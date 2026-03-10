@@ -1,0 +1,4 @@
+KO	OV
+0	Obox6, Zfp42
+0	Obox6
+0	Zfp42

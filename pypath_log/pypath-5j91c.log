@@ -1,0 +1,41 @@
+[2025-11-20 09:43:30] Welcome!
+[2025-11-20 09:43:30] Logger started, logging into `/Users/eventre/Documents/GitHub/CardaSC/pypath_log/pypath-5j91c.log`.
+[2025-11-20 09:43:30] Session `5j91c` started.
+[2025-11-20 09:43:30] Config has been read from the following files:
+[2025-11-20 09:43:30]   - /opt/homebrew/Caskroom/miniconda/base/envs/cardamom/lib/python3.12/site-packages/pypath_common/data/settings.yaml
+[2025-11-20 09:43:30] [pypath] 
+	- session ID: `5j91c`
+	- working directory: `/Users/eventre/Documents/GitHub/CardaSC`
+	- logfile: `/Users/eventre/Documents/GitHub/CardaSC/pypath_log/pypath-5j91c.log`
+	- config: 
+		- /opt/homebrew/Caskroom/miniconda/base/envs/cardamom/lib/python3.12/site-packages/pypath_common/data/settings.yaml
+	- pypath version: 0.16.20
+	- imported from: `/opt/homebrew/Caskroom/miniconda/base/envs/cardamom/lib/python3.12/site-packages/pypath`
+	- Python version: 3.12.2 | packaged by conda-forge | (main, Feb 16 2024, 20:54:21) [Clang 16.0.6 ]
+	- Platform: macOS-15.7.1-arm64-arm-64bit
+[2025-11-20 09:43:31] [pypath] pypath
+[2025-11-20 09:43:31] [curl] Creating Curl object to retrieve data from `https://www.ebi.ac.uk/unichem/api/v1/sources/`
+[2025-11-20 09:43:31] [curl] Cache file path: `/Users/eventre/Library/Caches/pypath/b2a060ead30932cabb4a6e993539989e-`
+[2025-11-20 09:43:31] [curl] Cache file found, no need for download.
+[2025-11-20 09:43:31] [curl] Loading data from cache previously downloaded from `www.ebi.ac.uk`
+[2025-11-20 09:43:31] [curl] Opening file `/Users/eventre/Library/Caches/pypath/b2a060ead30932cabb4a6e993539989e-`
+[2025-11-20 09:43:31] [curl] Extracting data from file type `plain`
+[2025-11-20 09:43:31] [curl] Opening plain text file `/Users/eventre/Library/Caches/pypath/b2a060ead30932cabb4a6e993539989e-`.
+[2025-11-20 09:43:31] [curl] Contents of `/Users/eventre/Library/Caches/pypath/b2a060ead30932cabb4a6e993539989e-` has been read and the file has been closed.
+[2025-11-20 09:43:31] [curl] File at `https://www.ebi.ac.uk/unichem/api/v1/sources/` successfully retrieved. Resulted file type `plain text, unicode string`. Local file at
+                      `/Users/eventre/Library/Caches/pypath/b2a060ead30932cabb4a6e993539989e-`.
+[2025-11-20 09:43:31] [curl] Creating Curl object to retrieve data from `https://www.ensembl.org/info/about/species.html`
+[2025-11-20 09:43:31] [curl] Cache file path: `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html`
+[2025-11-20 09:43:31] [curl] Cache file found, no need for download.
+[2025-11-20 09:43:31] [curl] Opening plain text file `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html`.
+[2025-11-20 09:43:31] [curl] Contents of `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html` has been read and the file has been closed.
+[2025-11-20 09:43:32] [curl] Creating Curl object to retrieve data from `https://www.ensembl.org/info/about/species.html`
+[2025-11-20 09:43:32] [curl] Cache file path: `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html`
+[2025-11-20 09:43:32] [curl] Cache file found, no need for download.
+[2025-11-20 09:43:32] [curl] Opening plain text file `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html`.
+[2025-11-20 09:43:32] [curl] Contents of `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html` has been read and the file has been closed.
+[2025-11-20 09:43:32] [curl] Creating Curl object to retrieve data from `https://www.ensembl.org/info/about/species.html`
+[2025-11-20 09:43:32] [curl] Cache file path: `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html`
+[2025-11-20 09:43:32] [curl] Cache file found, no need for download.
+[2025-11-20 09:43:32] [curl] Opening plain text file `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html`.
+[2025-11-20 09:43:32] [curl] Contents of `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html` has been read and the file has been closed.

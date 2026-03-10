@@ -1,0 +1,26 @@
+name: reference_fitting
+channels:
+  - conda-forge
+  - defaults
+  - pyg
+  - pytorch
+  - bioconda
+dependencies:
+  - python=3.9.23
+  - pip
+  - numba=0.60.0
+  - numpy=1.26.3
+  - pandas=2.3.0
+  - pytorch>=2.0.0
+  - scanpy=1.10.3
+  - scikit-learn=1.6.1
+  - scipy=1.13.1
+  - pot
+  - seaborn
+  - umap-learn
+  - notebook
+  - pip:
+    - harissa==3.0.7
+    - matplotlib==3.7.5
+    - geomloss
+    - scvelo

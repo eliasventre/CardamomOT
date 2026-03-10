@@ -1,0 +1,150 @@
+[2025-10-07 13:35:17] Welcome!
+[2025-10-07 13:35:17] Logger started, logging into `/Users/eventre/Documents/GitHub/CardaSC/pypath_log/pypath-uspd9.log`.
+[2025-10-07 13:35:17] Session `uspd9` started.
+[2025-10-07 13:35:17] Config has been read from the following files:
+[2025-10-07 13:35:17]   - /opt/homebrew/Caskroom/miniconda/base/envs/cardamom/lib/python3.12/site-packages/pypath_common/data/settings.yaml
+[2025-10-07 13:35:18] [pypath] 
+	- session ID: `uspd9`
+	- working directory: `/Users/eventre/Documents/GitHub/CardaSC`
+	- logfile: `/Users/eventre/Documents/GitHub/CardaSC/pypath_log/pypath-uspd9.log`
+	- config: 
+		- /opt/homebrew/Caskroom/miniconda/base/envs/cardamom/lib/python3.12/site-packages/pypath_common/data/settings.yaml
+	- pypath version: 0.16.20
+	- imported from: `/opt/homebrew/Caskroom/miniconda/base/envs/cardamom/lib/python3.12/site-packages/pypath`
+	- Python version: 3.12.2 | packaged by conda-forge | (main, Feb 16 2024, 20:54:21) [Clang 16.0.6 ]
+	- Platform: macOS-15.7-arm64-arm-64bit
+[2025-10-07 13:35:18] [pypath] pypath
+[2025-10-07 13:35:22] [curl] Creating Curl object to retrieve data from `https://www.ebi.ac.uk/unichem/api/v1/sources/`
+[2025-10-07 13:35:22] [curl] Cache file path: `/Users/eventre/Library/Caches/pypath/b2a060ead30932cabb4a6e993539989e-`
+[2025-10-07 13:35:22] [curl] Setting up and calling pycurl.
+[2025-10-07 13:35:22] [curl] Opening file `/Users/eventre/Library/Caches/pypath/b2a060ead30932cabb4a6e993539989e-`
+[2025-10-07 13:35:22] [curl] Extracting data from file type `plain`
+[2025-10-07 13:35:22] [curl] Opening plain text file `/Users/eventre/Library/Caches/pypath/b2a060ead30932cabb4a6e993539989e-`.
+[2025-10-07 13:35:22] [curl] Contents of `/Users/eventre/Library/Caches/pypath/b2a060ead30932cabb4a6e993539989e-` has been read and the file has been closed.
+[2025-10-07 13:35:22] [curl] File at `https://www.ebi.ac.uk/unichem/api/v1/sources/` successfully retrieved. Resulted file type `plain text, unicode string`. Local file at
+                      `/Users/eventre/Library/Caches/pypath/b2a060ead30932cabb4a6e993539989e-`.
+[2025-10-07 13:35:22] [curl] Creating Curl object to retrieve data from `https://www.ensembl.org/info/about/species.html`
+[2025-10-07 13:35:22] [curl] Cache file path: `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html`
+[2025-10-07 13:35:22] [curl] Setting up and calling pycurl.
+[2025-10-07 13:35:24] [curl] Opening plain text file `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html`.
+[2025-10-07 13:35:24] [curl] Contents of `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html` has been read and the file has been closed.
+[2025-10-07 13:35:25] [curl] Creating Curl object to retrieve data from `https://www.ensembl.org/info/about/species.html`
+[2025-10-07 13:35:25] [curl] Cache file path: `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html`
+[2025-10-07 13:35:25] [curl] Cache file found, no need for download.
+[2025-10-07 13:35:25] [curl] Opening plain text file `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html`.
+[2025-10-07 13:35:25] [curl] Contents of `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html` has been read and the file has been closed.
+[2025-10-07 13:35:25] [curl] Creating Curl object to retrieve data from `https://www.ensembl.org/info/about/species.html`
+[2025-10-07 13:35:25] [curl] Cache file path: `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html`
+[2025-10-07 13:35:25] [curl] Cache file found, no need for download.
+[2025-10-07 13:35:25] [curl] Opening plain text file `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html`.
+[2025-10-07 13:35:25] [curl] Contents of `/Users/eventre/Library/Caches/pypath/535b06d53a59e75bb693369bc5fdc556-species.html` has been read and the file has been closed.
+[2025-10-07 13:35:27] [pypath] pypath
+[2025-10-07 13:35:27] [curl] Creating Curl object to retrieve data from `https://www.ebi.ac.uk/unichem/api/v1/sources/`
+[2025-10-07 13:35:27] [curl] Cache file path: `/Users/eventre/Library/Caches/pypath/b2a060ead30932cabb4a6e993539989e-`
+[2025-10-07 13:35:27] [curl] Cache file found, no need for download.
+[2025-10-07 13:35:27] [curl] Loading data from cache previously downloaded from `www.ebi.ac.uk`
+[2025-10-07 13:35:27] [curl] Opening file `/Users/eventre/Library/Caches/pypath/b2a060ead30932cabb4a6e993539989e-`
+[2025-10-07 13:35:27] [curl] Extracting data from file type `plain`
+[2025-10-07 13:35:27] [curl] Opening plain text file `/Users/eventre/Library/Caches/pypath/b2a060ead30932cabb4a6e993539989e-`.
+[2025-10-07 13:35:27] [curl] Contents of `/Users/eventre/Library/Caches/pypath/b2a060ead30932cabb4a6e993539989e-` has been read and the file has been closed.
+[2025-10-07 13:35:27] [curl] File at `https://www.ebi.ac.uk/unichem/api/v1/sources/` successfully retrieved. Resulted file type `plain text, unicode string`. Local file at
+                      `/Users/eventre/Library/Caches/pypath/b2a060ead30932cabb4a6e993539989e-`.
+[2025-10-07 13:35:27] [ramp] Loading RaMP the list of ID types from `https://rampdb.nih.gov/api/id-types`.
+[2025-10-07 13:35:27] [curl] Creating Curl object to retrieve data from `https://rampdb.nih.gov/api/id-types`
+[2025-10-07 13:35:27] [curl] Cache file path: `/Users/eventre/Library/Caches/pypath/c058901753f61743bf55db935731cff1-id-types`
+[2025-10-07 13:35:27] [curl] Setting up and calling pycurl.
+[2025-10-07 13:35:33] [curl] Opening plain text file `/Users/eventre/Library/Caches/pypath/c058901753f61743bf55db935731cff1-id-types`.
+[2025-10-07 13:35:33] [curl] Contents of `/Users/eventre/Library/Caches/pypath/c058901753f61743bf55db935731cff1-id-types` has been read and the file has been closed.
+[2025-10-07 13:35:33] [network_resources] Could not find data model for resource `Negatome` in set `negative`.
+[2025-10-07 13:35:33] [network_resources] Could not find data model for resource `ORegAnno` in set `transcription_deprecated`.
+[2025-10-07 13:35:34] [resource_controller] Loading resource information from JSON file: /opt/homebrew/Caskroom/miniconda/base/envs/cardamom/lib/python3.12/site-packages/pypath/resources/data/resources.json
+[2025-10-07 13:35:34] [resource_controller] Resource information has been read from `/opt/homebrew/Caskroom/miniconda/base/envs/cardamom/lib/python3.12/site-packages/pypath/resources/data/resources.json`.
+[2025-10-07 13:35:34] [licenses] Populating license database from directory `/opt/homebrew/Caskroom/miniconda/base/envs/cardamom/lib/python3.12/site-packages/pypath/data/licenses`.
+[2025-10-07 13:35:34] [licenses] Added license `Unspecified NC-SA` (purpose = academic, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `PhosphoNetworks` (purpose = non_profit, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `Apache 2.0` (purpose = commercial, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `HPRD` (purpose = academic, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `Informal` (purpose = commercial, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `PDB` (purpose = commercial, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC BY-NC 4.0` (purpose = academic, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `AFL 3.0` (purpose = academic, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `COSMIC` (purpose = academic, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `DSL` (purpose = commercial, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC BY 4.0` (purpose = commercial, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC BY-ND 4.0` (purpose = commercial, sharing = noderiv, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `I2D` (purpose = academic, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `OpenTargets` (purpose = academic, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC BY-NC-ND 4.0` (purpose = academic, sharing = noderiv, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC BY-NC-SA 3.0` (purpose = academic, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `No license` (purpose = ignore, sharing = ignore, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC BY-SA 4.0` (purpose = commercial, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `Composite` (purpose = composite, sharing = composite, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CellCellInteractions` (purpose = non_profit, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC BY-NC 2.0` (purpose = academic, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC BY 3.0` (purpose = commercial, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC BY-ND 3.0` (purpose = commercial, sharing = noderiv, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `miRecords` (purpose = commercial, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `NAR Open Access` (purpose = commercial, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `EUL` (purpose = academic, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `HPO` (purpose = academic, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `Kinase.com` (purpose = non_profit, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `Artistic-2.0` (purpose = commercial, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC BY-NC-ND 3.0` (purpose = nonprofit, sharing = noderiv, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC BY-SA 2.5` (purpose = commercial, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC BY-NC-SA 4.0` (purpose = academic, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `miRTarBase` (purpose = academic, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `LGPLv3` (purpose = commercial, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC BY-SA 3.0` (purpose = commercial, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `ELM` (purpose = academic, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `HGNC` (purpose = commercial, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `MIT` (purpose = commercial, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CytoSig` (purpose = non_profit, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC BY 2.5` (purpose = commercial, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `KEGG` (purpose = ignore, sharing = ignore, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `GPLv2` (purpose = commercial, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC0 1.0` (purpose = commercial, sharing = free, attrib = noattrib).
+[2025-10-07 13:35:34] [licenses] Added license `BioCarta` (purpose = academic, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `MPPI` (purpose = commercial, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `BSD` (purpose = commercial, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `CC BY-NC 3.0` (purpose = academic, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `GPLv3` (purpose = commercial, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `EMBL-EBI` (purpose = academic, sharing = free, attrib = attrib).
+[2025-10-07 13:35:34] [licenses] Added license `PathwayCommons` (purpose = academic, sharing = alike, attrib = attrib).
+[2025-10-07 13:35:34] [resource_controller] Updating resource license information.
+[2025-10-07 13:35:34] [resource_controller] No license for resource `3DComplex`.
+[2025-10-07 13:35:34] [resource_controller] Could not find resource `Vidal HI-III`.
+[2025-10-07 13:35:34] [resource_controller] Could not find resource `HumanSignalingNetwork`.
+[2025-10-07 13:35:34] [resource_controller] Could not find resource `HI-union`.
+[2025-10-07 13:35:34] [resource_controller] Could not find resource `CPDB`.
+[2025-10-07 13:35:34] [resource_controller] Could not find resource `Laudanna-effects`.
+[2025-10-07 13:35:34] [resource_controller] Could not find resource `Laudanna-directions`.
+[2025-10-07 13:35:34] [resource_controller] Could not find resource `reaction resources`.
+[2025-10-07 13:35:43] [mapping] Requested to load ID translation table from `genesymbol` to `uniprot`, organism: 9606.
+[2025-10-07 13:35:43] [mapping] Chosen built-in defined ID translation table: resource=uniprot, id_type_a=genesymbol, id_type_b=uniprot
+[2025-10-07 13:35:43] [mapping] Loading mapping table for organism `9606` with identifiers `genesymbol` and `uniprot`, input type `uniprot`
+[2025-10-07 13:35:43] [mapping] Reader created for ID translation table, parameters: `ncbi_tax_id=9606, id_a=genesymbol, id_b=uniprot, load_a_to_b=1, load_b_to_a=0, input_type=uniprot (UniprotMapping)`.
+[2025-10-07 13:35:43] [mapping] UniProt REST API call: `https://rest.uniprot.org/uniprotkb/stream?query=(reviewed:true AND organism_id:9606)&format=tsv&fields=accession,gene_primary&compressed=true`.
+[2025-10-07 13:35:43] [curl] Creating Curl object to retrieve data from `https://rest.uniprot.org/uniprotkb/stream`
+[2025-10-07 13:35:43] [curl] GET parameters added to the URL: `query=%28reviewed%3Atrue+AND+organism_id%3A9606%29&format=tsv&fields=accession%2Cgene_primary&compre`
+[2025-10-07 13:35:43] [curl] Cache file path: `/Users/eventre/Library/Caches/pypath/361186900e725d39f9076e1c70245918-stream`
+[2025-10-07 13:35:43] [curl] Setting up and calling pycurl.
+[2025-10-07 13:35:55] [curl] Opening file `/Users/eventre/Library/Caches/pypath/361186900e725d39f9076e1c70245918-stream`
+[2025-10-07 13:35:55] [curl] Extracting data from file type `gz`
+[2025-10-07 13:35:55] [curl] Opening gzip file `/Users/eventre/Library/Caches/pypath/361186900e725d39f9076e1c70245918-stream`.
+[2025-10-07 13:35:55] [curl] Result is an iterator over the lines of `/Users/eventre/Library/Caches/pypath/361186900e725d39f9076e1c70245918-stream`.
+[2025-10-07 13:35:55] [curl] File at `https://rest.uniprot.org/uniprotkb/stream?query=%28reviewed%3Atrue+AND+organism_id%3A9606%29&format=tsv&fields=accession%2Cgene_primary&compressed=true` successfully retrieved.
+                      Resulted file type `gz extracted data, file object`. Local file at `/Users/eventre/Library/Caches/pypath/361186900e725d39f9076e1c70245918-stream`.
+[2025-10-07 13:35:55] [mapping] Sucessfully loaded mapping table for organism `9606` with identifiers `genesymbol` to `uniprot`.
+[2025-10-07 13:35:55] [mapping] Requested to load ID translation table from `uniprot-sec` to `uniprot-pri`, organism: 9606.
+[2025-10-07 13:35:55] [mapping] Chosen built-in defined ID translation table: resource=basic, id_type_a=uniprot-sec, id_type_b=uniprot-pri
+[2025-10-07 13:35:55] [inputs] Selecting input method (step 1): module `uniprot.get_uniprot_sec`, method `None`.
+[2025-10-07 13:35:55] [inputs] Selecting input method (step 2): module `pypath.inputs.uniprot`, method `get_uniprot_sec`.
+[2025-10-07 13:35:55] [inputs] Importing module `pypath.inputs.uniprot`.
+[2025-10-07 13:35:55] [mapping] Loading mapping table for organism `9606` with identifiers `uniprot-sec` and `uniprot-pri`, input type `file`
+[2025-10-07 13:35:55] [mapping] Reader created for ID translation table, parameters: `ncbi_tax_id=9606, id_a=uniprot-sec, id_b=uniprot-pri, load_a_to_b=1, load_b_to_a=0, input_type=file (FileMapping)`.
+[2025-10-07 13:35:55] [inputs] Selecting input method (step 1): module `uniprot.get_uniprot_sec`, method `None`.
+[2025-10-07 13:35:55] [inputs] Selecting input method (step 2): module `pypath.inputs.uniprot`, method `get_uniprot_sec`.
+[2025-10-07 13:35:55] [inputs] Importing module `pypath.inputs.uniprot`.
+[2025-10-07 13:35:55] [curl] Creating Curl object to retrieve data from `https://ftp.expasy.org/databases/uniprot/current_release/knowledgebase/complete/docs/sec_ac.txt`
+[2025-10-07 13:35:55] [curl] Cache file path: `/Users/eventre/Library/Caches/pypath/03ac43d2170f6d321db39dd52395abd3-sec_ac.txt`
+[2025-10-07 13:35:55] [curl] Setting up and calling pycurl.

@@ -1,0 +1,16 @@
+[2025-11-17 19:44:29] Welcome!
+[2025-11-17 19:44:29] Logger started, logging into `/Users/eventre/Documents/GitHub/CardaSC/pypath_log/pypath-58t3z.log`.
+[2025-11-17 19:44:29] Session `58t3z` started.
+[2025-11-17 19:44:29] Config has been read from the following files:
+[2025-11-17 19:44:29]   - /opt/homebrew/Caskroom/miniconda/base/envs/cardamom/lib/python3.12/site-packages/pypath_common/data/settings.yaml
+[2025-11-17 19:44:30] [pypath] 
+	- session ID: `58t3z`
+	- working directory: `/Users/eventre/Documents/GitHub/CardaSC`
+	- logfile: `/Users/eventre/Documents/GitHub/CardaSC/pypath_log/pypath-58t3z.log`
+	- config: 
+		- /opt/homebrew/Caskroom/miniconda/base/envs/cardamom/lib/python3.12/site-packages/pypath_common/data/settings.yaml
+	- pypath version: 0.16.20
+	- imported from: `/opt/homebrew/Caskroom/miniconda/base/envs/cardamom/lib/python3.12/site-packages/pypath`
+	- Python version: 3.12.2 | packaged by conda-forge | (main, Feb 16 2024, 20:54:21) [Clang 16.0.6 ]
+	- Platform: macOS-15.7.1-arm64-arm-64bit
+[2025-11-17 19:44:31] [pypath] pypath

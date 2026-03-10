@@ -1,0 +1,7 @@
+KO	OV
+0	Zfp42
+0	Jarid2
+0	Sox2
+0	Dnmt3a
+0	Col4a2
+0	Hoxb2
