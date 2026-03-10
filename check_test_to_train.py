@@ -108,10 +108,10 @@ def main(argv):
 
     # Load model parameters
     try:
-        mixture_parameters = np.load(os.path.join(p, 'cardamom', 'mixture_parameters.npy'))
+        mixture_parameters = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
         c = mixture_parameters[-1, :]
         kz = mixture_parameters[:-1, :] + 1e-6
-        pi_zinb = np.load(os.path.join(p, 'cardamom', 'pi_zinb.npy'))
+        pi_zinb = np.load(os.path.join(p, 'cardamomOT', 'pi_zinb.npy'))
         print(f"[check_test_to_train] Loaded model parameters")
     except FileNotFoundError as e:
         print(f"[check_test_to_train] Error: Missing parameter file: {e}")
@@ -122,12 +122,12 @@ def main(argv):
 
     # Load inference results
     try:
-        vect_kon_beta = np.load(os.path.join(p, 'cardamom', 'data_kon_beta_test.npy')) + 1e-6
-        vect_kon_theta = np.load(os.path.join(p, 'cardamom', 'data_kon_theta_test.npy')) + 1e-6
-        vect_kon_sim = np.load(os.path.join(p, 'cardamom', 'data_kon_simul_test.npy')) + 1e-6
-        rna_ref = np.load(os.path.join(p, 'cardamom', 'data_rna_test.npy'))
-        times_data = np.load(os.path.join(p, 'cardamom', 'data_times_test.npy'))
-        times_simulation = np.load(os.path.join(p, 'cardamom', 'simulation_times_test.npy'))
+        vect_kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta_test.npy')) + 1e-6
+        vect_kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta_test.npy')) + 1e-6
+        vect_kon_sim = np.load(os.path.join(p, 'cardamomOT', 'data_kon_simul_test.npy')) + 1e-6
+        rna_ref = np.load(os.path.join(p, 'cardamomOT', 'data_rna_test.npy'))
+        times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times_test.npy'))
+        times_simulation = np.load(os.path.join(p, 'cardamomOT', 'simulation_times_test.npy'))
         print(f"[check_test_to_train] Loaded test set inference and simulation results")
     except FileNotFoundError as e:
         print(f"[check_test_to_train] Error: Missing forecast file: {e}")

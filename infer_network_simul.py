@@ -114,20 +114,20 @@ def main(argv):
     # Load inferred network parameters
     print("[infer_network_simul] Loading inferred network parameters...")
     try:
-        model.d = np.load(os.path.join(p, 'cardamom', 'degradations.npy'))
-        model.basal = np.load(os.path.join(p, 'cardamom', 'basal.npy'))
-        model.inter = np.load(os.path.join(p, 'cardamom', 'inter.npy'))
-        model.a = np.load(os.path.join(p, 'cardamom', 'mixture_parameters.npy'))
-        model.modes = np.load(os.path.join(p, 'cardamom', 'modes.npy'))
-        model.prot = np.load(os.path.join(p, 'cardamom', 'data_prot.npy'))
-        model.rna = np.load(os.path.join(p, 'cardamom', 'data_rna.npy'))
-        model.times_data = np.load(os.path.join(p, 'cardamom', 'data_times.npy'))
-        model.samples_data = np.load(os.path.join(p, 'cardamom', 'data_samples.npy'))
-        model.kon_theta = np.load(os.path.join(p, 'cardamom', 'data_kon_theta.npy'))
-        model.kon_beta = np.load(os.path.join(p, 'cardamom', 'data_kon_beta.npy'))
-        model.alpha = np.load(os.path.join(p, 'cardamom', 'alpha.npy'))
-        model.proba_traj = np.load(os.path.join(p, 'cardamom', 'proba_traj.npy'))
-        model.n_networks = np.load(os.path.join(p, 'cardamom', 'n_networks.npy'))
+        model.d = np.load(os.path.join(p, 'cardamomOT', 'degradations.npy'))
+        model.basal = np.load(os.path.join(p, 'cardamomOT', 'basal.npy'))
+        model.inter = np.load(os.path.join(p, 'cardamomOT', 'inter.npy'))
+        model.a = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
+        model.modes = np.load(os.path.join(p, 'cardamomOT', 'modes.npy'))
+        model.prot = np.load(os.path.join(p, 'cardamomOT', 'data_prot.npy'))
+        model.rna = np.load(os.path.join(p, 'cardamomOT', 'data_rna.npy'))
+        model.times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
+        model.samples_data = np.load(os.path.join(p, 'cardamomOT', 'data_samples.npy'))
+        model.kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta.npy'))
+        model.kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta.npy'))
+        model.alpha = np.load(os.path.join(p, 'cardamomOT', 'alpha.npy'))
+        model.proba_traj = np.load(os.path.join(p, 'cardamomOT', 'proba_traj.npy'))
+        model.n_networks = np.load(os.path.join(p, 'cardamomOT', 'n_networks.npy'))
         print("[infer_network_simul] Successfully loaded all network parameters")
     except FileNotFoundError as e:
         print(f"[infer_network_simul] Error: Missing parameter file: {e}")
@@ -139,7 +139,7 @@ def main(argv):
 
     # Load reference network if available
     model.ref_network = np.ones((G, G, model.n_networks))
-    ref_path = os.path.join(p, 'cardamom', 'ref_network.csv')
+    ref_path = os.path.join(p, 'cardamomOT', 'ref_network.csv')
     if os.path.exists(ref_path):
         print(f"[infer_network_simul] Loading reference network from {ref_path}")
         try:
@@ -173,7 +173,7 @@ def main(argv):
     print("[infer_network_simul] Parameter adaptation completed")
     
     # Save adapted parameters
-    cardamom_dir = os.path.join(p, 'cardamom')
+    cardamom_dir = os.path.join(p, 'cardamomOT')
     try:
         np.save(os.path.join(cardamom_dir, 'data_prot_unitary'), model.prot)
         np.save(os.path.join(cardamom_dir, 'data_kon_unitary'), model.kon_theta)

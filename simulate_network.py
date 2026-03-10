@@ -107,18 +107,18 @@ def main(argv):
     # Load inferred network parameters
     print("[simulate_network] Loading inferred network parameters...")
     try:
-        model.d_t = np.load(os.path.join(p, 'cardamom', 'degradations_temporal.npy'))
-        model.basal = np.load(os.path.join(p, 'cardamom', 'basal_simul.npy'))
-        model.inter = np.load(os.path.join(p, 'cardamom', 'inter_simul.npy'))
-        model.basal_t = np.load(os.path.join(p, 'cardamom', 'basal_t_simul.npy'))
-        model.inter_t = np.load(os.path.join(p, 'cardamom', 'inter_t_simul.npy'))
-        model.a = np.load(os.path.join(p, 'cardamom', 'mixture_parameters.npy'))
-        model.prot = np.load(os.path.join(p, 'cardamom', 'data_prot_unitary.npy'))
-        model.times_data = np.load(os.path.join(p, 'cardamom', 'data_times.npy'))
-        model.kon_beta = np.load(os.path.join(p, 'cardamom', 'data_kon_beta.npy'))
-        model.proba_traj = np.load(os.path.join(p, 'cardamom', 'proba_traj.npy'))
-        model.ratios = np.load(os.path.join(p, 'cardamom', 'ratios.npy'))
-        model.n_networks = np.load(os.path.join(p, 'cardamom', 'n_networks.npy'))
+        model.d_t = np.load(os.path.join(p, 'cardamomOT', 'degradations_temporal.npy'))
+        model.basal = np.load(os.path.join(p, 'cardamomOT', 'basal_simul.npy'))
+        model.inter = np.load(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))
+        model.basal_t = np.load(os.path.join(p, 'cardamomOT', 'basal_t_simul.npy'))
+        model.inter_t = np.load(os.path.join(p, 'cardamomOT', 'inter_t_simul.npy'))
+        model.a = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
+        model.prot = np.load(os.path.join(p, 'cardamomOT', 'data_prot_unitary.npy'))
+        model.times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
+        model.kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta.npy'))
+        model.proba_traj = np.load(os.path.join(p, 'cardamomOT', 'proba_traj.npy'))
+        model.ratios = np.load(os.path.join(p, 'cardamomOT', 'ratios.npy'))
+        model.n_networks = np.load(os.path.join(p, 'cardamomOT', 'n_networks.npy'))
         print("[simulate_network] Successfully loaded all network parameters")
     except FileNotFoundError as e:
         print(f"[simulate_network] Error: Missing parameter file: {e}")
@@ -157,7 +157,7 @@ def main(argv):
     print("[simulate_network] Simulation completed")
     
     # Save simulation results
-    cardamom_dir = os.path.join(p, 'cardamom')
+    cardamom_dir = os.path.join(p, 'cardamomOT')
     try:
         np.save(os.path.join(cardamom_dir, 'data_prot_simul'), model.prot)
         np.save(os.path.join(cardamom_dir, 'data_kon_simul'), model.kon_theta)

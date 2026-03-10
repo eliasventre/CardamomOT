@@ -135,7 +135,7 @@ def main(argv):
     )
 
     # ─── SAVE RESULTS ───────────────────────────────────────────────────
-    out_dir = os.path.join(p, 'cardamom')
+    out_dir = os.path.join(p, 'cardamomOT')
     os.makedirs(out_dir, exist_ok=True)
 
     if verb:

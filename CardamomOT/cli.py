@@ -1,9 +1,9 @@
-"""Command-line helpers and high-level CLI for CARDAMOM.
+"""Command-line helpers and high-level CLI for CardamomOT.
 
 The repository previously contained a collection of standalone scripts
 (e.g. ``infer_rd.py``, ``infer_mixture.py``) invoked via shell wrappers.  In
 Tier‑3 these have been consolidated behind a single console command named
-``cardamom``.  Each original script still exists for backwards compatibility
+``cardamomot``.  Each original script still exists for backwards compatibility
 but they now import common argument parsing utilities from this module.
 
 Utilities such as ``create_pipeline_parser`` remain here so that the separate
@@ -13,10 +13,10 @@ Usage examples
 --------------
 
   # run the full analysis pipeline (identical to the old run.sh)
-  cardamom pipeline -i data/myproject -s train -c 1 -r 0.6 -m 0.5
+  cardamomot pipeline -i data/myproject -s train -c 1 -r 0.6 -m 0.5
 
   # execute a single step with arbitrary options
-  cardamom step infer_mixture -i data/myproject -s train -m 1.0
+  cardamomot step infer_mixture -i data/myproject -s train -m 1.0
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, List
+
+from . import cli_pipeline
 
 # ---------------------------------------------------------------------------
 # argument parser helpers for individual scripts
@@ -182,10 +184,25 @@ def _pipeline(args: argparse.Namespace) -> None:
     print("\nPipeline complete.")
 
 
+def _run_pipeline_interactive(args: argparse.Namespace) -> None:
+    """Run the interactive pipeline for a new project."""
+    cli_pipeline.run_pipeline_interactive(
+        project_path=args.project,
+        use_defaults=args.default,
+    )
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(prog='cardamom',
-                                     description='CARDAMOM command-line interface')
+    parser = argparse.ArgumentParser(prog='cardamomot',
+                                     description='CardamomOT command-line interface')
     subparsers = parser.add_subparsers(dest='command', required=True)
+
+    # Interactive pipeline runner (new recommended way)
+    p_run = subparsers.add_parser('run', help='run analysis pipeline interactively')
+    p_run.add_argument('project', help='path to project directory')
+    p_run.add_argument('--default', action='store_true',
+                       help='use default parameters without interaction')
+    p_run.set_defaults(func=_run_pipeline_interactive)
 
     p_pipe = subparsers.add_parser('pipeline', help='run the full analysis pipeline')
     p_pipe.add_argument('-i', '--input', required=True, help='project directory')

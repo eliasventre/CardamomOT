@@ -1,0 +1,52 @@
+# CARDAMOM Project Template Configuration
+# Copy this file to your project root and customize as needed
+# Format: YAML
+
+# Project metadata
+project_name: "My Analysis"
+description: "CARDAMOM analysis of single-cell RNA-seq data"
+
+# Data settings
+data:
+  input_file: "Data/data.h5ad"  # Path to your H5AD file
+  split: "train"                 # Data split name
+
+# Pipeline hyperparameters
+
+# Read depth correction
+read_depth:
+  enabled: true
+
+# Mixture model inference
+mixture:
+  enabled: true
+  mean_forcing: 0.5  # Balance between mean preservation and likelihood
+
+# Gene selection
+selection:
+  enabled: true
+  n_genes: 1000          # Number of top variable genes to keep
+  temporal_quantile: 0.5 # Quantile for temporal selection
+
+# Network structure (prior knowledge)
+network_structure:
+  enabled: false         # Set to true if you have a prior network
+  prior_file: null       # Path to prior network (optional)
+
+# Network inference
+network:
+  enabled: true
+  n_networks: 1          # Number of GRN modes
+  scale_pen: 20          # Penalization scale
+  max_iterations: 40     # Maximum optimization iterations
+
+# Simulations
+simulation:
+  enabled: true
+  stochastic: true       # Use PDMP simulation (vs ODE)
+  n_trajectories: 1000   # Number of trajectories to simulate
+
+# Logging and output
+logging:
+  level: "INFO"          # DEBUG, INFO, WARNING, ERROR
+  log_file: "cardamom.log"

@@ -1,5 +1,5 @@
 """
-CARDAMOM: Calibration And Regularized Dynamics And Mechanistic Optimization Method
+CardamomOT
 =====================================================================================
 
 A gene regulatory network inference method adapted to time-course scRNA-seq datasets.
@@ -17,12 +17,14 @@ Key Features
 
 References
 ----------
-1. Ventre E, et al. (2021). "Gene regulatory network inference from single-cell data..."
-2. Ventre E, et al. (2023). "Benchmarking gene regulatory network inference methods..."
+1. Ventre E, et al. (2021). 
+2. Ventre E, et al. (2023). 
+2. Mauge Y, et Ventre, E. (2026). 
 
 Author
 ------
 Elias Ventre
+Yann Mauge
 
 License
 -------

@@ -1,8 +1,8 @@
 """
-Setup configuration for CARDAMOM package.
+Setup configuration for CardamomOT package.
 
-CARDAMOM: Calibration And Regularized Dynamics And Mechanistic Optimization Method
-A gene regulatory network inference method for time-course scRNA-seq datasets.
+CardamomOT: 
+A joint trajectory and gene regulatory network inference method for time-course scRNA-seq datasets.
 """
 
 from setuptools import setup, find_packages
@@ -20,16 +20,16 @@ setup(
     long_description=long_description,
     long_description_content_type='text/markdown',
     author='Elias Ventre',
-    url='https://github.com/yourusername/CardaSC',
+    url='https://github.com/yourusername/CardamomOT',
     project_urls={
-        'Bug Tracker': 'https://github.com/yourusername/CardaSC/issues',
-        'Documentation': 'https://github.com/yourusername/CardaSC',
-        'Source Code': 'https://github.com/yourusername/CardaSC',
+        'Bug Tracker': 'https://github.com/yourusername/CardamomOT/issues',
+        'Documentation': 'https://github.com/yourusername/CardamomOT',
+        'Source Code': 'https://github.com/yourusername/CardamomOT',
     },
     packages=find_packages(),
     entry_points={
         'console_scripts': [
-            'cardamom=CardamomOT.cli:main',
+            'cardamomot=CardamomOT.cli:main',
         ],
     },
     python_requires='>=3.8',
@@ -49,6 +49,10 @@ setup(
         'joblib>=1.0',
     ],
     extras_require={
+        'cli': [
+            'questionary>=1.10',
+            'pyyaml>=5.4',
+        ],
         'dev': [
             'pytest>=6.0',
             'pytest-cov>=2.12',

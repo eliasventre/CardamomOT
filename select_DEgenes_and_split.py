@@ -17,7 +17,7 @@ Required input files:
 Output files:
     - Data/data_full.h5ad: filtered dataset with selected genes
     - Data/data_train.h5ad, data_test.h5ad: train/test split (if split="train")
-    - cardamom/gene_variation_report.csv: gene selection report
+    - cardamomOT/gene_variation_report.csv: gene selection report
 """
 import sys; sys.path += ['../']
 import os
@@ -26,8 +26,7 @@ from CardamomOT import NetworkModel as NetworkModel_beta
 from CardamomOT import select_DEgenes
 import anndata as ad
 import getopt
-import scipy.sparse
-import json
+import scipy as scp
 import pandas as pd
 
 n_genes_tokeep_temporal = [5] # [7, 7, 5, 3, 1]
@@ -112,7 +111,7 @@ def main(argv):
         print("[select_DEgenes_and_split] No read depth information found, proceeding without normalization")
             
     # Extract RNA data matrix
-    if scipy.sparse.issparse(adata.X):
+    if scp.sparse.issparse(adata.X):
         data_rna_extracted = adata.X.T.toarray()
     else:
         data_rna_extracted = adata.X.T
@@ -137,132 +136,117 @@ def main(argv):
 
     if int(change):
         print(f"[select_DEgenes_and_split] Performing gene selection with change parameter: {change}")
-        
-        if ('copycat' in p or 'Schiebinger' in p):
-            if ('copycat') in p:
-                adata_full_path = os.path.join('collaborations', 'copycat', 'RMS_all', 'Data', 'data_full.h5ad')
-                if os.path.exists(adata_full_path):
-                    adata_full = ad.read_h5ad(adata_full_path)
-                    adata = adata[:, [g for g in adata.var_names.values if g in adata_full.var_names.values]]
-                    print(f"[select_DEgenes_and_split] Filtered genes to match copycat full dataset")
 
-            if ('Schiebinger') in p:
-                print('[select_DEgenes_and_split] Skipping gene list construction for Schiebinger dataset')
-                adata_full_path = os.path.join('collaborations', 'Schiebinger', 'Data', 'data_full.h5ad')
-                if os.path.exists(adata_full_path):
-                    adata_full = ad.read_h5ad(adata_full_path)
-                    adata = adata[:, [g for g in adata.var_names.values if g in adata_full.var_names.values]]
-            
-            genes_list_init = list(adata.var_names.values)
-
-        else:
-            print("[select_DEgenes_and_split] Fitting mixture model for gene selection")
-            # Infer mixture model parameters and select the most variable genes
-            model = NetworkModel_beta(G-1)
-            if mean_forcing >= 0:
-                model.mean_forcing_em = mean_forcing
-            
-            # Subsample cells if dataset is too large
-            cells_to_use = []
-            vect_t = data_rna[:, 0]
-            sub_N = min(vect_t.size, int(10000/len(np.unique(times)))) # Limit to 10000 cells per gene
-            print(f"[select_DEgenes_and_split] Subsampling to {sub_N} cells per timepoint")
-            
-            for time in np.unique(times):
-                for sample in np.unique(vect_samples_id):
-                    idx = np.where((vect_t == time) & (vect_samples_id == sample))[0]
-                    N_cells_ts = len(idx)
-                    n_select = min(sub_N, N_cells_ts)
-                    if N_cells_ts > 0:
-                        selected = np.random.choice(idx, n_select, replace=False)
-                        cells_to_use.extend(selected)
-            
-            model.hard_em = 0 # Accelerates fitting
-            try:
-                model.fit_mixture(data_rna[cells_to_use], gene_names=genes_list_init, min_components=2, max_components=2, cell_rd=cell_rd,
-                                    max_iter_kinetics=0, refilter=1.6) # Filter genes with mode difference > 1.6
-                print(f"[select_DEgenes_and_split] Fitted mixture model on {len(cells_to_use)} cells")
-                
-                genes_to_keep, temporal_variations, cell_type_variations, df_report = select_DEgenes(
-                        data_rna[cells_to_use], vect_samples_id[cells_to_use], vect_celltype_id[cells_to_use], 
-                        model.proba, genes_list_init, n_genes_tokeep_temporal=n_genes_tokeep_temporal, 
-                        n_genes_tokeep_celltype=n_genes_tokeep_celltype, limit_min=.01)
-                
-                # Save gene selection report
-                report_path = os.path.join(p, 'cardamom', 'gene_variation_report.csv')
-                df_report.to_csv(report_path, index=False)
-                print(f"[select_DEgenes_and_split] Saved gene variation report to {report_path}")
-                print(f"[select_DEgenes_and_split] Selected {len(genes_to_keep)} genes based on variation criteria")
-                
-            except Exception as e:
-                print(f"[select_DEgenes_and_split] Error during mixture model fitting: {e}")
-                sys.exit(1)
-
-            # Add genes of biological interest
-            genes_list_path = os.path.join(p, 'Data', 'genes_list.txt')
-            if os.path.exists(genes_list_path):
-                with open(genes_list_path, "r") as f:
-                    genes_list = [line.strip() for line in f if line.strip()]
-                print(f"[select_DEgenes_and_split] Loaded {len(genes_list)} genes of biological interest")
-                
-                for gene in genes_list:
-                    if gene in genes_list_init:
-                        idx = genes_list_init.index(gene)
-                        if temporal_variations[idx] > 0.01:
-                            genes_to_keep.append(gene)
-                print(f"[select_DEgenes_and_split] Added {len(genes_to_keep) - len(set(genes_to_keep) - set(genes_list))} additional genes of interest")
-            else:
-                print("[select_DEgenes_and_split] No genes_list_complex.txt found, skipping biological interest genes")
-            
-            genes_list_tokeep = list(set(genes_to_keep))
-            adata = adata[:, [g for g in genes_list_tokeep if g in genes_list_init]]
-            print(f"[select_DEgenes_and_split] Final gene selection: {len(genes_list_tokeep)} genes retained")
-
-    if not ('copycat' in p or 'Schiebinger' in p):
-        print("[select_DEgenes_and_split] Re-filtering genes to ensure only variable genes are retained")
-        # Re-filter genes to ensure only variable genes remain
-        if scipy.sparse.issparse(adata.X):
-            data_rna_extracted = adata.X.T.toarray()
-        else:
-            data_rna_extracted = adata.X.T
-        times = adata.obs['time'].values if 'time' in adata.obs else np.zeros(adata.n_obs)
-        data_rna = np.vstack([times, data_rna_extracted]).T
-        vect_samples_id = adata.obs['dataset_id'].values if 'dataset_id' in adata.obs else np.zeros(adata.n_obs)
-        vect_celltype_id = adata.obs['cell_type'].values if 'cell_type' in adata.obs else np.zeros(adata.n_obs)
-        G = np.size(data_rna, 1)
+        print("[select_DEgenes_and_split] Fitting mixture model for gene selection")
+        # Infer mixture model parameters and select the most variable genes
         model = NetworkModel_beta(G-1)
         if mean_forcing >= 0:
             model.mean_forcing_em = mean_forcing
         
-        try:
-            model.fit_mixture(data_rna, gene_names=list(adata.var_names), 
-                              min_components=2, max_components=2, cell_rd=cell_rd,
-                              refilter=.1, max_iter_kinetics=0)
-            print("[select_DEgenes_and_split] Re-fitted mixture model for final gene filtering")
-            
-            genes_tokeep_final, temporal_variations, cell_type_variations, df_report = select_DEgenes(data_rna, 
-                    vect_samples_id, vect_celltype_id, 
-                    model.proba, adata.var_names, 
-                    n_genes_tokeep_celltype=[10000], n_genes_tokeep_temporal=[10000], limit_min=.01)
-            
-            print(f"[select_DEgenes_and_split] Final filtering retained {len(genes_tokeep_final)} genes")
-            
-        except Exception as e:
-            print(f"[select_DEgenes_and_split] Error during final gene filtering: {e}")
-            sys.exit(1)
+        # Subsample cells if dataset is too large
+        cells_to_use = []
+        vect_t = data_rna[:, 0]
+        sub_N = min(vect_t.size, int(10000/len(np.unique(times)))) # Limit to 5000 cells per gene
+        print(f"[select_DEgenes_and_split] Subsampling to {sub_N} cells per timepoint")
         
-        # Sort genes alphabetically and filter dataset
-        genes_list_init = list(adata.var_names)
-        genes_list_init.sort()
-        adata = adata[:, [g for g in genes_list_init if g in genes_tokeep_final]]
-
-        # Save the filtered dataset
+        for time in np.unique(times):
+            for sample in np.unique(vect_samples_id):
+                idx = np.where((vect_t == time) & (vect_samples_id == sample))[0]
+                N_cells_ts = len(idx)
+                n_select = min(sub_N, N_cells_ts)
+                if N_cells_ts > 0:
+                    selected = np.random.choice(idx, n_select, replace=False)
+                    cells_to_use.extend(selected)
+        
+        model.hard_em = 0 # substantially accelerates fitting
         try:
-            adata.write(os.path.join(p, 'Data', 'data_full.h5ad'))
-            print(f"[select_DEgenes_and_split] Saved filtered dataset to {os.path.join(p, 'Data', 'data_full.h5ad')}")
+            model.fit_mixture(data_rna[cells_to_use], gene_names=genes_list_init, min_components=2, max_components=2, cell_rd=cell_rd,
+                                max_iter_kinetics=0, refilter=1) # Filter genes with mode difference > 1
+            print(f"[select_DEgenes_and_split] Fitted mixture model on {len(cells_to_use)} cells")
+            
+            genes_to_keep, temporal_variations, cell_type_variations, df_report = select_DEgenes(
+                    data_rna[cells_to_use], vect_samples_id[cells_to_use], vect_celltype_id[cells_to_use], 
+                    model.proba, genes_list_init, n_genes_tokeep_temporal=n_genes_tokeep_temporal, 
+                    n_genes_tokeep_celltype=n_genes_tokeep_celltype, limit_min=.01)
+            
+            # Save gene selection report
+            out_dir = os.path.join(p, 'cardamomOT')
+            os.makedirs(out_dir, exist_ok=True)
+            report_path = os.path.join(p, 'cardamomOT', 'gene_variation_report.csv')
+            df_report.to_csv(report_path, index=False)
+            print(f"[select_DEgenes_and_split] Saved gene variation report to {report_path}")
+            print(f"[select_DEgenes_and_split] Selected {len(genes_to_keep)} genes based on variation criteria")
+            
         except Exception as e:
-            print(f"[select_DEgenes_and_split] Error saving filtered dataset: {e}")
+            print(f"[select_DEgenes_and_split] Error during mixture model fitting: {e}")
             sys.exit(1)
+
+        # Add genes of biological interest
+        genes_list_path = os.path.join(p, 'Data', 'genes_list.txt')
+        if os.path.exists(genes_list_path):
+            with open(genes_list_path, "r") as f:
+                genes_list = [line.strip() for line in f if line.strip()]
+            print(f"[select_DEgenes_and_split] Loaded {len(genes_list)} genes of biological interest")
+            
+            for gene in genes_list:
+                if gene in genes_list_init:
+                    idx = genes_list_init.index(gene)
+                    if temporal_variations[idx] > 0.01:
+                        genes_to_keep.append(gene)
+            print(f"[select_DEgenes_and_split] Added {len(genes_to_keep) - len(set(genes_to_keep) - set(genes_list))} additional genes of interest")
+        else:
+            print("[select_DEgenes_and_split] No genes_list_complex.txt found, skipping biological interest genes")
+        
+        genes_list_tokeep = list(set(genes_to_keep))
+        adata = adata[:, [g for g in genes_list_tokeep if g in genes_list_init]]
+        print(f"[select_DEgenes_and_split] Final gene selection: {len(genes_list_tokeep)} genes retained")
+
+
+
+    print("[select_DEgenes_and_split] Re-filtering genes to ensure only variable genes are retained")
+    # Re-filter genes to ensure only variable genes remain
+    if scp.sparse.issparse(adata.X):
+        data_rna_extracted = adata.X.T.toarray()
+    else:
+        data_rna_extracted = adata.X.T
+    times = adata.obs['time'].values if 'time' in adata.obs else np.zeros(adata.n_obs)
+    data_rna = np.vstack([times, data_rna_extracted]).T
+    vect_samples_id = adata.obs['dataset_id'].values if 'dataset_id' in adata.obs else np.zeros(adata.n_obs)
+    vect_celltype_id = adata.obs['cell_type'].values if 'cell_type' in adata.obs else np.zeros(adata.n_obs)
+    G = np.size(data_rna, 1)
+    model = NetworkModel_beta(G-1)
+    if mean_forcing >= 0:
+        model.mean_forcing_em = mean_forcing
+    
+    try:
+        model.fit_mixture(data_rna, gene_names=list(adata.var_names), 
+                            min_components=2, max_components=2, cell_rd=cell_rd,
+                            refilter=.1, max_iter_kinetics=0)
+        print("[select_DEgenes_and_split] Re-fitted mixture model for final gene filtering")
+        
+        genes_tokeep_final, temporal_variations, cell_type_variations, df_report = select_DEgenes(data_rna, 
+                vect_samples_id, vect_celltype_id, 
+                model.proba, adata.var_names, 
+                n_genes_tokeep_celltype=[100000], n_genes_tokeep_temporal=[100000], limit_min=.01)
+        
+        print(f"[select_DEgenes_and_split] Final filtering retained {len(genes_tokeep_final)} genes")
+        
+    except Exception as e:
+        print(f"[select_DEgenes_and_split] Error during final gene filtering: {e}")
+        sys.exit(1)
+    
+    # Sort genes alphabetically and filter dataset
+    genes_list_init = list(adata.var_names)
+    genes_list_init.sort()
+    adata = adata[:, [g for g in genes_list_init if g in genes_tokeep_final]]
+
+    # Save the filtered dataset
+    try:
+        adata.write(os.path.join(p, 'Data', 'data_full.h5ad'))
+        print(f"[select_DEgenes_and_split] Saved filtered dataset to {os.path.join(p, 'Data', 'data_full.h5ad')}")
+    except Exception as e:
+        print(f"[select_DEgenes_and_split] Error saving filtered dataset: {e}")
+        sys.exit(1)
 
     if split == "train":
         print(f"[select_DEgenes_and_split] Creating train/test split with rate: {rate}")
@@ -313,7 +297,7 @@ def main(argv):
         if not ('copycat' in p or 'Schiebinger' in p):
             print("[select_DEgenes_and_split] Re-filtering genes on training set")
             # Re-filter genes on training set only
-            if scipy.sparse.issparse(adata.X):
+            if scp.sparse.issparse(adata.X):
                 data_rna_extracted = adata.X.T.toarray()
             else:
                 data_rna_extracted = adata.X.T
@@ -328,7 +312,7 @@ def main(argv):
             
             try:
                 model.fit_mixture(data_rna, gene_names=list(adata.var_names), min_components=2, max_components=2, cell_rd=cell_rd,
-                                max_iter_kinetics=0, refilter=.1)
+                                max_iter_kinetics=0, refilter=.01)
                 genes_list_tokeep, temporal_variations, cell_type_variations, df_report = select_DEgenes(data_rna, 
                         vect_samples_id, vect_celltype_id, 
                         model.proba, adata.var_names, 

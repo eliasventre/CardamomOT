@@ -106,17 +106,17 @@ def main(argv):
     # Load mixture and simulation parameters
     print("[check_sim_to_data] Loading mixture and simulation parameters...")
     try:
-        mixture_parameters = np.load(os.path.join(p, 'cardamom', 'mixture_parameters.npy'))
+        mixture_parameters = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
         c = mixture_parameters[-1, :]
         kz = mixture_parameters[:-1, :] + 1e-6
-        pi_zinb = np.load(os.path.join(p, 'cardamom', 'pi_zinb.npy'))
+        pi_zinb = np.load(os.path.join(p, 'cardamomOT', 'pi_zinb.npy'))
         
-        vect_kon_beta = np.load(os.path.join(p, 'cardamom', 'data_kon_beta.npy')) + 1e-6
-        vect_kon_theta = np.load(os.path.join(p, 'cardamom', 'data_kon_theta.npy')) + 1e-6
-        vect_kon_sim = np.load(os.path.join(p, 'cardamom', 'data_kon_simul.npy')) + 1e-6
-        times_data = np.load(os.path.join(p, 'cardamom', 'data_times.npy'))
-        times_simulation = np.load(os.path.join(p, 'cardamom', 'simulation_times.npy'))
-        rna_ref = np.load(os.path.join(p, 'cardamom', 'data_rna.npy'))
+        vect_kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta.npy')) + 1e-6
+        vect_kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta.npy')) + 1e-6
+        vect_kon_sim = np.load(os.path.join(p, 'cardamomOT', 'data_kon_simul.npy')) + 1e-6
+        times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
+        times_simulation = np.load(os.path.join(p, 'cardamomOT', 'simulation_times.npy'))
+        rna_ref = np.load(os.path.join(p, 'cardamomOT', 'data_rna.npy'))
         print("[check_sim_to_data] Successfully loaded all parameters")
     except FileNotFoundError as e:
         print(f"[check_sim_to_data] Error: Missing parameter file: {e}")
@@ -165,7 +165,7 @@ def main(argv):
     data_netw_theta[1:, :] = np.where(zero_mask, 0, data_netw_theta[1:, :])
 
     model = NetworkModel(G)
-    cardamom_dir = os.path.join(p, 'cardamom')
+    cardamom_dir = os.path.join(p, 'cardamomOT')
 
     # Save comparison datasets
     print("[check_sim_to_data] Saving comparison datasets...")

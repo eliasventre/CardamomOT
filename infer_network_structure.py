@@ -92,13 +92,13 @@ def main(argv):
     # ─── LOAD MIXTURE PARAMETERS ────────────────────────────────────────
     try:
         model = NetworkModel_beta(G-1)
-        model.modes = np.load(os.path.join(p, 'cardamom', 'modes.npy'))
-        with open(os.path.join(p, 'cardamom', 'pi_init.pkl'), "rb") as f:
+        model.modes = np.load(os.path.join(p, 'cardamomOT', 'modes.npy'))
+        with open(os.path.join(p, 'cardamomOT', 'pi_init.pkl'), "rb") as f:
             model.pi_init = pickle.load(f)
-        model.proba = np.load(os.path.join(p, 'cardamom', 'proba.npy'))
-        model.proba_init = np.load(os.path.join(p, 'cardamom', 'proba_init.npy'))
-        model.a = np.load(os.path.join(p, 'cardamom', 'mixture_parameters.npy'))
-        model.n_networks = np.load(os.path.join(p, 'cardamom', 'n_networks.npy'))
+        model.proba = np.load(os.path.join(p, 'cardamomOT', 'proba.npy'))
+        model.proba_init = np.load(os.path.join(p, 'cardamomOT', 'proba_init.npy'))
+        model.a = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
+        model.n_networks = np.load(os.path.join(p, 'cardamomOT', 'n_networks.npy'))
 
         print(f"[infer_network_structure] Loaded mixture parameters ({model.n_networks} networks)")
     except FileNotFoundError as e:
@@ -110,7 +110,7 @@ def main(argv):
         raise SystemExit(error_msg)
     
     model.ref_network = np.ones((G, G, model.n_networks))
-    ref_path = os.path.join(p, 'cardamom', 'ref_network.csv')
+    ref_path = os.path.join(p, 'cardamomOT', 'ref_network.csv')
     if os.path.exists(ref_path):
         # 1️⃣ Charger la matrice complète depuis le CSV
         ref_df = pd.read_csv(ref_path, index_col=0)
@@ -134,7 +134,7 @@ def main(argv):
     model.fit_network(data_rna, intensity_prior=100, vect_samples_id=vect_samples_id, verb=1)
 
     # Save inferred network structure parameters
-    cardamom_dir = os.path.join(p, 'cardamom')
+    cardamom_dir = os.path.join(p, 'cardamomOT')
     np.save(os.path.join(cardamom_dir, 'basal'), model.basal)
     np.save(os.path.join(cardamom_dir, 'inter'), model.inter)
     np.save(os.path.join(cardamom_dir, f'inter_stim{model.stimulus}_prior{model.prior_network_pen}'), model.inter)

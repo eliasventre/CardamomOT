@@ -32,7 +32,6 @@ import numpy as np
 import anndata as ad
 import scipy.sparse
 import matplotlib.pyplot as plt
-from scipy.stats import chi2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -109,12 +108,12 @@ def select_poissonian_genes(X, xi, var_threshold=1.2, min_mean=0.1):
     X   = np.asarray(X, dtype=float)
     mu  = X.mean(axis=0)
     var = X.var(axis=0)
-    a   = 1.0     # intrinsic Poisson term (fixed at 1 in Chronocell)
+    a   = 1.0     # intrinsic Poisson term
     sp  = xi
 
     poisson_mask = mu > min_mean   # initialize broadly
 
-    for _ in range(10):             # up to 10 iterations (5 in Chronocell)
+    for _ in range(10):             # up to 5 iterations 
         # criterion: var / (a*mu + sp*mu^2) < var_threshold
         denom        = a * mu + sp * mu ** 2
         poisson_mask = (mu > min_mean) & (var / np.where(denom > 0, denom, np.inf) < var_threshold)

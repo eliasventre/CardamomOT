@@ -3,7 +3,7 @@ requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cardamom-sc"
+name = "CardamomOT"
 version = "2.0.0"
 description = "Joint gene regulatory network and trajectory inference from temporal snapshots of scRNAseq data"
 readme = "README.md"
@@ -41,7 +41,14 @@ dependencies = [
     "joblib>=1.0",
 ]
 
+[project.scripts]
+cardamomot = "CardamomOT.cli:main"
+
 [project.optional-dependencies]
+cli = [
+    "questionary>=1.10",
+    "pyyaml>=5.4",
+]
 dev = [
     "pytest>=6.0",
     "pytest-cov>=2.12",

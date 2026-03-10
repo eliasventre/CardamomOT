@@ -185,11 +185,11 @@ def main(argv):
 
     # Load model parameters
     try:
-        mixture_parameters = np.load(os.path.join(p, 'cardamom', 'mixture_parameters.npy'))
+        mixture_parameters = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
         c = mixture_parameters[-1, :]
         kz = mixture_parameters[:-1, :]
-        pi_zinb = np.load(os.path.join(p, 'cardamom', 'pi_zinb.npy'))
-        times_simulation = np.load(os.path.join(p, 'cardamom', 'simulation_times.npy'))
+        pi_zinb = np.load(os.path.join(p, 'cardamomOT', 'pi_zinb.npy'))
+        times_simulation = np.load(os.path.join(p, 'cardamomOT', 'simulation_times.npy'))
         t_simul = list(set(times_simulation))
         t_simul.sort()
         print(f"[check_KOV_to_sim] Loaded model parameters and simulation times")

@@ -86,7 +86,7 @@ def main(argv):
     
     # Load read depth correction (optional)
     try:
-        cell_rd = np.load(os.path.join(p, 'cardamom', 'cell_rd.npy'))
+        cell_rd = np.load(os.path.join(p, 'cardamomOT', 'cell_rd.npy'))
         print(f"[check_mixture_to_data] Loaded read depth corrections for {len(cell_rd)} cells")
     except FileNotFoundError:
         print("[check_mixture_to_data] Read depth file not found, assuming uniform depth")
@@ -125,11 +125,11 @@ def main(argv):
     # Load mixture model parameters
     print("[check_mixture_to_data] Loading mixture model parameters...")
     try:
-        mixture_parameters = np.load(os.path.join(p, 'cardamom', 'mixture_parameters.npy'))
+        mixture_parameters = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
         c = mixture_parameters[-1, :]
         kz = mixture_parameters[:-1, :] + 1e-6
-        pi_zinb = np.load(os.path.join(p, 'cardamom', 'pi_zinb.npy'))
-        vect_kon_beta = np.load(os.path.join(p, 'cardamom', 'modes.npy')) + 1e-6
+        pi_zinb = np.load(os.path.join(p, 'cardamomOT', 'pi_zinb.npy'))
+        vect_kon_beta = np.load(os.path.join(p, 'cardamomOT', 'modes.npy')) + 1e-6
         print("[check_mixture_to_data] Successfully loaded mixture parameters")
     except FileNotFoundError as e:
         print(f"[check_mixture_to_data] Error: Missing parameter file: {e}")
@@ -161,8 +161,8 @@ def main(argv):
     adata_beta = ad.AnnData(X=data_beta[1:, :].T)
     adata_beta.var = adata.var.copy()
     adata_beta.obs['time'] = times_data
-    adata_beta.write(os.path.join(p, 'cardamom', 'adata_beta.h5ad'))
-    print(f"[check_mixture_to_data] Saved synthetic data to {os.path.join(p, 'cardamom', 'adata_beta.h5ad')}")
+    adata_beta.write(os.path.join(p, 'cardamomOT', 'adata_beta.h5ad'))
+    print(f"[check_mixture_to_data] Saved synthetic data to {os.path.join(p, 'cardamomOT', 'adata_beta.h5ad')}")
 
     # Compute optimal transport distance (Wasserstein)
     print("[check_mixture_to_data] Computing optimal transport distance...")
