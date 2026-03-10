@@ -3,19 +3,11 @@
 Core functions for the inference of trajectories, mainly used in loop_trajectories
 """
 
-from typing import Any
 import numpy as np
 from numba import njit, prange
 import multiprocessing as mp
 mp.set_start_method("spawn", force=True)
-# joblib is optional: import lazily to avoid breaking imports when it's absent
-try:
-    from joblib import Parallel, delayed
-except ImportError:
-    Parallel = None
-    delayed = None
-    import logging
-    logging.getLogger(__name__).warning("joblib missing: parallel loops disabled")
+from joblib import Parallel, delayed
 from .network import main_loss
 from .simulations import simulate_next_prot_ode
 
@@ -119,13 +111,13 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
     n1, G = vect_rna_init.shape
     n2 = vect_rna_end.shape[0]
 
-    # Préallocation (important pour Numba)
+    # Preallocation (important for Numba)
     dist = np.ones((n1, n2))
     vect_prot_end = np.ones((n1, n2, G + 1))
 
     weight_init: float = 1 / n_iter
 
-    for i in prange(n1):  # parallélisation cellule par cellule
+    for i in prange(n1):  # parallelize cell-by-cell
         prot_init_i = vect_prot_init[i]
         rna_init_i = vect_rna_init[i]
         mode_init_i = mode_init[i]
@@ -136,13 +128,13 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
         local_prot_end = np.empty((n2, G))
         local_dist = np.zeros(n2)
 
-        # --- Boucle sur les cibles j ---
+        # --- Loop over target cells j ---
         for j in range(n2):
             prot_end = find_next_prot(d1, prot_init_i, rna_init_i, vect_rna_end[j], mode_init_i, mode_end[j], alpha_i, s1, delta_t)
             local_prot_end[j] = prot_end
 
             if n_iter <= intensity_prior:
-                # distances sur proba ou modes et protéines
+                # distances on probabilities or modes and proteins
                 diff_prot = prot_end - prot_init_i
                 if compute_with_proba:
                     diff_p = vect_proba_end[j] - proba_init_i
@@ -153,10 +145,10 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
                     local_dist[j] += ((1.0 - 1.0 / G) * np.sum(diff_k * diff_k) +
                                 (1.0 / G) * np.sum(diff_prot * diff_prot)) * weight_init
 
-        # --- Stockage ---
+        # --- Storage ---
         vect_prot_end[i, :, 1:] = local_prot_end
 
-        # --- Correction avec main_loss ---
+        # --- Correction using main_loss ---
         if n_iter > 1:
             if compute_with_proba:
                 sigma = base_kon_vector(basal, inter, vect_prot_end[i]) 
@@ -167,7 +159,7 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
                 for j in range(n2):
                     local_dist[j] += main_loss(sigma[j, 1:], vect_kon_end[j], 1, loss) * (1 - weight_init)
 
-        # --- Clamp et copie ---
+        # --- Clamp and copy ---
         for j in range(n2):
             val = local_dist[j]
             dist[i, j] = 100.0 if val > 100.0 else val

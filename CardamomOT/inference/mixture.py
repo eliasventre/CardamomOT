@@ -17,16 +17,14 @@ Public functions include:
 Auxiliary helpers and legacy utilities are retained for compatibility.
 """
 
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
-from numpy import ndarray, floating
+from numpy import floating
 from scipy.special import gammaln, logsumexp, psi, polygamma
 from scipy.stats import nbinom
 from scipy.optimize import minimize
-from scipy import stats
 import ot
-import logging
 
 from CardamomOT.logging import get_logger
 
@@ -36,7 +34,7 @@ logger = get_logger(__name__)
 EPS = 1e-12
 
 # ---------------------------
-# Fonctions utilitaires d'origine (conservées pour l'init)
+# Original utility functions (retained for initialization)
 # ---------------------------
 
 def estim_gamma_poisson(x, mod=0, a_init=0, b_init=0):
@@ -71,7 +69,7 @@ def estim_gamma_poisson(x, mod=0, a_init=0, b_init=0):
 
 def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=100, seuil=0.001, tol=1e-6, verb=False) -> tuple[Any, Any]:
     """
-    Version originale pour l'initialisation avec des temps discrets.
+    Original version used for initialization with discrete timepoints.
     """
     t = np.sort(list(set(times)))
     m: int = t.size
@@ -86,7 +84,7 @@ def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=10
                                          a_init=a_init[i], b_init=b_init)
     b = np.mean(b)
     
-    # Σ x_i / s_i  (dénominateur pour b)
+    # Σ x_i / s_i  (denominator for b)
     sx: float = max(np.sum(x), EPS)
 
     k, c = 0, 0
@@ -136,11 +134,11 @@ def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=10
 def infer_kinetics_temporal_scaled(x, s, times, a_init=np.ones(100), b_init=1,
                                     max_iter=100, seuil=0.001, tol=1e-6, verb=False) -> tuple[np.ndarray, floating[Any]]:
     """
-    Version scalée de infer_kinetics_temporal.
-    Modèle : X_i | bassin k  ~  NB(a_k,  b/s_i)
-    La seule différence avec la version originale :
-      - le gradient utilise log(b/s_i) au lieu de log(b)
-      - la fermeture de b utilise Σ x_i/s_i au lieu de Σ x_i
+    Scaled version of :func:`infer_kinetics_temporal`.
+    Model: X_i | basin k ∼ NB(a_k, b / s_i).
+    The only differences with the original are:
+      - the gradient uses log(b/s_i) instead of log(b)
+      - the analytic update for b uses Σ x_i/s_i instead of Σ x_i
     """
     t = np.sort(list(set(times)))
     m: int = t.size
@@ -155,7 +153,7 @@ def infer_kinetics_temporal_scaled(x, s, times, a_init=np.ones(100), b_init=1,
                                        a_init=a_init[i], b_init=b_init)
     b = np.mean(b) 
 
-    # Σ x_i / s_i  (dénominateur pour b)
+    # Σ x_i / s_i  (denominator for b)
     sx: float = max(np.sum(x / s), EPS)
 
     k, c = 0, 0
@@ -179,7 +177,7 @@ def infer_kinetics_temporal_scaled(x, s, times, a_init=np.ones(100), b_init=1,
                     da[i] = -d / h
 
         a += np.maximum(da, -a)
-        b = np.sum(n * a) / sx          # fermeture analytique corrigée
+        b = np.sum(n * a) / sx          # corrected analytic closure
         c  = np.max(np.abs(da))
         k += 1
         if (k > 100) and (b > 1/seuil or b < seuil):
@@ -196,44 +194,46 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
                                    tol=1e-6, max_iter=100,  
                                    damping=0.7, verb=False) -> tuple[Any, Any]:
     """
-    Version adaptée de infer_kinetics_temporal pour l'EM avec preserve_mean_values assignments.
-    
-    Optimise analytiquement les paramètres a[0],...,a[K-1] et b (c dans notre notation)
-    en maximisant la log-vraisemblance pondérée par les responsabilités.
-    
+    Adapted version of ``infer_kinetics_temporal`` for EM when
+    *preserve_mean_values* assignments are used.
+
+    Analytically optimizes parameters ``a[0],...,a[K-1]`` and ``b`` (called
+    ``c`` in other parts of the code) by maximizing the weighted log-
+    likelihood under the provided responsibilities.
+
     Parameters:
     -----------
     x : array (N,)
         Observations (counts)
     resp : array (N, K)
-        Responsabilités (probabilités d'appartenance aux K composantes)
+        Responsibilities (probabilities of membership in each component)
     seuil : float
-        Borne inférieure pour a et b
-    a_init : array (K,) ou None
-        Initialisation des a
-    b_init : float ou None
-        Initialisation de b
+        Lower bound for ``a`` and ``b``
+    a_init : array (K,) or None
+        Initialization for ``a``
+    b_init : float or None
+        Initialization for ``b``
     damping : float
-        Facteur d'amortissement pour Newton-Raphson (0 < damping <= 1)
-        Plus petit = plus stable mais plus lent
-    
+        Damping factor for Newton–Raphson (0 < damping <= 1);
+        smaller values increase stability at the cost of speed.
+
     Returns:
     --------
     a : array (K,)
-        Paramètres de forme optimaux (ks dans notre notation)
+        Optimal shape parameters (ks in our notation)
     b : float
-        Paramètre de dispersion commun (c dans notre notation)
+        Common dispersion parameter (c in our notation)
     """
     x = np.asarray(x).reshape(-1)
     resp = np.asarray(resp)
     N, K = resp.shape
     
-    # Effectifs pondérés par composante
+    # weighted counts per component
     n = resp.sum(axis=0) + EPS  # (K,)
     
     # Initialisation
     if a_init is None:
-        # Init par moyenne pondérée
+        # initialize by weighted mean
         a = np.zeros(K)
         for k in range(K):
             weighted_mean = np.sum(resp[:, k] * x) / n[k]
@@ -246,22 +246,22 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
     else:
         b = float(b_init)
     
-    # Somme totale pondérée (pour mise à jour de b)
+    # weighted total sum (for updating b)
     sx: np.bool_ | float = max(np.sum(resp * x[:, None]), EPS)
     
-    # Newton-Raphson avec damping
+    # Newton-Raphson with damping
     iteration, conv_metric = 0, 0
     
     while (iteration == 0) or (iteration < max_iter and conv_metric > tol):
         da = np.zeros(K)
         
         for k in range(K):
-            if a[k] > seuil * 0.1:  # Éviter divisions par 0
-                # z = a[k] + x pour toutes les observations
+            if a[k] > seuil * 0.1:  # avoid divisions by zero
+                # z = a[k] + x for all observations
                 z = a[k] + x  # (N,)
                 
-                # Gradient et Hessian pondérés par resp[:, k]
-                # d/da log p(x|a,b) pondéré
+                # weighted gradient and Hessian by resp[:, k]
+                # weighted d/da log p(x|a,b)
                 p0 = np.sum(resp[:, k] * psi(z))
                 p1: np.bool_ = np.sum(resp[:, k] * polygamma(1, z))
                 
@@ -277,14 +277,14 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
         a += np.maximum(da, -a)
         b = np.sum(n*a)/sx
         
-        # Métrique de convergence
+        # convergence metric
         conv_metric = np.max(np.abs(da))
         iteration += 1
         
-        # Sécurité : sortir si b diverge
+        # Safety check: break if b diverges
         if (iteration > 100) and (b > 1/seuil or b < seuil): break
     
-    # Vérifications finales
+    # final checks
     if (iteration == max_iter) or (conv_metric > tol):
         if verb:
             logger.warning("Soft kinetics: convergence warning (iter=%d, conv=%.2e, b=%.4f)", iteration, conv_metric, b)
@@ -305,17 +305,17 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
 
 def nb_logpmf_vectorized(x, ks, c, s=None):
     """
-    Log-PMF NB vectorisée avec scaling cellulaire (read depth).
+    Vectorized log-PMF of a Negative Binomial with optional cell-specific scaling.
 
-    Modèle : X_i | z=k  ~  NB(ks_k,  c / s_i)
-    soit    E[X_i | k] = s_i * ks_k / c   (le scaling multiplie la moyenne).
+    Model: X_i | z=k ∼ NB(ks_k, c / s_i)
+    so that E[X_i | k] = s_i * ks_k / c (scaling multiplies the mean).
 
     Parameters
     ----------
-    x  : (N,)   observations (comptages entiers)
+    x  : (N,)   observations (integer counts)
     ks : (K,)   shape parameters
-    c  : float  dispersion du gène  (partagée entre composantes)
-    s  : (N,)   facteurs de read depth cellulaires (médiane = 1)
+    c  : float  dispersion parameter for the gene (shared across components)
+    s  : (N,)   cell read-depth factors (median = 1)
 
     Returns
     -------
@@ -380,7 +380,7 @@ def zinb_logpmf_vectorized(x, ks, c, pi_zero, s=None):
 
 def predict_resp(x, ks, c, s=None, pi=None, pi_zero=None, zi=None) -> tuple[Any, Any]:
         """
-        Calcule les responsabilités.
+        Compute the responsibilities.
         """
 
         # Test : impose pi=None (we don't modify the priori on the proportion of basins)
@@ -465,12 +465,12 @@ def hard_em_scaled(data, s, n_components, ks_init, c_init, seuil,
 def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=200, 
             basins_temporal=None, vect_t=None, preserve_mean_values=0, mean_forcing=1.0):
     """
-    Hard EM pour mélange de Binomiales Négatives avec contraintes temporelles.
+    Hard EM for a Negative Binomial mixture with temporal constraints.
     
-    Parameters:
-    -----------
+    Parameters
+    ----------
     mean_forcing : float
-        Poids de la contrainte temporelle (0 = pas de contrainte, 1 = contrainte forte)
+        Weight of the temporal constraint (0 = no constraint, 1 = strict constraint)
     """
     
     n_cells = data.size 
@@ -487,15 +487,15 @@ def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=
     log_likelihood_old = np.sum([log_proba[cell, basins[cell]] for cell in range(n_cells)])
     
     for it in range(max_iter_loop):
-        # M-step : mise à jour des paramètres
+        # M-step: update parameters
         ks_new, c_new = infer_kinetics_temporal(data, basins, a_init=ks, b_init=c, 
                                                  seuil=seuil, max_iter=1e5, tol=tol)
         
-        # Contraintes sur les paramètres basées sur basins_temporal
+        # parameter constraints based on basins_temporal
         if basins_temporal is not None:
             ks_new = _apply_temporal_constraints(data, basins_temporal, ks_new, c_new, n_components)
         
-        # E-step : réassignation
+        # E-step: reassign
         resp_new, log_proba = predict_resp(
             data, ks_new, c_new, pi=pi
             )
@@ -506,7 +506,7 @@ def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=
         if len(np.unique(basins_new)) < n_components:
             return ks, c, pi, basins
         
-        # Vérification convergence
+        # convergence check
         if it:
             log_likelihood_new = np.sum([log_proba[cell, basins_new[cell]] for cell in range(n_cells)])
             if (log_likelihood_new - log_likelihood_old) < 1/max_iter_loop:
@@ -519,7 +519,7 @@ def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=
 
 
 def _assign_basins(resp, data, ks, c, vect_t, preserve_mean_values, n_components, mean_forcing, final=False):
-    """Assigne les cellules aux bassins avec contraintes temporelles optionnelles."""
+    """Assign cells to basins with optional temporal constraints."""
     
     n_cells = data.size
 
@@ -534,7 +534,7 @@ def _assign_basins(resp, data, ks, c, vect_t, preserve_mean_values, n_components
         coupling = ot.bregman.sinkhorn(mu, nu, -np.log(resp), reg=1)
         return np.argmax(coupling, axis=1), nu
     
-    # Soft clustering avec contraintes temporelles
+    # Soft clustering with temporal constraints
     basins: np.ndarray[Any, np.dtype[Any]] = np.zeros(n_cells, dtype=int)
     pi_final = {}
     pi = np.zeros(n_components)
@@ -543,10 +543,10 @@ def _assign_basins(resp, data, ks, c, vect_t, preserve_mean_values, n_components
         resp_i = resp[indices]
         n_cells_i = np.sum(indices)
         
-        # Distribution uniforme des cellules
+        # Uniform cell distribution
         mu = np.ones(n_cells_i) / n_cells_i
         
-        # Calcul de nu avec contrainte temporelle
+        # Compute nu with temporal constraint
         nu = _compute_nu_with_temporal_constraint(
             resp_i, data[indices], ks, c, n_components, mean_forcing
         )
@@ -563,18 +563,19 @@ def _assign_basins(resp, data, ks, c, vect_t, preserve_mean_values, n_components
 
 def _compute_nu_with_temporal_constraint(resp_i, data_t, ks, c, n_components, mean_forcing):
     """
-    Calcule la distribution cible nu en équilibrant likelihood et contrainte temporelle.
+    Compute the target distribution nu by balancing likelihood and a temporal
+    mean constraint.
     
-    La contrainte temporelle force: sum_k (nu_k * ks_k / c) ≈ mean_t
+    The temporal constraint enforces: sum_k (nu_k * ks_k / c) ≈ mean_t
     """
-    # Proportions basées sur la likelihood
+    # proportions based on the likelihood
     nu_likelihood = np.sum(resp_i, axis=0)
     nu_likelihood /= np.sum(nu_likelihood)
     
-    # Proportions basées sur la contrainte de moyenne
+    # proportions based on the mean constraint
     means_components = ks / c  # Moyenne de chaque NB
     nu = _solve_mean_constraint(means_components, data_t, ks, c, nu_likelihood, n_components, mean_forcing)
-    nu = np.clip(nu, EPS, 1)  # Éviter les valeurs nulles
+    nu = np.clip(nu, EPS, 1)  # avoid zero values
     nu /= np.sum(nu)
     
     return nu
@@ -587,11 +588,11 @@ def neg_log_likelihood_logits(logits, data, r, p):
     r, p   : NB parameters (K,)
     """
     # softmax -> nu
-    logits = logits - np.max(logits)  # stabilité numérique
+    logits = logits - np.max(logits)  # numerical stability
     exp_logits = np.exp(logits)
     nu = exp_logits / np.sum(exp_logits)
 
-    # log-probas du mélange
+    # log-probabilities of the mixture
     log_probs = []
     for k in range(len(nu)):
         log_probs.append(
@@ -628,7 +629,7 @@ def compute_nu_star(
         method=method
     )
 
-    # récupération de nu*
+    # retrieval of nu*
     logits_opt = res.x
     logits_opt -= np.max(logits_opt)
     nu_star = np.clip(np.exp(logits_opt), 1e-12, 1)
@@ -642,7 +643,7 @@ def ks_statistic(data_full, nu, r, p, repet=10, n_cells_init=200) -> Any | float
     n_cells: int = min(data_full.size, n_cells_init)
     stat = 0
     for _ in range(repet):
-        # données triées
+        # sorted data
         data = data_full[np.random.choice(data_full.size, n_cells, replace=False)]
         data_sorted = np.sort(data)
         n: int = len(data_sorted)
@@ -650,7 +651,7 @@ def ks_statistic(data_full, nu, r, p, repet=10, n_cells_init=200) -> Any | float
         # CDF empirique
         emp_cdf = np.arange(1, n + 1) / n
 
-        # CDF théorique du mélange
+        # theoretical mixture CDF
         model_cdf = np.zeros(n)
         for k in range(len(nu)):
             model_cdf += nu[k] * nbinom.cdf(data_sorted, r[k], p)
@@ -663,10 +664,10 @@ def ks_statistic(data_full, nu, r, p, repet=10, n_cells_init=200) -> Any | float
 
 def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_components, mean_forcing):
     """
-    Trouve les proportions nu qui satisfont: sum(nu_k * means_k) = target_mean
-    tout en minimisant la distance à la distribution uniforme.
+    while minimizing the distance to the uniform distribution_k) = target_mean
+    while minimizing the distance to the uniform distribution.
     
-    Résout un problème d'optimisation quadratique sous contrainte.
+    Solves a constrained quadratic optimization problem.
     """
     mean_t = np.mean(data_t)
 
@@ -680,14 +681,14 @@ def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_component
     if mean_forcing > 0: alpha_reg = np.clip(stat_KS / mean_forcing, 0.0, 1.0)
     else: alpha_reg = 1.0
 
-    # Fonction objectif : distance à la distribution uniforme
+    # Objective function: distance to the uniform distribution
     def objective(nu):
         mean_pred = np.dot(nu, means_components)
         mean_erreur = (mean_pred - mean_t) / (EPS + mean_t)
         err = mean_erreur**2
         return (1 - alpha_reg) * err + alpha_reg * np.sum((nu - nu_init)**2)
     
-    # Contrainte : somme = 1
+    # Constraint: sum = 1
     def constraint_sum(nu):
         return np.sum(nu) - 1
     
@@ -704,7 +705,7 @@ def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_component
     
 
 def _apply_temporal_constraints(data, basins_temporal, ks, c, n_components):
-    """Applique des contraintes sur les paramètres basées sur basins_temporal."""
+    """Apply constraints to parameters based on temporal basins."""
     mean_min = np.mean(data[basins_temporal == 0])
     mean_max = np.mean(data[basins_temporal == n_components-1])
     ks[0] = np.minimum(mean_min * c, ks[0])
@@ -718,35 +719,36 @@ def _apply_temporal_constraints(data, basins_temporal, ks, c, n_components):
 def infer_kinetics_scaled(x, s, resp, seuil=0.01, a_init=None, b_init=None,
                           tol=1e-6, max_iter=100, damping=0.7, verb=False) -> tuple[Any, Any]:
     """
-    M-step analytique pour mélange NB avec read depth cellulaire s_i.
+    Analytical M-step for NB mixture with cell-specific read-depth factors ``s_i``.
 
-    Modèle : X_i | k  ~  NB(a_k,  c/s_i)
-    La log-vraisemblance pondérée par resp est :
+    Model: X_i | k  ~  NB(a_k,  c/s_i)
+    The weighted log-likelihood under responsibilities ``resp`` is::
 
       ℓ(a, c) = Σ_i Σ_k r_{ik} [
           log Γ(x_i + a_k) - log Γ(a_k) - log Γ(x_i+1)
           + a_k * log(c/s_i) - (x_i + a_k) * log(1 + c/s_i)
       ]
 
-    On maximise via Newton-Raphson sur a_k et fermeture analytique pour c.
+    We optimize using Newton–Raphson on ``a_k`` and analytically close-form
+    update for ``c``.
 
     Parameters
     ----------
-    x    : (N,)   comptages
-    s    : (N,)   read depth (médiane = 1)
-    resp : (N, K) responsabilités
+    x    : (N,)   counts
+    s    : (N,)   read-depth factors (median = 1)
+    resp : (N, K) responsibilities
 
     Returns
     -------
-    a : (K,)  shape params
-    b : float  dispersion c  (tel que mean_k = s_i * a_k / c)
+    a : (K,)  shape parameters
+    b : float dispersion ``c``  (such that mean_k = s_i * a_k / c)
     """
     x: np.ndarray[Any, np.dtype[Any]]    = np.asarray(x,    dtype=float).reshape(-1)
     s: np.ndarray[Any, np.dtype[Any]]    = np.clip(np.asarray(s, dtype=float).reshape(-1), 1e-8, 1e8)
     resp = np.asarray(resp)
     N, K = resp.shape
 
-    n  = resp.sum(axis=0) + EPS           # (K,)  effectifs pondérés
+    n  = resp.sum(axis=0) + EPS           # (K,)  weighted counts
 
     # Initialisation
     if a_init is None:
@@ -757,7 +759,7 @@ def infer_kinetics_scaled(x, s, resp, seuil=0.01, a_init=None, b_init=None,
 
     b: float = float(b_init) if b_init is not None else 1.0
 
-    # Somme pondérée de x / s_i  (pour la fermeture analytique de b)
+    # Weighted sum of x / s_i (for analytic closure of b)
     # E[X/s | k] = a_k / b  →  b = Σ_k n_k * a_k / Σ_i Σ_k r_{ik} * x_i/s_i
     sx = max(np.sum(resp * (x / s)[:, None]), EPS)
 
@@ -809,16 +811,17 @@ def em_vectorized_nb_zinb_scaled(x, s, ks_init, c_init, pi_init=None,
                                   max_iter=200, tol=1e-6, seuil=0.01,
                                   damping=0.7, verbose=False):
     """
-    EM pour mélange NB avec read depth cellulaire s_i.
+    EM for NB mixture with cellular read depth factors ``s_i``.
 
-    Identique à em_vectorized_nb_zinb mais utilise nb_logpmf_vectorized dans
-    l'E-step et infer_kinetics_scaled dans le M-step.
+    Same as :func:`em_vectorized_nb_zinb` but uses
+    :func:`nb_logpmf_vectorized` in the E-step and
+    :func:`infer_kinetics_scaled` in the M-step.
 
     Parameters
     ----------
-    x      : (N,)   comptages (entiers)
-    s      : (N,)   read depth par cellule (médiane normalisée à 1)
-    (autres paramètres identiques à em_vectorized_nb_zinb)
+    x      : (N,)   counts (integers)
+    s      : (N,)   per-cell read depth (median normalized to 1)
+    (other parameters are identical to ``em_vectorized_nb_zinb``)
     """
     x: np.ndarray[Any, np.dtype[Any]] = np.asarray(x, dtype=float).reshape(-1)
     s: np.ndarray[Any, np.dtype[Any]] = np.clip(np.asarray(s, dtype=float).reshape(-1), 1e-8, 1e8)
@@ -848,7 +851,7 @@ def em_vectorized_nb_zinb_scaled(x, s, ks_init, c_init, pi_init=None,
         if zi_mode is None:
             logpmf = nb_logpmf_vectorized(x, ks, c, s)            # (N, K)
         else:
-            # ZINB avec scaling : composante NB scalée + spike à zéro
+            # ZINB with scaling: scaled NB component + zero spike
             log_nb = nb_logpmf_vectorized(x, ks, c, s)
             X: np.ndarray[Any, np.dtype[Any]] = np.asarray(x)
             zeros_mask = (X == 0)
@@ -895,7 +898,7 @@ def em_vectorized_nb_zinb_scaled(x, s, ks_init, c_init, pi_init=None,
             tol=tol, max_iter=int(1e5), damping=damping, verb=verbose
         )
 
-        # Zero-inflation update (identique à la version non-scaled)
+        # Zero-inflation update (identical to non-scaled version)
         if zi_mode == 'global':
             frac_zeros     = np.mean(x == 0)
             log_nb0        = nb_logpmf_vectorized(np.zeros(1), ks, c,
@@ -919,12 +922,12 @@ def em_vectorized_nb_zinb_scaled(x, s, ks_init, c_init, pi_init=None,
 
 
 def compute_aic_for_params_scaled(x, s, ks, c, pi, pi_zero, zi_mode) -> tuple[Any, float]:
-    """Calcule l'AIC avec read depth pour un jeu de paramètres donné."""
+    """Compute the AIC with read depth for a given set of parameters."""
     if zi_mode is None:
         logpmf     = nb_logpmf_vectorized(x, ks, c, s)
         num_params: int = len(ks) + 1 + (len(ks) - 1)
     else:
-        # ZINB scaled : même logique que la version non-scaled
+        # ZINB scaled: same logic as non-scaled version
         log_nb = nb_logpmf_vectorized(x, ks, c, s)
         zeros_mask = (np.asarray(x) == 0)
         if np.isscalar(pi_zero):
@@ -956,10 +959,10 @@ def em_vectorized_nb_zinb(x, ks_init, c_init, pi_init=None, pi_zero_init=None,
                         zi_mode=None, max_iter=200, tol=1e-6, seuil=0.01, 
                         damping=0.7, verbose=False) -> Any:
     """
-    EM pour mélange NB/ZINB avec M-step ANALYTIQUE via Newton-Raphson.
+    EM for NB/ZINB mixture with ANALYTICAL M-step via Newton-Raphson.
     
-    Remplace l'estimation par moments par une optimisation directe de la 
-    log-vraisemblance pondérée, comme dans infer_kinetics_temporal.
+    Replaces moment-based estimates with direct optimization of the
+    weighted log-likelihood, as in :func:`infer_kinetics_temporal`.
     """
     x = np.asarray(x).reshape(-1)
     N: int = x.size
@@ -990,7 +993,7 @@ def em_vectorized_nb_zinb(x, ks_init, c_init, pi_init=None, pi_zero_init=None,
 
     for it in range(max_iter):
         # ==================
-        # E-STEP (inchangé)
+        # E-STEP (unchanged)
         # ==================
         if zi_mode is None:
             logpmf = nb_logpmf_vectorized(x, ks, c)
@@ -1021,23 +1024,23 @@ def em_vectorized_nb_zinb(x, ks_init, c_init, pi_init=None, pi_zero_init=None,
         # M-STEP ANALYTIQUE
         # ==================
         
-        # 1) Mise à jour de pi 
+        # 1) Update pi 
         Nk = resp.sum(axis=0) + EPS
         pi = Nk / N
 
-        # 2) Mise à jour de ks et c via optimisation analytique
+        # 2) Update ks and c via analytical optimization
         ks, c = infer_kinetics_preserve_mean_values_assignment(
             x, resp, 
             seuil=seuil,
             a_init=ks, 
             b_init=c,
             tol=tol,
-            max_iter=1e5,  # Sous-itérations Newton-Raphson
+            max_iter=1e5,  # Newton-Raphson sub-iterations
             damping=damping,
             verb=verbose
         )
 
-        # 3) Mise à jour de pi_zero (ZINB uniquement)
+        # 3) Update pi_zero (ZINB only)
         if zi_mode == 'global':
             frac_zeros = np.mean(x == 0)
             log_nb0 = nb_logpmf_vectorized(np.array([0]), ks, c).ravel()
@@ -1072,7 +1075,7 @@ def em_vectorized_nb_zinb(x, ks_init, c_init, pi_init=None, pi_zero_init=None,
 # ---------------------------
 
 def compute_aic_for_params(x, ks, c, pi, pi_zero, zi_mode) -> tuple[Any, floating[Any]]:
-    """Calcule l'AIC pour un jeu de paramètres donné."""
+    """Compute the AIC for a given set of parameters."""
     if zi_mode is None:
         logpmf = nb_logpmf_vectorized(x, ks, c)
         num_params: int = len(ks) + 1 + (len(ks) - 1)
@@ -1092,7 +1095,7 @@ def compute_aic_for_params(x, ks, c, pi, pi_zero, zi_mode) -> tuple[Any, floatin
 
 
 # ---------------------------
-# Classe principale (refactorisée)
+# Main class (refactored)
 # ---------------------------
 
 class NegativeBinomialMixtureEM:
@@ -1100,14 +1103,14 @@ class NegativeBinomialMixtureEM:
                  tol=1e-5, max_iter_em=200, verbose=False, preserve_mean_values=0,
                  compare_init_aic=True, damping=1.0) -> None:
         """
-        Mélange NB/ZINB avec M-step analytique optimal.
+        NB/ZINB mixture with optimal analytical M-step.
         
         New parameters:
         ---------------
         compare_init_aic : bool
-            Si True, compare l'AIC de l'initialisation avec l'AIC post-EM
+            If True, compare the AIC of the initialization with the AIC after EM
         damping : float (0, 1]
-            Facteur d'amortissement pour Newton-Raphson (0.5-0.8 = stable, 1.0 = rapide)
+            Damping factor for Newton-Raphson (0.5-0.8 = stable, 1.0 = fast)
         """
         assert min_components >= 1 and max_components >= min_components
         self.min_components: int = min_components
@@ -1242,25 +1245,24 @@ class NegativeBinomialMixtureEM:
 
     def fit(self, x, vect_t=None, quant_init=None, seuil=0.001, s=None):
         """
-        Ajuste le mélange NB sur les données x.
+        Fit the NB mixture model to data ``x``.
 
         Parameters
         ----------
-        x      : (N,)  comptages (entiers)
-        vect_t : (N,)  temps par cellule (optionnel)
-        s      : (N,)  facteurs de read depth cellulaires (optionnel).
-                       Si None, on utilise s=1 pour toutes les cellules
-                       (comportement original).
-                       Si fourni (issu de adata.obs['rd']), le modèle tient
-                       compte du scaling : X_i|k ~ NB(ks_k, c/s_i).
+        x      : (N,)  counts (integers)
+        vect_t : (N,)  optional time label per cell
+        s      : (N,)  optional cell-specific read depth factors.
+               If ``None`` all factors are set to 1 (original behavior).
+               If provided (e.g. from ``adata.obs['rd']``), the model
+               accounts for scaling: X_i|k ~ NB(ks_k, c/s_i).
         """
         x: np.ndarray[Any, np.dtype[Any]] = np.asarray(x).astype(int)
         N: int = x.size
 
-        # ── Gestion du read depth ─────────────────────────────────────────
+        # ── Read depth handling ─────────────────────────────────────────
         use_scaling: bool = (s is not None)
         if use_scaling:
-            # Pseudo-comptages pour l'initialisation (hard EM et _init_for_K)
+            # Pseudo-counts for initialization (hard EM and _init_for_K)
             x_init = np.round(x / s).astype(int)
             x_init = np.clip(x_init, 0, None)
         else:
@@ -1347,7 +1349,7 @@ class NegativeBinomialMixtureEM:
             while not stable and iter_count < 10:
                 iter_count += 1
 
-                # Choisir la version EM selon la présence ou non du scaling
+                # choose EM version depending on whether scaling is present
                 if use_scaling:
                     ks_fit, c_fit, pi_fit, pi_zero_fit, resp_fit, loglik_fit = \
                         em_vectorized_nb_zinb_scaled(

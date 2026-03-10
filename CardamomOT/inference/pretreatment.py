@@ -1,5 +1,6 @@
 """
-Core functions for selecting the most variable genes in the ZiNB sens.
+Core functions for selecting the most variable genes according to the
+Zero‑Inflated Negative Binomial (ZiNB) model.
 """
 from typing import Any
 import pandas as pd
@@ -30,7 +31,7 @@ def extract_degradation_rates(df, gene_list, cell_line=None, similarity_threshol
     for cnt, gene in enumerate(gene_list):
         gene_len: int = len(gene)
 
-        for pct in range(100, -1, -10):  # de 100% à 0%, par pas de 10%
+        for pct in range(100, -1, -10):  # from 100% to 0% in steps of 10%
             min_len = int(gene_len * pct / 100)
             prefix = gene[:min_len]
 
@@ -131,7 +132,7 @@ def select_DEgenes(data_rna, vect_samples_id, vect_celltype_id, proba,
     genes_to_keep = [list_genes[i] for i in indices_to_keep]
 
     ### ----- REPORT BUILDING -----
-    # Moyenne des variations sur les samples
+    # mean of variations across samples
     mean_temp = np.mean(temporal_variations, axis=2)  # (G, len(times))
     mean_cell: Any | None = np.mean(celltype_variations, axis=2) if celltype_variations is not None else None
 
@@ -143,11 +144,11 @@ def select_DEgenes(data_rna, vect_samples_id, vect_celltype_id, proba,
         row = {"gene": gene_name, "selection_summary": select_text}
 
         for s_i, s in enumerate(samples_id):
-            # Ajouter colonnes temporelles
+            # Add temporal columns
             for t_i, t in enumerate(sorted(times, key=str)):
                 row[f"sample_{s}-temporal_{t}"] = temporal_variations[g, t_i, s_i]
 
-            # Ajouter colonnes celltypes
+            # Add celltype columns
             if celltype_variations is not None:
                 for c_i, c in enumerate(sorted(celltype_id, key=str)):
                     row[f"sample_{s}-celltype_{c}"] = celltype_variations[g, c_i, s_i]

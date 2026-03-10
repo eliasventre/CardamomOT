@@ -1,6 +1,12 @@
 
 """
-Main class for network inference and simulation
+Core implementation of the NetworkModel used for inference and simulation.
+
+This module defines the :class:`NetworkModel` class which encapsulates
+parameters, state, and algorithms for fitting gene regulatory networks
+from single-cell expression data, performing stochastic or deterministic
+simulations, and managing mixture models. All documentation and comments
+are maintained in English.
 """
 import numpy as np
 import ot
@@ -19,7 +25,12 @@ np.set_printoptions(precision=3, suppress=True)
 
 class NetworkModel:
     """
-    Handle networks within the package.
+    Encapsulates the state and parameters of a regulatory network.
+
+    The class stores kinetic, mixture and network parameters as well as
+    trajectories produced during inference. It provides methods for
+    initialization, calibration and simulation used by the higher-level
+    pipeline script.
     """
     def __init__(self, n_genes=None, times=None):
         # Infos
@@ -125,10 +136,10 @@ class NetworkModel:
         """
         Parameters
         ----------
-        cell_rd : (N_cells,) array ou None
-            Facteurs de read depth par cellule (médiane = 1), issus de
-            adata.obs['rd'].  Si None, le modèle NB classique (sans scaling)
-            est utilisé.
+        cell_rd : (N_cells,) array or None
+            Read depth scaling factors per cell (median = 1), typically
+            stored in ``adata.obs['rd']``.  If ``None``, the standard
+            Negative Binomial model without scaling is applied.
         """
 
         # Get kinetic parameters
@@ -153,7 +164,7 @@ class NetworkModel:
                                                  refilter=refilter, hard_em=self.hard_em, 
                                                  preserve_mean_values=self.preserve_mean_values, mean_forcing_em=self.mean_forcing_em)
             x = data_rna[:, g]
-            # Passer le read depth si disponible
+            # Pass the read depth factor if it is available
             model = kinetics.fit(x, vect_t=vect_t, seuil=self.seuil, s=cell_rd)
             ks, c, pi0, proba, pi = np.sort(model['ks']), model['c'], np.mean(np.asarray(model['pi_zero'])), model['resp'], model['pi']
             ## Transform proba to be steepers

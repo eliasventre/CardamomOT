@@ -1,5 +1,11 @@
 """
-Core functions for network inference, mainly use in loop_trajectories
+Core routines for network inference used in trajectory-based loops.
+
+This module implements the optimization objectives, gradients, and
+penalization schemes required to learn regulatory interactions from
+multi-modal single-cell data.  It is designed to be imported lazily in
+order to avoid heavy dependencies when only other parts of the package
+are needed.
 """
 
 from typing import Any
@@ -38,22 +44,22 @@ r_elasticnet = 0.5
 
 @njit(fastmath=True, cache=True)
 def smoothed_l1_penalization(array, l1, sc=sc):
-    # Applique une version lissée de la norme L1 pour chaque élément
+    # Apply a smoothed version of the L1 norm element-wise
     smoothed_array: np.ndarray[Any, np.dtype[Any]] = np.where(
-        np.abs(array) < sc,  # Vérifie si la valeur absolue est sous le seuil
-        l1 * 0.5 * (array ** 2) / sc,  # Quadratique si |x| < sc
-        l1 * (np.abs(array) - 0.5 * sc)  # Linéaire autrement
+        np.abs(array) < sc,  # check if absolute value is below threshold
+        l1 * 0.5 * (array ** 2) / sc,  # quadratic region when |x| < sc
+        l1 * (np.abs(array) - 0.5 * sc)  # linear region otherwise
     )
     return np.sum(smoothed_array)
 
 
 @njit(fastmath=True, cache=True)
 def grad_smoothed_l1_penalization(array, l1, sc=sc) -> np.ndarray:
-    # Applique une version lissée de la norme L1 pour chaque élément
+    # Apply a smoothed version of the L1 norm element-wise
     smoothed_array = np.where(
-        np.abs(array) < sc,  # Vérifie si la valeur absolue est sous le seuil
-        l1 * array / sc,  # Quadratique si |x| < sc
-        l1 * np.sign(array)  # Linéaire autrement
+        np.abs(array) < sc,  # check if absolute value is below threshold
+        l1 * array / sc,  # quadratic gradient portion when |x| < sc
+        l1 * np.sign(array)  # linear gradient otherwise
     )
     return smoothed_array
 
@@ -132,13 +138,13 @@ def grad_main_loss(y_pred, y_true, l, loss, sc=sc, eps=eps_CE):
 
 @njit(fastmath=True, cache=True)
 def base_kon(theta_basal, theta_inter, y_prot) -> np.ndarray:
-    """Version plus robuste avec clipping des exponentielles"""
+    """More robust version with clipping of exponentials to avoid overflow."""
     n_cells, G = y_prot.shape
     n_net = theta_basal.size
     Z = np.zeros((n_cells, n_net))
     result = np.empty((n_cells, n_net + 1))
     
-    # Limite pour éviter overflow dans exp()
+    # Limit to avoid overflow of the exponential function
     MAX_EXP = 50.0  # exp(50) ≈ 5e21, largement suffisant
     
     for i in range(n_cells):
@@ -148,10 +154,10 @@ def base_kon(theta_basal, theta_inter, y_prot) -> np.ndarray:
             for g in range(G):
                 Z[i, k] += y_prot[i, g] * theta_inter[g, k]
         
-        # Trouver le max pour stabilité numérique
+        # Find max for numerical stability
         z_max = np.max(Z[i])
         
-        # Clipping pour éviter les valeurs extrêmes
+        # Clip to avoid extreme values
         z_max = min(z_max, MAX_EXP)
         
         # Softmax stable
@@ -171,7 +177,11 @@ def base_kon(theta_basal, theta_inter, y_prot) -> np.ndarray:
 
 def objective(X, weights_samples, ys, ypr, yp, ypm, yk, ks, G, g, n_networks, theta_ref, ref_network, l_pen, proba, weight_prev, loss, final):
     """
-    Objective function to be minimized (all cells, all genes, one timepoints).
+    Loss function to be minimized for a single gene at one timepoint.
+
+    Calculates the weighted error across samples and optionally adds a
+    penalization term that keeps the inferred parameters close to a
+    reference network.
     """ 
 
     theta = X.reshape(G+1, n_networks) 
@@ -249,7 +259,10 @@ def grad_theta(X, weights_samples, ys, ypr, yp, ypm, yk, ks, G, g, n_networks, t
 
 def objective_refinement(X, correc_ref, inter, basal, weights_samples, ys, ypr, yp, ypm, yk, ks, diag, G, g, n_networks, l_pen, proba, weight_prev, loss, final):
     """
-    Objective function to be minimized (all cells, all genes).
+    Loss to optimize when refining network parameters across all genes.
+
+    The refinement step rescales interactions and biases while keeping
+    the target gene fixed to improve numerical stability.
     """
     correc = X.reshape(G+1, n_networks)
     theta_inter = inter.copy()
@@ -285,7 +298,11 @@ def objective_refinement(X, correc_ref, inter, basal, weights_samples, ys, ypr, 
 
 def grad_correc(X, correc_ref, inter, basal, weights_samples, ys, ypr, yp, ypm, yk, ks, diag, G, g, n_networks, l_pen, proba, weight_prev, loss, final):
     """
-    Objective gradient
+    Gradient of the refinement objective with respect to correction factors.
+
+    This gradient corresponds to :func:`objective_refinement` and is used
+    by the optimizer when rescaling the interaction and basal parameters
+    during the refinement step.
     """
 
     correc = X.reshape(G+1, n_networks)

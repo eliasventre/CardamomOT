@@ -1,5 +1,16 @@
 """
-Core functions for ODE and PDMP simulations.
+Numerical solvers and utilities for gene regulatory network simulations.
+
+This module provides both Numba-accelerated low-level functions and
+higher-level classes for the two simulation regimes used by CARDAMOM:
+
+* deterministic ordinary differential equation (ODE) dynamics handled by
+  :class:`ApproxODE`;
+* stochastic piecewise-deterministic Markov process (PDMP) modelling
+  bursty protein production encapsulated in :class:`BurstyPDMP`.
+
+Helper routines such as ``base_kon_vector`` and ``kon_ref`` are also
+included, since they are reused across inference and trajectory modules.
 """
 from typing import Any
 import numpy as np

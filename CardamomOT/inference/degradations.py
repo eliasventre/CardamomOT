@@ -1,3 +1,13 @@
+"""
+Utilities for degradation rate inference and temporal epsilon estimation.
+
+This module provides PyTorch models and helper functions used by the
+CARDAMOM pipeline when learning gene-specific degradation parameters
+from protein dynamics.  It includes the
+:class:`GeneRegulatoryODE_softmax` neural ODE model and the
+:func:`inference_epsilon_temporal` routine among other utilities.
+"""
+
 import numpy as np
 import torch
 import torch.nn as nn
