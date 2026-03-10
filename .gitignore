@@ -3,12 +3,6 @@
 # ============================================================================
 collaborations/
 results_article/Benchmark_on_simulated_data/*/REFERENCE_FITTING/pred_adata_*.h5ad
-experimental_datasets/*/cardamom/
-*.pkl
-*.png
-*.pickle
-*.npy
-*.npz
 
 # ============================================================================
 # IDE and Editor
@@ -54,7 +48,6 @@ htmlcov/
 # ============================================================================
 .ipynb_checkpoints/
 *.ipynb_checkpoints
-.ipynb
 
 # ============================================================================
 # Virtual Environments
