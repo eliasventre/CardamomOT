@@ -47,6 +47,7 @@ setup(
         'torch>=1.9',
         'torchdiffeq>=0.2',
         'joblib>=1.0',
+        'pot>=0.9.6',
     ],
     extras_require={
         'cli': [
@@ -65,6 +66,9 @@ setup(
             'jupyter>=1.0',
             'notebook>=6.0',
             'ipython>=7.0',
+            'scanpy>=1.12',
+            'scvelo>=0.3.4',
+
         ]
     },
     classifiers=[
