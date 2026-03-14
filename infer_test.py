@@ -110,13 +110,13 @@ def main(argv):
 
     # Load model parameters
     try:
-        model.basal = np.load(os.path.join(p, 'cardamom', 'basal.npy'))
-        model.inter = np.load(os.path.join(p, 'cardamom', 'inter.npy'))
-        model.a = np.load(os.path.join(p, 'cardamom', 'mixture_parameters.npy'))
-        model.times_data = np.load(os.path.join(p, 'cardamom', 'data_times.npy'))
-        model.ratios = np.load(os.path.join(p, 'cardamom', 'ratios.npy'))
-        model.n_networks = np.load(os.path.join(p, 'cardamom', 'n_networks.npy'))
-        model.d = np.load(os.path.join(p, 'cardamom', 'degradations.npy'))
+        model.basal = np.load(os.path.join(p, 'cardamomOT', 'basal.npy'))
+        model.inter = np.load(os.path.join(p, 'cardamomOT', 'inter.npy'))
+        model.a = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
+        model.times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
+        model.ratios = np.load(os.path.join(p, 'cardamomOT', 'ratios.npy'))
+        model.n_networks = np.load(os.path.join(p, 'cardamomOT', 'n_networks.npy'))
+        model.d = np.load(os.path.join(p, 'cardamomOT', 'degradations.npy'))
         print(f"[infer_test] Loaded network parameters")
     except FileNotFoundError as e:
         print(f"[infer_test] Error: Missing parameter file: {e}")
@@ -136,11 +136,11 @@ def main(argv):
     
     # Save inference results
     try:
-        np.save(os.path.join(p, 'cardamom', 'data_prot_test'), model.prot)
-        np.save(os.path.join(p, 'cardamom', 'data_rna_test'), model.rna)
-        np.save(os.path.join(p, 'cardamom', 'data_times_test'), model.times_data)
-        np.save(os.path.join(p, 'cardamom', 'data_kon_beta_test'), model.kon_beta)
-        np.save(os.path.join(p, 'cardamom', 'data_kon_theta_test'), model.kon_theta)
+        np.save(os.path.join(p, 'cardamomOT', 'data_prot_test'), model.prot)
+        np.save(os.path.join(p, 'cardamomOT', 'data_rna_test'), model.rna)
+        np.save(os.path.join(p, 'cardamomOT', 'data_times_test'), model.times_data)
+        np.save(os.path.join(p, 'cardamomOT', 'data_kon_beta_test'), model.kon_beta)
+        np.save(os.path.join(p, 'cardamomOT', 'data_kon_theta_test'), model.kon_theta)
         print(f"[infer_test] Saved inference results for test set")
     except Exception as e:
         print(f"[infer_test] Error saving inference results: {e}")
@@ -148,8 +148,8 @@ def main(argv):
 
     # Load simulation parameters
     try:
-        model.basal = np.load(os.path.join(p, 'cardamom', 'basal_simul.npy'))
-        model.inter = np.load(os.path.join(p, 'cardamom', 'inter_simul.npy'))
+        model.basal = np.load(os.path.join(p, 'cardamomOT', 'basal_simul.npy'))
+        model.inter = np.load(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))
         print(f"[infer_test] Loaded simulation parameters")
     except FileNotFoundError as e:
         print(f"[infer_test] Error: Missing simulation parameter file: {e}")
@@ -193,9 +193,9 @@ def main(argv):
 
     # Save simulation results
     try:
-        np.save(os.path.join(p, 'cardamom', 'data_prot_simul_test'), model.prot)
-        np.save(os.path.join(p, 'cardamom', 'data_kon_simul_test'), model.kon_theta)
-        np.save(os.path.join(p, 'cardamom', 'simulation_times_test'), times_simulation)
+        np.save(os.path.join(p, 'cardamomOT', 'data_prot_simul_test'), model.prot)
+        np.save(os.path.join(p, 'cardamomOT', 'data_kon_simul_test'), model.kon_theta)
+        np.save(os.path.join(p, 'cardamomOT', 'simulation_times_test'), times_simulation)
         print(f"[infer_test] Saved test set simulation results")
         print("[infer_test] Test set inference and simulation completed successfully")
     except Exception as e:

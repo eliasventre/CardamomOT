@@ -6,7 +6,6 @@ Core functions for the inference of trajectories, mainly used in loop_trajectori
 import numpy as np
 from numba import njit, prange
 import multiprocessing as mp
-mp.set_start_method("spawn", force=True)
 from joblib import Parallel, delayed
 from .network import main_loss
 from .simulations import simulate_next_prot_ode
@@ -183,7 +182,7 @@ def my_otdistance_simulated(vect_prot_init, vect_rna_init, vect_rna_end,
         return prot_end
 
     if Parallel is not None:
-        results = Parallel(n_jobs=-1)(
+        results = Parallel(n_jobs=-1, backend="loky")(
             delayed(run_main_loop_for_cell)(i) for i in range(0, n1)
         )
     else:
@@ -199,7 +198,6 @@ def my_otdistance_simulated(vect_prot_init, vect_rna_init, vect_rna_end,
             dist[i, j] += np.sum((sigma[j, 1:] - vect_proba_end[j]) ** 2)
 
     return dist, vect_prot_end
-
 
 
 def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init, y_rna_init, 
@@ -235,40 +233,18 @@ def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init
 
         t += 1 / n_pas
 
-    # print(np.sum(np.abs(alpha  - alpha_init))/y_prot_init[:, 1:].size, np.mean(alpha), np.mean(alpha_init), delta_t)
-
     return alpha
 
 
-@njit(fastmath=True, parallel=True)
-def argmax_numba(a) -> int:
-    """Manual argmax compatible with Numba."""
-    max_val = a[0]
-    max_idx = 0
-    for i in prange(1, a.shape[0]):
-        if a[i] > max_val:
-            max_val = a[i]
-            max_idx: int = i
-    return max_idx
-
-
-# @njit(fastmath=True, parallel=True)
-def filter_network(T, N_traj, prot_traj, ks, basal_init, basal_t_init, inter_init, inter_t_init,
-                   seuil_intensity=5e-2, seuil_variations=.2, n_order=10):
+def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
+                   seuil_intensity=5e-2, seuil_variations=.01, n_order=10):
     
-    G, n_networks = basal_init.shape
-
-    inter_ref = inter_t_init[-1].copy()
-    basal_ref = basal_t_init[-1].copy()
-    inter_temp = inter_t_init[-1].copy()
-
+    G, n_networks = basal_ref.shape
+    
     kon_vector = kon_ref_vector(prot_traj, ks, inter_ref, basal_ref)
-    genes_list = np.arange(G)
 
-    inter_t = np.zeros((T, G, G, n_networks))
-
-    @njit(fastmath=True, parallel=True)
-    def core_filter(inter_ref, inter_temp, inter_t, kon_vector, genes_list):
+    def core_filter(inter_ref, kon_vector, genes_list):
+        inter_t = np.zeros((T, G, G, n_networks))
         variations = np.zeros((n_networks, G, G, T))
         variations_ref = np.zeros((n_networks, G, G, T))
         inter_tmp = inter_ref.copy()
@@ -276,27 +252,49 @@ def filter_network(T, N_traj, prot_traj, ks, basal_init, basal_t_init, inter_ini
             for n in range(n_networks):
                 inter_tmp[g1, :, n] = 0
                 kon_vector_nog1 = kon_ref_vector(prot_traj, ks, inter_tmp, basal_ref)
-                for g2 in prange(0, G):
+                for g2 in range(0, G):
                     val = abs(inter_ref[g1, g2, n])
                     if val >= seuil_intensity:
-                        inter_tmp[g1, g2, n] = 0
-                        for t in range(T):
-                            start = N_traj * t
-                            end = N_traj * (t + 1)
-                            diff = (kon_vector_nog1[start:end, g2] - kon_vector[start:end, g2])**2
-                            variations_ref[n, g1, g2, t] = np.max(diff)
-                            if t > 0:
-                                variations[n, g1, g2, t] = abs(variations_ref[n, g1, g2, t] - variations_ref[n, g1, g2, t-1])
+                        diff = (kon_vector_nog1.reshape(T, N_traj, G) - 
+                                            kon_vector.reshape(T, N_traj, G))**2
+                        variations_ref[n, g1, g2, :] = diff[:, :, g2].max(axis=1)
+                        variations[n, g1, g2, 1:] = np.abs(np.diff(variations_ref[n, g1, g2, :]))
+                        variations[n, g1, g2, 0] = abs(variations_ref[n, g1, g2, 0])
                         max_val = np.max(variations[n, g1, g2, :])
-                        if max_val >= seuil_variations / G:#(1 + np.sum(np.minimum(1, np.abs(inter_tmp[:, g2, :]))) + np.sum(np.minimum(1, np.abs(basal_ref[g2])))):
-                            tmax: int = argmax_numba(variations[n, g1, g2, :])
-                            for t in range(tmax, T):
-                                inter_t[t, g1, g2, n] = inter_temp[g1, g2, n]
+                        if max_val >= seuil_variations:
+                            tmax: int = np.argmax(variations[n, g1, g2, :])
+                            inter_t[tmax:, g1, g2, n] = inter_ref[g1, g2, n]
                             inter_tmp[g1, g2, n] = inter_ref[g1, g2, n]
         return inter_t
 
-    for _ in range(0, min(n_order, G)):  # G attempts to not depend too much on order
-        genes_list = np.random.choice(genes_list, G, replace=False)
-        inter_t = core_filter(inter_ref, inter_temp, inter_t, kon_vector, genes_list)
+    try:
+        from joblib import Parallel, delayed
+    except ImportError:
+        Parallel = None
+        delayed = None
+        logging.getLogger(__name__).warning("joblib not available; parallel loops will run sequentially")
+
+    def single_run(_):
+        genes_list = np.random.permutation(G)
+        inter_t_run = core_filter(inter_ref, kon_vector, genes_list)
+        return inter_t_run
+
+    n_order = min(n_order, G**2)
+    results = Parallel(n_jobs=-1, backend="loky")(delayed(single_run)(i) for i in range(n_order))
+
+    # Agregation
+    stacked = np.stack(results, axis=0)  # (n_order, T, G, G, n_networks)
+    inter_t = np.zeros((T, G, G, n_networks))
+    pos_mask = stacked != 0                         # (n_order, T, G, G, n_networks)
+    last_positive_i = np.where(pos_mask, np.arange(n_order)[:, None, None, None, None], -1).argmax(axis=0)
+    inter_t = stacked[last_positive_i, 
+                    np.arange(T)[:, None, None, None],
+                    np.arange(G)[None, :, None, None],
+                    np.arange(G)[None, None, :, None],
+                    np.arange(n_networks)[None, None, None, :]]
+    inter_t[~pos_mask.any(axis=0)] = 0
+
+    # Filtre
+    inter = inter_ref * (inter_t[-1] != 0)
     
-    return inter_init, inter_t
+    return inter, inter_t

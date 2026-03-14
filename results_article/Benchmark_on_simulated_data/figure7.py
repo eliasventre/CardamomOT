@@ -131,7 +131,7 @@ def load_grn_matrix(p):
     train_path = os.path.join(p, 'Data', 'data_train.h5ad')
     adata = sc.read_h5ad(full_path if os.path.exists(full_path) else train_path)
     genes = list(adata.var_names)
-    grn_path = os.path.join(p, 'cardamom', 'inter_simul.npy')
+    grn_path = os.path.join(p, 'cardamomOT', 'inter_simul.npy')
     grn_mat = np.load(grn_path)[1:, 1:]
     matrix = grn_mat[:, :, 0] if grn_mat.ndim == 3 else grn_mat
     return matrix, genes
@@ -372,8 +372,10 @@ def load_perturbation_data(cfg):
         adata_full.obs[LABEL] = adata_full.obs[LABEL].astype(str).str.capitalize()
     if cfg['dataset_group'] == 'Semrau' and LABEL in adata_full.obs:
         adata_full.obs[LABEL] = adata_full.obs[LABEL].astype(str).str.replace('_', ' ', regex=False)
-    adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamom/adata_sim_stim{STIM}_prior{PRIOR}.h5ad'))
-    perturb_path  = os.path.join(p, f'cardamom/adata_sim_{perturb_id}_stim{STIM}_prior{PRIOR}.h5ad')
+    adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{STIM}_prior{PRIOR}.h5ad'))
+    if cfg['dataset_group'] == 'Kameneva':
+        adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{0.2}_prior{PRIOR}.h5ad'))
+    perturb_path  = os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{STIM}_prior{PRIOR}.h5ad')
     adata_perturb = ad.read_h5ad(perturb_path)
 
     # Classifieur & types cellulaires

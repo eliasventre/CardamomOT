@@ -11,7 +11,7 @@ Use this checklist to verify that CardamomOT is properly installed and ready to 
 
 - [ ] **CardamomOT installed**
   ```bash
-  pip show cardamom-sc  # Should show package info
+  pip show cardamomOT  # Should show package info
   ```
 
 - [ ] **CLI command available**
@@ -198,14 +198,14 @@ except Exception as e:
 cat /path/to/my_project/cardamom_output/pipeline.log
 
 # Try individual step
-cardamom step infer_mixture -i /path/to/my_project --verbose
+cardamomot step infer_mixture -i /path/to/my_project --verbose
 ```
 
 ## System Configuration
 
 ### Memory Requirements
 
-CARDAMOM typically needs:
+CardamomOT typically needs:
 - **Minimum**: 8 GB RAM (for small datasets)
 - **Recommended**: 16 GB RAM (for typical datasets)
 - **Large datasets**: 32+ GB RAM
@@ -245,7 +245,7 @@ pip install --upgrade pip
 pip install -e ".[cli]"
 
 # Verify
-cardamom --version
+cardamomot --version
 ```
 
 ## Platform-Specific Notes
@@ -284,7 +284,7 @@ If checks fail or you encounter issues:
    - https://github.com/yourusername/CardamomOT/issues
 
 4. **Open a new issue**
-   - Include output of: `cardamom --help`
+   - Include output of: `cardamomot --help`
    - Include relevant section of log file (lines leading to error)
    - Include system info: OS, Python version, available RAM
 
@@ -293,6 +293,6 @@ If checks fail or you encounter issues:
 
 ---
 
-**✅ If all checks pass, you're ready to run CARDAMOM!**
+**✅ If all checks pass, you're ready to run CardamomOT!**
 
-Start with: `cardamom run /path/to/my_project`
+Start with: `cardamomot run /path/to/my_project`

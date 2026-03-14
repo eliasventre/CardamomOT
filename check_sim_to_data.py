@@ -28,7 +28,7 @@ from CardamomOT import NetworkModel, plot_data_umap_altogether, plot_data_distri
 import scipy.sparse
 import os
 
-plot_in_script = 1
+plot_in_script = 0
 
 def main(argv):
     """
@@ -184,6 +184,11 @@ def main(argv):
         adata_sim.var = adata.var.copy()
         adata_sim.obs['time'] = times_simulation
         adata_sim.write(os.path.join(cardamom_dir, f'adata_sim_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
+
+        adata_rna_traj = ad.AnnData(X=data_ref[1:, :].T)
+        adata_rna_traj.var = adata.var.copy()
+        adata_rna_traj.obs['time'] = times_data
+        adata_rna_traj.write(os.path.join(cardamom_dir, f'adata_rna_traj_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
 
         data_prot_traj = np.load(os.path.join(cardamom_dir, 'data_prot_unitary.npy'))
         adata_prot_traj = ad.AnnData(X=data_prot_traj[:, 1:])

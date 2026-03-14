@@ -10,7 +10,7 @@ algo = 'CardamomOT'
 algo_file = {'CardamomOT': 'CARDAMOM2', 'CARDAMOM': 'CARDAMOM1', 'Reference Fitting': 'REFERENCE_FITTING'}
 def file_name(a): return algo_file.get(a, a)
 
-benchmarks_traj = ['FN4', 'CN5', 'BN8', 'FN8']
+benchmarks_traj = ['FN4', 'CN5', 'BN8', 'FN8', 'Trees5', 'Trees10', 'Trees20', 'Trees50']#, 'Trees100']
 N = 10
 
 # ── Same palette as figure 3 ──────────────────────────────────────────────────
@@ -20,6 +20,10 @@ color_bench = {
     'CN5': (cmap(2),  cmap(3)),
     'BN8': (cmap(4),  cmap(5)),
     'FN8': (cmap(6),  cmap(7)),
+    'Trees5': (cmap(8),  cmap(9)),
+    'Trees10': (cmap(10),  cmap(11)),
+    'Trees20': (cmap(12),  cmap(13)),
+    'Trees50': (cmap(14),  cmap(15)),
 }
 
 # ── Padding helpers ───────────────────────────────────────────────────────────

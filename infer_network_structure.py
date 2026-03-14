@@ -137,6 +137,7 @@ def main(argv):
     cardamom_dir = os.path.join(p, 'cardamomOT')
     np.save(os.path.join(cardamom_dir, 'basal'), model.basal)
     np.save(os.path.join(cardamom_dir, 'inter'), model.inter)
+    np.save(os.path.join(cardamom_dir, 'inter_t'), model.inter_t)
     np.save(os.path.join(cardamom_dir, f'inter_stim{model.stimulus}_prior{model.prior_network_pen}'), model.inter)
     np.save(os.path.join(cardamom_dir, 'basal_tmp'), model.basal_tmp)
     np.save(os.path.join(cardamom_dir, 'inter_tmp'), model.inter_tmp)

@@ -13,7 +13,6 @@ import ot
 from scipy.stats import gamma, rankdata
 import seaborn as sns
 import multiprocessing as mp
-mp.set_start_method("spawn", force=True)
 from joblib import Parallel, delayed
 from ..inference import (inference_network, filter_network,
                         minimal_repetition_choice, find_next_prot, my_otdistance, count_errors, kon_ref_vector, inference_alpha, 
@@ -54,7 +53,6 @@ class NetworkModel:
         self.ref_network = None
         self.basal = None
         self.inter = None
-        self.basal_t = None
         self.inter_t = None
         self.basal_tmp = None
         self.inter_tmp = None
@@ -103,7 +101,7 @@ class NetworkModel:
         self.update_modes = 1
         self.alpha_threshold= .4 # max = .5 to update alpha at least for important transition
         # Penalization/prior information
-        self.stimulus = 1.0 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
+        self.stimulus = 0.2 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
         self.prior_network_pen = 1.0 # 1 if we don't use prior information. If not we can penalize the non-existing age in prior network with values between 1 and 0: 0 = impossible edge
         # Filtering
         self.filter_network = 0 # Do we filter the network ? It also builds a temporal network using the filter criterium
@@ -129,6 +127,7 @@ class NetworkModel:
             self.a = np.zeros((3,G))
             self.basal = np.zeros((G, 1))
             self.inter = np.zeros((G, G, 1))
+            self.inter_t = np.zeros((1, G, G, 1))
             self.ref_network = np.ones((G, G, 1))
         
 
@@ -209,7 +208,7 @@ class NetworkModel:
         
             return ks, c, pi0, proba, tmp, pi
 
-        results = Parallel(n_jobs=-1)(
+        results = Parallel(n_jobs=-1, backend="loky")(
         delayed(run_main_loop_for_gene)(g) for g in range(1, G_tot)
         )
 
@@ -611,10 +610,11 @@ class NetworkModel:
                             alpha_n = self.alpha[cnt, n]
                             
                             for g in range(1, G_tot):
-                                alpha_n_mod = min(alpha_n[g-1]+.1, 1) # Letting some time for mode to stabilize
+                                alpha_n_mod = min(alpha_n[g-1]+.1, 1) # +.1 for letting some time for mode to stabilize
                                 y_prot_prev[g, idx_next, 1:] = find_next_prot(self.d[1, 1:],
                                                         y_prot[idx_prev, 1:],
-                                                        y_rna[idx_prev, 1:], y_rna[idx_next, 1:],
+                                                        y_rna[idx_prev, 1:], 
+                                                        y_rna[idx_next, 1:],
                                                         modes[idx_prev],
                                                         modes[idx_next],
                                                         np.minimum(alpha_n / alpha_n_mod, 1),
@@ -741,7 +741,7 @@ class NetworkModel:
                             tmp_modes[cell] = obj[cell, idx[cell]]
                     return tmp_proba, tmp_modes
 
-                results = Parallel(n_jobs=-1)(
+                results = Parallel(n_jobs=-1, backend="loky")(
                     delayed(run_main_loop_for_gene)(g) for g in range(1, G_tot))
 
                 for idx, g in enumerate(range(1, G_tot)):
@@ -751,7 +751,7 @@ class NetworkModel:
         # --- Updating the networks ---
         if compute_theta:
             if self.filter_network:
-                inter, inter_tmp = filter_network(len(times), N_tot, y_prot, ks, basal, basal_tmp, inter, inter_tmp)
+                inter, self.inter_t = filter_network(len(times), N_tot, y_prot, ks, basal, inter)
             self.basal = basal
             self.inter = inter
             self.basal_tmp = basal_tmp
@@ -1035,7 +1035,7 @@ class NetworkModel:
                     idx = ((self.times_data == times[t]) | (self.times_data == times[t+1])) & (cells_to_use == 1)
                     return inference_degradation_prot(y_prot[idx], self.times_data[idx], basal, inter, ks.T * self.scale_proteins, d=self.d[1], lr=1e-2*self.scale_proteins)
 
-                results = Parallel(n_jobs=-1)(
+                results = Parallel(n_jobs=-1, backend="loky")(
                 delayed(run_main_inference_degradation_prot)(t) for t in range(0, len(times)-1)
                 )
 
@@ -1152,7 +1152,7 @@ class NetworkModel:
                         self.scale_proteins, P0=prot_modified[start_index + n, :]
                     )
 
-            results = Parallel(n_jobs=-1)(
+            results = Parallel(n_jobs=-1, backend="loky")(
             delayed(run_main_loop_for_cell)(n) for n in range(0, N)
             )
 

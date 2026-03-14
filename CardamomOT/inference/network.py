@@ -10,12 +10,7 @@ are needed.
 
 from typing import Any
 import multiprocessing as mp
-mp.set_start_method("spawn", force=True)
 import numpy as np
-# joblib is only required for parallel loops; delay import to runtime to
-# avoid failing module import when the package is missing.  The functions
-# that need it will import inside themselves.
-
 from scipy.optimize import minimize
 from scipy.optimize import check_grad
 from numba import njit
@@ -516,7 +511,7 @@ def inference_network(vect_t, times, y_samples, y_kon, y_proba, y_prot, y_prot_m
         )
 
     if Parallel is not None:
-        results = Parallel(n_jobs=-1)(
+        results = Parallel(n_jobs=-1, backend="loky")(
             delayed(run_main_loop_for_gene)(g) for g in range(1, G)
         )
     else:

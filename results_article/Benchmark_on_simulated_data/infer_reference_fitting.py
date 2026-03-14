@@ -5,7 +5,7 @@ os.environ["OPENBLAS_NUM_THREADS"] = num_threads
 os.environ["MKL_NUM_THREADS"] = num_threads
 os.environ["VECLIB_MAXIMUM_THREADS"] = num_threads
 os.environ["NUMEXPR_NUM_THREADS"] = num_threads
-
+import time as timer
 import numpy as np
 import scanpy as sc
 import anndata as ad
@@ -20,7 +20,7 @@ import rf
 # Code adapted from https://github.com/zsteve/referencefitting/tree/main
 
 # Number of runs
-N = 10
+N = 1
 # Print information
 verb = 1
 # number of initial couplings
@@ -104,6 +104,7 @@ def infer(adata, save_path, timepoints, replicate_number):
 Networks = ['FN4', 'CN5', 'BN8', 'FN8', 'Trees5', 'Trees10', 'Trees20', 'Trees50', 'Trees100']
 for net in Networks:
     for r in range(0, N):
+        print(net)
         fname = f'{net}/Data/data_{r + 1}.txt'
         raw_matrix = np.loadtxt(fname, delimiter='\t').astype(np.int64)
         timepoints = raw_matrix[0, 1:]
@@ -113,4 +114,7 @@ for net in Networks:
         adata.var_names = genes_names[1:].astype(str)
         adata.obs['time'] = timepoints.astype(int)
         adata.obs['timepoint'] = timepoints.astype(int)
+        t0 = timer.time()
         infer(adata, f'{net}/REFERENCE_FITTING/', np.unique(adata.obs['timepoint']), r+1)
+        t1 = timer.time()
+        print(t1 - t0)

@@ -53,20 +53,6 @@ def _get_device_from_module(module) -> torch.device:
             return torch.device("cpu")
 
 
-def _ensure_tensor_on_device(arr, dtype=torch.float32, device="cpu") -> torch.Tensor:
-    """Convert an array-like object to a torch tensor on the given device.
-
-    Args:
-        arr: Array-like input (NumPy array, list, etc.).
-        dtype: Desired torch dtype (default ``torch.float32``).
-        device: Target device string or ``torch.device`` (default ``"cpu"``).
-
-    Returns:
-        ``torch.Tensor`` created from ``arr`` with specified dtype/device.
-    """
-    return torch.tensor(np.asarray(arr, dtype=np.float32), dtype=dtype, device=device)
-
-
 def build_kon_fn(ks, theta_inter, bias, device="cpu"):
     """
     Return a function kon(X_numpy_or_torch) -> numpy array (batch, G)

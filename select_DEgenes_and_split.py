@@ -161,13 +161,13 @@ def main(argv):
         model.hard_em = 0 # substantially accelerates fitting
         try:
             model.fit_mixture(data_rna[cells_to_use], gene_names=genes_list_init, min_components=2, max_components=2, cell_rd=cell_rd,
-                                max_iter_kinetics=0, refilter=1) # Filter genes with mode difference > 1
+                                max_iter_kinetics=0, refilter=1.0) # Filter genes with mode difference > 1
             print(f"[select_DEgenes_and_split] Fitted mixture model on {len(cells_to_use)} cells")
             
             genes_to_keep, temporal_variations, cell_type_variations, df_report = select_DEgenes(
                     data_rna[cells_to_use], vect_samples_id[cells_to_use], vect_celltype_id[cells_to_use], 
                     model.proba, genes_list_init, n_genes_tokeep_temporal=n_genes_tokeep_temporal, 
-                    n_genes_tokeep_celltype=n_genes_tokeep_celltype, limit_min=.01)
+                    n_genes_tokeep_celltype=n_genes_tokeep_celltype, limit_min=.001)
             
             # Save gene selection report
             out_dir = os.path.join(p, 'cardamomOT')
@@ -221,13 +221,13 @@ def main(argv):
     try:
         model.fit_mixture(data_rna, gene_names=list(adata.var_names), 
                             min_components=2, max_components=2, cell_rd=cell_rd,
-                            refilter=.1, max_iter_kinetics=0)
+                            refilter=.001, max_iter_kinetics=0)
         print("[select_DEgenes_and_split] Re-fitted mixture model for final gene filtering")
         
         genes_tokeep_final, temporal_variations, cell_type_variations, df_report = select_DEgenes(data_rna, 
                 vect_samples_id, vect_celltype_id, 
                 model.proba, adata.var_names, 
-                n_genes_tokeep_celltype=[100000], n_genes_tokeep_temporal=[100000], limit_min=.01)
+                n_genes_tokeep_celltype=[100000], n_genes_tokeep_temporal=[100000], limit_min=.001)
         
         print(f"[select_DEgenes_and_split] Final filtering retained {len(genes_tokeep_final)} genes")
         
@@ -312,11 +312,11 @@ def main(argv):
             
             try:
                 model.fit_mixture(data_rna, gene_names=list(adata.var_names), min_components=2, max_components=2, cell_rd=cell_rd,
-                                max_iter_kinetics=0, refilter=.01)
+                                max_iter_kinetics=0, refilter=.001)
                 genes_list_tokeep, temporal_variations, cell_type_variations, df_report = select_DEgenes(data_rna, 
                         vect_samples_id, vect_celltype_id, 
                         model.proba, adata.var_names, 
-                        n_genes_tokeep_celltype=[10000], n_genes_tokeep_temporal=[10000], limit_min=.01)
+                        n_genes_tokeep_celltype=[10000], n_genes_tokeep_temporal=[10000], limit_min=.001)
                 print(f"[select_DEgenes_and_split] Training set filtering retained {len(genes_list_tokeep)} genes")
                 
             except Exception as e:
