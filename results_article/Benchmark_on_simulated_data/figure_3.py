@@ -155,5 +155,5 @@ ax.legend(loc='upper right', ncol=2, **p)
 ax.set_xticks(size)
 ax.set_xlabel('No. of genes', fontsize=6, labelpad=1.8)
 
-fig.savefig('figure3.pdf', dpi=300, bbox_inches='tight', pad_inches=0)
+fig.savefig('figure_3.pdf', dpi=300, bbox_inches='tight', pad_inches=0)
 plt.show()

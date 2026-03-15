@@ -511,7 +511,7 @@ def inference_network(vect_t, times, y_samples, y_kon, y_proba, y_prot, y_prot_m
         )
 
     if Parallel is not None:
-        results = Parallel(n_jobs=-1, backend="loky")(
+        results = Parallel(n_jobs=-1)(
             delayed(run_main_loop_for_gene)(g) for g in range(1, G)
         )
     else:

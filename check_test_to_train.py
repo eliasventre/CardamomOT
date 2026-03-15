@@ -11,14 +11,14 @@ Usage:
 
 Required input files:
     - Data/data_<split>.h5ad: observed test data
-    - cardamom/data_kon_beta_test.npy, data_kon_theta_test.npy: inferred dynamics
-    - cardamom/data_kon_simul_test.npy, data_rna_test.npy: simulation data
-    - cardamom/mixture_parameters.npy, pi_zinb.npy: model parameters
+    - cardamomOT/data_kon_beta_test.npy, data_kon_theta_test.npy: inferred dynamics
+    - cardamomOT/data_kon_simul_test.npy, data_rna_test.npy: simulation data
+    - cardamomOT/mixture_parameters.npy, pi_zinb.npy: model parameters
 
 Output files:
-    - cardamom/adata_beta_test.h5ad: beta parameter trajectory
-    - cardamom/adata_theta_test.h5ad: theta parameter trajectory
-    - cardamom/adata_sim_test.h5ad: simulated trajectory
+    - cardamomOT/adata_beta_test.h5ad: beta parameter trajectory
+    - cardamomOT/adata_theta_test.h5ad: theta parameter trajectory
+    - cardamomOT/adata_sim_test.h5ad: simulated trajectory
     - results_article/*_test_to_train.png: comparison plots
 """
 import numpy as np
@@ -195,19 +195,19 @@ def main(argv):
         adata_beta = ad.AnnData(X=data_beta[1:, ].T)
         adata_beta.var = adata.var.copy()
         adata_beta.obs['time'] = times_simulation
-        adata_beta.write(os.path.join(p, f'cardamom/adata_beta_test_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
+        adata_beta.write(os.path.join(p, f'cardamomOT/adata_beta_test_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
         print(f"[check_test_to_train] Saved beta parameter trajectory")
 
         adata_theta = ad.AnnData(X=data_netw_theta[1:, ].T)
         adata_theta.var = adata.var.copy()
         adata_theta.obs['time'] = times_simulation
-        adata_theta.write(os.path.join(p, f'cardamom/adata_theta_test_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
+        adata_theta.write(os.path.join(p, f'cardamomOT/adata_theta_test_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
         print(f"[check_test_to_train] Saved theta parameter trajectory")
 
         adata_sim = ad.AnnData(X=data_sim[1:, ].T)
         adata_sim.var = adata.var.copy()
         adata_sim.obs['time'] = times_simulation
-        adata_sim.write(os.path.join(p, f'cardamom/adata_sim_test_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
+        adata_sim.write(os.path.join(p, f'cardamomOT/adata_sim_test_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
         print(f"[check_test_to_train] Saved simulated trajectory")
         print("[check_test_to_train] Test set validation completed successfully")
     except Exception as e:

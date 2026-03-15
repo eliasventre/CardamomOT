@@ -205,17 +205,17 @@ def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj_sc
     b_rf  = estim.b.cpu().numpy()
 
     # RNA delta: linear prediction
-    delta_rna_reffit  = rna_traj @ A_rf + b_rf
+    delta_rna_reffit  = (rna_traj @ A_rf + b_rf)
     # Protein delta: OT-coupling-based prediction
-    delta_prot_reffit = prot_traj_scaled @ A_rf + b_rf 
-    unique_times = np.unique(time)
-    for number, cell in enumerate(prot_traj_scaled):
-        ti = number // 100
-        if ti < len(unique_times) - 1:
-            row_weights = estim.Ts[0][ti][number % 100].cpu().numpy()
-            next_cells  = prot_traj_scaled[100 * (ti + 1): 100 * (ti + 2)]
-            P2 = (np.dot(row_weights, next_cells) * 100)
-            delta_prot_reffit[number] = P2 - cell
+    delta_prot_reffit = (prot_traj_scaled @ A_rf + b_rf)
+    # unique_times = np.unique(time)
+    # for number, cell in enumerate(prot_traj_scaled):
+    #     ti = number // 100
+    #     if ti < len(unique_times) - 1:
+    #         row_weights = estim.Ts[0][ti][number % 100].cpu().numpy()
+    #         next_cells  = prot_traj_scaled[100 * (ti + 1): 100 * (ti + 2)]
+    #         P2 = (np.dot(row_weights, next_cells) * 100)
+    #         delta_prot_reffit[number] = P2 - cell
 
     # ---- Strip stimulus column ----
     delta_rna_carda_s    = delta_rna_carda[:, 1:]
@@ -226,6 +226,94 @@ def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj_sc
     delta_prot_reffit_s  = delta_prot_reffit[:, 1:]
     rna_s   = rna_traj[:, 1:]
     prot_s  = prot_traj_scaled[:, 1:]
+
+    # ---- Per-cell optimal scaling of mechanistic velocity fields ----
+    #
+    # For each cell i and each interval [t_k, t_{k+1}], we compute the OT-based
+    # reference velocity (exactly as in figure5_traj.py):
+    #   v_ot_i = (E_q[x_{k+1,i}] - x_k_i) / dt
+    # where E_q[x_{k+1,i}] = sum_j q_ij * x_{k+1,j}.
+    #
+    # Then for each cell i we find the scalar alpha_i that rescales the
+    # mechanistic velocity v_meca_i to match the OT magnitude while preserving
+    # direction (cosine similarity is unchanged):
+    #   alpha_i = ||v_ot_i|| / ||v_meca_i||   (if ||v_meca_i|| > 0, else 1)
+    #
+    # CardamomOT coupling: built by exact matching of inferred trajectories to
+    # original data (same logic as in figure5_traj.py).
+    # RF coupling: estim.Ts[0][ti], row-normalised.
+
+    unique_times = np.unique(time)
+    C_per_t = {t: np.where(time == t)[0] for t in unique_times}
+
+    # Accumulate OT-based reference velocities (shape like rna_s / prot_s)
+    v_ot_rna_carda  = np.zeros_like(delta_rna_carda_s)
+    v_ot_prot_carda = np.zeros_like(delta_prot_carda_s)
+    v_ot_rna_rf     = np.zeros_like(delta_rna_reffit_s)
+    v_ot_prot_rf    = np.zeros_like(delta_prot_reffit_s)
+
+    for ti, (tk, tk1) in enumerate(zip(unique_times[:-1], unique_times[1:])):
+        dt = float(tk1 - tk)
+        idx_k  = C_per_t[tk]   # indices of cells at t_k  in the full arrays
+        idx_k1 = C_per_t[tk1]  # indices of cells at t_{k+1}
+        C_k  = len(idx_k)
+        C_k1 = len(idx_k1)
+
+        rna_k_g   = rna_s[idx_k].astype(float)      # (C_k,  G)
+        rna_k1_g  = rna_s[idx_k1].astype(float)     # (C_k1, G)
+        prot_k_g  = prot_s[idx_k].astype(float)     # (C_k,  G)
+        prot_k1_g = prot_s[idx_k1].astype(float)    # (C_k1, G)
+
+        # ---- CardamomOT coupling (exact matching via model_carda.rna) ----
+        # model_carda.rna rows are in the same order as the input cells (x),
+        # which are rna_traj rows ordered by time (same order as idx_k / idx_k1).
+        rna_inf_k  = model_carda.rna[idx_k,  1:]   # (C_k,  G)  inferred at t_k
+        rna_inf_k1 = model_carda.rna[idx_k1, 1:]   # (C_k1, G)  inferred at t_{k+1}
+
+        q_carda = np.zeros((C_k, C_k1), dtype=float)
+        n_obtained = 0
+        for i in range(C_k):
+            inf_idxs = np.where(np.all(rna_inf_k == rna_k_g[i], axis=1))[0]
+            dest_true = []
+            for inf_j in inf_idxs:
+                dest_true.extend(
+                    np.where(np.all(rna_k1_g == rna_inf_k1[inf_j], axis=1))[0])
+            if len(dest_true):
+                for j_true in dest_true:
+                    q_carda[i, j_true] += 1.0
+                q_carda[i] /= q_carda[i].sum()
+                n_obtained += 1
+        if n_obtained > 0:
+            q_carda *= (C_k / n_obtained)
+
+        rna_exp_carda  = q_carda @ rna_k1_g    # (C_k, G)
+        prot_exp_carda = q_carda @ prot_k1_g
+        v_ot_rna_carda[idx_k]  = (rna_exp_carda  - rna_k_g)  / dt
+        v_ot_prot_carda[idx_k] = (prot_exp_carda - prot_k_g) / dt
+
+        # ---- RF coupling (estim.Ts[0][ti], row-normalised) ----
+        q_rf = estim.Ts[0][ti].cpu().numpy()        # (C_k, C_k1) or (C, C)
+        row_sums = q_rf.sum(axis=1, keepdims=True)
+        q_rf_n   = q_rf / np.where(row_sums == 0, 1.0, row_sums)
+
+        rna_exp_rf  = q_rf_n @ rna_k1_g
+        prot_exp_rf = q_rf_n @ prot_k1_g
+        v_ot_rna_rf[idx_k]  = (rna_exp_rf  - rna_k_g)  / dt
+        v_ot_prot_rf[idx_k] = (prot_exp_rf - prot_k_g) / dt
+
+    # ---- Apply per-cell scaling to mechanistic fields ----
+    # alpha_i = ||v_ot_i|| / ||v_meca_i||  (preserves direction → cosine sim unchanged)
+    def _per_cell_scale(v_meca, v_ot):
+        """Scale each row of v_meca so its norm matches the corresponding row of v_ot."""
+        norm_meca = np.linalg.norm(v_meca, axis=1, keepdims=True)   # (N, 1)
+        norm_ot   = np.linalg.norm(v_ot,   axis=1, keepdims=True)
+        alpha     = np.where(norm_meca > 0, norm_ot / norm_meca, 1.0)
+        return v_meca * alpha
+
+    delta_rna_carda_s   = _per_cell_scale(delta_rna_carda_s,  v_ot_rna_carda)
+    delta_prot_carda_s  = _per_cell_scale(delta_prot_carda_s, v_ot_prot_carda)
+    delta_rna_reffit_s  = _per_cell_scale(delta_rna_reffit_s,  v_ot_rna_rf)
+    delta_prot_reffit_s = _per_cell_scale(delta_prot_reffit_s, v_ot_prot_rf)
 
     # ---- Subsample 100 cells per timepoint ----
     n_sub = 100
@@ -481,15 +569,47 @@ def load_schiebinger():
     # delta_rna_carda  = 10 * d0[1:] * (kon_traj * ks_cells[1:] / c[1:] - rna_traj)
     delta_rna_carda = np.zeros_like(prot_traj, dtype=float)
     for ci in range(rna_traj.shape[0]):
-        _, delta_M = step_ode_rna(d0 * 10, ks, model.inter, model.basal,
+        _, delta_M = step_ode_rna(d0, ks, model.inter, model.basal,
                                     ks_cells / c, model.prot[sub_idx, :][ci, :].reshape(1, -1), model.rna[sub_idx, :][ci, :].reshape(1, -1))
         delta_rna_carda[ci] = delta_M[0, 1:]
     # Protein delta
     delta_prot_carda = np.zeros_like(prot_traj, dtype=float)
     for ci in range(prot_traj.shape[0]):
-        _, delta_P = step_ode_modif(d1 * 50, ks, model.inter, model.basal,
+        _, delta_P = step_ode_modif(d1, ks, model.inter, model.basal,
                                     1, model.prot[sub_idx, :][ci, :].reshape(1, -1))
         delta_prot_carda[ci] = delta_P[0, 1:]
+
+    N_sub   = len(sub_idx)
+    delta_rna_all  = np.zeros((N_sub, rna_traj.shape[1]),  dtype=float)
+    delta_prot_all = np.zeros((N_sub, prot_traj.shape[1]), dtype=float)
+    unique_sub = np.unique(time_s)
+    for ti, (tk, tk1) in enumerate(zip(unique_sub[:-1], unique_sub[1:])):
+        dt       = float(tk1 - tk)
+        mask_k   = np.where(time_s == tk)[0]
+        mask_k1  = np.where(time_s == tk1)[0]
+        N_k  = len(mask_k)
+        N_k1 = len(mask_k1)
+        # Aligner : prendre min(N_k, N_k1) cellules
+        N_pair = min(N_k, N_k1)
+        rna_k  = rna_traj[mask_k[:N_pair]]
+        rna_k1 = rna_traj[mask_k1[:N_pair]]
+        prot_k  = prot_traj[mask_k[:N_pair]]
+        prot_k1 = prot_traj[mask_k1[:N_pair]]
+ 
+        delta_rna_all[mask_k[:N_pair]]  = (rna_k1  - rna_k)  / dt
+        delta_prot_all[mask_k[:N_pair]] = (prot_k1 - prot_k) / dt
+
+    # ---- Apply per-cell scaling to mechanistic fields ----
+    # alpha_i = ||v_ot_i|| / ||v_meca_i||  (preserves direction → cosine sim unchanged)
+    def _per_cell_scale(v_meca, v_ot):
+        """Scale each row of v_meca so its norm matches the corresponding row of v_ot."""
+        norm_meca = np.linalg.norm(v_meca, axis=1, keepdims=True)   # (N, 1)
+        norm_ot   = np.linalg.norm(v_ot,   axis=1, keepdims=True)
+        alpha     = np.where(norm_meca > 0, norm_ot / norm_meca, 1.0)
+        return v_meca * alpha
+    
+    delta_rna_carda = _per_cell_scale(delta_rna_carda, delta_rna_all)
+    delta_prot_carda = _per_cell_scale(delta_prot_carda, delta_prot_all)
 
     # Top-8 masking on RNA (identique au notebook)
     k_top = 8

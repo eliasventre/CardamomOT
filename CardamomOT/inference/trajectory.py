@@ -182,7 +182,7 @@ def my_otdistance_simulated(vect_prot_init, vect_rna_init, vect_rna_end,
         return prot_end
 
     if Parallel is not None:
-        results = Parallel(n_jobs=-1, backend="loky")(
+        results = Parallel(n_jobs=-1)(
             delayed(run_main_loop_for_cell)(i) for i in range(0, n1)
         )
     else:
@@ -280,7 +280,7 @@ def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
         return inter_t_run
 
     n_order = min(n_order, G**2)
-    results = Parallel(n_jobs=-1, backend="loky")(delayed(single_run)(i) for i in range(n_order))
+    results = Parallel(n_jobs=-1)(delayed(single_run)(i) for i in range(n_order))
 
     # Agregation
     stacked = np.stack(results, axis=0)  # (n_order, T, G, G, n_networks)

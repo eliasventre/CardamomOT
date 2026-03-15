@@ -163,5 +163,5 @@ ax.set_xticks(range(1, len(labelG)+1))
 ax.set_xticklabels(labelG, rotation=45, ha='right', fontsize=5)
 ax.set_ylabel('AUPR', fontsize=6)
 
-fig.savefig('figure4.pdf', dpi=300, bbox_inches='tight', pad_inches=0.0)
+fig.savefig('figure_4.pdf', dpi=300, bbox_inches='tight', pad_inches=0.0)
 plt.show()

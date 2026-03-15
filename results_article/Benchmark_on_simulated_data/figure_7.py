@@ -291,17 +291,18 @@ def compute_umaps(adata_full, adata_sim, adata_perturb, normlog=True):
     project_on_full = False
     """
     adatas = [adata_full, adata_sim, adata_perturb]
-    names  = ['Reference', 'Sim WT', 'Sim perturb']
+    names  = ['NB mixture', 'Sim WT', 'Sim perturb']
 
     for name, A in zip(names, adatas):
         A.obs_names = [f"{name}_{i}" for i in range(A.n_obs)]
         A.obs['source'] = name
 
-    adata_all = ad.concat(adatas, join='inner', label='source', keys=names)
-
     if normlog:
-        sc.pp.normalize_total(adata_all, target_sum=1e4)
-        sc.pp.log1p(adata_all)
+        for adata in adatas:
+            sc.pp.normalize_total(adata, target_sum=1e4)
+            sc.pp.log1p(adata)
+
+    adata_all = ad.concat(adatas, join='inner', label='source', keys=names)
 
     X_all = adata_all.X.toarray() if scipy.sparse.issparse(adata_all.X) else adata_all.X
 
@@ -372,17 +373,21 @@ def load_perturbation_data(cfg):
         adata_full.obs[LABEL] = adata_full.obs[LABEL].astype(str).str.capitalize()
     if cfg['dataset_group'] == 'Semrau' and LABEL in adata_full.obs:
         adata_full.obs[LABEL] = adata_full.obs[LABEL].astype(str).str.replace('_', ' ', regex=False)
-    adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{STIM}_prior{PRIOR}.h5ad'))
-    if cfg['dataset_group'] == 'Kameneva':
+    if cfg['dataset_group'] != 'Kameneva':
+        adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{STIM}_prior{PRIOR}.h5ad'))
+        adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{STIM}_prior{PRIOR}.h5ad'))
+        adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_beta_stim{STIM}_prior{PRIOR}.h5ad'))
+    else:
+        adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_beta_stim{0.2}_prior{PRIOR}.h5ad'))
         adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{0.2}_prior{PRIOR}.h5ad'))
-    perturb_path  = os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{STIM}_prior{PRIOR}.h5ad')
-    adata_perturb = ad.read_h5ad(perturb_path)
+        adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{0.2}_prior{PRIOR}.h5ad'))
 
     # Classifieur & types cellulaires
     color_map = get_color_map(adata_full)
     clf = train_classifier(adata_full, label_key=LABEL)
 
     adata_sim_wt = predict_cell_types(adata_sim_raw.copy(), clf, label_key=LABEL)
+    adata_traj_wt = predict_cell_types(adata_traj_raw.copy(), clf, label_key=LABEL)
 
     # Sim single-gene
     adata_sim_single = adata_sim_raw.copy()
@@ -395,14 +400,14 @@ def load_perturbation_data(cfg):
 
     # Proportions (4 conditions)
     prop_df = compute_proportions(
-        [adata_full, adata_sim_wt, adata_sim_single, adata_perturb_pred],
-        ['Reference', 'Sim WT', 'Sim single', 'Sim perturb'],
+        [adata_traj_wt, adata_sim_wt, adata_sim_single, adata_perturb_pred],
+        ['NB mixture', 'Sim WT', 'Sim single', 'Sim perturb'],
         color_map,
     )
 
     # UMAP joint sur 3 conditions
     af_umap, as_umap, ap_umap = compute_umaps(
-        adata_full.copy(), adata_sim_wt.copy(), adata_perturb_pred.copy()
+        adata_traj_wt.copy(), adata_sim_wt.copy(), adata_perturb_pred.copy()
     )
 
     return dict(
@@ -423,7 +428,7 @@ def load_perturbation_data(cfg):
 # Assemblage de la figure
 # ──────────────────────────────────────────────────────────────
 
-def make_figure(perturbations=PERTURBATIONS, save_path='figure7.pdf'):
+def make_figure(perturbations=PERTURBATIONS, save_path='figure_7.pdf'):
     n_rows = len(perturbations)
 
     fig = plt.figure(figsize=(8.27, 11.69))   # A4 portrait
@@ -602,5 +607,5 @@ def make_figure(perturbations=PERTURBATIONS, save_path='figure7.pdf'):
 if __name__ == '__main__':
     make_figure(
         perturbations=PERTURBATIONS,
-        save_path='figure7.pdf',
+        save_path='figure_7.pdf',
     )

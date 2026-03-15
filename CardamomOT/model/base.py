@@ -8,9 +8,13 @@ from single-cell expression data, performing stochastic or deterministic
 simulations, and managing mixture models. All documentation and comments
 are maintained in English.
 """
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 import numpy as np
 import ot
-from scipy.stats import gamma, rankdata
 import seaborn as sns
 import multiprocessing as mp
 from joblib import Parallel, delayed
@@ -101,7 +105,7 @@ class NetworkModel:
         self.update_modes = 1
         self.alpha_threshold= .4 # max = .5 to update alpha at least for important transition
         # Penalization/prior information
-        self.stimulus = 0.2 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
+        self.stimulus = 1.0 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
         self.prior_network_pen = 1.0 # 1 if we don't use prior information. If not we can penalize the non-existing age in prior network with values between 1 and 0: 0 = impossible edge
         # Filtering
         self.filter_network = 0 # Do we filter the network ? It also builds a temporal network using the filter criterium
@@ -154,14 +158,14 @@ class NetworkModel:
         c = np.ones(G_tot)
         pi_zeros = np.ones(G_tot-1)
         n_components = 0
-
-        def run_main_loop_for_gene(g, temporal=self.temporal_basins):
-            if verb: print("Calibrating gene", g)
-            kinetics = NegativeBinomialMixtureEM(min_components=min_components, 
+        kinetics = NegativeBinomialMixtureEM(min_components=min_components, 
                                                  max_components=max_components, zi=None, 
                                                  max_iter_em=max_iter_kinetics,
                                                  refilter=refilter, hard_em=self.hard_em, 
                                                  preserve_mean_values=self.preserve_mean_values, mean_forcing_em=self.mean_forcing_em)
+        
+        def run_main_loop_for_gene(g, temporal=self.temporal_basins):
+            if verb: print("Calibrating gene", g)
             x = data_rna[:, g]
             # Pass the read depth factor if it is available
             model = kinetics.fit(x, vect_t=vect_t, seuil=self.seuil, s=cell_rd)
@@ -208,7 +212,7 @@ class NetworkModel:
         
             return ks, c, pi0, proba, tmp, pi
 
-        results = Parallel(n_jobs=-1, backend="loky")(
+        results = Parallel(n_jobs=-1)(
         delayed(run_main_loop_for_gene)(g) for g in range(1, G_tot)
         )
 
@@ -741,7 +745,7 @@ class NetworkModel:
                             tmp_modes[cell] = obj[cell, idx[cell]]
                     return tmp_proba, tmp_modes
 
-                results = Parallel(n_jobs=-1, backend="loky")(
+                results = Parallel(n_jobs=-1)(
                     delayed(run_main_loop_for_gene)(g) for g in range(1, G_tot))
 
                 for idx, g in enumerate(range(1, G_tot)):
@@ -1035,7 +1039,7 @@ class NetworkModel:
                     idx = ((self.times_data == times[t]) | (self.times_data == times[t+1])) & (cells_to_use == 1)
                     return inference_degradation_prot(y_prot[idx], self.times_data[idx], basal, inter, ks.T * self.scale_proteins, d=self.d[1], lr=1e-2*self.scale_proteins)
 
-                results = Parallel(n_jobs=-1, backend="loky")(
+                results = Parallel(n_jobs=-1)(
                 delayed(run_main_inference_degradation_prot)(t) for t in range(0, len(times)-1)
                 )
 
@@ -1152,7 +1156,7 @@ class NetworkModel:
                         self.scale_proteins, P0=prot_modified[start_index + n, :]
                     )
 
-            results = Parallel(n_jobs=-1, backend="loky")(
+            results = Parallel(n_jobs=-1)(
             delayed(run_main_loop_for_cell)(n) for n in range(0, N)
             )
 

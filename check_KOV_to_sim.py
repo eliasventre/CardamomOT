@@ -13,12 +13,12 @@ Usage:
 Required input files:
     - Data/data_<split>.h5ad: observed count matrix (wildtype)
     - Data/KO_OV_list.txt: perturbation combinations
-    - cardamom/data_prot_simul_KO_*.npy: simulated proteins for each perturbation
-    - cardamom/data_kon_simul_KO_*.npy: simulated bursting for each perturbation
+    - cardamomOT/data_prot_simul_KO_*.npy: simulated proteins for each perturbation
+    - cardamomOT/data_kon_simul_KO_*.npy: simulated bursting for each perturbation
 
 Output files:
-    - cardamom/adata_sim_KO_*.h5ad: AnnData objects for each perturbation
-    - cardamom/adata_prot_simul_KO_*.h5ad: Protein trajectories for each perturbation
+    - cardamomOT/adata_sim_KO_*.h5ad: AnnData objects for each perturbation
+    - cardamomOT/adata_prot_simul_KO_*.h5ad: Protein trajectories for each perturbation
 """
 import numpy as np
 import sys, getopt
@@ -110,7 +110,7 @@ def main(argv):
         argv: Command-line arguments (--input, --split).
     
     Returns:
-        None. Saves validation datasets to cardamom/ directory.
+        None. Saves validation datasets to cardamomOT/ directory.
     """
     inputfile = ''
     split = ''
@@ -214,8 +214,8 @@ def main(argv):
         label = f"KO_{'-'.join(kos) if kos else 'none'}_OV_{'-'.join(ovs) if ovs else 'none'}"
         print(f"[check_KOV_to_sim] Processing combination {idx}/{len(combos)}: {label}")
         
-        file_prefix = os.path.join(p, f"cardamom/data_kon_simul_{label}.npy")
-        prot_prefix = os.path.join(p, f"cardamom/data_prot_simul_{label}.npy")
+        file_prefix = os.path.join(p, f"cardamomOT/data_kon_simul_{label}.npy")
+        prot_prefix = os.path.join(p, f"cardamomOT/data_prot_simul_{label}.npy")
 
         if not os.path.exists(file_prefix):
             print(f"[check_KOV_to_sim] Warning: Simulation data missing for {label}, file {file_prefix} not found. Skipping.")
@@ -248,7 +248,7 @@ def main(argv):
         adata_sim.obs['time'] = times_simulation
 
         # Save simulated RNA data
-        sim_rna_path = os.path.join(p, f'cardamom/adata_sim_{label}_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad')
+        sim_rna_path = os.path.join(p, f'cardamomOT/adata_sim_{label}_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad')
         try:
             adata_sim.write(sim_rna_path)
             print(f"[check_KOV_to_sim] Saved simulated RNA data: {os.path.basename(sim_rna_path)}")
@@ -264,7 +264,7 @@ def main(argv):
                 adata_prot_simul.var = adata.var.copy()
                 adata_prot_simul.obs['time'] = times_simulation
                 
-                prot_path = os.path.join(p, f'cardamom/adata_prot_simul_{label}_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad')
+                prot_path = os.path.join(p, f'cardamomOT/adata_prot_simul_{label}_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad')
                 adata_prot_simul.write(prot_path)
                 print(f"[check_KOV_to_sim] Saved simulated protein data: {os.path.basename(prot_path)}")
             except Exception as e:

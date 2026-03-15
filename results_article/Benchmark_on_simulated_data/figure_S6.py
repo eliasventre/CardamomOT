@@ -671,8 +671,8 @@ def main():
     x_pos = np.arange(len(dataset_titles)); width = 0.35
 
     for ax, score_key, title in [
-        (axes[0], 'rna',  'OT descendant distance – RNA (↓ better)'),
-        (axes[1], 'prot', 'OT descendant distance – Protein (↓ better)'),
+        (axes[0], 'rna',  'OT descendant distance – RNA'),
+        (axes[1], 'prot', 'OT descendant distance – Protein'),
     ]:
         for method_idx, (label, color) in enumerate(
                 zip(['ReferenceFitting', 'CardamomOT'], bar_colors)):
