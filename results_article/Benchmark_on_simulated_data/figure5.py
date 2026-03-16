@@ -17,6 +17,7 @@ Dépendances:
 """
 
 import numpy as np
+import scipy
 import scanpy as sc
 import anndata as ad
 import torch
@@ -303,12 +304,23 @@ def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj_sc
 
     # ---- Apply per-cell scaling to mechanistic fields ----
     # alpha_i = ||v_ot_i|| / ||v_meca_i||  (preserves direction → cosine sim unchanged)
+    # def _per_cell_scale(v_meca, v_ot):
+    #     """Scale each row of v_meca so its norm matches the corresponding row of v_ot."""
+    #     norm_meca = np.linalg.norm(v_meca, axis=1, keepdims=True)   # (N, 1)
+    #     norm_ot   = np.linalg.norm(v_ot,   axis=1, keepdims=True)
+    #     alpha     = np.where(norm_ot > 0, norm_ot / (norm_meca + 1e-16), 1.0)
+    #     return v_meca * alpha
+    
     def _per_cell_scale(v_meca, v_ot):
-        """Scale each row of v_meca so its norm matches the corresponding row of v_ot."""
-        norm_meca = np.linalg.norm(v_meca, axis=1, keepdims=True)   # (N, 1)
-        norm_ot   = np.linalg.norm(v_ot,   axis=1, keepdims=True)
-        alpha     = np.where(norm_meca > 0, norm_ot / norm_meca, 1.0)
-        return v_meca * alpha
+        """Scale each time of v_meca so its norm matches the corresponding time of v_ot."""
+        alpha = []
+        for t in np.unique(time):
+            mask = (time == t)
+            norm_meca = np.linalg.norm(v_meca[mask, :]) 
+            norm_ot = np.linalg.norm(v_ot[mask, :])
+            if norm_ot > 0: alpha.extend([norm_ot / norm_meca] * mask.sum())
+            else: alpha.extend([1.0] * mask.sum())
+        return v_meca * np.array(alpha).reshape(len(time), 1)
 
     delta_rna_carda_s   = _per_cell_scale(delta_rna_carda_s,  v_ot_rna_carda)
     delta_prot_carda_s  = _per_cell_scale(delta_prot_carda_s, v_ot_prot_carda)
@@ -316,7 +328,7 @@ def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj_sc
     delta_prot_reffit_s = _per_cell_scale(delta_prot_reffit_s, v_ot_prot_rf)
 
     # ---- Subsample 100 cells per timepoint ----
-    n_sub = 100
+    n_sub=100
     np.random.seed(42)
     sub_idx = []
     for t in np.unique(time):
@@ -533,31 +545,26 @@ def load_schiebinger():
     """
     base = f'{SCHIE_DIR}/cardamomOT'
 
-    tmp = np.load(f'{base}/data_rna.npy')
-    G               = tmp.shape[1]
-    model           = CardamomNetworkModel(G)
+    rna = np.load(f'{base}/data_rna.npy')
+    G               = rna.shape[1]
+    model           = CardamomNetworkModel(G-1)
     model.d         = np.load(f'{base}/degradations.npy')
     model.basal     = np.load(f'{base}/basal_simul.npy')
     model.inter     = np.load(f'{base}/inter_simul.npy')
     model.prot      = np.load(f'{base}/data_prot_unitary.npy')
-    model.rna        = np.load(f'{base}/data_rna.npy')  
+    adata_full      = ad.read_h5ad(f'{base}/adata_beta_stim{1.0}_prior{1.0}.h5ad')
+    model.rna       = rna.copy()
+    model.rna[:, 1:]= adata_full.X.toarray() if scipy.sparse.issparse(adata_full.X) else adata_full.X
     model.kon_theta = np.load(f'{base}/data_kon_theta.npy')
     model.a         = np.load(f'{base}/mixture_parameters.npy')
     time_s          = np.load(f'{base}/data_times.npy')
 
     # Subsample 200 cells per timepoint 
-    n_per_time = 200
-    np.random.seed(0)
-    sub_idx = []
-    for t in np.unique(time_s):
-        idx = np.where(time_s == t)[0]
-        sub_idx.extend(np.random.choice(idx, size=min(n_per_time, len(idx)), replace=False))
-    sub_idx = np.array(sub_idx)
+    sub_idx = np.arange(len(time_s))
 
     time_s          = time_s[sub_idx]
     rna_traj        = model.rna[sub_idx, 1:]
     prot_traj      = model.prot[sub_idx, 1:]
-    kon_traj = model.kon_theta[sub_idx, 1:]
 
     c        = model.a[-1]
     ks_cells = np.max(model.a[:-1], axis=0)
@@ -602,11 +609,15 @@ def load_schiebinger():
     # ---- Apply per-cell scaling to mechanistic fields ----
     # alpha_i = ||v_ot_i|| / ||v_meca_i||  (preserves direction → cosine sim unchanged)
     def _per_cell_scale(v_meca, v_ot):
-        """Scale each row of v_meca so its norm matches the corresponding row of v_ot."""
-        norm_meca = np.linalg.norm(v_meca, axis=1, keepdims=True)   # (N, 1)
-        norm_ot   = np.linalg.norm(v_ot,   axis=1, keepdims=True)
-        alpha     = np.where(norm_meca > 0, norm_ot / norm_meca, 1.0)
-        return v_meca * alpha
+        """Scale each time of v_meca so its norm matches the corresponding time of v_ot."""
+        alpha = []
+        for t in np.unique(time_s):
+            mask = (time_s == t)
+            norm_meca = np.linalg.norm(v_meca[mask, :]) 
+            norm_ot = np.linalg.norm(v_ot[mask, :])
+            if norm_ot > 0: alpha.extend([norm_ot / norm_meca] * mask.sum())
+            else: alpha.extend([1.0] * mask.sum())
+        return v_meca * np.array(alpha).reshape(len(time_s), 1)
     
     delta_rna_carda = _per_cell_scale(delta_rna_carda, delta_rna_all)
     delta_prot_carda = _per_cell_scale(delta_prot_carda, delta_prot_all)
@@ -664,10 +675,6 @@ def main():
     scores = {name: {'rna': [], 'prot': []} for name, _ in DATASETS}
     # UMAPs et cells du run 0 (seed=0) — utilisés pour les stream plots
     vis = {}
-
-    print("\n=== Loading Schiebinger ===")
-    rna_traj_2d, delta_rna_carda_2d, prot_traj_2d, delta_prot_carda_2d, time_schiebinger = \
-        load_schiebinger()
     
     for name, builder in DATASETS:
         for run in range(N_RUNS):
@@ -683,6 +690,10 @@ def main():
         scores[name]['rna']  = np.array(scores[name]['rna'])   # (N_RUNS, 2)
         scores[name]['prot'] = np.array(scores[name]['prot'])
 
+    print("\n=== Loading Schiebinger ===")
+    rna_traj_2d, delta_rna_carda_2d, prot_traj_2d, delta_prot_carda_2d, time_schiebinger = \
+        load_schiebinger()
+    
     # ---- Figure layout ----
     fig = plt.figure(figsize=(8.27, 11.69))
     gs  = gridspec.GridSpec(4, 1, figure=fig, height_ratios=[1, 2, 2, 2], hspace=0.3)

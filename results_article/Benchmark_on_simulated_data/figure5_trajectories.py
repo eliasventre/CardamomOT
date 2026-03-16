@@ -48,6 +48,7 @@ SCHIEBINGER : identique à figure_5.py.
 """
 
 import numpy as np
+import scipy
 import scanpy as sc
 import anndata as ad
 import torch
@@ -526,21 +527,13 @@ def load_schiebinger():
     # data_prot : (N_total, G+1) avec col0 = stimulus
     # data_times : (N_total,) temps associé à chaque ligne
     rna_inf  = np.load(f'{base}/data_rna.npy')   # (N, G+1)
+    adata_full      = ad.read_h5ad(f'{base}/adata_beta_stim{1.0}_prior{1.0}.h5ad')
+    rna_inf[:, 1:]  = adata_full.X.toarray() if scipy.sparse.issparse(adata_full.X) else adata_full.X
     prot_inf = np.load(f'{base}/data_prot_unitary.npy')  # (N, G+1)
     time_s   = np.load(f'{base}/data_times.npy') # (N,)
  
-    unique_times = np.unique(time_s)
- 
     # Subsample n_per_time cellules par temps (même seed que le reste)
-    n_per_time = 200
-    np.random.seed(0)
-    sub_idx = []
-    for t in unique_times:
-        idx = np.where(time_s == t)[0]
-        chosen = np.random.choice(idx, size=min(n_per_time, len(idx)), replace=False)
-        # Trier pour préserver l'ordre relatif (important pour le couplage 1-to-1)
-        sub_idx.extend(np.sort(chosen))
-    sub_idx = np.array(sub_idx)
+    sub_idx = np.arange(len(time_s))
  
     time_sub = time_s[sub_idx]
     rna_sub  = rna_inf[sub_idx,  1:]   # strip stimulus → (N_sub, G)
