@@ -138,5 +138,5 @@ ax_score.set_ylabel('AUPR',              fontsize=6)
 ax_score.legend(loc='lower right', borderaxespad=0, frameon=False,
                 fontsize=4.5, handlelength=1.2, handletextpad=0.5)
 
-fig.savefig('figureS7.pdf', dpi=300, bbox_inches='tight', pad_inches=0)
+fig.savefig('figure_S7.pdf', dpi=300, bbox_inches='tight', pad_inches=0)
 plt.show()

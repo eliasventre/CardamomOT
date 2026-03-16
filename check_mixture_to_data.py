@@ -12,12 +12,12 @@ Usage:
 
 Required input files:
     - Data/data_<split>.h5ad: count matrix with temporal information
-    - cardamom/mixture_parameters.npy: inferred burst kinetics parameters
-    - cardamom/modes.npy: mode of burst frequency distribution
-    - cardamom/pi_zinb.npy: zero-inflation probabilities
+    - cardamomOT/mixture_parameters.npy: inferred burst kinetics parameters
+    - cardamomOT/modes.npy: mode of burst frequency distribution
+    - cardamomOT/pi_zinb.npy: zero-inflation probabilities
 
 Output files:
-    - cardamom/adata_beta.h5ad: simulated data from mixture model
+    - cardamomOT/adata_beta.h5ad: simulated data from mixture model
     - Check/mixture_vs_data/ directory: comparison plots
 """
 

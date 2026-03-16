@@ -12,12 +12,12 @@ Usage:
 
 Required input files:
     - Data/data_<split>.h5ad: observed count matrix
-    - cardamom/data_rna.npy: RNA expression from network inference
-    - cardamom/data_prot_simul.npy: simulated protein abundance
-    - cardamom/simulation_times.npy: timepoints used for simulation
+    - cardamomOT/data_rna.npy: RNA expression from network inference
+    - cardamomOT/data_prot_simul.npy: simulated protein abundance
+    - cardamomOT/simulation_times.npy: timepoints used for simulation
 
 Output files:
-    - cardamom/adata_*_stim*.h5ad: generated AnnData objects for visualization
+    - cardamomOT/adata_*_stim*.h5ad: generated AnnData objects for visualization
     - Check/sim_vs_data/ directory: distribution comparison plots
 """
 
