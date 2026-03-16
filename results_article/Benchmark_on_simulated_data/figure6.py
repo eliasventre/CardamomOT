@@ -331,11 +331,11 @@ def main():
 
     # ── UMAP panels A–F  (adata_beta | adata_sim, shared UMAP space) ──────────
     umap_configs = [
-        (axes[0], beta_semrau_2d,       t_beta_semrau,    'Semrau — NB mixture',        5, False),
+        (axes[0], beta_semrau_2d,       t_beta_semrau,    'Semrau — Reference',        5, False),
         (axes[1], sim_semrau_beta_2d,   t_sim_semrau,     'Semrau — Sim',          5, True),
-        (axes[2], beta_kameneva_2d,     t_beta_kameneva,  'Kameneva — NB mixture',      5, False),
+        (axes[2], beta_kameneva_2d,     t_beta_kameneva,  'Kameneva — Reference',      5, False),
         (axes[3], sim_kameneva_beta_2d, t_sim_kameneva,   'Kameneva — Sim',       5, True),
-        (axes[4], beta_schie_2d,        t_beta_schie,     'Schiebinger — NB mixture',   2, False),
+        (axes[4], beta_schie_2d,        t_beta_schie,     'Schiebinger — Reference',   2, False),
         (axes[5], sim_schie_beta_2d,    t_sim_schie,      'Schiebinger — Sim',    2, True),
     ]
     for ax, coords, t_vals, title, s, with_cb in umap_configs:

@@ -105,7 +105,7 @@ class NetworkModel:
         self.update_modes = 1
         self.alpha_threshold= .4 # max = .5 to update alpha at least for important transition
         # Penalization/prior information
-        self.stimulus = 1.0 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
+        self.stimulus = 0.5 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
         self.prior_network_pen = 1.0 # 1 if we don't use prior information. If not we can penalize the non-existing age in prior network with values between 1 and 0: 0 = impossible edge
         # Filtering
         self.filter_network = 0 # Do we filter the network ? It also builds a temporal network using the filter criterium

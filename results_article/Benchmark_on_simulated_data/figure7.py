@@ -96,7 +96,7 @@ PERTURBATIONS = [
         gene          = 'STMN2',
         mode          = 'OV',
         perturb_id    = 'KO_CHGA_OV_STMN2',
-        label         = 'KO CHGA - OV STMN2\nKameneva',
+        label         = 'KO CHGA-OV STMN2\nKameneva',
         dataset_group = 'Kameneva',
         last_in_group = True,
     ),
@@ -362,6 +362,8 @@ def load_perturbation_data(cfg):
     rank  = get_regulator_rank(grn_matrix, gene_names, gene)
     if gene == "Col4a2":
         G_net, max_int = build_gene_subgraph(grn_matrix, gene_names, gene, top_targets=4)
+    elif gene == "STMN2":
+        G_net, max_int = build_gene_subgraph(grn_matrix, gene_names, gene, top_targets=6)
     else:
         G_net, max_int = build_gene_subgraph(grn_matrix, gene_names, gene, top_targets=8)
 
@@ -378,9 +380,9 @@ def load_perturbation_data(cfg):
         adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{STIM}_prior{PRIOR}.h5ad'))
         adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_beta_stim{STIM}_prior{PRIOR}.h5ad'))
     else:
-        adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_beta_stim{0.2}_prior{PRIOR}.h5ad'))
-        adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{0.2}_prior{PRIOR}.h5ad'))
-        adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{0.2}_prior{PRIOR}.h5ad'))
+        adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_beta_stim{0.5}_prior{PRIOR}.h5ad'))
+        adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{0.5}_prior{PRIOR}.h5ad'))
+        adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{0.5}_prior{PRIOR}.h5ad'))
 
     # Classifieur & types cellulaires
     color_map = get_color_map(adata_full)
