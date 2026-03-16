@@ -350,7 +350,7 @@ def main():
     gene_name_0 = gnames_s[HIST_GENES[0]]
     ax0 = fig.add_subplot(gs_Ct[0, 0])
     draw_hist(ax0, x_sd[:, HIST_GENES[0]], x_ss[:, HIST_GENES[0]],
-              f'{gene_name_0}  —  t = 0h', show_legend=True, show_xlabel=False, show_ylabel=True)
+              f'{gene_name_0}  — All times', show_legend=True, show_xlabel=False, show_ylabel=True)
     for col, tp in enumerate(sel_times):
         ax = fig.add_subplot(gs_Ct[0, col + 1])
         draw_hist(ax, x_sd[t_sd == tp, HIST_GENES[0]],
@@ -361,7 +361,7 @@ def main():
     gene_name_1 = gnames_s[HIST_GENES[1]]
     ax0 = fig.add_subplot(gs_Cb[0, 0])
     draw_hist(ax0, x_sd[:, HIST_GENES[1]], x_ss[:, HIST_GENES[1]],
-              f'{gene_name_1}  —  t = 0h', show_legend=False, show_xlabel=True, show_ylabel=True)
+              f'{gene_name_1}  — All times', show_legend=False, show_xlabel=True, show_ylabel=True)
     for col, tp in enumerate(sel_times):
         ax = fig.add_subplot(gs_Cb[0, col + 1])
         draw_hist(ax, x_sd[t_sd == tp, HIST_GENES[1]],
