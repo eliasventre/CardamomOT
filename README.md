@@ -13,6 +13,10 @@ CARDAMOM is an executable gene regulatory network (GRN) inference method, adapte
 conda create -n cardamom_env python=3.12 -y
 conda activate cardamom_env
 
+# IMPORTANT on macOS Apple Silicon (arm64): install numba + threading runtimes from conda-forge
+# This avoids pip wheels without TBB backend support.
+conda install -c conda-forge numba llvmlite llvm-openmp tbb tbb-devel -y
+
 # OR with venv (standard Python)
 python -m venv cardamom_env
 source cardamom_env/bin/activate  # Linux/Mac

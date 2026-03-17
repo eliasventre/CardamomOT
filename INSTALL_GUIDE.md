@@ -8,7 +8,17 @@ git clone https://github.com/yourusername/CardamomOT.git
 cd CardamomOT
 ```
 
-### 2. Install CardamomOT
+### 2. Create and Prepare Environment
+
+```bash
+conda create -n cardamom_env python=3.12 -y
+conda activate cardamom_env
+
+# Recommended on macOS arm64 to avoid Numba threading backend issues
+conda install -c conda-forge numba llvmlite llvm-openmp tbb tbb-devel -y
+```
+
+### 3. Install CardamomOT
 
 #### Option A: Minimal Installation (core functionality only)
 ```bash
@@ -29,7 +39,7 @@ pip install -e ".[cli,dev,notebooks]"
 
 This installs everything for development, testing, and running example notebooks.
 
-### 3. Verify Installation
+### 4. Verify Installation
 ```bash
 cardamomot --help
 ```
@@ -135,6 +145,12 @@ pip install questionary pyyaml
 CardamomOT requires Python 3.8 or higher. Check your version:
 ```bash
 python --version
+```
+
+### Numba TBB backend not available
+If you see `ValueError: No threading layer could be loaded`, install Numba and threading runtimes from conda-forge in your active env:
+```bash
+conda install -c conda-forge numba llvmlite llvm-openmp tbb tbb-devel -y
 ```
 
 ## Next Steps

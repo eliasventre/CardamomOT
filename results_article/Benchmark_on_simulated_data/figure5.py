@@ -712,7 +712,7 @@ def main():
                  ha="left", va="bottom", fontsize=10, fontweight="bold", clip_on=False)
 
     # --- Bar charts : moyenne ± erreur standard sur N_RUNS runs ---
-    dataset_titles = ['BN8', 'FN8', 'CN5', 'FN4']
+    dataset_titles = ['FN4', 'CN5', 'BN8', 'FN8']
     bar_methods    = ['ReferenceFitting', 'CardamomOT']
     bar_colors     = [colors_methods['REFERENCE_FITTING'][0], colors_methods['CardamomOT'][0]]
     x = np.arange(len(dataset_titles))

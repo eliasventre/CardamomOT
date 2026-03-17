@@ -168,7 +168,7 @@ def draw_mean_sd(ax, adata_traj, adata_beta, adata_sim,
     for sp in ax.spines.values():
         sp.set_linewidth(0.6)
     if show_legend:
-        ax.legend(fontsize=5, frameon=False, loc='upper right')
+        ax.legend(fontsize=5, frameon=False, loc='upper center')
 
 
 def draw_celltype_timeline(ax, adata_beta, adata_sim, title,
@@ -239,8 +239,8 @@ def draw_celltype_timeline(ax, adata_beta, adata_sim, title,
         n_cols = max(1, len(used_labels) // 2)
         ax.legend(handles=handles, labels=used_labels,
                   fontsize=5, loc='upper center', ncol=n_cols,
-                  bbox_to_anchor=(0.5, -0.18),
-                  title='Beta | Sim', title_fontsize=4, framealpha=0.5)
+                  bbox_to_anchor=(0.5, -0.16),
+                  title='Reference | Simulated', title_fontsize=5, framealpha=0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +347,7 @@ def main():
     # Remove UMAP axis labels from panels A–D (keep only E=axes[4], F=axes[5])
     for ax in axes[:4]:
         ax.set_xlabel('')
+    for ax in axes[1:6:2]:
         ax.set_ylabel('')
 
     # ── Cell-type timeline panels G–I ─────────────────────────────────────────
@@ -375,13 +376,14 @@ def main():
         is_last_dataset = (i == len(gene_configs) - 1)   # Schiebinger → rangée M N O
         gnames = a_traj.var_names
         for k, (ax, gene_idx) in enumerate(zip(ax_slice, gene_idxs)):
+            show_main_annotations = ax in (axes[9], axes[12])
             draw_mean_sd(
                 ax,
                 a_traj, a_beta, a_sim,
                 gene_idx, f'{dset} — {gnames[gene_idx]}',
-                show_legend=(k == 0),
-                show_xlabel=is_last_dataset,   # 'Time' seulement sur M N O
-                show_ylabel=(k == 0),
+                show_legend=show_main_annotations,
+                show_xlabel=is_last_dataset,   # 'Time' only for M N O
+                show_ylabel=show_main_annotations,
             )
 
     # ── Save ──────────────────────────────────────────────────────────────────
