@@ -63,7 +63,7 @@ def _to_dense(X):
 # ---------------------------------------------------------------------------
 
 # STIM hyperparameter per dataset (from figure_7)
-STIM  = {'Semrau': 1.0, 'Kameneva': 0.2, 'Schiebinger': 1.0}
+STIM  = {'Semrau': 1.0, 'Kameneva': 0.5, 'Schiebinger': 1.0}
 PRIOR = 1.0
 
 
@@ -162,6 +162,8 @@ def draw_mean_sd(ax, adata_traj, adata_beta, adata_sim,
         ax.set_xlabel('Time', fontsize=6, labelpad=2)
     if show_ylabel:
         ax.set_ylabel('Mean ± SD', fontsize=6, labelpad=2)
+    else:
+        ax.set_ylabel('')
     ax.tick_params(labelsize=5, pad=2)
     for sp in ax.spines.values():
         sp.set_linewidth(0.6)
@@ -171,7 +173,7 @@ def draw_mean_sd(ax, adata_traj, adata_beta, adata_sim,
 
 def draw_celltype_timeline(ax, adata_beta, adata_sim, title,
                            time_key='time', cell_type_key='cell_type',
-                           n_timepoints=6):
+                           n_timepoints=6, show_legend=False):
     """
     Stacked-bar cell-type composition — 2 bar groups per timepoint:
       left  (solid)       = adata_beta
@@ -233,11 +235,12 @@ def draw_celltype_timeline(ax, adata_beta, adata_sim, title,
     for sp in ax.spines.values():
         sp.set_linewidth(0.6)
 
-    n_cols = max(1, len(used_labels) // 2)
-    ax.legend(handles=handles, labels=used_labels,
-              fontsize=5, loc='upper center', ncol=n_cols,
-              bbox_to_anchor=(0.5, -0.18),
-              title='Beta | Sim', title_fontsize=4, framealpha=0.5)
+    if show_legend:
+        n_cols = max(1, len(used_labels) // 2)
+        ax.legend(handles=handles, labels=used_labels,
+                  fontsize=5, loc='upper center', ncol=n_cols,
+                  bbox_to_anchor=(0.5, -0.18),
+                  title='Beta | Sim', title_fontsize=4, framealpha=0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +344,11 @@ def main():
     for ax, coords, t_vals, title, s, with_cb in umap_configs:
         draw_umap(ax, coords, t_vals, title, s=s, show_colorbar=with_cb)
 
+    # Remove UMAP axis labels from panels A–D (keep only E=axes[4], F=axes[5])
+    for ax in axes[:4]:
+        ax.set_xlabel('')
+        ax.set_ylabel('')
+
     # ── Cell-type timeline panels G–I ─────────────────────────────────────────
     # 3 bars per timepoint: rna_traj (solid) | adata_beta (mid) | adata_sim (light)
     celltype_configs = [
@@ -349,7 +357,7 @@ def main():
         (axes[8], adata_beta_schie,    adata_sim_schie,    'Schiebinger — Cell-type timeline'),
     ]
     for ax, a_beta, a_sim, title in celltype_configs:
-        draw_celltype_timeline(ax, a_beta, a_sim, title)
+        draw_celltype_timeline(ax, a_beta, a_sim, title, show_legend=True)
 
     # ── Gene mean±SD panels J–O ───────────────────────────────────────────────
     # 3 curves per panel: rna_traj (grey) | adata_beta (blue) | adata_sim (red)
@@ -363,7 +371,8 @@ def main():
         (axes[12:15], adata_traj_schie,    adata_beta_schie,    adata_sim_schie,
          SCHIE_GENES,    'Schiebinger'),
     ]
-    for ax_slice, a_traj, a_beta, a_sim, gene_idxs, dset in gene_configs:
+    for i, (ax_slice, a_traj, a_beta, a_sim, gene_idxs, dset) in enumerate(gene_configs):
+        is_last_dataset = (i == len(gene_configs) - 1)   # Schiebinger → rangée M N O
         gnames = a_traj.var_names
         for k, (ax, gene_idx) in enumerate(zip(ax_slice, gene_idxs)):
             draw_mean_sd(
@@ -371,7 +380,7 @@ def main():
                 a_traj, a_beta, a_sim,
                 gene_idx, f'{dset} — {gnames[gene_idx]}',
                 show_legend=(k == 0),
-                show_xlabel=True,
+                show_xlabel=is_last_dataset,   # 'Time' seulement sur M N O
                 show_ylabel=(k == 0),
             )
 

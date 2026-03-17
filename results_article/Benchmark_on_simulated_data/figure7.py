@@ -162,25 +162,42 @@ def build_gene_subgraph(matrix, gene_names, gene, top_targets=8):
 
 
 def draw_gene_subgraph(ax, G, gene, max_intensity):
-    """
-    Dessine le sous-graphe sur un Axes matplotlib.
-    Polices et nœuds réduits (v2).
-    """
     if G is None or G.number_of_edges() == 0:
         ax.text(0.5, 0.5, f"{gene}\n(no GRN data)", ha='center', va='center',
                 transform=ax.transAxes, fontsize=6, color='gray')
         ax.axis('off')
         return
 
-    pos = nx.spring_layout(G, seed=42)
+    # --- Layout : gène central fixé à (0, 0) ---
+    fixed_positions = {gene: (0.0, 0.0)}
+    pos = nx.spring_layout(
+        G,
+        pos=fixed_positions,
+        fixed=[gene],
+        k=2.5,
+        iterations=100,
+        seed=42
+    )
 
-    # Taille des nœuds réduite, police réduite
+    # --- Rayon minimum autour du centre ---
+    min_radius = 0.6
+    cx, cy = pos[gene]
+    for node in pos:
+        if node == gene:
+            continue
+        dx, dy = pos[node][0] - cx, pos[node][1] - cy
+        dist = (dx**2 + dy**2) ** 0.5
+        if dist < min_radius:
+            scale = min_radius / (dist if dist > 1e-6 else 1e-6)
+            pos[node] = (cx + dx * scale, cy + dy * scale)
+
+    # --- Dessin ---
     node_colors = ['#4C9BE8' if n == gene else '#E8E8E8' for n in G.nodes]
     node_sizes  = [550 if n == gene else 380 for n in G.nodes]
 
     nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=node_sizes, ax=ax)
     nx.draw_networkx_labels(G, pos, font_size=5.5, ax=ax)
-    ax.margins(0.15)  # empêche les nœuds d'être coupés aux bords
+    ax.margins(0.15)
 
     edges_pos = [(u, v, d['weight']) for u, v, d in G.edges(data=True) if d['weight'] > 0]
     edges_neg = [(u, v, d['weight']) for u, v, d in G.edges(data=True) if d['weight'] < 0]
@@ -193,7 +210,7 @@ def draw_gene_subgraph(ax, G, gene, max_intensity):
     kw_neg = dict(
         ax=ax, connectionstyle='arc3,rad=0.1',
         arrows=True,
-        arrowstyle='-[,widthB=0.8,lengthB=0.0',  # flat T-bar = inhibition
+        arrowstyle='-[,widthB=0.8,lengthB=0.0',
         min_target_margin=12.5,
     )
     if edges_pos:
@@ -362,8 +379,6 @@ def load_perturbation_data(cfg):
     rank  = get_regulator_rank(grn_matrix, gene_names, gene)
     if gene == "Col4a2":
         G_net, max_int = build_gene_subgraph(grn_matrix, gene_names, gene, top_targets=4)
-    elif gene == "STMN2":
-        G_net, max_int = build_gene_subgraph(grn_matrix, gene_names, gene, top_targets=6)
     else:
         G_net, max_int = build_gene_subgraph(grn_matrix, gene_names, gene, top_targets=8)
 
@@ -375,12 +390,16 @@ def load_perturbation_data(cfg):
         adata_full.obs[LABEL] = adata_full.obs[LABEL].astype(str).str.capitalize()
     if cfg['dataset_group'] == 'Semrau' and LABEL in adata_full.obs:
         adata_full.obs[LABEL] = adata_full.obs[LABEL].astype(str).str.replace('_', ' ', regex=False)
-    if cfg['dataset_group'] != 'Kameneva':
+    if cfg['dataset_group'] == 'Semrau':
+        adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{STIM}_prior{PRIOR}.h5ad'))
+        adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{STIM}_prior{PRIOR}.h5ad'))
+        adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_rna_traj_stim{STIM}_prior{PRIOR}.h5ad'))
+    elif cfg['dataset_group'] == 'Schiebinger':
         adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{STIM}_prior{PRIOR}.h5ad'))
         adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{STIM}_prior{PRIOR}.h5ad'))
         adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_beta_stim{STIM}_prior{PRIOR}.h5ad'))
     else:
-        adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_beta_stim{0.5}_prior{PRIOR}.h5ad'))
+        adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_rna_traj_stim{0.5}_prior{PRIOR}.h5ad'))
         adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{0.5}_prior{PRIOR}.h5ad'))
         adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{0.5}_prior{PRIOR}.h5ad'))
 
