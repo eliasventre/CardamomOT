@@ -61,7 +61,7 @@ colors_methods = {
 # Helper functions
 # ---------------------------------------------------------------------------
 
-def step_ode_modif(d1, ks, inter, basal, scale, P):
+def step_ode_prot(d1, ks, inter, basal, scale, P):
     """Euler step for the deterministic limit model."""
     a = kon_ref(P, ks, inter, basal)
     delta_P = d1 * (scale * a - P)
@@ -128,7 +128,7 @@ def weighted_cosine_similarity(delta_i, delta_j):
 # Core pipeline: simulate + calibrate + compute velocity deltas
 # ---------------------------------------------------------------------------
 
-def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj_scaled,
+def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj,
                  degradation_rates, run=0):
     """
     Run CardamomOT and ReferenceFitting on the provided (pre-simulated) data,
@@ -142,7 +142,7 @@ def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj_sc
     time : 1-D int array  (C,)
     data : array (C+1, G+2)  raw HARISSA data matrix
     rna_traj : array (C, G+1)  [stimulus col included]
-    prot_traj_scaled : array (C, G+1)
+    prot_traj : array (C, G+1)
     degradation_rates_path : str or None
 
     Returns
@@ -156,20 +156,20 @@ def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj_sc
     k0_h = model_harissa.a[0] * model_harissa.d[0]
     k1_h = model_harissa.a[1] * model_harissa.d[0]
     delta_rna_harissa  = np.zeros_like(rna_traj,        dtype=float)
-    delta_prot_harissa = np.zeros_like(prot_traj_scaled, dtype=float)
-    for n, cell in enumerate(prot_traj_scaled):
+    delta_prot_harissa = np.zeros_like(prot_traj, dtype=float)
+    for n, cell in enumerate(prot_traj):
         kon = kon_harissa(model_harissa.basal, model_harissa.inter, k0_h, k1_h, cell)
         delta_rna_harissa[n]  = kon / model_harissa.a[-1] - model_harissa.d[0] * rna_traj[n]
         delta_prot_harissa[n] = model_harissa.d[1] * (kon / k1_h - cell)
 
     # ---- CardamomOT calibration ----
-    x = data[1:, 1:].copy()
+    x = rna_traj.copy()
+    print(x.shape)
     x[:, 0] = time
     G_cols = x.shape[1]
     model_carda = CardamomNetworkModel(G_cols - 1)
     model_carda.d = degradation_rates
     model_carda.fit(x)
-    model_carda.adapt_to_unitary()
 
     c          = model_carda.a[-1]
     ks_cells   = np.max(model_carda.a[:-1], axis=0)
@@ -181,12 +181,12 @@ def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj_sc
     delta_rna_carda = np.zeros_like(rna_traj, dtype=float)
     for ci in range(rna_traj.shape[0]):
         _, delta_M = step_ode_rna(d0, ks, model_carda.inter, model_carda.basal,
-                                    ks_cells / c, prot_traj_scaled[ci].reshape(1, -1), rna_traj[ci].reshape(1, -1))
+                                    ks_cells / c, prot_traj[ci].reshape(1, -1), rna_traj[ci].reshape(1, -1))
         delta_rna_carda[ci] = delta_M[0]
-    delta_prot_carda = np.zeros_like(prot_traj_scaled, dtype=float)
-    for ci in range(prot_traj_scaled.shape[0]):
-        _, delta_P = step_ode_modif(d1, ks, model_carda.inter, model_carda.basal,
-                                    1, prot_traj_scaled[ci].reshape(1, -1))
+    delta_prot_carda = np.zeros_like(prot_traj, dtype=float)
+    for ci in range(prot_traj.shape[0]):
+        _, delta_P = step_ode_prot(d1, ks, model_carda.inter, model_carda.basal,
+                                    1, prot_traj[ci].reshape(1, -1))
         delta_prot_carda[ci] = delta_P[0]
 
     # ---- ReferenceFitting calibration ----
@@ -208,13 +208,13 @@ def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj_sc
     # RNA delta: linear prediction
     delta_rna_reffit  = (rna_traj @ A_rf + b_rf)
     # Protein delta: OT-coupling-based prediction
-    delta_prot_reffit = (prot_traj_scaled @ A_rf + b_rf)
+    delta_prot_reffit = (prot_traj @ A_rf + b_rf)
     # unique_times = np.unique(time)
-    # for number, cell in enumerate(prot_traj_scaled):
+    # for number, cell in enumerate(prot_traj):
     #     ti = number // 100
     #     if ti < len(unique_times) - 1:
     #         row_weights = estim.Ts[0][ti][number % 100].cpu().numpy()
-    #         next_cells  = prot_traj_scaled[100 * (ti + 1): 100 * (ti + 2)]
+    #         next_cells  = prot_traj[100 * (ti + 1): 100 * (ti + 2)]
     #         P2 = (np.dot(row_weights, next_cells) * 100)
     #         delta_prot_reffit[number] = P2 - cell
 
@@ -226,7 +226,7 @@ def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj_sc
     delta_rna_reffit_s   = delta_rna_reffit[:, 1:]
     delta_prot_reffit_s  = delta_prot_reffit[:, 1:]
     rna_s   = rna_traj[:, 1:]
-    prot_s  = prot_traj_scaled[:, 1:]
+    prot_s  = prot_traj[:, 1:]
 
     # ---- Per-cell optimal scaling of mechanistic velocity fields ----
     #
@@ -248,49 +248,18 @@ def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj_sc
     C_per_t = {t: np.where(time == t)[0] for t in unique_times}
 
     # Accumulate OT-based reference velocities (shape like rna_s / prot_s)
-    v_ot_rna_carda  = np.zeros_like(delta_rna_carda_s)
-    v_ot_prot_carda = np.zeros_like(delta_prot_carda_s)
-    v_ot_rna_rf     = np.zeros_like(delta_rna_reffit_s)
-    v_ot_prot_rf    = np.zeros_like(delta_prot_reffit_s)
+    v_ot_rna     = np.zeros_like(delta_rna_reffit_s)
+    v_ot_prot    = np.zeros_like(delta_prot_reffit_s)
 
     for ti, (tk, tk1) in enumerate(zip(unique_times[:-1], unique_times[1:])):
         dt = float(tk1 - tk)
         idx_k  = C_per_t[tk]   # indices of cells at t_k  in the full arrays
         idx_k1 = C_per_t[tk1]  # indices of cells at t_{k+1}
-        C_k  = len(idx_k)
-        C_k1 = len(idx_k1)
 
         rna_k_g   = rna_s[idx_k].astype(float)      # (C_k,  G)
         rna_k1_g  = rna_s[idx_k1].astype(float)     # (C_k1, G)
         prot_k_g  = prot_s[idx_k].astype(float)     # (C_k,  G)
         prot_k1_g = prot_s[idx_k1].astype(float)    # (C_k1, G)
-
-        # ---- CardamomOT coupling (exact matching via model_carda.rna) ----
-        # model_carda.rna rows are in the same order as the input cells (x),
-        # which are rna_traj rows ordered by time (same order as idx_k / idx_k1).
-        rna_inf_k  = model_carda.rna[idx_k,  1:]   # (C_k,  G)  inferred at t_k
-        rna_inf_k1 = model_carda.rna[idx_k1, 1:]   # (C_k1, G)  inferred at t_{k+1}
-
-        q_carda = np.zeros((C_k, C_k1), dtype=float)
-        n_obtained = 0
-        for i in range(C_k):
-            inf_idxs = np.where(np.all(rna_inf_k == rna_k_g[i], axis=1))[0]
-            dest_true = []
-            for inf_j in inf_idxs:
-                dest_true.extend(
-                    np.where(np.all(rna_k1_g == rna_inf_k1[inf_j], axis=1))[0])
-            if len(dest_true):
-                for j_true in dest_true:
-                    q_carda[i, j_true] += 1.0
-                q_carda[i] /= q_carda[i].sum()
-                n_obtained += 1
-        if n_obtained > 0:
-            q_carda *= (C_k / n_obtained)
-
-        rna_exp_carda  = q_carda @ rna_k1_g    # (C_k, G)
-        prot_exp_carda = q_carda @ prot_k1_g
-        v_ot_rna_carda[idx_k]  = (rna_exp_carda  - rna_k_g)  / dt
-        v_ot_prot_carda[idx_k] = (prot_exp_carda - prot_k_g) / dt
 
         # ---- RF coupling (estim.Ts[0][ti], row-normalised) ----
         q_rf = estim.Ts[0][ti].cpu().numpy()        # (C_k, C_k1) or (C, C)
@@ -299,8 +268,8 @@ def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj_sc
 
         rna_exp_rf  = q_rf_n @ rna_k1_g
         prot_exp_rf = q_rf_n @ prot_k1_g
-        v_ot_rna_rf[idx_k]  = (rna_exp_rf  - rna_k_g)  / dt
-        v_ot_prot_rf[idx_k] = (prot_exp_rf - prot_k_g) / dt
+        v_ot_rna[idx_k]  = (rna_exp_rf  - rna_k_g)  / dt
+        v_ot_prot[idx_k] = (prot_exp_rf - prot_k_g) / dt
 
     # ---- Apply per-cell scaling to mechanistic fields ----
     # alpha_i = ||v_ot_i|| / ||v_meca_i||  (preserves direction → cosine sim unchanged)
@@ -316,16 +285,16 @@ def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj_sc
         alpha = []
         for t in np.unique(time):
             mask = (time == t)
-            norm_meca = np.linalg.norm(v_meca[mask, :]) 
+            norm_meca = np.linalg.norm(v_meca[mask, :])
             norm_ot = np.linalg.norm(v_ot[mask, :])
             if norm_ot > 0: alpha.extend([norm_ot / norm_meca] * mask.sum())
             else: alpha.extend([1.0] * mask.sum())
         return v_meca * np.array(alpha).reshape(len(time), 1)
 
-    delta_rna_carda_s   = _per_cell_scale(delta_rna_carda_s,  v_ot_rna_carda)
-    delta_prot_carda_s  = _per_cell_scale(delta_prot_carda_s, v_ot_prot_carda)
-    delta_rna_reffit_s  = _per_cell_scale(delta_rna_reffit_s,  v_ot_rna_rf)
-    delta_prot_reffit_s = _per_cell_scale(delta_prot_reffit_s, v_ot_prot_rf)
+    delta_rna_carda_s   = _per_cell_scale(delta_rna_carda_s,  v_ot_rna)
+    delta_prot_carda_s  = _per_cell_scale(delta_prot_carda_s, v_ot_prot)
+    delta_rna_reffit_s  = _per_cell_scale(delta_rna_reffit_s,  v_ot_rna)
+    delta_prot_reffit_s = _per_cell_scale(delta_prot_reffit_s, v_ot_prot)
 
     # ---- Subsample 100 cells per timepoint ----
     n_sub=100
@@ -426,13 +395,13 @@ def make_harissa_BN8(seed=0):
         mh.inter[i, j] = v
 
     prot = np.ones((C, G + 1), dtype='float32')
+    prot[:, 0] = (time > 0).astype(float)
     for ki in range(C):
         sim = mh.simulate(time[ki], burnin=5)
         prot[ki, 1:] = sim.p[-1]
         data[ki + 1, 2:] = np.random.poisson(sim.m[-1])
     rna = data[1:, 1:].copy()
-    prot_scaled = prot / np.max(prot, axis=0)
-    return mh, time, data, rna, prot_scaled, mh.d.copy()
+    return mh, time, data, rna, prot, mh.d.copy()
 
 
 def make_harissa_FN8(seed=0):
@@ -458,13 +427,13 @@ def make_harissa_FN8(seed=0):
         mh.inter[i, j] = v
 
     prot = np.ones((C, G + 1), dtype='float32')
+    prot[:, 0] = (time > 0).astype(float)
     for ki in range(C):
         sim = mh.simulate(time[ki], burnin=5)
         prot[ki, 1:] = sim.p[-1]
         data[ki + 1, 2:] = np.random.poisson(sim.m[-1])
     rna = data[1:, 1:].copy()
-    prot_scaled = prot / np.max(prot, axis=0)
-    return mh, time, data, rna, prot_scaled, mh.d.copy()
+    return mh, time, data, rna, prot, mh.d.copy()
 
 
 def make_harissa_CN5(seed=0):
@@ -488,13 +457,13 @@ def make_harissa_CN5(seed=0):
         mh.inter[i, j] = v
 
     prot = np.ones((C, G + 1), dtype='float32')
+    prot[:, 0] = (time > 0).astype(float)
     for ki in range(C):
         sim = mh.simulate(time[ki], burnin=5)
         prot[ki, 1:] = sim.p[-1]
         data[ki + 1, 2:] = np.random.poisson(sim.m[-1])
     rna = data[1:, 1:].copy()
-    prot_scaled = prot / np.max(prot, axis=0)
-    return mh, time, data, rna, prot_scaled, mh.d.copy()
+    return mh, time, data, rna, prot, mh.d.copy()
 
 
 def make_harissa_FN4(seed=0):
@@ -519,13 +488,13 @@ def make_harissa_FN4(seed=0):
         mh.inter[i, j] = v
 
     prot = np.ones((C, G + 1), dtype='float32')
+    prot[:, 0] = (time > 0).astype(float)
     for ki in range(C):
         sim = mh.simulate(time[ki], burnin=5)
         prot[ki, 1:] = sim.p[-1]
         data[ki + 1, 2:] = np.random.poisson(sim.m[-1])
     rna = data[1:, 1:].copy()
-    prot_scaled = prot / np.max(prot, axis=0)
-    return mh, time, data, rna, prot_scaled, mh.d.copy()
+    return mh, time, data, rna, prot, mh.d.copy()
 
 
 # ---------------------------------------------------------------------------
@@ -549,9 +518,9 @@ def load_schiebinger():
     G               = rna.shape[1]
     model           = CardamomNetworkModel(G-1)
     model.d         = np.load(f'{base}/degradations.npy')
-    model.basal     = np.load(f'{base}/basal_simul.npy')
-    model.inter     = np.load(f'{base}/inter_simul.npy')
-    model.prot      = np.load(f'{base}/data_prot_unitary.npy')
+    model.basal     = np.load(f'{base}/basal.npy')
+    model.inter     = np.load(f'{base}/inter.npy')
+    model.prot      = np.load(f'{base}/data_prot.npy')
     adata_full      = ad.read_h5ad(f'{base}/adata_beta_stim{1.0}_prior{1.0}.h5ad')
     model.rna       = rna.copy()
     model.rna[:, 1:]= adata_full.X.toarray() if scipy.sparse.issparse(adata_full.X) else adata_full.X
@@ -582,7 +551,7 @@ def load_schiebinger():
     # Protein delta
     delta_prot_carda = np.zeros_like(prot_traj, dtype=float)
     for ci in range(prot_traj.shape[0]):
-        _, delta_P = step_ode_modif(d1, ks, model.inter, model.basal,
+        _, delta_P = step_ode_prot(d1, ks, model.inter, model.basal,
                                     1, model.prot[sub_idx, :][ci, :].reshape(1, -1))
         delta_prot_carda[ci] = delta_P[0, 1:]
 
@@ -604,7 +573,7 @@ def load_schiebinger():
         prot_k1 = prot_traj[mask_k1[:N_pair]]
  
         delta_rna_all[mask_k[:N_pair]]  = (rna_k1  - rna_k)  / dt
-        delta_prot_all[mask_k[:N_pair]] = (prot_k1 - prot_k) / dt
+        delta_prot_all[mask_k[:N_pair]] = (prot_k1 - prot_k) 
 
     # ---- Apply per-cell scaling to mechanistic fields ----
     # alpha_i = ||v_ot_i|| / ||v_meca_i||  (preserves direction → cosine sim unchanged)

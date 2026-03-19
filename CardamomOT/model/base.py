@@ -75,8 +75,8 @@ class NetworkModel:
         self.hard_em = 1 # Do we initialize with a hard_em ?
         self.preserve_mean_values = 1 # Do we ensure temporal constraints when fitting the basins in the hard_em ?
         self.mean_forcing_em = 0.5 # at which point we force the mean correction: the higher the more
-        self.force_basins = 1 # Do we want to ensure the means to be preserved by the NB mixture ? It may not preserve multistability
-        self.temporal_basins = 1 # Is it preserved temporally ?
+        self.force_basins = 0 # Do we want to ensure the means to be preserved by the NB mixture ? It may not preserve multistability
+        self.temporal_basins = 0 # Is it preserved temporally ?
         self.transform_proba = 0 # Do we want to force probas to be steep for compatibility with sigmoid model?
         self.seuil = 1e-2 # minimum for beta mixture parameters (second parameters)
 
@@ -105,7 +105,7 @@ class NetworkModel:
         self.update_modes = 1
         self.alpha_threshold= .4 # max = .5 to update alpha at least for important transition
         # Penalization/prior information
-        self.stimulus = 0.5 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
+        self.stimulus = 1.0 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
         self.prior_network_pen = 1.0 # 1 if we don't use prior information. If not we can penalize the non-existing age in prior network with values between 1 and 0: 0 = impossible edge
         # Filtering
         self.filter_network = 0 # Do we filter the network ? It also builds a temporal network using the filter criterium

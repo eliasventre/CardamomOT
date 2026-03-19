@@ -384,7 +384,7 @@ def predict_resp(x, ks, c, s=None, pi=None, pi_zero=None, zi=None) -> tuple[Any,
         """
 
         # Test : impose pi=None (we don't modify the priori on the proportion of basins)
-        # pi = None
+        pi = None
 
         n_components: int = len(ks)
         if pi is None:

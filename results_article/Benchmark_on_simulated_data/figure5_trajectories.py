@@ -149,6 +149,7 @@ def simulate_true_trajectories(model_harissa, time_list, C, seed=0):
     rna_by_time  = [np.zeros((C, G + 1), dtype=float) for _ in range(T)]
     prot_by_time = [np.ones( (C, G + 1), dtype=float) for _ in range(T)]
 
+
     for i in range(C):
         sim = model_harissa.simulate(time_list[0], burnin=5)
         p_prev = sim.p[-1].copy()
@@ -196,11 +197,6 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=100, seed=0):
     print(f"  [sim] Simulating {C} true trajectories for {dataset_name}...")
     rna_by_time, prot_by_time = simulate_true_trajectories(
         model_harissa, time_list, C, seed=seed)
-
-    # Protéines scalées globalement
-    prot_all  = np.vstack(prot_by_time)   # (C*T, G+1)
-    prot_max  = np.maximum(prot_all.max(axis=0), 1e-9)
-    prot_sc_by_time = [prot_by_time[k] / prot_max for k in range(T)]
 
     # Données complètes (toutes les cellules, tous les temps) pour l'inférence
     rna_all  = np.vstack(rna_by_time)     # (C*T, G+1)  col0=stimulus (sauf t0)
@@ -251,7 +247,7 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=100, seed=0):
     #
     # Convention :
     #   rna_by_time[ti]     : (C, G+1)  données vraies à t_k  (col0 = stimulus)
-    #   prot_sc_by_time[ti] : (C, G+1)  protéines vraies scalées à t_k
+    #   prot_by_time[ti] : (C, G+1)  protéines vraies à t_k
     #   rna_inf_by_time[tk] : (C, G+1)  trajectoires RNA inférées par CardamomOT
     #   prot_inf_by_time[tk]: (C, G+1)  trajectoires prot inférées par CardamomOT
     #
@@ -296,8 +292,8 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=100, seed=0):
  
         rna_k   = rna_by_time[ti]        # (C, G+1) vraies données à t_k
         rna_k1  = rna_by_time[ti + 1]    # (C, G+1) vraies données à t_{k+1}
-        prot_k  = prot_sc_by_time[ti]    # (C, G+1) protéines scalées à t_k
-        prot_k1 = prot_sc_by_time[ti + 1]
+        prot_k  = prot_by_time[ti]    # (C, G+1) protéines scalées à t_k
+        prot_k1 = prot_by_time[ti + 1]
  
         rna_inf_k  = rna_inf_by_time[ti]   # (C, G+1) inférées à t_k
         rna_inf_k1 = rna_inf_by_time[ti + 1]  # (C, G+1) inférées à t_{k+1}
@@ -357,7 +353,7 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=100, seed=0):
         # RNA  : sum_j q_ij * || log1p(rna_k1_g[j]) - log1p(rna_k1_g[i]) ||^2
         # Prot : sum_j q_ij * || prot_k1_g[j]        - prot_k1_g[i]       ||^2
         log_rna_k1 = np.log1p(rna_k1_g)    # (C, G)
-        log_prot_k1 = prot_k1_g.copy()
+        log_prot_k1 = np.log1p(prot_k1_g)
 
         metric_carda_tmp = 0
         metric_rf_tmp = 0
@@ -407,7 +403,7 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=100, seed=0):
     for ti in range(T):    # intervalle ti : cellules source à time_list[ti]
         idx = np.random.choice(C, size=min(n_sub, C), replace=False)
         rna_plot_list.append(rna_by_time[ti][idx, 1:].astype(float))
-        prot_plot_list.append(prot_sc_by_time[ti][idx, 1:])
+        prot_plot_list.append(prot_by_time[ti][idx, 1:])
         if ti < T - 1:
             dr_c_list.append(delta_rna_carda[ti][idx])
             dp_c_list.append(delta_prot_carda[ti][idx])
@@ -417,9 +413,9 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=100, seed=0):
             # Dernier temps : pas de successeur, vitesse nulle
             G = rna_by_time[ti].shape[1] - 1
             dr_c_list.append(np.zeros((len(idx), G)))
-            dp_c_list.append(np.zeros((len(idx), prot_sc_by_time[ti].shape[1] - 1)))
+            dp_c_list.append(np.zeros((len(idx), prot_by_time[ti].shape[1] - 1)))
             dr_rf_list.append(np.zeros((len(idx), G)))
-            dp_rf_list.append(np.zeros((len(idx), prot_sc_by_time[ti].shape[1] - 1)))
+            dp_rf_list.append(np.zeros((len(idx), prot_by_time[ti].shape[1] - 1)))
         time_plot_list.extend([time_list[ti]] * len(idx))
  
     rna_sub  = np.vstack(rna_plot_list)
@@ -505,11 +501,6 @@ def make_FN4(seed=0):
 # Schiebinger (identique à figure_5.py)
 # ---------------------------------------------------------------------------
 
-def step_ode_modif(d1, ks, inter, basal, scale, P):
-    a = kon_ref(P, ks, inter, basal)
-    delta_P = d1 * (scale * a - P)
-    return P + delta_P, delta_P
-
 
 def load_schiebinger():
     """
@@ -529,7 +520,7 @@ def load_schiebinger():
     rna_inf  = np.load(f'{base}/data_rna.npy')   # (N, G+1)
     adata_full      = ad.read_h5ad(f'{base}/adata_beta_stim{1.0}_prior{1.0}.h5ad')
     rna_inf[:, 1:]  = adata_full.X.toarray() if scipy.sparse.issparse(adata_full.X) else adata_full.X
-    prot_inf = np.load(f'{base}/data_prot_unitary.npy')  # (N, G+1)
+    prot_inf = np.load(f'{base}/data_prot.npy')  # (N, G+1)
     time_s   = np.load(f'{base}/data_times.npy') # (N,)
  
     # Subsample n_per_time cellules par temps (même seed que le reste)
@@ -566,7 +557,7 @@ def load_schiebinger():
         prot_k1 = prot_sub_sc[mask_k1[:N_pair]]
  
         delta_rna_all[mask_k[:N_pair]]  = (rna_k1  - rna_k)  / dt
-        delta_prot_all[mask_k[:N_pair]] = (prot_k1 - prot_k) / dt
+        delta_prot_all[mask_k[:N_pair]] = (prot_k1 - prot_k) 
  
     # Exclure le dernier temps (pas de successeur) pour le plot
     mask_plot = time_sub < unique_sub[-1]
