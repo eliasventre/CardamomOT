@@ -308,7 +308,7 @@ def compute_umaps(adata_full, adata_sim, adata_perturb, normlog=True):
     project_on_full = False
     """
     adatas = [adata_full, adata_sim, adata_perturb]
-    names  = ['NB mixture', 'Sim WT', 'Sim perturb']
+    names  = ['Reference', 'Sim WT', 'Sim perturb']
 
     for name, A in zip(names, adatas):
         A.obs_names = [f"{name}_{i}" for i in range(A.n_obs)]
@@ -391,13 +391,13 @@ def load_perturbation_data(cfg):
     if cfg['dataset_group'] == 'Semrau' and LABEL in adata_full.obs:
         adata_full.obs[LABEL] = adata_full.obs[LABEL].astype(str).str.replace('_', ' ', regex=False)
     if cfg['dataset_group'] == 'Semrau':
-        adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{STIM}_prior{PRIOR}.h5ad'))
-        adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{STIM}_prior{PRIOR}.h5ad'))
         adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_rna_traj_stim{STIM}_prior{PRIOR}.h5ad'))
-    elif cfg['dataset_group'] == 'Schiebinger':
         adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{STIM}_prior{PRIOR}.h5ad'))
         adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{STIM}_prior{PRIOR}.h5ad'))
+    elif cfg['dataset_group'] == 'Schiebinger':
         adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_beta_stim{STIM}_prior{PRIOR}.h5ad'))
+        adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{STIM}_prior{PRIOR}.h5ad'))
+        adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{STIM}_prior{PRIOR}.h5ad'))
     else:
         adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_rna_traj_stim{0.5}_prior{PRIOR}.h5ad'))
         adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{0.5}_prior{PRIOR}.h5ad'))
@@ -414,7 +414,7 @@ def load_perturbation_data(cfg):
     adata_sim_single = adata_sim_raw.copy()
     if gene in adata_full.var_names:
         idx_gene = np.where(adata_full.var_names == gene)[0][0]
-        adata_sim_single.X[:, idx_gene] = adata_perturb.X[:, idx_gene]
+        adata_sim_single.X[:, idx_gene] = adata_perturb.X[:, idx_gene].mean()
     adata_sim_single = predict_cell_types(adata_sim_single, clf, label_key=LABEL)
 
     adata_perturb_pred = predict_cell_types(adata_perturb.copy(), clf, label_key=LABEL)
@@ -422,7 +422,7 @@ def load_perturbation_data(cfg):
     # Proportions (4 conditions)
     prop_df = compute_proportions(
         [adata_traj_wt, adata_sim_wt, adata_sim_single, adata_perturb_pred],
-        ['NB mixture', 'Sim WT', 'Sim single', 'Sim perturb'],
+        ['Reference', 'Sim WT', 'Sim single', 'Sim perturb'],
         color_map,
     )
 
@@ -615,9 +615,14 @@ def make_figure(perturbations=PERTURBATIONS, save_path='figure_7.pdf'):
     # )
 
     # ── Sauvegarde
-    fig.savefig(save_path, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
-    print(f"\n✅ Figure sauvegardée : {save_path}")
-    plt.show()
+    plt.savefig('figure_7.png', dpi=300, bbox_inches='tight', pad_inches=0.05)
+    print("Saved figure_7.png")
+    try:
+        from PIL import Image
+        Image.open('figure_7.png').convert('RGB').save('figure_7.pdf', 'PDF', resolution=300)
+        print("Saved figure_7.pdf")
+    except ImportError:
+        print("(PIL not available — skipping PDF export)")
     return fig
 
 

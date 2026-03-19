@@ -134,8 +134,11 @@ def main(argv):
     # Generate synthetic data from mixture and simulation models
     print("[check_sim_to_data] Generating synthetic data for distribution comparison...")
     G = np.size(data_real, 0)-1
-    data_ref = np.zeros((G+1, np.size(vect_kon_beta, 0)))
-    data_ref[0, :] = times_data[:]
+    data_ref = np.zeros((G+1, np.size(rna_ref, 0)))
+    N_traj_rna = data_ref.shape[1] // len(np.unique(times_data))
+    for t, time in enumerate(np.sort(np.unique(times_data))):
+        data_ref[0, t*N_traj_rna:(t+1)*N_traj_rna] = time
+    data_ref[0, N_traj_rna*len(np.unique(times_data)):] = times_data[-1]
     data_ref[1:, :] = rna_ref[:, 1:].T
     
     data_beta = np.zeros((G+1, np.size(vect_kon_beta, 0)))
@@ -187,7 +190,7 @@ def main(argv):
 
         adata_rna_traj = ad.AnnData(X=data_ref[1:, :].T)
         adata_rna_traj.var = adata.var.copy()
-        adata_rna_traj.obs['time'] = times_data
+        adata_rna_traj.obs['time'] = data_ref[0, :]
         adata_rna_traj.write(os.path.join(cardamom_dir, f'adata_rna_traj_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
 
         data_prot_traj = np.load(os.path.join(cardamom_dir, 'data_prot_unitary.npy'))

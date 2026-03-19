@@ -298,13 +298,13 @@ def main():
     print("Loading Semrau...")
     (adata_beta_semrau, adata_sim_semrau, adata_traj_semrau, _) = load_dataset(SEMRAU_PATH, 'Semrau')
     beta_semrau_2d, sim_semrau_beta_2d, t_beta_semrau, t_sim_semrau = compute_umap_beta_sim(
-        adata_beta_semrau, adata_sim_semrau)
+        adata_traj_semrau, adata_sim_semrau)
 
     # ── Load Kameneva ────────────────────────────────────────────────────────
     print("Loading Kameneva...")
     (adata_beta_kameneva, adata_sim_kameneva, adata_traj_kameneva, _) = load_dataset(KAMENEVA_PATH, 'Kameneva')
     beta_kameneva_2d, sim_kameneva_beta_2d, t_beta_kameneva, t_sim_kameneva = compute_umap_beta_sim(
-        adata_beta_kameneva, adata_sim_kameneva)
+        adata_traj_kameneva, adata_sim_kameneva)
 
     # ── Load Schiebinger ─────────────────────────────────────────────────────
     print("Loading Schiebinger...")
@@ -353,9 +353,9 @@ def main():
     # ── Cell-type timeline panels G–I ─────────────────────────────────────────
     # 3 bars per timepoint: rna_traj (solid) | adata_beta (mid) | adata_sim (light)
     celltype_configs = [
-        (axes[6], adata_beta_semrau,   adata_sim_semrau,   'Semrau — Cell-type timeline'),
-        (axes[7], adata_beta_kameneva, adata_sim_kameneva, 'Kameneva — Cell-type timeline'),
-        (axes[8], adata_beta_schie,    adata_sim_schie,    'Schiebinger — Cell-type timeline'),
+        (axes[6], adata_traj_semrau,   adata_sim_semrau,   'Semrau — Cell-type timeline'),
+        (axes[7], adata_traj_kameneva, adata_sim_kameneva, 'Kameneva — Cell-type timeline'),
+        (axes[8], adata_traj_schie,    adata_sim_schie,    'Schiebinger — Cell-type timeline'),
     ]
     for ax, a_beta, a_sim, title in celltype_configs:
         draw_celltype_timeline(ax, a_beta, a_sim, title, show_legend=True)
