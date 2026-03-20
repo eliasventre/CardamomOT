@@ -378,18 +378,15 @@ def zinb_logpmf_vectorized(x, ks, c, pi_zero, s=None):
     return logpmf
 
 
-def predict_resp(x, ks, c, s=None, pi=None, pi_zero=None, zi=None) -> tuple[Any, Any]:
+def predict_resp(x, ks, c, s=None, pi=None, pi_zero=None, zi=None, forcing=1.0) -> tuple[Any, Any]:
         """
         Compute the responsibilities.
         """
-
-        # Test : impose pi=None (we don't modify the priori on the proportion of basins)
-        pi = None
-
         n_components: int = len(ks)
         if pi is None:
             pi = np.ones(n_components) / n_components
         else:
+            pi = pi * forcing + (np.ones(n_components) / n_components) * (1 - forcing)
             pi = pi / (pi.sum() + EPS)
 
         if zi is None:
@@ -442,7 +439,7 @@ def hard_em_scaled(data, s, n_components, ks_init, c_init, seuil,
             )
 
         resp_new, log_proba = predict_resp(
-            data, ks_new, c_new, s=s, pi=pi
+            data, ks_new, c_new, s=s, pi=pi, forcing=mean_forcing
             )
         basins_new, pi_new  = _assign_basins(resp_new, data, ks_new, c_new, vect_t,
                                               preserve_mean_values, n_components,
@@ -497,7 +494,7 @@ def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=
         
         # E-step: reassign
         resp_new, log_proba = predict_resp(
-            data, ks_new, c_new, pi=pi
+            data, ks_new, c_new, pi=pi, forcing=mean_forcing
             )
         basins_new, pi_new = _assign_basins(resp_new, data, ks_new, c_new, 
                                             vect_t, preserve_mean_values, 
@@ -1422,7 +1419,7 @@ class NegativeBinomialMixtureEM:
             if aic_final < best_aic:
                 resp_final, _ = predict_resp(
                     x, ks_final, c_final, s=s,
-                    pi_zero=pi_zero_final, zi=self.zi, pi=pi_final
+                    pi_zero=pi_zero_final, zi=self.zi, pi=pi_final, forcing=self.mean_forcing_em
                 )
                 basins, pi_final = _assign_basins(
                     resp_final, x, ks_final, c_final, vect_t,

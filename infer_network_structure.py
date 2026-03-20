@@ -85,7 +85,8 @@ def main(argv):
     data_rna = np.vstack([times, data_rna_extracted]).T
     vect_samples_id = adata.obs['dataset_id'].values if 'dataset_id' in adata.obs else np.zeros(adata.n_obs)
     G = np.size(data_rna, 1)
-    genes_list = ['Stimulus'] + list(adata.var_names[:])
+    genes_list = list(adata.var_names[:])
+    genes_list = ['Stimulus'] + [g.upper() for g in genes_list]
 
     print(f"[infer_network_structure] Starting network inference ({G-1} genes)...")
 
@@ -117,10 +118,11 @@ def main(argv):
         # 2️⃣ S’assurer que les noms des colonnes sont bien des chaînes
         ref_df.columns = ref_df.columns.astype(str)
         ref_df.index = ref_df.index.astype(str)
-        # 3️⃣ Filtrer les gènes présents à la fois dans ref_df et ta liste
-        common_genes = [g for g in genes_list if g in ref_df.index]
+        # Filter genes present in both ref_df and gene list
+        common_genes = [g for g in ref_df.index if g in genes_list]
         # 4️⃣ Extraire la sous-matrice dans le bon ordre (ligne + colonne)
         sub_df = ref_df.loc[common_genes, common_genes]
+        print(f"[infer_network_structure] shape of ref_network = {sub_df.shape}")
         # 5️⃣ Convertir en numpy array si besoin
         ref_mat = sub_df.to_numpy()
         if ref_mat.shape[0] == G:

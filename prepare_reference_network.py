@@ -321,8 +321,8 @@ def subset_adj_by_genes(adj_matrix, node_index_list, gene_list, min_adj = 0):
     - diagonal entries all set to +1
     """
     n = len(gene_list)
-    sub_adj = min_adj * np.ones((n, n), dtype=float) # start with +1 everywhere per spec
-    sub_adj_real = np.zeros((n, n), dtype=float) # start with +1 everywhere per spec
+    sub_adj = min_adj * np.ones((n, n), dtype=float) 
+    sub_adj_real = np.zeros((n, n), dtype=float) 
 
 
     # Fill where both genes exist in node_index_list
@@ -331,19 +331,13 @@ def subset_adj_by_genes(adj_matrix, node_index_list, gene_list, min_adj = 0):
             if g1 in node_index_list and g2 in node_index_list:
                 i0 = node_index_list.index(g1)
                 j0 = node_index_list.index(g2)
-                if adj_matrix[i0, j0] > min_adj:
-                    sub_adj[i, j] = adj_matrix[i0, j0]
-                    sub_adj_real[i, j] = np.sign(adj_matrix[i0, j0])
-            elif g1 not in node_index_list and g2 in node_index_list:
-                sub_adj[i, j] = min_adj
-                sub_adj_real[i, j] = 0
-            else: # Genes not contained can interact between each other 
-                sub_adj[i, j] = 1
-                
+                if abs(adj_matrix[i0, j0]) > min_adj:
+                    sub_adj[i, j] = abs(adj_matrix[i0, j0])
+                    sub_adj_real[i, j] = np.sign(adj_matrix[i0, j0])          
 
     # # ensure diagonal and stimulus = 1
     np.fill_diagonal(sub_adj, 1)
-    sub_adj[0, :] = min_adj
+    sub_adj[0, :] = 1
     return sub_adj, sub_adj_real
 
 
@@ -368,10 +362,14 @@ def main(argv):
     if os.path.exists(data_path):
         adata = ad.read_h5ad(data_path)
     else:
-        raise FileNotFoundError(
-            "There is no data available. Create a subfolder 'Data' in your main folder "
-            "and put inside a count table named 'data.h5ad'."
-        )
+        data_path = os.path.join(p, 'Data', 'data_train.h5ad')
+        if os.path.exists(data_path):
+            adata = ad.read_h5ad(data_path)
+        else:
+            raise FileNotFoundError(
+                "There is no data available. Create a subfolder 'Data' in your main folder "
+                "and put inside a count table named 'data.h5ad'."
+            )
 
     genes_list_init = list(adata.var_names[:])
     genes_list_final = ['Stimulus'] + genes_list_init
@@ -391,7 +389,11 @@ def main(argv):
         visualizer = NetworkVisualizer(ref_network, color_by='effect', noi=True)
         visualizer.render()
 
-        genes_list_final = ['Stimulus'] + genes_list_init
+        nodes_index_list = [g.upper() for g in nodes_index_list]
+        genes_list_final = ['Stimulus'] + [g.upper() for g in genes_list_init]          
+        print("Exemple var_names:", genes_list_final[:5])
+        print("Exemple neko nodes:", nodes_index_list[:5])
+        print("Overlap:", len(set(genes_list_final) & set(nodes_index_list)), "/", len(genes_list_final))
         ref_network_mat, ref_network_real = subset_adj_by_genes(adj_matrix, nodes_index_list, genes_list_final)
         print('prior network', ref_network_mat)
         
@@ -405,7 +407,7 @@ def main(argv):
                         columns=genes_list_final)
 
     else:
-        path_ref = os.path.join(p, 'cardamom', 'ref_network.csv')
+        path_ref = os.path.join(p, 'cardamomOT', 'ref_network.csv')
         if os.path.exists(path_ref):
             df = pd.read_csv(path_ref, index_col=0)
         else:
@@ -413,7 +415,7 @@ def main(argv):
                         index=genes_list_final, 
                         columns=genes_list_final)
 
-    df.to_csv(p+"cardamom/ref_network.csv")
+    df.to_csv(p+"cardamomOT/ref_network.csv")
 
 
 if __name__ == "__main__":

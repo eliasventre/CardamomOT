@@ -15,11 +15,11 @@ mean="$5"
 # echo "Inference rd"
 # python infer_rd.py -i "${input_dir}" 
 
-echo "Select DE genes and split cells"
-python select_DEgenes_and_split.py -i "${input_dir}" -c "${change}" -r "${rate}" -s "${split}" -m "${mean}"
+# echo "Select DE genes and split cells"
+# python select_DEgenes_and_split.py -i "${input_dir}" -c "${change}" -r "${rate}" -s "${split}" -m "${mean}"
 
 # echo "Compute prior network"
-# python prepare_reference_network.py -i "${input_dir}" -d 3
+# python prepare_reference_network.py -i "${input_dir}" -d 4
 
 # echo "Get kinetic rates"
 # python get_kinetic_rates.py -i "${input_dir}" -s "${split}"
@@ -48,10 +48,10 @@ python check_sim_to_data.py -i "${input_dir}" -s "${split}"
 #     python check_test_to_train.py -i "${input_dir}" -s "${split}" 
 # fi
 
-# echo "Simulate KOV"
-# python simulate_network_KOV.py -i "${input_dir}" -s "${split}"
+echo "Simulate KOV"
+python simulate_network_KOV.py -i "${input_dir}" -s "${split}"
 
-# echo "Check KOV"
-# python check_KOV_to_sim.py -i "${input_dir}" -s "${split}" 
+echo "Check KOV"
+python check_KOV_to_sim.py -i "${input_dir}" -s "${split}" 
 
 echo "All scripts executed !"

@@ -20,7 +20,7 @@ import rf
 # Code adapted from https://github.com/zsteve/referencefitting/tree/main
 
 # Number of runs
-N = 1
+N = 10
 # Print information
 verb = 1
 # number of initial couplings
@@ -108,7 +108,7 @@ for net in Networks:
         fname = f'{net}/Data/data_{r + 1}.txt'
         raw_matrix = np.loadtxt(fname, delimiter='\t').astype(np.int64)
         timepoints = raw_matrix[0, 1:]
-        data_rna = raw_matrix[1:, 1:].T 
+        data_rna = raw_matrix[1:, 1:].T
         genes_names = raw_matrix[:, 0]
         adata = ad.AnnData(X=data_rna)
         adata.var_names = genes_names[1:].astype(str)

@@ -106,7 +106,8 @@ def main(argv):
     
     data_rna = np.vstack([times, data_rna_extracted]).T
     G = np.size(data_rna, 1)
-    genes_list = ['Stimulus'] + list(adata.var_names[:])
+    genes_list = list(adata.var_names[:])
+    genes_list = ['Stimulus'] + [g.upper() for g in genes_list]
     print(f"[infer_network_simul] Data shape: {G} genes, {np.size(data_rna, 0)} cells")
 
     model = NetworkModel_beta(G-1)
@@ -149,9 +150,10 @@ def main(argv):
             ref_df.columns = ref_df.columns.astype(str)
             ref_df.index = ref_df.index.astype(str)
             # Filter genes present in both ref_df and gene list
-            common_genes = [g for g in genes_list if g in ref_df.index]
+            common_genes = [g for g in ref_df.index if g in genes_list]
             # Extract submatrix in correct order
             sub_df = ref_df.loc[common_genes, common_genes]
+            print(f"[infer_network_structure] shape of ref_network = {sub_df.shape}")
             # Convert to numpy array
             ref_mat = sub_df.to_numpy()
             if ref_mat.shape[0] == G:
