@@ -75,8 +75,8 @@ class NetworkModel:
         self.hard_em = 1 # Do we initialize with a hard_em ?
         self.preserve_mean_values = 1 # Do we ensure temporal constraints when fitting the basins in the hard_em ?
         self.mean_forcing_em = 0.5 # at which point we force the mean correction: the higher the more
-        self.force_basins = 0 # Do we want to ensure the means to be preserved by the NB mixture ? It may not preserve multistability
-        self.temporal_basins = 0 # Is it preserved temporally ?
+        self.force_basins = 1 # Do we want to ensure the means to be preserved by the NB mixture ? It may not preserve multistability
+        self.temporal_basins = 1 # Is it preserved temporally ?
         self.transform_proba = 0 # Do we want to force probas to be steep for compatibility with sigmoid model?
         self.seuil = 1e-2 # minimum for beta mixture parameters (second parameters)
 
@@ -86,7 +86,7 @@ class NetworkModel:
         # Loop for the inference
         self.n_loops = 10 # minimal number of iterations in inference loops
         self.count_max = 5 # Stopping criteria
-        self.max_iter = 40 # max iteration for main loop
+        self.max_iter = 35 # max iteration for main loop
         # Trajectory inference with OT
         self.stopThr_init = 1e-7 # initial tolerance for sinkhorn algorithm
         self.batch_size = 1024 # Maximum number of cells used per time point per sample for inference.
