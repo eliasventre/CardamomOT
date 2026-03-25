@@ -168,7 +168,7 @@ def draw_mean_sd(ax, x_data, x_sim, t_data, t_sim, gene_idx, gene_name,
     for sp in ax.spines.values():
         sp.set_linewidth(0.6)
     if show_legend:
-        ax.legend(fontsize=5, frameon=False, loc='upper right')
+        ax.legend(fontsize=5, frameon=False, loc='upper center')
 
 
 def draw_hist(ax, vals_data, vals_sim, title, n_bins=22, show_legend=False, show_xlabel=True, show_ylabel=True):
