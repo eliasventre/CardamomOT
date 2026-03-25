@@ -96,8 +96,8 @@ def plot_stream(ax, embedding, velocity, time_vals, title, size=15,
                 add_colorbar=False, density=1, smooth=0.5):
     scv.pl.velocity_embedding_stream(
         make_adata_plot(embedding, velocity, time_vals),
-        basis='umap', ax=ax, color='time', cmap='viridis',
-        alpha=1, size=size, show=False, colorbar=False,
+        basis='umap', ax=ax, color='time', cmap='viridis', arrow_color=(0.85, 0.0, 0.0, 1.0),
+        alpha=0.2, size=size, show=False, colorbar=False,
         density=density, smooth=smooth)
     ax.set_xlabel('UMAP 1')
     ax.set_ylabel('UMAP 2')
@@ -687,13 +687,13 @@ def main():
     DENSITY, SMOOTH = 1, 0.5
     stream_configs = [
         (axes[2], CN5['UMAPs']['rna'],  CN5['UMAPs']['rna_carda'],  cn5_time,
-         'RNA velocity – CardamomOT (CN5)',            15, False),
+         'RNA velocity – CardamomOT (CN5)',            100, False),
         (axes[3], p2d_CN5,              dp_c_2d_CN5,               cn5_time,
-         'Protein velocity – CardamomOT (CN5)',        15, True),
+         'Protein velocity – CardamomOT (CN5)',        100, True),
         (axes[4], CN5['UMAPs']['rna'],  CN5['UMAPs']['rna_rf'],     cn5_time,
-         'RNA velocity – ReferenceFitting (CN5)',      15, False),
+         'RNA velocity – ReferenceFitting (CN5)',      100, False),
         (axes[5], p2d_CN5,              dp_rf_2d_CN5,              cn5_time,
-         'Protein velocity – ReferenceFitting (CN5)',  15, True),
+         'Protein velocity – ReferenceFitting (CN5)',  100, True),
         (axes[6], rna_2d_s,             dr_s,                      time_s,
          'RNA velocity – CardamomOT (Schiebinger)',              5, False),
         (axes[7], prot_2d_s,            dp_s,                      time_s,

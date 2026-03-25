@@ -218,8 +218,10 @@ def draw_celltype_timeline(ax, adata_beta, adata_sim, title,
         pb  = np.array([d[ct] for d in props_beta])
         ps  = np.array([d[ct] for d in props_sim])
 
-        bar = ax.bar(x - w/2, pb, w, bottom=bots[0], color=col, label=ct)
-        ax.bar(x + w/2, ps, w, bottom=bots[1], color=col, alpha=0.45, edgecolor='none')
+        bar = ax.bar(x - w/2, pb, w, bottom=bots[0], color=col, label=ct,
+                edgecolor='black', linewidth=0.2)
+        ax.bar(x + w/2, ps, w, bottom=bots[1], color=col,
+             edgecolor='black', linewidth=0.2)
 
         if ct not in used_labels:
             handles.append(bar); used_labels.append(ct)
@@ -381,7 +383,7 @@ def main():
                 ax,
                 a_traj, a_beta, a_sim,
                 gene_idx, f'{dset} — {gnames[gene_idx]}',
-                show_legend=show_main_annotations,
+                show_legend=False,
                 show_xlabel=is_last_dataset,   # 'Time' only for M N O
                 show_ylabel=show_main_annotations,
             )

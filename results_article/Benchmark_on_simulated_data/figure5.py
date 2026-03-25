@@ -96,8 +96,8 @@ def plot_stream(ax, embedding, velocity, time_vals, title, size=15, add_colorbar
                 density=1, smooth=0.5):
     scv.pl.velocity_embedding_stream(
         make_adata_plot(embedding, velocity, time_vals),
-        basis='umap', ax=ax, color='time', cmap='viridis',
-        alpha=1, size=size, show=False, colorbar=False,
+        basis='umap', ax=ax, color='time', cmap='viridis', arrow_color=(0.85, 0.0, 0.0, 1.0),
+        alpha=0.2, size=size, show=False, colorbar=False,
         density=density, smooth=smooth)
     ax.set_xlabel('UMAP 1')
     ax.set_ylabel('UMAP 2')
@@ -688,7 +688,7 @@ def main():
     width = 0.35
 
     bar_configs = [
-        (axes[0], 'rna',  'Comparison of RNA Similarities Across Datasets',     (-0.5, 1), False),
+        (axes[0], 'rna',  'Comparison of RNA Similarities Across Datasets',     (-0.2, 1), False),
         (axes[1], 'prot', 'Comparison of Protein Similarities Across Datasets', (0,    1), True),
     ]
     for ax, score_key, title, ylim, show_legend in bar_configs:
@@ -728,13 +728,13 @@ def main():
     DENSITY, SMOOTH = 1, 0.5
     stream_configs = [
         (axes[2], CN5_UMAPs['rna'],  CN5_UMAPs['rna_carda'],    fn4_time,
-         'RNA trajectories - CardamomOT',           15, False),
+         'RNA trajectories - CardamomOT',           100, False),
         (axes[3], prot_traj_2d_CN5,  delta_prot_carda_2d_CN5,   fn4_time,
-         'Protein trajectories - CardamomOT',       15, True),
+         'Protein trajectories - CardamomOT',       100, True),
         (axes[4], CN5_UMAPs['rna'],  CN5_UMAPs['rna_reffit'],   fn4_time,
-         'RNA trajectories - Reference Fitting',    15, False),
+         'RNA trajectories - Reference Fitting',    100, False),
         (axes[5], prot_traj_2d_CN5,  delta_prot_reffit_2d_CN5,  fn4_time,
-         'Protein trajectories - Reference Fitting',15, True),
+         'Protein trajectories - Reference Fitting',100, True),
         (axes[6], rna_traj_2d,       delta_rna_carda_2d,        time_schiebinger,
          'RNA trajectories - CardamomOT - Schiebinger',              5, False),
         (axes[7], prot_traj_2d,      delta_prot_carda_2d,       time_schiebinger,
