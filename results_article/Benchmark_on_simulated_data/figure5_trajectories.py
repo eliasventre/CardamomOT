@@ -600,7 +600,7 @@ def load_schiebinger():
 def main():
     TIME_LIST = [0, 6, 12, 24, 36, 48, 60, 72, 84, 96]
     C      = 100   # cellules par trajectoire
-    N_RUNS = 5     # jeux de données par réseau
+    N_RUNS = 3     # jeux de données par réseau
 
     DATASETS = [
         ('BN8', make_BN8),

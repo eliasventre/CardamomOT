@@ -102,7 +102,7 @@ class NetworkModel:
         self.compute_with_proba = 0 # Determine if compute with proba or kon values in network inference (recommended:1)
         self.weight_prev = .4 # max = .5 to not withdrawn the inference on timepoints, allows the calibration to incorporate some "flow-matching" method
         # Inference of alpha = switch moment between each timepoint and modes
-        self.update_modes = 1
+        self.update_modes = 0
         self.alpha_threshold= .4 # max = .5 to update alpha at least for important transition
         # Penalization/prior information
         self.stimulus = 1.0 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
@@ -222,7 +222,7 @@ class NetworkModel:
             cg_old, cg = cg, np.minimum(9, cg) # No need of having a variance too low
             kg *= cg / cg_old
             frequency_modes_smooth[:, g] = np.sum(kg * tmpg, axis=1)
-            if verb and g <= len(gene_names): print('Gene {}-{} calibrated...'.format(g, gene_names[g-1]), kg, cg)
+            if verb and g <= len(gene_names): print('Gene {}-{} calibrated...'.format(g, gene_names[g-1]), kg, cg, probag)
             if len(kg) > n_components:
                 n_components = len(kg)
             ks.append(kg)
@@ -239,14 +239,14 @@ class NetworkModel:
         self.a[:, 0] = 1
         for g in range(1, G_tot):
             self.a[:len(ks[g-1]), g] = ks[g-1][:]
-            frequency_proba_init[:, g, :len(ks[g-1])] = proba_init[g-1]
-            frequency_proba_init[:, g, len(ks[g-1]):] = 0
-            frequency_proba_modif[:, g, :len(ks[g-1])] = proba_modif[g-1]
-            frequency_proba_modif[:, g, len(ks[g-1]):] = 0
+            frequency_proba_init[:, g, :len(ks[g-1])] = np.minimum(proba_init[g-1], 1-1e-16)
+            frequency_proba_init[:, g, len(ks[g-1]):] = 1e-16
+            frequency_proba_modif[:, g, :len(ks[g-1])] = np.minimum(proba_modif[g-1], 1-1e-16)
+            frequency_proba_modif[:, g, len(ks[g-1]):] = 1e-16
         self.a[-1, :] = c[:]
         self.pi_init = pi_init
         
-        scale_max = np.max(self.a[:-1, :], 0)
+        scale_max = np.max(self.a[:-1, :], axis=0)
         frequency_modes_smooth /= scale_max
 
         if verb: print('Mean proba = ', np.mean(np.max(frequency_proba_init[:, 1:, :], axis=-1)), 
@@ -335,7 +335,6 @@ class NetworkModel:
                 x_maxg = max(np.max(xs[indices, g]), x_max / (lmax - cnt_z))
                 res[indices, g] = a[g] + (b[g]-a[g]) * (cnt_z + 
                                                 (np.clip(xs[indices, g], x_ming, x_maxg) / (x_maxg + 1e-16))**p) / lmax
-        # print(np.mean(res, axis=0), np.mean(mu, axis=0))
         return res * self.scale_proteins
     
 

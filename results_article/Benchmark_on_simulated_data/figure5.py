@@ -630,7 +630,7 @@ def load_schiebinger():
 # ---------------------------------------------------------------------------
 
 def main():
-    N_RUNS = 5   # nombre de jeux de données simulés par réseau
+    N_RUNS = 3   # nombre de jeux de données simulés par réseau
 
     DATASETS = [
         ('BN8', make_harissa_BN8),
