@@ -46,7 +46,7 @@ def configure(ax):
     ax.tick_params(axis='x', pad=2, labelsize=5.5)
     ax.tick_params(axis='y', pad=0.5, labelsize=5.5)
     for side in ['top','bottom','left','right']: ax.spines[side].set_linewidth(w)
-    ax.set_ylim(0,1)
+    ax.set_ylim(0,1.1)
 
 opt_box = {'patch_artist': True, 'widths': [.25]}
 def configure_box(box, col):

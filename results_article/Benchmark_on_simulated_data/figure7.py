@@ -270,6 +270,30 @@ def compute_proportions(adatas, labels, color_map):
     return pd.DataFrame(prop)
 
 
+from scipy.stats import chi2_contingency
+
+def chi2_test_from_proportions(prop_df, n_cells=1000):
+    """
+    Approxime un test du chi2 à partir de proportions en reconstruisant
+    des effectifs (n_cells arbitraire mais identique pour les deux conditions).
+    """
+    try:
+        p_single = prop_df['Sim single'].values
+        p_pert   = prop_df['Sim perturb'].values
+
+        # reconstruire des comptes
+        counts_single = np.round(p_single * n_cells)
+        counts_pert   = np.round(p_pert * n_cells)
+
+        table = np.vstack([counts_single, counts_pert])
+
+        chi2, pval, _, _ = chi2_contingency(table)
+        return chi2, pval
+    except Exception:
+        return None, None
+    
+
+
 def draw_barplot(ax, prop_df, color_map, show_xlabels='none'):
     """
     Barplot empilé des proportions de types cellulaires.
@@ -293,7 +317,7 @@ def draw_barplot(ax, prop_df, color_map, show_xlabels='none'):
     ax.spines[['top', 'right']].set_visible(False)
 
     if show_xlabels == 'top':
-        ax.xaxis.set_tick_params(labeltop=True, labelbottom=False)
+        ax.xaxis.set_tick_params(labeltop=True, labelbottom=False, pad=9)
         ax.set_xticklabels(prop_df.columns, fontsize=6, rotation=30, ha='left')
     else:
         ax.set_xticklabels([])
@@ -335,7 +359,7 @@ def compute_umaps(adata_full, adata_sim, adata_perturb, normlog=True):
     return adata_full, adata_sim, adata_perturb
 
 
-def draw_umap_panel(axes_row, adata_full, adata_sim, adata_perturb, color_map, point_size=3):
+def draw_umap_panel(axes_row, adata_full, adata_sim, adata_perturb, color_map, point_size=3, rotate=False):
     """Dessine 3 sub-axes UMAP colorés par cell_type (ou time si absent)."""
     triples = [
         (adata_full,    'Reference data'),
@@ -346,6 +370,8 @@ def draw_umap_panel(axes_row, adata_full, adata_sim, adata_perturb, color_map, p
 
     for ax, (A, title) in zip(axes_row, triples):
         coords = A.obsm['X_umap']
+        if rotate:
+            coords = -coords
 
         if use_celltype and LABEL in A.obs:
             for cat, col in color_map.items():
@@ -426,6 +452,8 @@ def load_perturbation_data(cfg):
         color_map,
     )
 
+    chi2_stat, chi2_pval = chi2_test_from_proportions(prop_df)
+
     # UMAP joint sur 3 conditions
     af_umap, as_umap, ap_umap = compute_umaps(
         adata_traj_wt.copy(), adata_sim_wt.copy(), adata_perturb_pred.copy()
@@ -443,6 +471,8 @@ def load_perturbation_data(cfg):
         ap_umap   = ap_umap,
         label     = cfg['label'],
         mode      = cfg['mode'],
+        chi2_stat = chi2_stat,
+        chi2_pval = chi2_pval,
     )
 
 # ──────────────────────────────────────────────────────────────
@@ -529,12 +559,37 @@ def make_figure(perturbations=PERTURBATIONS, save_path='figure_7.pdf'):
         # Col 2 : barplot (labels en haut pour la 1ère ligne seulement)
         draw_barplot(axes_bar[row], data['prop_df'], data['color_map'],
                      show_xlabels='top' if row == 0 else 'none')
+        
+        # --- Affichage test chi2 ---
+        if data.get('chi2_pval') is not None:
+            pval = data['chi2_pval']
+            txt = f"$\\chi^2$ p = {pval:.1e}"
+
+            axes_bar[row].text(
+                0.75, 1.02,
+                txt,
+                transform=axes_bar[row].transAxes,
+                ha='center', va='bottom',
+                fontsize=5.2,
+                color='#222222',
+                bbox=dict(
+                    boxstyle='round,pad=0.25',
+                    facecolor='#F8F8F8',
+                    edgecolor='#BBBBBB',
+                    linewidth=0.6,
+                    alpha=0.9
+                )
+            )
 
         # Col 3 : UMAPs
         _pt_size = 1 if cfg['dataset_group'] == 'Schiebinger' else 3
+        rotate = row in [2]
+
         draw_umap_panel(umap_subaxes[row],
                         data['af_umap'], data['as_umap'], data['ap_umap'],
-                        data['color_map'], point_size=_pt_size)
+                        data['color_map'],
+                        point_size=_pt_size,
+                        rotate=rotate)
 
         # Sous-titres UMAP uniquement pour la première ligne
         if row == 0:
