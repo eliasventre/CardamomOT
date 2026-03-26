@@ -684,7 +684,7 @@ def main():
     dp_c_2d_CN5  = umap_p_CN5.transform(prot_CN5 + dp_c_CN5)  - p2d_CN5
     dp_rf_2d_CN5 = umap_p_CN5.transform(prot_CN5 + dp_rf_CN5) - p2d_CN5
 
-    DENSITY, SMOOTH = 1, 0.5
+    DENSITY, SMOOTH = 0.8, 0.7
     stream_configs = [
         (axes[2], CN5['UMAPs']['rna'],  CN5['UMAPs']['rna_carda'],  cn5_time,
          'RNA velocity – CardamomOT (CN5)',            100, False),

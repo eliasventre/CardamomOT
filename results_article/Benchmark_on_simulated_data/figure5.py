@@ -725,7 +725,7 @@ def main():
     delta_prot_reffit_2d_CN5 = umap_prot_CN5.transform(prot_CN5 + delta_prot_reffit_CN5 * 0.1) - prot_traj_2d_CN5
 
     # --- Stream plot config ---
-    DENSITY, SMOOTH = 1, 0.5
+    DENSITY, SMOOTH = 0.8, 0.7
     stream_configs = [
         (axes[2], CN5_UMAPs['rna'],  CN5_UMAPs['rna_carda'],    fn4_time,
          'RNA trajectories - CardamomOT',           100, False),

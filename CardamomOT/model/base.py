@@ -25,6 +25,7 @@ from ..inference import (inference_network, filter_network,
                         inference_degradation_prot, inference_epsilon_temporal)
 
 np.set_printoptions(precision=3, suppress=True)
+EPS=1e-16
 
 class NetworkModel:
     """
@@ -102,7 +103,7 @@ class NetworkModel:
         self.compute_with_proba = 0 # Determine if compute with proba or kon values in network inference (recommended:1)
         self.weight_prev = .4 # max = .5 to not withdrawn the inference on timepoints, allows the calibration to incorporate some "flow-matching" method
         # Inference of alpha = switch moment between each timepoint and modes
-        self.update_modes = 0
+        self.update_modes = 1
         self.alpha_threshold= .4 # max = .5 to update alpha at least for important transition
         # Penalization/prior information
         self.stimulus = 1.0 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
@@ -232,17 +233,17 @@ class NetworkModel:
             pi_zeros[g-1] = pi_zerog
             pi_init.append(pi_initg)
 
-        self.a = np.zeros((n_components+1, G_tot)) + self.seuil
+        self.a = np.zeros((n_components+1, G_tot)) + self.seuil / 10
         frequency_proba_init = np.zeros((N_cells, G_tot, n_components))
         frequency_proba_init[:N_cells_0, 0, 0], frequency_proba_init[N_cells_0:, 0, -1] = 1, 1 # the stimulus is in high mode after 0
         frequency_proba_modif = frequency_proba_init.copy()
         self.a[:, 0] = 1
         for g in range(1, G_tot):
             self.a[:len(ks[g-1]), g] = ks[g-1][:]
-            frequency_proba_init[:, g, :len(ks[g-1])] = np.minimum(proba_init[g-1], 1-1e-16)
-            frequency_proba_init[:, g, len(ks[g-1]):] = 1e-16
-            frequency_proba_modif[:, g, :len(ks[g-1])] = np.minimum(proba_modif[g-1], 1-1e-16)
-            frequency_proba_modif[:, g, len(ks[g-1]):] = 1e-16
+            frequency_proba_init[:, g, :len(ks[g-1])] = proba_init[g-1]
+            frequency_proba_init[:, g, len(ks[g-1]):] = 0
+            frequency_proba_modif[:, g, :len(ks[g-1])] = proba_modif[g-1]
+            frequency_proba_modif[:, g, len(ks[g-1]):] = 0
         self.a[-1, :] = c[:]
         self.pi_init = pi_init
         
@@ -311,7 +312,7 @@ class NetworkModel:
 
     def adaptive_shrinkage(self, x, mu, fact=2, p=2):
         d = x - mu
-        alpha = (np.abs(d) / (fact * (1e-12 + mu)))**p
+        alpha = (np.abs(d) / (fact * (EPS + mu)))**p
         weight = alpha / (1 + alpha)
         res = x * (1 - weight) + mu * weight
         return res * self.scale_proteins
@@ -334,7 +335,7 @@ class NetworkModel:
                 x_ming = min(np.min(xs[indices, g]), x_max / (1 + lmax - cnt_z))
                 x_maxg = max(np.max(xs[indices, g]), x_max / (lmax - cnt_z))
                 res[indices, g] = a[g] + (b[g]-a[g]) * (cnt_z + 
-                                                (np.clip(xs[indices, g], x_ming, x_maxg) / (x_maxg + 1e-16))**p) / lmax
+                                                (np.clip(xs[indices, g], x_ming, x_maxg) / (x_maxg + EPS))**p) / lmax
         return res * self.scale_proteins
     
 
@@ -703,7 +704,7 @@ class NetworkModel:
                             obj_i = obj[indices].copy()
                             n_cells_i = np.sum(indices)
                             mu = np.ones(n_cells_i)/n_cells_i
-                            if self.force_basins: nu = self.pi_init[g-1][t_i]
+                            if self.force_basins: nu = self.pi_init[g-1][t_i][:l_max]
                             else: nu = np.sum(proba_i[:, :l_max], axis=0)
                             nu /= np.sum(nu)
                             diff_k = np.maximum(1 - np.abs(kon_vector_formodes[indices, g, None] - obj_i), self.seuil)
@@ -725,12 +726,13 @@ class NetworkModel:
                         proba = self.proba_init[:, g, :l_max].copy()
                         mu = np.ones(n_cells)/n_cells
                         if self.force_basins: nu = np.sum([self.pi_init[g-1][t_i] * np.sum(vect_t == t_i)/n_cells 
-                                                       for t_i in times], axis=0)
+                                                    for t_i in times], axis=0)[:l_max]
                         else: nu = np.sum(proba[:, :l_max], axis=0)
                         nu /= np.sum(nu)
                         diff_k = np.maximum(1 - np.abs(kon_vector_formodes[:, g, None] - obj), self.seuil)
                         dist = - (np.log(proba) + (1 - weight_prob) * to_keep_for_update[:, None] * 
                                                     np.log(diff_k/np.max(diff_k, axis=1, keepdims=True)))
+                        dist = np.clip(dist, 1e-4, 100)
                         if n_iter <= n_loops: 
                             try: 
                                 coupling = ot.bregman.sinkhorn(mu, nu, dist, reg=reg, numItermax=int(10000/reg), stopThr=self.stopThr_init*10)
@@ -854,8 +856,8 @@ class NetworkModel:
         ]
 
         # --- Extract kinetic parameters ---
-        ks = (self.a[:-1] / np.clip(np.max(self.a[:-1], axis=0), 1e-12, None)).T
-        s1 = self.fact_simple * self.a[-1, 1:] / np.clip(np.max(self.a[:-1, 1:], axis=0), 1e-12, None)
+        ks = (self.a[:-1] / np.clip(np.max(self.a[:-1], axis=0), EPS, None)).T
+        s1 = self.fact_simple * self.a[-1, 1:] / np.clip(np.max(self.a[:-1, 1:], axis=0), EPS, None)
         s1 *= self.scale_proteins
 
         # --- Infer theta (basal/interactions) on reduced simulations with mixing ---
