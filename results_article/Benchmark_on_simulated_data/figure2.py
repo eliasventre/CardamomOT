@@ -148,7 +148,7 @@ def draw_umap(ax, coords, ct_arr, unique_cts, ct_colors, title, s=10, show_xlabe
 
 
 def draw_mean_sd(ax, x_data, x_sim, t_data, t_sim, gene_idx, gene_name,
-                 show_legend=False, show_xlabel=True, show_ylabel=True):
+                 dataset_name=None, show_legend=False, show_xlabel=True, show_ylabel=True):
     unique_t = np.sort(np.unique(t_data))
     for X, time_arr, color, label in [
         (x_data, t_data, REF_COLOR, 'Reference'),
@@ -159,7 +159,8 @@ def draw_mean_sd(ax, x_data, x_sim, t_data, t_sim, gene_idx, gene_name,
         ax.fill_between(unique_t, np.maximum(means - stds, 0), means + stds,
                         color=color, alpha=0.18)
         ax.plot(unique_t, means, color=color, lw=1.5, label=label)
-    ax.set_title(gene_name, fontsize=7, pad=2)
+    title = f'{dataset_name} — {gene_name}' if dataset_name else gene_name
+    ax.set_title(title, fontsize=7, pad=2)
     if show_xlabel:
         ax.set_xlabel('Time', fontsize=6, labelpad=2)
     if show_ylabel:
@@ -168,7 +169,7 @@ def draw_mean_sd(ax, x_data, x_sim, t_data, t_sim, gene_idx, gene_name,
     for sp in ax.spines.values():
         sp.set_linewidth(0.6)
     if show_legend:
-        ax.legend(fontsize=5, frameon=False, loc='upper right')
+        ax.legend(fontsize=5, frameon=False, loc='upper center')
 
 
 def draw_hist(ax, vals_data, vals_sim, title, n_bins=22, show_legend=False, show_xlabel=True, show_ylabel=True):
@@ -336,21 +337,21 @@ def main():
     for i, gene_idx in enumerate(SCHIE_GENES):
         ax = fig.add_subplot(gs_Bt[0, i])
         draw_mean_sd(ax, x_sd, x_ss, t_sd, t_ss,
-                     gene_idx, gnames_s[gene_idx],
+                     gene_idx, gnames_s[gene_idx], dataset_name='Schiebinger',
                      show_legend=(i == 0), show_xlabel=False, show_ylabel=(i == 0))
 
     # F: mean+/-SD Semrau (x-label shown here)
     for i, gene_idx in enumerate(SEMRAU_GENES):
         ax = fig.add_subplot(gs_Br[0, i])
         draw_mean_sd(ax, x_rd, x_rs, t_rd, t_rs,
-                     gene_idx, gnames_r[gene_idx],
+                     gene_idx, gnames_r[gene_idx], dataset_name='Semrau',
                      show_legend=False, show_xlabel=True, show_ylabel=(i == 0))
 
     # G: histos gene 1 (no x-label)
     gene_name_0 = gnames_s[HIST_GENES[0]]
     ax0 = fig.add_subplot(gs_Ct[0, 0])
     draw_hist(ax0, x_sd[:, HIST_GENES[0]], x_ss[:, HIST_GENES[0]],
-              f'{gene_name_0}  —  t = 0h', show_legend=True, show_xlabel=False, show_ylabel=True)
+              f'Schiebinger - {gene_name_0} - All times', show_legend=True, show_xlabel=False, show_ylabel=True)
     for col, tp in enumerate(sel_times):
         ax = fig.add_subplot(gs_Ct[0, col + 1])
         draw_hist(ax, x_sd[t_sd == tp, HIST_GENES[0]],
@@ -361,7 +362,7 @@ def main():
     gene_name_1 = gnames_s[HIST_GENES[1]]
     ax0 = fig.add_subplot(gs_Cb[0, 0])
     draw_hist(ax0, x_sd[:, HIST_GENES[1]], x_ss[:, HIST_GENES[1]],
-              f'{gene_name_1}  —  t = 0h', show_legend=False, show_xlabel=True, show_ylabel=True)
+              f'Schiebinger - {gene_name_1} - All times', show_legend=False, show_xlabel=True, show_ylabel=True)
     for col, tp in enumerate(sel_times):
         ax = fig.add_subplot(gs_Cb[0, col + 1])
         draw_hist(ax, x_sd[t_sd == tp, HIST_GENES[1]],
