@@ -1,5 +1,9 @@
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 3.066108942031860352e+00
+=======
+2.740364789962768555e+00
+>>>>>>> Stashed changes
 =======
 2.740364789962768555e+00
 >>>>>>> Stashed changes
