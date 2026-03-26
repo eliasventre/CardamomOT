@@ -63,8 +63,13 @@ def _to_dense(X):
 # ---------------------------------------------------------------------------
 
 # STIM hyperparameter per dataset (from figure_7)
+<<<<<<< Updated upstream
 STIM  = {'Semrau': 1.0, 'Kameneva': 0.2, 'Schiebinger': 1.0}
 PRIOR = 1.0
+=======
+STIM  = {'Semrau': 1.0, 'Kameneva': 1.0, 'Schiebinger': 1.0}
+PRIOR = 0.5
+>>>>>>> Stashed changes
 
 
 def load_dataset(base_path, dataset_name):
