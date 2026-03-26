@@ -223,7 +223,7 @@ class NetworkModel:
             cg_old, cg = cg, np.minimum(9, cg) # No need of having a variance too low
             kg *= cg / cg_old
             frequency_modes_smooth[:, g] = np.sum(kg * tmpg, axis=1)
-            if verb and g <= len(gene_names): print('Gene {}-{} calibrated...'.format(g, gene_names[g-1]), kg, cg, probag)
+            if verb and g <= len(gene_names): print('Gene {}-{} calibrated...'.format(g, gene_names[g-1]), kg, cg)
             if len(kg) > n_components:
                 n_components = len(kg)
             ks.append(kg)
