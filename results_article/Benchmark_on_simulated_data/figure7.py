@@ -425,15 +425,9 @@ def load_perturbation_data(cfg):
         adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{STIM}_prior{PRIOR}.h5ad'))
         adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{STIM}_prior{PRIOR}.h5ad'))
     else:
-<<<<<<< Updated upstream
-        adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_rna_traj_stim{0.2}_prior{PRIOR}.h5ad'))
-        adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{0.2}_prior{PRIOR}.h5ad'))
-        adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{0.2}_prior{PRIOR}.h5ad'))
-=======
-        adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_rna_traj_stim{STIM}_prior{PRIOR}.h5ad'))
-        adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{STIM}_prior{PRIOR}.h5ad'))
-        adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{STIM}_prior{PRIOR}.h5ad'))
->>>>>>> Stashed changes
+        adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_rna_traj_stim{0.5}_prior{PRIOR}.h5ad'))
+        adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{0.5}_prior{PRIOR}.h5ad'))
+        adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{0.5}_prior{PRIOR}.h5ad'))
 
     # Classifieur & types cellulaires
     color_map = get_color_map(adata_full)
