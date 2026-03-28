@@ -163,7 +163,7 @@ def simulate_true_trajectories(model_harissa, time_list, C, seed=0):
         for k in range(1, T):
             delta_t = time_list[k] - time_list[k - 1]
             # stimulus = 1 pour tous les temps > 0
-            M0 = np.concatenate([[1], m_prev])
+            M0 = np.concatenate([[100], m_prev])
             P0 = np.concatenate([[1], p_prev])
             sim = model_harissa.simulate(delta_t, M0=M0, P0=P0)
             p_prev = sim.p[-1].copy()
@@ -181,7 +181,7 @@ def simulate_true_trajectories(model_harissa, time_list, C, seed=0):
 # Core pipeline
 # ---------------------------------------------------------------------------
 
-def run_pipeline(dataset_name, model_harissa, time_list, C=100, seed=0):
+def run_pipeline(dataset_name, model_harissa, time_list, C=500, seed=0, run=0):
     """
     1. Simule C vraies trajectoires → UN seul jeu de données.
     2. Calibre CardamomOT sur ce jeu de données.
@@ -208,6 +208,7 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=100, seed=0):
     x_carda[:, 0] = time_all   # col0 = temps pour CardamomOT
     model_carda = CardamomNetworkModel(x_carda.shape[1] - 1)
     model_carda.d = model_harissa.d.copy()
+    model_carda.unbalanced_reg = 0
     model_carda.fit(x_carda)
 
     # model_carda.rna  : (N_inf, G+1)  trajectoires RNA inférées
@@ -304,31 +305,47 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=100, seed=0):
         # Étape 2 : regarder rna_inf_k1[j1], rna_inf_k1[j2], …
         #           et retrouver leurs indices j1', j2', … dans rna_k1
         # → q_carda[i, j1'] = q_carda[i, j2'] = 1/n_matches
- 
-        q_carda = np.zeros((C, C), dtype=float)
+
+        q_sharp = np.zeros((C, C), dtype=float)
         n_missing = 0
         n_obtained = 0
         for i in range(rna_k.shape[0]):
             # Étape 1 : indices dans rna_inf_k égaux à rna_k[i]
-            inf_idxs = np.where(np.all(rna_inf_k[:, 1:] == rna_k[i, 1:], axis=1))[0]  # [j1, j2, …]
+            inf_idxs = np.where(np.all(rna_inf_k[:, 1:] == rna_k[i, 1:], axis=1))[0] 
             # Étape 2 : descendants inférés → retrouver dans rna_k1
             dest_true = []
             for inf_j in inf_idxs:
                 dest_true.extend(np.where(np.all(rna_k1[:, 1:] == rna_inf_k1[inf_j, 1:], axis=1))[0])  # [j1', j2', …]
             if len(dest_true):
                 for j_true in dest_true:
-                    q_carda[i, j_true] += 1.0
-                q_carda[i] /= q_carda[i].sum()
+                    q_sharp[i, j_true] += 1.0
+                q_sharp[i] /= q_sharp[i].sum()
                 n_obtained += 1
             else:
                 n_missing += 1
-        q_carda *= (C / n_obtained)  # renormalisation pour que la somme globale soit C (et pas n_obtained)
-        print(f"    CardamomOT couplage: {n_obtained}/{C} obtained, {n_missing}/ {C} missing (fallback to uniform)")
+
+        # q_carda *= (C / n_obtained)  # renormalisation pour que la somme globale soit C (et pas n_obtained)
+        # print(f"    CardamomOT couplage: {n_obtained}/{C} obtained, {n_missing}/ {C} missing (fallback to uniform)")
+
+        log_rna_k  = np.log1p(rna_k[:,  1:].astype(float))  # (C, G) sources
+        log_rna_k1 = np.log1p(rna_k1[:, 1:].astype(float))  # (C, G) destinations
+
+        sq_src = ((log_rna_k[:,  np.newaxis, :] - log_rna_k[ np.newaxis, :, :]) ** 2).sum(-1)
+        sq_dst = ((log_rna_k1[:, np.newaxis, :] - log_rna_k1[np.newaxis, :, :]) ** 2).sum(-1)
+
+        sigma2_src = .01 * np.median(sq_src[sq_src > 0])
+        sigma2_dst = .01 * np.median(sq_dst[sq_dst > 0])
+
+        K_src = np.exp(-sq_src / sigma2_src); K_src /= K_src.sum(axis=1, keepdims=True)
+        K_dst = np.exp(-sq_dst / sigma2_dst); K_dst /= K_dst.sum(axis=1, keepdims=True)
+
+        q_carda = K_src @ q_sharp @ K_dst
+        q_carda /= q_carda.sum(axis=1, keepdims=True)
 
         # ---- Couplage ReferenceFitting ----------------------------------
         q_rf = estim.Ts[0][ti].cpu().numpy()   # (C, C)
         row_sums = q_rf.sum(axis=1, keepdims=True)
-        q_rf_n   = q_rf / np.where(row_sums == 0, 1.0, row_sums)
+        q_rf_n   = q_rf / row_sums
  
         # ---- Vitesses : v_i = E_q[(x_{k+1} - x_i)] / dt ---------------
         # RNA : col0 = stimulus, on travaille sur les gènes (col 1:)
@@ -345,8 +362,8 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=100, seed=0):
  
         delta_rna_carda.append( (rna_exp_carda  - rna_k_g)  / dt )
         delta_rna_rf.append(    (rna_exp_rf     - rna_k_g)  / dt )
-        delta_prot_carda.append((prot_exp_carda - prot_k_g) / dt )
-        delta_prot_rf.append(   (prot_exp_rf    - prot_k_g) / dt )
+        delta_prot_carda.append((prot_exp_carda - prot_k_g)      )
+        delta_prot_rf.append(   (prot_exp_rf    - prot_k_g)      )
  
         # ---- Métrique ---------------------------------------------------
         # Vrai successeur de la cellule i = rna_k1[i] (index i dans t_{k+1})
@@ -392,8 +409,6 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=100, seed=0):
     # pour k = 0..T-2, et on les reprojette dans l'espace UMAP des cellules à t_1..T-1
     # Pour simplifier : on utilise les cellules à t_k comme point de départ et
     # on montre la vitesse de l'intervalle [t_k, t_{k+1}].
-    n_sub = 100
-    np.random.seed(42)
  
     rna_plot_list, prot_plot_list = [], []
     dr_c_list, dp_c_list = [], []
@@ -401,7 +416,7 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=100, seed=0):
     time_plot_list = []
  
     for ti in range(T):    # intervalle ti : cellules source à time_list[ti]
-        idx = np.random.choice(C, size=min(n_sub, C), replace=False)
+        idx = np.arange(C)
         rna_plot_list.append(rna_by_time[ti][idx, 1:].astype(float))
         prot_plot_list.append(prot_by_time[ti][idx, 1:])
         if ti < T - 1:
@@ -426,7 +441,7 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=100, seed=0):
     dp_rf_sub= np.vstack(dp_rf_list)
     time_sub = np.array(time_plot_list, dtype=int)
     
-    if seed == 0:
+    if run == 0:
         umap_rna  = UMAP(n_components=2, random_state=42, min_dist=0.7)
         umap_prot = UMAP(n_components=2, random_state=42, min_dist=0.7)
         umap_rna.fit(np.vstack([rna_sub, rna_sub + dr_rf_sub, rna_sub + dr_c_sub]))
@@ -528,11 +543,7 @@ def load_schiebinger():
  
     time_sub = time_s[sub_idx]
     rna_sub  = rna_inf[sub_idx,  1:]   # strip stimulus → (N_sub, G)
-    prot_sub = prot_inf[sub_idx, 1:]   # strip stimulus → (N_sub, G)
- 
-    # Normalisation prot dans [0,1] (max global)
-    prot_max = np.maximum(prot_sub.max(axis=0), 1e-9)
-    prot_sub_sc = prot_sub / prot_max
+    prot_sub_sc = prot_inf[sub_idx, 1:]   # strip stimulus → (N_sub, G)
  
     # ---- Champ de vitesse : couplage 1-to-1 par index ----
     # Pour chaque temps t_k, les N_k cellules à t_k correspondent 1-to-1
@@ -540,7 +551,7 @@ def load_schiebinger():
     # vitesse_i = (rna[t_{k+1}][i] - rna[t_k][i]) / delta_t
     N_sub   = len(sub_idx)
     delta_rna_all  = np.zeros((N_sub, rna_sub.shape[1]),  dtype=float)
-    delta_prot_all = np.zeros((N_sub, prot_sub.shape[1]), dtype=float)
+    delta_prot_all = np.zeros((N_sub, rna_sub.shape[1]), dtype=float)
  
     unique_sub = np.unique(time_sub)
     for ti, (tk, tk1) in enumerate(zip(unique_sub[:-1], unique_sub[1:])):
@@ -599,7 +610,7 @@ def load_schiebinger():
 
 def main():
     TIME_LIST = [0, 6, 12, 24, 36, 48, 60, 72, 84, 96]
-    C      = 100   # cellules par trajectoire
+    C      = 200   # cellules par trajectoire
     N_RUNS = 3     # jeux de données par réseau
 
     DATASETS = [
@@ -618,9 +629,9 @@ def main():
     for name, builder in DATASETS:
         for run in range(N_RUNS):
             print(f"\n=== {name}  run {run}/{N_RUNS-1} ===")
-            mh, seed = builder(seed=run)
+            mh, seed = builder(seed=0)
             mh.G = mh.inter.shape[0] - 1
-            m_rna, m_prot, UMAPs, cells = run_pipeline(name, mh, TIME_LIST, C=C, seed=seed)
+            m_rna, m_prot, UMAPs, cells = run_pipeline(name, mh, TIME_LIST, C=C, seed=seed, run=run)
             scores[name]['rna'].append(m_rna)    # [carda, rf]
             scores[name]['prot'].append(m_prot)
             if run == 0:
@@ -684,7 +695,7 @@ def main():
     dp_c_2d_CN5  = umap_p_CN5.transform(prot_CN5 + dp_c_CN5)  - p2d_CN5
     dp_rf_2d_CN5 = umap_p_CN5.transform(prot_CN5 + dp_rf_CN5) - p2d_CN5
 
-    DENSITY, SMOOTH = 0.8, 0.7
+    DENSITY, SMOOTH = 1.0, 0.5
     stream_configs = [
         (axes[2], CN5['UMAPs']['rna'],  CN5['UMAPs']['rna_carda'],  cn5_time,
          'RNA velocity – CardamomOT (CN5)',            100, False),

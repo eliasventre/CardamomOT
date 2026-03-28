@@ -95,14 +95,6 @@ def load_dataset(base_path, n_per_time=100, lognorm=True):
     t_rna_full  = np.array(adata_train.obs['time'])
     t_beta_full = np.array(adata_beta.obs['time'])
 
-    def _subsample(time_arr, n, seed):
-        np.random.seed(seed)
-        idx = []
-        for t in np.unique(time_arr):
-            mask = np.where(time_arr == t)[0]
-            idx.extend(np.random.choice(mask, size=min(n, len(mask)), replace=False))
-        return np.array(idx)
-
     idx_rna  = np.arange(len(t_rna_full))
     idx_beta = np.arange(len(t_beta_full))
 

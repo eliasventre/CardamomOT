@@ -441,6 +441,8 @@ class NetworkModel:
                                 numItermax *= 2
                         else:
                             print('Warning, main Sinkhorn did not converge')
+                        # if n_iter > 15:
+                        #     coupling = ot.emd(mu, nu, pairwise_dist)
                     else:
                         reg_m = np.array([1e3, self.unbalanced_reg*tmp])
                         while stopThr <= 1e-5:

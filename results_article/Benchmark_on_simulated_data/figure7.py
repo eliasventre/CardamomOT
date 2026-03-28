@@ -49,7 +49,7 @@ from CardamomOT import train_classifier, predict_cell_types
 # ──────────────────────────────────────────────────────────────
 
 STIM  = 1.0
-PRIOR = 0.5
+PRIOR = 1.0
 LABEL = "cell_type"
 
 # Palette douce inspirée de la figure de référence (style matplotlib par défaut amélioré)
