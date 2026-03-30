@@ -106,7 +106,7 @@ class NetworkModel:
         self.update_modes = 1
         self.alpha_threshold= .4 # max = .5 to update alpha at least for important transition
         # Penalization/prior information
-        self.stimulus = 1.0 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
+        self.stimulus = 0.2 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
         self.prior_network_pen = 1.0 # 1 if we don't use prior information. If not we can penalize the non-existing age in prior network with values between 1 and 0: 0 = impossible edge
         # Filtering
         self.filter_network = 0 # Do we filter the network ? It also builds a temporal network using the filter criterium
@@ -441,8 +441,6 @@ class NetworkModel:
                                 numItermax *= 2
                         else:
                             print('Warning, main Sinkhorn did not converge')
-                        # if n_iter > 15:
-                        #     coupling = ot.emd(mu, nu, pairwise_dist)
                     else:
                         reg_m = np.array([1e3, self.unbalanced_reg*tmp])
                         while stopThr <= 1e-5:

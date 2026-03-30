@@ -321,22 +321,16 @@ def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj,
         umap_rna  = UMAP(n_components=2, random_state=42, min_dist=0.7)
         umap_prot = UMAP(n_components=2, random_state=42, min_dist=0.7)
 
-        umap_rna.fit(np.vstack([rna_sub,
-                                rna_sub + dr_reffit_sub,
-                                rna_sub + dr_carda_sub,
-                                rna_sub + dr_harissa_sub]))
-        umap_prot.fit(np.vstack([prot_sub,
-                                prot_sub + dp_reffit_sub,
-                                prot_sub + dp_carda_sub,
-                                prot_sub + dp_harissa_sub]))
+        umap_rna.fit(rna_sub)
+        umap_prot.fit(prot_sub)
 
         rna_2d  = umap_rna.transform(rna_sub)
         prot_2d = umap_prot.transform(prot_sub)
 
-        dr_reffit_2d  = (umap_rna.transform(rna_sub + dr_reffit_sub)  - rna_2d) * 0.5
+        dr_reffit_2d  = (umap_rna.transform(rna_sub + dr_reffit_sub)  - rna_2d) 
         dr_carda_2d   = (umap_rna.transform(rna_sub + dr_carda_sub)   - rna_2d)
         dr_harissa_2d = (umap_rna.transform(rna_sub + dr_harissa_sub) - rna_2d)
-        dp_reffit_2d  = (umap_prot.transform(prot_sub + dp_reffit_sub) - prot_2d) * 0.2
+        dp_reffit_2d  = (umap_prot.transform(prot_sub + dp_reffit_sub) - prot_2d) 
         dp_carda_2d   = (umap_prot.transform(prot_sub + dp_carda_sub)  - prot_2d)
         dp_harissa_2d = (umap_prot.transform(prot_sub + dp_harissa_sub)- prot_2d)
 

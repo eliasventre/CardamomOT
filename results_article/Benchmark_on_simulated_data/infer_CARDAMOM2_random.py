@@ -12,46 +12,46 @@ verb = 1
 n_repet=2
 
 # Inference for Network4
-# for r in range(0, N):
-#     fname = 'FN4/Data/data_{}.txt'.format(r + 1)
-#     data = np.loadtxt(fname, dtype=int, delimiter='\t')[1:,1:]
-#     time = np.loadtxt(fname, dtype=int, delimiter='\t')[0,1:]
-#     x = data.T
-#     x[:, 0] = time
-#     G = np.size(x, 1)
-#     model = NetworkModel(G - 1)
-#     model.recompute_degradations=0
-#     model.d = np.loadtxt('FN4/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
-#     model.fit(x, intensity_prior=0, verb=verb)
-#     score = model.inter
-#     for n in range(n_repet):
-#         model = NetworkModel(G - 1)
-#         model.recompute_degradations=0
-#         model.d = np.loadtxt('FN4/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
-#         model.fit(x, intensity_prior=0, verb=verb)
-#         score += model.inter
-#     np.save('FN4/random init/score_{}'.format(r+1), score)
+for r in range(0, N):
+    fname = 'FN4/Data/data_{}.txt'.format(r + 1)
+    data = np.loadtxt(fname, dtype=int, delimiter='\t')[1:,1:]
+    time = np.loadtxt(fname, dtype=int, delimiter='\t')[0,1:]
+    x = data.T
+    x[:, 0] = time
+    G = np.size(x, 1)
+    model = NetworkModel(G - 1)
+    model.recompute_degradations=0
+    model.d = np.loadtxt('FN4/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
+    model.fit(x, intensity_prior=0, verb=verb)
+    score = model.inter
+    for n in range(n_repet):
+        model = NetworkModel(G - 1)
+        model.recompute_degradations=0
+        model.d = np.loadtxt('FN4/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
+        model.fit(x, intensity_prior=0, verb=verb)
+        score += model.inter
+    np.save('FN4/random init/score_{}'.format(r+1), score)
 
-# # Inference for Cycle
-# for r in range(0, N):
-#     fname = 'CN5/Data/data_{}.txt'.format(r + 1)
-#     data = np.loadtxt(fname, dtype=int, delimiter='\t')[1:, 1:]
-#     time = np.loadtxt(fname, dtype=int, delimiter='\t')[0, 1:]
-#     x = data.T
-#     x[:, 0] = time
-#     G = np.size(x, 1)
-#     model = NetworkModel(G - 1)
-#     model.recompute_degradations=0
-#     model.d = np.loadtxt('CN5/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
-#     model.fit(x, intensity_prior=0, verb=verb)
-#     score = model.inter
-#     for n in range(n_repet):
-#         model = NetworkModel(G - 1)
-#         model.recompute_degradations=0
-#         model.d = np.loadtxt('CN5/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
-#         model.fit(x, intensity_prior=0, verb=verb)
-#         score += model.inter
-#     np.save('CN5/random init/score_{}'.format(r+1), score)
+# Inference for Cycle
+for r in range(0, N):
+    fname = 'CN5/Data/data_{}.txt'.format(r + 1)
+    data = np.loadtxt(fname, dtype=int, delimiter='\t')[1:, 1:]
+    time = np.loadtxt(fname, dtype=int, delimiter='\t')[0, 1:]
+    x = data.T
+    x[:, 0] = time
+    G = np.size(x, 1)
+    model = NetworkModel(G - 1)
+    model.recompute_degradations=0
+    model.d = np.loadtxt('CN5/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
+    model.fit(x, intensity_prior=0, verb=verb)
+    score = model.inter
+    for n in range(n_repet):
+        model = NetworkModel(G - 1)
+        model.recompute_degradations=0
+        model.d = np.loadtxt('CN5/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
+        model.fit(x, intensity_prior=0, verb=verb)
+        score += model.inter
+    np.save('CN5/random init/score_{}'.format(r+1), score)
 
 # Inference for Bifurcation
 for r in range(0, N):

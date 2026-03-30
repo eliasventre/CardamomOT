@@ -106,18 +106,29 @@ def kon_ref_vector(y_prot, kz, theta_inter, theta_basal) -> np.ndarray:
 @njit(fastmath=True, parallel=True)
 def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, vect_rna_end,
                             vect_proba_init, vect_proba_end, mode_init, mode_end, alpha, s1, ks, d1, delta_t, basal, inter, loss='CE',
-                            compute_with_proba=1, n_iter=1, intensity_prior=1) -> tuple[np.ndarray, np.ndarray]:
+                            compute_with_proba=1, n_iter=1, intensity_prior=1, q=0.95) -> tuple[np.ndarray, np.ndarray]:
     n1, G = vect_rna_init.shape
     n2 = vect_rna_end.shape[0]
 
     # Preallocation (important for Numba)
     dist = np.ones((n1, n2))
     vect_prot_end = np.ones((n1, n2, G + 1))
+    log_vect_rna_end = np.log1p(vect_rna_end)
+    log_vect_rna_init = np.log1p(vect_rna_init)
+
+    combined = np.vstack((log_vect_rna_end, log_vect_rna_init))
+    for j in range(G):
+        sorted_combined = np.sort(combined[:, j])
+        idx = int(q * (n1 + n2 - 1))
+        scale_rna = sorted_combined[idx]
+        log_vect_rna_init[:, j] /= (1 + scale_rna)
+        log_vect_rna_end[:, j] /= (1 + scale_rna)  
 
     weight_init: float = 1 / n_iter
 
     for i in prange(n1):  # parallelize cell-by-cell
         prot_init_i = vect_prot_init[i]
+        log_rna_init_i = log_vect_rna_init[i]
         rna_init_i = vect_rna_init[i]
         mode_init_i = mode_init[i]
         proba_init_i = vect_proba_init[i]
@@ -135,14 +146,17 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
             if n_iter <= intensity_prior:
                 # distances on probabilities or modes and proteins
                 diff_prot = prot_end - prot_init_i
+                diff_rna = log_vect_rna_end[j] - log_rna_init_i
                 if compute_with_proba:
                     diff_p = vect_proba_end[j] - proba_init_i
                     local_dist[j] += ((1.0 - 1.0 / G) * np.sum(diff_p * diff_p) +
-                                (1.0 / G) * np.sum(diff_prot * diff_prot)) * weight_init
+                                (0.5 / G) * np.sum(diff_prot * diff_prot) + 
+                                (0.5 / G) * np.sum(diff_rna * diff_rna)) * weight_init
                 else:
                     diff_k = vect_kon_end[j] - kon_init_i
                     local_dist[j] += ((1.0 - 1.0 / G) * np.sum(diff_k * diff_k) +
-                                (1.0 / G) * np.sum(diff_prot * diff_prot)) * weight_init
+                                (0.5 / G) * np.sum(diff_prot * diff_prot) + 
+                                (0.5 / G) * np.sum(diff_rna * diff_rna)) * weight_init
 
         # --- Storage ---
         vect_prot_end[i, :, 1:] = local_prot_end
@@ -152,11 +166,19 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
             if compute_with_proba:
                 sigma = base_kon_vector(basal, inter, vect_prot_end[i]) 
                 for j in range(n2):
-                    local_dist[j] += main_loss(sigma[j, 1:], vect_proba_end[j], 1, loss) * (1 - weight_init)
+                    diff_prot = local_prot_end[j] - prot_init_i
+                    diff_rna = log_vect_rna_end[j] - log_rna_init_i
+                    local_dist[j] += ((1.0 - 1.0 / G) * main_loss(sigma[j, 1:], vect_proba_end[j], 1, loss) +
+                                    (0.5 / G) * np.sum(diff_prot * diff_prot) +
+                                    (0.5 / G) * np.sum(diff_rna * diff_rna)) * (1 - weight_init)
             else:
                 sigma = kon_ref_vector(vect_prot_end[i], ks, inter, basal) 
                 for j in range(n2):
-                    local_dist[j] += main_loss(sigma[j, 1:], vect_kon_end[j], 1, loss) * (1 - weight_init)
+                    diff_prot = local_prot_end[j] - prot_init_i
+                    diff_rna = log_vect_rna_end[j] - log_rna_init_i
+                    local_dist[j] += ((1.0 - 1.0 / G) * main_loss(sigma[j, 1:], vect_kon_end[j], 1, loss) +
+                                    (0.5 / G) * np.sum(diff_prot * diff_prot) +
+                                    (0.5 / G) * np.sum(diff_rna * diff_rna))  * (1 - weight_init)
 
         # --- Clamp and copy ---
         for j in range(n2):

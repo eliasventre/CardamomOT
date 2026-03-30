@@ -10,7 +10,7 @@ PYTHON=/usr/bin/python3
 
 # python infer_CARDAMOM1.py 
 python infer_CARDAMOM2.py 
-# python infer_CARDAMOM2_random.py 
+python infer_CARDAMOM2_random.py 
 
 # python infer_CARDAMOM2_degover8.py 
 # python infer_CARDAMOM2_degover4.py 

@@ -319,16 +319,16 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=500, seed=0, run=0):
             if len(dest_true):
                 for j_true in dest_true:
                     q_sharp[i, j_true] += 1.0
-                q_sharp[i] /= q_sharp[i].sum()
+                q_sharp[i] /= len(dest_true)
                 n_obtained += 1
             else:
                 n_missing += 1
 
         # q_carda *= (C / n_obtained)  # renormalisation pour que la somme globale soit C (et pas n_obtained)
-        # print(f"    CardamomOT couplage: {n_obtained}/{C} obtained, {n_missing}/ {C} missing (fallback to uniform)")
+        print(f"    CardamomOT couplage: {n_obtained}/{C} obtained, {n_missing}/ {C} missing (fallback to uniform)")
 
-        log_rna_k  = np.log1p(rna_k[:,  1:].astype(float))  # (C, G) sources
-        log_rna_k1 = np.log1p(rna_k1[:, 1:].astype(float))  # (C, G) destinations
+        log_rna_k  = np.log1p(rna_k.astype(float))  # (C, G) sources
+        log_rna_k1 = np.log1p(rna_k1.astype(float))  # (C, G) destinations
 
         sq_src = ((log_rna_k[:,  np.newaxis, :] - log_rna_k[ np.newaxis, :, :]) ** 2).sum(-1)
         sq_dst = ((log_rna_k1[:, np.newaxis, :] - log_rna_k1[np.newaxis, :, :]) ** 2).sum(-1)
@@ -344,8 +344,7 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=500, seed=0, run=0):
 
         # ---- Couplage ReferenceFitting ----------------------------------
         q_rf = estim.Ts[0][ti].cpu().numpy()   # (C, C)
-        row_sums = q_rf.sum(axis=1, keepdims=True)
-        q_rf_n   = q_rf / row_sums
+        q_rf_n   = q_rf / q_rf.sum(axis=1, keepdims=True)
  
         # ---- Vitesses : v_i = E_q[(x_{k+1} - x_i)] / dt ---------------
         # RNA : col0 = stimulus, on travaille sur les gènes (col 1:)
@@ -362,15 +361,15 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=500, seed=0, run=0):
  
         delta_rna_carda.append( (rna_exp_carda  - rna_k_g)  / dt )
         delta_rna_rf.append(    (rna_exp_rf     - rna_k_g)  / dt )
-        delta_prot_carda.append((prot_exp_carda - prot_k_g)      )
-        delta_prot_rf.append(   (prot_exp_rf    - prot_k_g)      )
+        delta_prot_carda.append((prot_exp_carda - prot_k_g) / 2.0 )
+        delta_prot_rf.append(   (prot_exp_rf    - prot_k_g) / 2.0 )
  
         # ---- Métrique ---------------------------------------------------
         # Vrai successeur de la cellule i = rna_k1[i] (index i dans t_{k+1})
         # RNA  : sum_j q_ij * || log1p(rna_k1_g[j]) - log1p(rna_k1_g[i]) ||^2
         # Prot : sum_j q_ij * || prot_k1_g[j]        - prot_k1_g[i]       ||^2
-        log_rna_k1 = np.log1p(rna_k1_g)    # (C, G)
-        log_prot_k1 = np.log1p(prot_k1_g)
+        log_rna_k1 = np.log1p(rna_k1_g.astype(float))    # (C, G)
+        log_prot_k1 = np.log1p(prot_k1_g.astype(float))
 
         metric_carda_tmp = 0
         metric_rf_tmp = 0
@@ -444,8 +443,8 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=500, seed=0, run=0):
     if run == 0:
         umap_rna  = UMAP(n_components=2, random_state=42, min_dist=0.7)
         umap_prot = UMAP(n_components=2, random_state=42, min_dist=0.7)
-        umap_rna.fit(np.vstack([rna_sub, rna_sub + dr_rf_sub, rna_sub + dr_c_sub]))
-        umap_prot.fit(np.vstack([prot_sub, prot_sub + dp_rf_sub, prot_sub + dp_c_sub]))
+        umap_rna.fit(rna_sub)
+        umap_prot.fit(prot_sub)
     
         rna_2d  = umap_rna.transform(rna_sub)
         prot_2d = umap_prot.transform(prot_sub)
@@ -629,7 +628,7 @@ def main():
     for name, builder in DATASETS:
         for run in range(N_RUNS):
             print(f"\n=== {name}  run {run}/{N_RUNS-1} ===")
-            mh, seed = builder(seed=0)
+            mh, seed = builder(seed=np.random.choice(1000))
             mh.G = mh.inter.shape[0] - 1
             m_rna, m_prot, UMAPs, cells = run_pipeline(name, mh, TIME_LIST, C=C, seed=seed, run=run)
             scores[name]['rna'].append(m_rna)    # [carda, rf]

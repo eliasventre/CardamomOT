@@ -359,7 +359,7 @@ def compute_umaps(adata_full, adata_sim, adata_perturb, normlog=True):
     return adata_full, adata_sim, adata_perturb
 
 
-def draw_umap_panel(axes_row, adata_full, adata_sim, adata_perturb, color_map, point_size=3, rotate=False):
+def draw_umap_panel(axes_row, adata_full, adata_sim, adata_perturb, color_map, point_size=3, rotate_x=False, rotate_y=False):
     """Dessine 3 sub-axes UMAP colorés par cell_type (ou time si absent)."""
     triples = [
         (adata_full,    'Reference data'),
@@ -370,8 +370,10 @@ def draw_umap_panel(axes_row, adata_full, adata_sim, adata_perturb, color_map, p
 
     for ax, (A, title) in zip(axes_row, triples):
         coords = A.obsm['X_umap']
-        if rotate:
-            coords = -coords
+        if rotate_x:
+            coords[:, 0] = -coords[:, 0]
+        if rotate_y:
+            coords[:, 1] = -coords[:, 1]
 
         if use_celltype and LABEL in A.obs:
             for cat, col in color_map.items():
@@ -425,9 +427,9 @@ def load_perturbation_data(cfg):
         adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{STIM}_prior{PRIOR}.h5ad'))
         adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{STIM}_prior{PRIOR}.h5ad'))
     else:
-        adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_rna_traj_stim{0.5}_prior{PRIOR}.h5ad'))
-        adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{0.5}_prior{PRIOR}.h5ad'))
-        adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{0.5}_prior{PRIOR}.h5ad'))
+        adata_traj_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_rna_traj_stim{0.2}_prior{PRIOR}.h5ad'))
+        adata_sim_raw = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_stim{0.2}_prior{PRIOR}.h5ad'))
+        adata_perturb  = ad.read_h5ad(os.path.join(p, f'cardamomOT/adata_sim_{perturb_id}_stim{0.2}_prior{PRIOR}.h5ad'))
 
     # Classifieur & types cellulaires
     color_map = get_color_map(adata_full)
@@ -583,13 +585,14 @@ def make_figure(perturbations=PERTURBATIONS, save_path='figure_7.pdf'):
 
         # Col 3 : UMAPs
         _pt_size = 1 if cfg['dataset_group'] == 'Schiebinger' else 3
-        rotate = row in [2]
+        rotate_x = row in []
+        rotate_y = row in [2]
 
         draw_umap_panel(umap_subaxes[row],
                         data['af_umap'], data['as_umap'], data['ap_umap'],
                         data['color_map'],
                         point_size=_pt_size,
-                        rotate=rotate)
+                        rotate_x=rotate_x, rotate_y=rotate_y)
 
         # Sous-titres UMAP uniquement pour la première ligne
         if row == 0:
