@@ -106,7 +106,7 @@ def kon_ref_vector(y_prot, kz, theta_inter, theta_basal) -> np.ndarray:
 @njit(fastmath=True, parallel=True)
 def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, vect_rna_end,
                             vect_proba_init, vect_proba_end, mode_init, mode_end, alpha, s1, ks, d1, delta_t, basal, inter, loss='CE',
-                            compute_with_proba=1, n_iter=1, intensity_prior=1, q=0.95) -> tuple[np.ndarray, np.ndarray]:
+                            compute_with_proba=1, n_iter=1, intensity_prior=1, q=0.9) -> tuple[np.ndarray, np.ndarray]:
     n1, G = vect_rna_init.shape
     n2 = vect_rna_end.shape[0]
 
@@ -115,18 +115,20 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
     vect_prot_end = np.ones((n1, n2, G + 1))
     log_vect_rna_end = np.log1p(vect_rna_end)
     log_vect_rna_init = np.log1p(vect_rna_init)
+    log_vect_prot_init = np.log1p(vect_prot_init)
 
     combined = np.vstack((log_vect_rna_end, log_vect_rna_init))
-    for j in range(G):
-        sorted_combined = np.sort(combined[:, j])
+    for g in range(G):
+        sorted_combined = np.sort(combined[:, g])
         idx = int(q * (n1 + n2 - 1))
         scale_rna = sorted_combined[idx]
-        log_vect_rna_init[:, j] /= (1 + scale_rna)
-        log_vect_rna_end[:, j] /= (1 + scale_rna)  
+        log_vect_rna_init[:, g] /= (1 + scale_rna)
+        log_vect_rna_end[:, g] /= (1 + scale_rna)
 
     weight_init: float = 1 / n_iter
 
     for i in prange(n1):  # parallelize cell-by-cell
+        log_prot_init_i = log_vect_prot_init[i]
         prot_init_i = vect_prot_init[i]
         log_rna_init_i = log_vect_rna_init[i]
         rna_init_i = vect_rna_init[i]
@@ -135,17 +137,17 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
         kon_init_i = vect_kon_init[i]
         alpha_i = alpha[i]
 
-        local_prot_end = np.empty((n2, G))
+        local_prot_end = np.zeros((n2, G))
         local_dist = np.zeros(n2)
 
         # --- Loop over target cells j ---
         for j in range(n2):
             prot_end = find_next_prot(d1, prot_init_i, rna_init_i, vect_rna_end[j], mode_init_i, mode_end[j], alpha_i, s1, delta_t)
-            local_prot_end[j] = prot_end
+            local_prot_end[j, :] = prot_end[:]
 
             if n_iter <= intensity_prior:
                 # distances on probabilities or modes and proteins
-                diff_prot = prot_end - prot_init_i
+                diff_prot = np.log1p(prot_end) - log_prot_init_i  
                 diff_rna = log_vect_rna_end[j] - log_rna_init_i
                 if compute_with_proba:
                     diff_p = vect_proba_end[j] - proba_init_i
@@ -159,14 +161,14 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
                                 (0.5 / G) * np.sum(diff_rna * diff_rna)) * weight_init
 
         # --- Storage ---
-        vect_prot_end[i, :, 1:] = local_prot_end
+        vect_prot_end[i, :, 1:] = local_prot_end[:, :]
 
         # --- Correction using main_loss ---
         if n_iter > 1:
             if compute_with_proba:
                 sigma = base_kon_vector(basal, inter, vect_prot_end[i]) 
                 for j in range(n2):
-                    diff_prot = local_prot_end[j] - prot_init_i
+                    diff_prot = np.log1p(local_prot_end[j]) - log_prot_init_i
                     diff_rna = log_vect_rna_end[j] - log_rna_init_i
                     local_dist[j] += ((1.0 - 1.0 / G) * main_loss(sigma[j, 1:], vect_proba_end[j], 1, loss) +
                                     (0.5 / G) * np.sum(diff_prot * diff_prot) +

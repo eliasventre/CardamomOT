@@ -359,10 +359,10 @@ def run_pipeline(dataset_name, model_harissa, time_list, C=500, seed=0, run=0):
         prot_exp_carda = q_carda  @ prot_k1_g
         prot_exp_rf    = q_rf_n   @ prot_k1_g
  
-        delta_rna_carda.append( (rna_exp_carda  - rna_k_g)  / dt )
-        delta_rna_rf.append(    (rna_exp_rf     - rna_k_g)  / dt )
-        delta_prot_carda.append((prot_exp_carda - prot_k_g) / 2.0 )
-        delta_prot_rf.append(   (prot_exp_rf    - prot_k_g) / 2.0 )
+        delta_rna_carda.append( (rna_exp_carda  - rna_k_g) )
+        delta_rna_rf.append(    (rna_exp_rf     - rna_k_g))
+        delta_prot_carda.append((prot_exp_carda - prot_k_g) )
+        delta_prot_rf.append(   (prot_exp_rf    - prot_k_g) )
  
         # ---- Métrique ---------------------------------------------------
         # Vrai successeur de la cellule i = rna_k1[i] (index i dans t_{k+1})

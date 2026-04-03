@@ -90,7 +90,7 @@ class NetworkModel:
         self.max_iter = 35 # max iteration for main loop
         # Trajectory inference with OT
         self.stopThr_init = 1e-7 # initial tolerance for sinkhorn algorithm
-        self.batch_size = 1024 # Maximum number of cells used per time point per sample for inference.
+        self.batch_size = 5096 # Maximum number of cells used per time point per sample for solving EOT problems in the inference.
         self.unbalanced_reg = 5 # Unbalanced regularization parameter for UOT if > 0, OT if 0
         self.init_entropic_noise = 1.5 # Initial entropic penalization for OT
         self.quant_samples = .8 # Quantile of cells number per sample to use for inference

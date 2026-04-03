@@ -268,8 +268,8 @@ def run_pipeline(dataset_name, model_harissa, time, data, rna_traj, prot_traj,
 
         rna_exp_rf  = q_rf_n @ rna_k1_g
         prot_exp_rf = q_rf_n @ prot_k1_g
-        v_ot_rna[idx_k]  = (rna_exp_rf  - rna_k_g)  / dt
-        v_ot_prot[idx_k] = (prot_exp_rf - prot_k_g)
+        v_ot_rna[idx_k]  = (rna_exp_rf  - rna_k_g) 
+        v_ot_prot[idx_k] = (prot_exp_rf - prot_k_g) 
 
     # ---- Apply per-cell scaling to mechanistic fields ----
     # alpha_i = ||v_ot_i|| / ||v_meca_i||  (preserves direction → cosine sim unchanged)

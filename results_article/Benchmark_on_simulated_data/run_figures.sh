@@ -10,6 +10,6 @@ PYTHON=/usr/bin/python3
 # python figure2.py 
 # python figure6.py 
 # python figure7.py 
-# python figure5.py 
+python figure5.py 
 python figure5_trajectories.py 
  # python figureS7.py 
