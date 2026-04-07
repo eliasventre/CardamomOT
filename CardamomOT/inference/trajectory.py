@@ -36,7 +36,7 @@ def base_kon_vector(theta_basal, theta_inter, y_prot) -> np.ndarray:
     n_cells, G = y_prot.shape
     Gm1, n_net = theta_basal.shape[0], theta_basal.shape[1]
     Z = np.zeros((n_cells, Gm1, n_net))
-    result = np.empty((n_cells, Gm1, n_net + 1))
+    result = np.zeros((n_cells, Gm1, n_net + 1))
     for i in range(n_cells):
         for j in range(Gm1):
             z_max: float = -np.inf
@@ -106,29 +106,28 @@ def kon_ref_vector(y_prot, kz, theta_inter, theta_basal) -> np.ndarray:
 @njit(fastmath=True, parallel=True)
 def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, vect_rna_end,
                             vect_proba_init, vect_proba_end, mode_init, mode_end, alpha, s1, ks, d1, delta_t, basal, inter, loss='CE',
-                            compute_with_proba=1, n_iter=1, intensity_prior=1, q=0.9) -> tuple[np.ndarray, np.ndarray]:
+                            compute_with_proba=1, n_iter=1, intensity_prior=1, q=.9) -> tuple[np.ndarray, np.ndarray]:
     n1, G = vect_rna_init.shape
     n2 = vect_rna_end.shape[0]
 
     # Preallocation (important for Numba)
-    dist = np.ones((n1, n2))
+    dist = np.zeros((n1, n2))
     vect_prot_end = np.ones((n1, n2, G + 1))
     log_vect_rna_end = np.log1p(vect_rna_end)
     log_vect_rna_init = np.log1p(vect_rna_init)
-    log_vect_prot_init = np.log1p(vect_prot_init)
 
     combined = np.vstack((log_vect_rna_end, log_vect_rna_init))
     for g in range(G):
         sorted_combined = np.sort(combined[:, g])
         idx = int(q * (n1 + n2 - 1))
         scale_rna = sorted_combined[idx]
-        log_vect_rna_init[:, g] /= (1 + scale_rna)
-        log_vect_rna_end[:, g] /= (1 + scale_rna)
+        log_vect_rna_init[:, g] /= max(scale_rna, 1)
+        log_vect_rna_end[:, g] /= max(scale_rna, 1)
 
-    weight_init: float = 1 / n_iter
+    weight_init: float = (n_iter < intensity_prior) * (1 / n_iter)**(1 - 1/n_iter)
 
     for i in prange(n1):  # parallelize cell-by-cell
-        log_prot_init_i = log_vect_prot_init[i]
+
         prot_init_i = vect_prot_init[i]
         log_rna_init_i = log_vect_rna_init[i]
         rna_init_i = vect_rna_init[i]
@@ -137,55 +136,44 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
         kon_init_i = vect_kon_init[i]
         alpha_i = alpha[i]
 
-        local_prot_end = np.zeros((n2, G))
-        local_dist = np.zeros(n2)
+        prot_end_i = np.zeros((n2, G))
+        local_dist_i = np.zeros(n2)
 
         # --- Loop over target cells j ---
-        for j in range(n2):
-            prot_end = find_next_prot(d1, prot_init_i, rna_init_i, vect_rna_end[j], mode_init_i, mode_end[j], alpha_i, s1, delta_t)
-            local_prot_end[j, :] = prot_end[:]
-
-            if n_iter <= intensity_prior:
-                # distances on probabilities or modes and proteins
-                diff_prot = np.log1p(prot_end) - log_prot_init_i  
-                diff_rna = log_vect_rna_end[j] - log_rna_init_i
-                if compute_with_proba:
-                    diff_p = vect_proba_end[j] - proba_init_i
-                    local_dist[j] += ((1.0 - 1.0 / G) * np.sum(diff_p * diff_p) +
-                                (0.5 / G) * np.sum(diff_prot * diff_prot) + 
-                                (0.5 / G) * np.sum(diff_rna * diff_rna)) * weight_init
-                else:
-                    diff_k = vect_kon_end[j] - kon_init_i
-                    local_dist[j] += ((1.0 - 1.0 / G) * np.sum(diff_k * diff_k) +
-                                (0.5 / G) * np.sum(diff_prot * diff_prot) + 
-                                (0.5 / G) * np.sum(diff_rna * diff_rna)) * weight_init
+        for j in range(0, n2):
+            prot_end_i[j, :] = find_next_prot(d1, prot_init_i, rna_init_i, vect_rna_end[j], mode_init_i, mode_end[j], alpha_i, s1, delta_t)
 
         # --- Storage ---
-        vect_prot_end[i, :, 1:] = local_prot_end[:, :]
+        vect_prot_end[i, :, 1:] = prot_end_i[:, :]
 
-        # --- Correction using main_loss ---
-        if n_iter > 1:
-            if compute_with_proba:
-                sigma = base_kon_vector(basal, inter, vect_prot_end[i]) 
-                for j in range(n2):
-                    diff_prot = np.log1p(local_prot_end[j]) - log_prot_init_i
-                    diff_rna = log_vect_rna_end[j] - log_rna_init_i
-                    local_dist[j] += ((1.0 - 1.0 / G) * main_loss(sigma[j, 1:], vect_proba_end[j], 1, loss) +
-                                    (0.5 / G) * np.sum(diff_prot * diff_prot) +
-                                    (0.5 / G) * np.sum(diff_rna * diff_rna)) * (1 - weight_init)
-            else:
-                sigma = kon_ref_vector(vect_prot_end[i], ks, inter, basal) 
-                for j in range(n2):
-                    diff_prot = local_prot_end[j] - prot_init_i
-                    diff_rna = log_vect_rna_end[j] - log_rna_init_i
-                    local_dist[j] += ((1.0 - 1.0 / G) * main_loss(sigma[j, 1:], vect_kon_end[j], 1, loss) +
-                                    (0.5 / G) * np.sum(diff_prot * diff_prot) +
-                                    (0.5 / G) * np.sum(diff_rna * diff_rna))  * (1 - weight_init)
+        for g in range(G):
+            sorted_prot = np.sort(prot_end_i[:, g])
+            idx = int(q * (n2 - 1))
+            scale_prot = sorted_prot[idx]
+            prot_end_i[:, g] /= max(scale_prot, 1)
+            prot_init_i /= max(scale_prot, 1)
 
-        # --- Clamp and copy ---
-        for j in range(n2):
-            val = local_dist[j]
-            dist[i, j] = 100.0 if val > 100.0 else val
+        # --- Main loss ---
+        if compute_with_proba:
+            sigma = base_kon_vector(basal, inter, vect_prot_end[i]) 
+            for j in range(0, n2):
+                diff_proba = vect_proba_end[j] - proba_init_i
+                diff_prot = prot_end_i[j] - prot_init_i
+                diff_rna = log_vect_rna_end[j] - log_rna_init_i
+                local_dist_i[j] = ((1.0 - 1.0 / G) * (np.sum(diff_proba * diff_proba) * weight_init + 
+                                    main_loss(sigma[j, 1:], vect_proba_end[j], 1, loss) * (1 - weight_init)) +
+                                    (0.5 / G) * (np.sum(diff_prot * diff_prot) + np.sum(diff_rna * diff_rna)))
+        else:
+            sigma = kon_ref_vector(vect_prot_end[i], ks, inter, basal) 
+            for j in range(0, n2):
+                diff_k = vect_kon_end[j] - kon_init_i
+                diff_prot = prot_end_i[j] - prot_init_i
+                diff_rna = log_vect_rna_end[j] - log_rna_init_i
+                local_dist_i[j] = ((1.0 - 1.0 / G) * (np.sum(diff_k * diff_k) * weight_init +
+                                    main_loss(sigma[j, 1:], vect_kon_end[j], 1, loss) * (1 - weight_init)) +
+                                    (0.5 / G) * (np.sum(diff_prot * diff_prot) + np.sum(diff_rna * diff_rna)))
+        
+        dist[i, :] = np.minimum(local_dist_i, 100.0)
 
     return dist, vect_prot_end
 

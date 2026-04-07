@@ -424,7 +424,7 @@ class NetworkModel:
                     mu = np.ones(N_sample)/N_sample
                     nu = np.ones(N_cells)/N_cells
                     tmp = np.log(G) # approximate number of errors expected by gene in the reconstructed modes
-                    reg = self.init_entropic_noise * tmp / n_iter # decrease entropic regularization with iterations - on purpose the slope is in 1/x for fast convergence
+                    reg = self.init_entropic_noise * tmp * (1 / n_iter)**(1 - 1/n_iter) # decrease entropic regularization with iterations - on purpose the slope is in 1/x for fast convergence
                     stopThr, numItermax = self.stopThr_init, int(10000 / min(1, reg))
                     if not self.unbalanced_reg: 
                         while stopThr <= self.stopThr_init*100:
