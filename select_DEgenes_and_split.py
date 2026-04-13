@@ -160,7 +160,7 @@ def main(argv):
         
         model.hard_em = 0 # substantially accelerates fitting
         try:
-            model.fit_mixture(data_rna[cells_to_use], gene_names=genes_list_init, min_components=2, max_components=2, cell_rd=cell_rd,
+            model.fit_mixture(data_rna[cells_to_use], gene_names=genes_list_init, min_components=2, max_components=2, cell_rd=cell_rd[cells_to_use],
                                 max_iter_kinetics=0, refilter=1.0) # Filter genes with mode difference > 1
             print(f"[select_DEgenes_and_split] Fitted mixture model on {len(cells_to_use)} cells")
             
