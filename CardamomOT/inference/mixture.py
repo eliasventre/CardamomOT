@@ -1125,7 +1125,7 @@ class NegativeBinomialMixtureEM:
         self.best_model = None
 
 
-    def _init_for_K(self, x, K, vect_t=None, quant_init=None, seuil=0.01):
+    def _init_for_K(self, x, K, vect_t=None, vect_celltypes=None, quant_init=None, seuil=0.01):
         mean = np.mean(x)
         var = np.var(x)
         
@@ -1134,55 +1134,71 @@ class NegativeBinomialMixtureEM:
             c_glob = 1.0
         else:
             if var <= mean + 1e-8:
-                k_glob: float = max(50.0, mean)
+                k_glob = max(50.0, mean)
             else:
-                k_glob: float = max(1e-3, (mean**2) / (var - mean))
-            c_glob: float = max(1e-6, k_glob / (mean + EPS))
+                k_glob = max(1e-3, (mean**2) / (var - mean))
+            c_glob = max(1e-6, k_glob / (mean + 1e-16))
 
         if vect_t is not None:
-            try:
-                a_per_time, b_est = infer_kinetics_temporal(x, vect_t, seuil, max_iter=1e5)
+            if vect_celltypes is None or (vect_celltypes is not None and len(np.unique(vect_celltypes)) <= 1):
+                a_per_time, b_est = infer_kinetics_temporal(x, vect_t, seuil=seuil, max_iter=1e5)
                 ks_init = np.linspace(np.min(a_per_time), np.max(a_per_time), K)
-                if a_per_time.size < K:
-                    qs = np.linspace(0, 1, K)
-                    ks_init += np.quantile(a_per_time, qs)
-                    ks_init /= 2
                 c_init = b_est
-                if self.verbose:
-                    logger.info("Warm start: ks_init=%s, c_init=%s", ks_init, c_init)
-            except Exception as e:
-                if self.verbose:
-                    logger.warning("Warm start failed: %s, using fallback", e)
-                ks_init = k_glob * np.linspace(0.8, 1.2, K)
-                c_init: float = c_glob
+            else:
+                a_per_time, b_time = infer_kinetics_temporal(x, vect_t, seuil=seuil, max_iter=1e5)
+                a_per_type, b_type = infer_kinetics_temporal(x, vect_celltypes, seuil=seuil, max_iter=1e5)
+                ks_init = np.linspace(min(np.min(a_per_time/b_time), np.min(a_per_type/b_type)), max(np.max(a_per_time/b_time), np.max(a_per_type/b_type)), K)
+                c_init = (b_time + b_type)/2
+                ks_init *= c_init
         else:
-            if len(quant_init) != 2*K:
-                quant_init = np.linspace(0, 1, 2*K)
-            centers = np.quantile(x, quant_init)
-            ks_init = np.array([np.mean(x[(centers[2*k] <= x) & 
-                                          (x <= np.maximum(centers[2*k+1], centers[2*k]+1))]) * c_glob 
+            if vect_celltypes is None or (vect_celltypes is not None and len(np.unique(vect_celltypes)) <= 1):
+                if quant_init is None:
+                    quant_init = np.linspace(0, 1, K+1)
+                elif len(quant_init) != K+1:
+                    print("Quant init has not the right size")
+                    quant_init = np.linspace(0, 1, K+1)
+                centers = np.quantile(x, quant_init)
+                ks_init = np.array([np.mean(x[(centers[k] <= x) & 
+                                          (x <= centers[k+1])]) * c_glob 
                                           for k in range(0, K)]) 
-            ks_init = np.clip(ks_init, seuil, 1e5)
-            c_init: float = c_glob
+                c_init = c_glob
+            else:
+                if quant_init is None:
+                    a_per_type, b_est = infer_kinetics_temporal(x, vect_celltypes, seuil=seuil, max_iter=1e5)
+                    ks_init = np.linspace(np.min(a_per_type), np.max(a_per_type), K)
+                    c_init = b_est
+                else:
+                    if len(quant_init) != K+1:
+                        print("Quant init has not the right size")
+                        quant_init = np.linspace(0, 1, K+1)
+                    centers = np.quantile(x, quant_init)
+                    a_per_quant = np.array([np.mean(x[(centers[k] <= x) & 
+                                            (x <= centers[k+1])]) 
+                                            for k in range(0, K)]) 
+                    a_per_type, b_type = infer_kinetics_temporal(x, vect_celltypes, seuil=seuil, max_iter=1e5)
+                    ks_init = np.linspace(min(np.min(a_per_quant), np.min(a_per_type/b_type)), max(np.max(a_per_quant), np.max(a_per_type/b_type)), K)
+                    c_init = b_type
+                    ks_init *= c_glob
+
         
-        n: float = 1/2
+        n = 1/2
         m, M = np.min(ks_init), np.max(ks_init)
         while (len(np.unique((ks_init/c_init).astype(int))) < K) and (n > 1/x.size):
             mn = min(m, np.quantile(seuil + x*c_init, n))
             Mn = max(M, np.quantile(seuil + x*c_init, 1-n))
             ks_init = np.linspace(mn, Mn, K)
             n /= 2 
-        if self.verbose: logger.info("Init: ks_init=%s", ks_init)
+        if self.verbose: print(f"  Init: ks_init={ks_init}")
 
         pi_init = np.ones(K) / K
         if self.zi is None:
             pi_zero_init = 0
         elif self.zi == 'global':
             frac_zeros = np.mean(x == 0)
-            pi_zero_init: float = min(0.95, max(0.0, frac_zeros - 0.05))
+            pi_zero_init = min(0.95, max(0.0, frac_zeros - 0.05))
         else:
             frac_zeros = np.mean(x == 0)
-            pi_zero_init: np.ndarray[Any, np.dtype[Any]] = np.full(K, max(0.0, frac_zeros - 0.05))
+            pi_zero_init = np.full(K, max(0.0, frac_zeros - 0.05))
 
         return ks_init.astype(float), float(c_init), pi_init.astype(float), pi_zero_init
 
@@ -1240,7 +1256,7 @@ class NegativeBinomialMixtureEM:
         return K + 1 + (K - 1) + zi_p
     
 
-    def fit(self, x, vect_t=None, quant_init=None, seuil=0.001, s=None):
+    def fit(self, x, vect_t=None, vect_celltypes=None, quant_init=None, seuil=0.001, s=None):
         """
         Fit the NB mixture model to data ``x``.
 
@@ -1273,7 +1289,7 @@ class NegativeBinomialMixtureEM:
             if self.verbose:
                 logger.info("=== Trying K_init = %s ===", K_try)
             ks_init, c_init, pi_init, pi_zero_init = self._init_for_K(
-                x_init, K_try, vect_t=vect_t, quant_init=quant_init, seuil=seuil
+                x_init, K_try, vect_t=vect_t, vect_celltypes=vect_celltypes, quant_init=quant_init, seuil=seuil
             )
 
             if self.hard_em:
@@ -1442,16 +1458,4 @@ class NegativeBinomialMixtureEM:
 
         self.best_model = best_model
         return best_model
-    
-
-    def predict_proba(self, x, ks, c, pi_zero=None, zi=None):
-        
-        if zi is None:
-            logpmf = nb_logpmf_vectorized(x, ks, c)
-        else:
-            logpmf = zinb_logpmf_vectorized(x, ks, c, pi_zero)
-        
-        log_evidence = logsumexp(logpmf, axis=1, keepdims=True)
-        
-        return np.sum(log_evidence)
 

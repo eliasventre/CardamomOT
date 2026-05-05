@@ -31,6 +31,7 @@ seuil = 1e-5
 check_gradient = 0
 alpha = 1 # How to balance differents sources when they are unbalanced (ex: RMS2V3 and RD136 with different number of cells, 0 if not rescaled (each cell equal), 1 if rescaled (each model equal)))
 eps_CE = 1e-6
+EPS = 1e-16
 sc = 1e-3
 r_elasticnet = 0.5
 
@@ -99,10 +100,11 @@ def main_loss(y_pred, y_true, l, loss, sc=sc, eps=eps_CE):
         return l * np.sum(np.square(y_pred - y_true))
     
     else:  # Cross-Entropy
-        y_pred = np.clip(y_pred, eps, 1 - eps)
+        y_pred_c = np.clip(y_pred, eps, 1 - eps)
+        y_true_c = np.clip(y_true, eps, 1 - eps)
         return -l * np.sum(
-            y_true * np.log(y_pred) + 
-            (1 - y_true) * np.log1p(-y_pred)  
+            y_true * np.log(y_pred_c / y_true_c) + 
+            (1 - y_true) * np.log((1-y_pred_c)/(1-y_true_c))  
         )
 
 
@@ -350,21 +352,44 @@ def grad_correc(X, correc_ref, inter, basal, weights_samples, ys, ypr, yp, ypm, 
 
 def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, theta_ref, ref_network, ks, G, g, n_networks, proba, l_pen, weight_prev=.5, loss='CE', final=0):
     
-    X = theta_init.ravel()
     weights_samples =[np.sum(y_samples == s)**alpha for s in np.unique(y_samples)]
     y_prot_mod = y_prot.copy()
+
+    # ── Construire les bounds ───────────────────────────────
+    theta_init_ = np.ascontiguousarray(theta_init, dtype=float)   # (G+1, n_networks)
+    theta_ref_  = np.ascontiguousarray(theta_ref,  dtype=float)   # (G+1, n_networks)
+    ref_network_= np.ascontiguousarray(ref_network,dtype=float)   # (G,   n_networks)
+    # ── Vecteur initial : injecter les valeurs de référence aux positions gelées
+    X_flat = theta_init_.ravel(order='C')                     # vecteur 1D pour minimize
+    theta_ref_flat = theta_ref_.ravel(order='C')    # même ordre que X_flat
+    ref_network_flat = ref_network_.ravel(order='C') # même ordre que X_flat
+    bounds = [(None, None)] * len(X_flat)
+    if not final:
+        for idx in range(len(X_flat)-1):
+            if theta_ref_flat[idx] != 0.0:
+                v = theta_ref_flat[idx]
+                if v > .1:
+                    bounds[idx] = (v, None)
+                elif v < .1:
+                    bounds[idx] = (None, v)
+            elif ref_network_flat[idx] != 0.0:
+                v = ref_network_flat[idx]
+                if v < 1:
+                    bounds[idx] = (None, 0)
+                elif v > 1:
+                    bounds[idx] = (0, None)
 
     loss_fn = partial(objective, weights_samples=weights_samples, ys=y_samples,
                         ypr=y_proba, yp=y_prot, ypm = y_prot_mod, yk=y_kon,
                         ks=ks, G=G, g=g, n_networks=n_networks,
-                        theta_ref=theta_ref, ref_network=ref_network, l_pen=l_pen, proba=proba, weight_prev=weight_prev, loss=loss, final=final)
+                        theta_ref=theta_ref, ref_network= np.abs(ref_network), l_pen=l_pen, proba=proba, weight_prev=weight_prev, loss=loss, final=final)
 
     grad_fn = partial(grad_theta, weights_samples=weights_samples, ys=y_samples,
                         ypr=y_proba, yp=y_prot, ypm=y_prot_mod, yk=y_kon,
                         ks=ks, G=G, g=g, n_networks=n_networks,
-                        theta_ref=theta_ref, ref_network=ref_network, l_pen=l_pen, proba=proba, weight_prev=weight_prev, loss=loss, final=final)
+                        theta_ref=theta_ref, ref_network=np.abs(ref_network), l_pen=l_pen, proba=proba, weight_prev=weight_prev, loss=loss, final=final)
 
-    res = minimize(loss_fn, X, jac=grad_fn, method="L-BFGS-B", tol=seuil/G)
+    res = minimize(loss_fn, X_flat, jac=grad_fn, method="L-BFGS-B", bounds=bounds, tol=seuil/G)
     if not res.success:
         logger.error('Minimization failed for inference: %s', res.message)
 
@@ -372,15 +397,15 @@ def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, th
         error = check_grad(loss_fn, grad_fn, res.x)
         if error > .05:
             logger.debug("Gradient theta inference check error for gene %s: %s", g, error)
-            res = minimize(loss_fn, X, method="L-BFGS-B", tol=seuil/G)
+            res = minimize(loss_fn, X_flat, bounds=bounds, method="L-BFGS-B", tol=seuil/G)
 
     theta_final = res.x.reshape(G+1, n_networks)
-    theta_final[:-1] *= ref_network
+    theta_final[:-1] *= (np.abs(ref_network))
 
     return theta_final
     
 
-def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal, ks, G, g, n_networks, proba, l_pen, weight_prev=.5, loss='CE', correc_ref=0, final=0):
+def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal, theta_ref, ks, G, g, n_networks, proba, l_pen, weight_prev=.5, loss='CE', correc_ref=0, final=0):
 
         correc = np.ones((G+1, n_networks))
         diag = np.zeros((G, n_networks))
@@ -388,6 +413,18 @@ def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal
         inter -= diag
 
         weights_samples = [np.sum(y_samples == s)**alpha for s in np.unique(y_samples)]
+
+        # ── Construire les bounds ───────────────────────────────
+        correc_init_ = np.ascontiguousarray(correc, dtype=float)   # (G+1, n_networks)
+        theta_ref_  = np.ascontiguousarray(theta_ref,  dtype=float)   # (G+1, n_networks)
+        # ── Vecteur initial : injecter les valeurs de référence aux positions gelées
+        X_flat = correc_init_.ravel(order='C')            
+        theta_ref_flat = theta_ref_.ravel(order='C')    # même ordre que X_flat
+        bounds = [(0, None)] * len(X_flat)
+        if not final:
+            for idx in range(len(X_flat)):
+                if theta_ref_flat[idx] != 0.0:
+                    bounds[idx] = (1, None)
 
         loss_fn = partial(objective_refinement, correc_ref=correc_ref, inter=inter, basal=basal, 
                                 weights_samples=weights_samples, ys=y_samples, 
@@ -398,7 +435,7 @@ def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal
                                 ypr=y_proba, yp=y_prot, ypm = y_prot_mod, yk=y_kon, 
                                 ks=ks, diag=diag, G=G, g=g, n_networks=n_networks, proba=proba, l_pen=l_pen, weight_prev=weight_prev, loss=loss, final=final)
 
-        res = minimize(loss_fn, correc.ravel(), jac=grad_fn, method="L-BFGS-B", tol=seuil/G)
+        res = minimize(loss_fn, X_flat, jac=grad_fn, method="L-BFGS-B", bounds=bounds, tol=seuil/G)
         if not res.success:
             logger.error('Minimization failed for refining: %s', res.message)
             
@@ -406,7 +443,7 @@ def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal
             error = check_grad(loss_fn, grad_fn, res.x)
             if error > .05:
                 logger.debug("Gradient theta refining check error for gene %s: %s", g, error)
-                res = minimize(loss_fn, correc.ravel(), method="L-BFGS-B", tol=seuil/G)
+                res = minimize(loss_fn, X_flat, bounds=bounds, method="L-BFGS-B", tol=seuil/G)
 
         correc = res.x.reshape(G+1, n_networks)
         inter[:, :] *= correc[:-1, :]
@@ -417,7 +454,7 @@ def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal
 
 
 
-def main_loop_inference(g, vect_t, y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, theta_ref, 
+def main_loop_inference(g, y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, theta_ref, 
                   ks, G, n_networks, proba, l_gen, scale, inter_tmp, basal_tmp, inter, basal, ref_network,
                   weight_prev=.5, loss='CE', final=0):
 
@@ -435,7 +472,7 @@ def main_loop_inference(g, vect_t, y_samples, y_proba, y_prot, y_prot_mod, y_kon
     l_pen2 = l_gen / (n_networks_tmp*(1+np.log(G)))
     inter[:, :n_networks_tmp], basal[:n_networks_tmp] = refine_inference(y_samples, 
                             y_proba[:, :n_networks_tmp+1], y_prot, y_prot_mod, y_kon, 
-                            inter, basal, ks[:n_networks_tmp+1], G, g, n_networks_tmp, proba, 
+                            inter, basal, theta_ref[:, :n_networks_tmp], ks[:n_networks_tmp+1], G, g, n_networks_tmp, proba, 
                             l_pen2, weight_prev=weight_prev*(1-final), loss=loss, correc_ref=final, final=final)
             
     if n_networks_tmp < n_networks:
@@ -445,7 +482,7 @@ def main_loop_inference(g, vect_t, y_samples, y_proba, y_prot, y_prot_mod, y_kon
     return basal, inter, basal_tmp, inter_tmp
 
 
-def inference_network(vect_t, times, y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, proba=1,
+def inference_network(y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, n_stimulus=1, proba=0,
                       ref_network = np.zeros(2),
                       basal_init = np.zeros(2), inter_init = np.zeros(2), 
                       basal_ref = np.zeros(2), inter_ref = np.zeros(2), 
@@ -475,9 +512,9 @@ def inference_network(vect_t, times, y_samples, y_kon, y_proba, y_prot, y_prot_m
     
     theta_ref = np.zeros((G+1, G, n_networks))
     if np.linalg.norm(inter_ref):
-        theta_ref[:-1, :, :] = inter_init[:, :, :]
+        theta_ref[:-1, :, :] = inter_ref[:, :, :]
     if np.linalg.norm(basal_ref):
-        theta_ref[-1, :, :] = basal_init[:, :]
+        theta_ref[-1, :, :] = basal_ref[:, :]
 
     if np.linalg.norm(ref_network) <= 0:
         ref_network = np.ones_like(inter_init)
@@ -490,7 +527,6 @@ def inference_network(vect_t, times, y_samples, y_kon, y_proba, y_prot, y_prot_m
 
     def run_main_loop_for_gene(g):
         return main_loop_inference(g,
-            vect_t, 
             y_samples,
             y_proba[:, g],
             y_prot, 
@@ -512,13 +548,13 @@ def inference_network(vect_t, times, y_samples, y_kon, y_proba, y_prot, y_prot_m
 
     if Parallel is not None:
         results = Parallel(n_jobs=-1)(
-            delayed(run_main_loop_for_gene)(g) for g in range(1, G)
+            delayed(run_main_loop_for_gene)(g) for g in range(n_stimulus, G)
         )
     else:
         # fallback sequential loop when joblib is unavailable
-        results = [run_main_loop_for_gene(g) for g in range(1, G)]
+        results = [run_main_loop_for_gene(g) for g in range(n_stimulus, G)]
 
-    for idx, g in enumerate(range(1, G)):
+    for idx, g in enumerate(range(n_stimulus, G)):
         basal[g, :], inter[:, g, :], basal_tmp[g, :], inter_tmp[:, g, :] = results[idx]
 
     return basal, inter, basal_tmp, inter_tmp

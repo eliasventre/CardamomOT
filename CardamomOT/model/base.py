@@ -76,8 +76,8 @@ class NetworkModel:
         self.hard_em = 1 # Do we initialize with a hard_em ?
         self.preserve_mean_values = 1 # Do we ensure temporal constraints when fitting the basins in the hard_em ?
         self.mean_forcing_em = 0.5 # at which point we force the mean correction: the higher the more
-        self.force_basins = 1 # Do we want to ensure the means to be preserved by the NB mixture ? It may not preserve multistability
-        self.temporal_basins = 1 # Is it preserved temporally ?
+        self.force_basins = 0 # Do we want to ensure the means to be preserved by the NB mixture ? It may not preserve multistability
+        self.temporal_basins = 0 # Is it preserved temporally ?
         self.transform_proba = 0 # Do we want to force probas to be steep for compatibility with sigmoid model?
         self.seuil = 1e-2 # minimum for beta mixture parameters (second parameters)
 
@@ -424,7 +424,7 @@ class NetworkModel:
                     mu = np.ones(N_sample)/N_sample
                     nu = np.ones(N_cells)/N_cells
                     tmp = np.log(G) # approximate number of errors expected by gene in the reconstructed modes
-                    reg = self.init_entropic_noise * tmp * (1 / n_iter)**(1 - 1/n_iter) # decrease entropic regularization with iterations - on purpose the slope is in 1/x for fast convergence
+                    reg = max(self.init_entropic_noise * tmp * (1 / n_iter)**(1 - 1/n_iter), .01) # decrease entropic regularization with iterations - on purpose the slope is in 1/x for fast convergence
                     stopThr, numItermax = self.stopThr_init, int(10000 / min(1, reg))
                     if not self.unbalanced_reg: 
                         while stopThr <= self.stopThr_init*100:
@@ -626,11 +626,12 @@ class NetworkModel:
                                                     )
                                 
                 basal, inter, basal_tmp, inter_tmp = inference_network(
-                    vect_t_sim, times, y_samples, y_kon, y_proba, y_prot, y_prot_prev, 
+                    y_samples, y_kon, y_proba, y_prot, y_prot_prev, 
                     ks, ref_network = self.ref_network, basal_init=basal, inter_init=inter,
                     basal_ref = basal_ref, inter_ref = inter_ref,
-                    proba=self.compute_with_proba, scale=self.scale_pen, weight_prev=weight_prev, loss=self.loss_norm,
-                    final=int(np.linalg.norm(inter_ref) > 1))
+                    proba=self.compute_with_proba, scale=self.scale_pen, 
+                    weight_prev=weight_prev, loss=self.loss_norm,
+                    final=0)
 
 
             error_2 = count_errors(y_prot, y_kon, y_proba, ks, basal, inter, loss=self.loss_norm, compute_with_proba=self.compute_with_proba)
@@ -710,6 +711,7 @@ class NetworkModel:
                             diff_k = np.maximum(1 - np.abs(kon_vector_formodes[indices, g, None] - obj_i), self.seuil)
                             dist = - (np.log(proba_i) + (1 - weight_prob) * to_keep_for_update[indices, None] * 
                                                         np.log(diff_k/np.max(diff_k, axis=1, keepdims=True)))
+                            dist = np.clip(dist, 0, 100)
                             if n_iter <= n_loops: 
                                 try: 
                                     coupling = ot.bregman.sinkhorn(mu, nu, dist, reg=reg, numItermax=int(10000/reg), stopThr=self.stopThr_init*10)
@@ -732,7 +734,7 @@ class NetworkModel:
                         diff_k = np.maximum(1 - np.abs(kon_vector_formodes[:, g, None] - obj), self.seuil)
                         dist = - (np.log(proba) + (1 - weight_prob) * to_keep_for_update[:, None] * 
                                                     np.log(diff_k/np.max(diff_k, axis=1, keepdims=True)))
-                        dist = np.clip(dist, 1e-4, 100)
+                        dist = np.clip(dist, 0, 100)
                         if n_iter <= n_loops: 
                             try: 
                                 coupling = ot.bregman.sinkhorn(mu, nu, dist, reg=reg, numItermax=int(10000/reg), stopThr=self.stopThr_init*10)
@@ -745,7 +747,6 @@ class NetworkModel:
                             tmp_proba[cell, idx[cell]] = 1
                             tmp_modes[cell] = obj[cell, idx[cell]]
                     return tmp_proba, tmp_modes
-
                 results = Parallel(n_jobs=-1)(
                     delayed(run_main_loop_for_gene)(g) for g in range(1, G_tot))
 
@@ -1001,11 +1002,12 @@ class NetworkModel:
         error = count_errors(y_prot, self.kon_beta, self.proba_traj, ks, self.basal, self.inter, loss=self.loss_norm, compute_with_proba=self.compute_with_proba)
 
         basal, inter, _, _ = inference_network(
-            self.times_data, times, self.samples_data, self.kon_beta, self.proba_traj,
+            self.samples_data, self.kon_beta, self.proba_traj,
             y_prot, y_prot_prev, ks, proba=self.compute_with_proba,
             ref_network = self.ref_network, basal_init=basal_ref, inter_init=inter_ref,
             basal_ref=basal_ref, inter_ref=inter_ref,
-            scale=self.scale_pen * self.fact_simple, weight_prev=self.weight_prev, loss=self.loss_norm, final=1
+            scale=self.scale_pen * self.fact_simple, 
+            weight_prev=self.weight_prev, loss=self.loss_norm, final=1
         )
 
         error_corrected = count_errors(y_prot, self.kon_beta, self.proba_traj, ks, basal, inter, loss=self.loss_norm, compute_with_proba=self.compute_with_proba)
