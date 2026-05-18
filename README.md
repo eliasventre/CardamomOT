@@ -128,26 +128,172 @@ python infer_network_structure.py -i my_project -s full
 python infer_mixture.py -i my_project -s full -m 0.5 --verbose
 ```
 
+## 🧬 Advanced Features
+
+This section describes optional input files that activate advanced modes of the algorithm. All optional files are placed either in `my_project/Data/` or directly in `adata.obs`.
+
+---
+
+### Read depth correction (`infer_rd.py`)
+
+When cells have heterogeneous sequencing depths, CARDAMOM can correct for this before inference. Run:
+
+```bash
+python infer_rd.py -i my_project
+```
+
+This script identifies Poisson-like genes (following Chronocell, Fang et al. 2024) and computes a per-cell read depth factor stored in `adata.obs['rd']`. Subsequent steps (`infer_mixture`, `infer_network_structure`) automatically use this column when present.
+
+**Requirements:** at least 1,000 genes. Below this threshold the step is silently skipped (no `rd` column is added).
+
+**Key parameters:**
+- `--var_threshold 1.2`: Poisson variance threshold (default 1.2)
+- `--min_mean 0.1`: minimum gene mean for Poisson gene selection
+
+---
+
+### Multiple experimental samples (`dataset_id`)
+
+If your experiment contains several biological conditions that should share a common gene regulatory network but may have **different basal transcription rates** (e.g. different cell lines, donors, or perturbation backgrounds), annotate each cell with a sample label:
+
+```python
+adata.obs['dataset_id'] = ...   # string or integer label per cell
+```
+
+When `dataset_id` is present, CARDAMOM automatically:
+- Identifies unique samples and builds one set of **per-sample basal parameters** `θ_basal(s)` for each sample `s`.
+- Solves a **single joint optimisation** over shared interaction weights `inter` and all per-sample basals simultaneously — so perturbation information is exploited during network inference.
+- Saves `basal.npy` with shape `(n_samples, G, n_networks)` instead of the standard `(1, G, n_networks)`.
+
+> Without `dataset_id`, all cells are treated as a single sample (`n_samples = 1`).
+
+---
+
+### Stimulus / exogenous signal (`n_stimuli`, `stimulus_schedule.txt`)
+
+CARDAMOM supports one or several **exogenous inputs** (stimuli) that are not inferred but act as known regulators of the network. Stimuli occupy the first `n_stimuli` columns of the full gene-plus-stimulus state vector.
+
+**Default behaviour (no file needed):** one stimulus that is `0` at the first timepoint and `1` at all subsequent timepoints.
+
+**Custom schedule:** place `Data/stimulus_schedule.txt` in the project folder. Each row corresponds to a timepoint (in chronological order); each column to one stimulus:
+
+```
+# stimulus_schedule.txt  (tab or space separated, no header)
+# rows = timepoints, cols = stimulus channels
+0.0    0.0
+1.0    0.0
+1.0    1.0
+```
+
+For a single stimulus channel, a single-column file suffices. Values between 0 and 1 are allowed and interpreted as partial stimulus strength.
+
+**Simulation-specific schedule:** to use a *different* schedule during forward simulation (e.g. to test a new stimulus protocol after training), place `Data/stimulus_schedule_simul.txt`. `simulate_network.py` and `simulate_network_KOV.py` look for this file first, falling back to `stimulus_schedule.txt` if absent.
+
+---
+
+### Initialisation and reference arrays (`Data/`)
+
+The network inference step accepts optional arrays to **warm-start** the optimiser or to **anchor** the solution towards a prior network. All files go in `my_project/Data/` and can be provided as `.npy` or gene-indexed `.csv`.
+
+| File | Shape | Role |
+|---|---|---|
+| `basal_init.npy` / `.csv` | `(G,)` or `(n_samples, G, n_networks)` | Initial values for basal parameters |
+| `inter_init.npy` / `.csv` | `(G, G)` or `(G, G, n_networks)` | Initial values for interaction matrix |
+| `basal_ref.npy` / `.csv` | same as `basal_init` | Regularisation target for basal (penalises deviations) |
+| `inter_ref.npy` / `.csv` | same as `inter_init` | Regularisation target for interactions |
+| `ref_network.csv` | `(G, G)` gene-indexed CSV | Binary/real prior interaction graph (sparsity mask) |
+
+**CSV format for `basal_ref` / `inter_ref`:** rows and columns must be gene names matching `adata.var_names` (upper-cased). Stimulus rows/columns (`Stimulus`, `Stimulus_0`, …) are handled automatically.
+
+A 3-D `basal_init` of shape `(n_samples, G, n_networks)` warm-starts each sample's basal independently. If a 2-D array `(G, n_networks)` is provided it is broadcast to all samples.
+
+---
+
+### Per-sample KO / OV prior (`Data/basal_ref_KOV.txt`)
+
+To encode prior knowledge about **which genes are knocked out (KO) or overexpressed (OV)** in specific samples, create a tab-separated file:
+
+```
+# basal_ref_KOV.txt
+sample_id	KO	OV
+wt	        	
+ko_CHGA	CHGA	
+ov_STMN2	 	STMN2
+ko_CHGA_ov_STMN2	CHGA	STMN2
+```
+
+- `sample_id` values must match `adata.obs['dataset_id']`.
+- `KO` column: comma-separated gene names forced to **basal = −100** (silent during inference).
+- `OV` column: comma-separated gene names forced to **basal = +100** (always active during inference).
+- Multiple genes per cell: `CHGA,POSTN`.
+- Missing or `0` entries mean no constraint for that sample.
+
+When this file is present, `infer_network_structure.py` replaces `basal_ref` for the affected genes and samples, and saves `cardamomOT/basal_ref_mask.npy` (a boolean `(n_samples, G)` array) so that `simulate_network_KOV.py` can compute a clean wild-type baseline when running new perturbations.
+
+---
+
+### In-silico perturbation simulation (`Data/KO_OV_list.txt`)
+
+After training, you can simulate arbitrary knock-out / over-expression combinations with `simulate_network_KOV.py`. Define the combinations in:
+
+```
+# KO_OV_list.txt  (tab-separated, header required)
+KO	        OV
+            		        # wild-type (no perturbation)
+CHGA	
+		STMN2
+CHGA	STMN2
+POSTN	S100B,STMN2
+```
+
+Each row produces one independent simulation. Results are saved as `cardamomOT/adata_prot_simul_KO_*_OV_*_stim*.h5ad`.
+
+If `basal_ref_KOV.txt` was used during training and `basal.npy` is therefore 3-D (per-sample), `simulate_network_KOV.py` automatically reconstructs a clean wild-type basal by averaging the unconstrained samples before applying each new perturbation.
+
+---
+
+### Summary: project directory structure
+
+```
+my_project/
+├── Data/
+│   ├── data.h5ad                  # required — obs['time'], obs['dataset_id'] (opt.), obs['rd'] (opt.)
+│   ├── gene_list.txt              # optional — subset of genes to use
+│   ├── stimulus_schedule.txt      # optional — stimulus values per timepoint
+│   ├── stimulus_schedule_simul.txt# optional — overrides stimulus schedule for simulation only
+│   ├── ref_network.csv            # optional — prior interaction graph (sparsity mask)
+│   ├── basal_init.npy / .csv      # optional — warm-start for basal parameters
+│   ├── inter_init.npy / .csv      # optional — warm-start for interactions
+│   ├── basal_ref.npy / .csv       # optional — regularisation target for basal
+│   ├── inter_ref.npy / .csv       # optional — regularisation target for interactions
+│   ├── basal_ref_KOV.txt          # optional — per-sample KO/OV prior (requires dataset_id)
+│   └── KO_OV_list.txt             # optional — in-silico perturbations to simulate
+└── cardamomOT/                    # generated by the pipeline
+    ├── basal.npy                  # (n_samples, G, n_networks)
+    ├── inter.npy                  # (G, G, n_networks)
+    ├── basal_ref_mask.npy         # (n_samples, G) bool — generated from basal_ref_KOV.txt
+    └── ...
+```
+
+---
+
 ## 📊 Understanding Results
 
 ### Main generated files
 
-**In `my_project/cardamom/`:**
-- `inter.npy`: gene regulatory interaction matrix (G×G)
-- `basal.npy`: basal expression parameters (G×1)
-- `mixture_parameters.npy`: burst kinetics parameters (G×3)
+**In `my_project/cardamomOT/`:**
+- `inter.npy`: gene regulatory interaction matrix `(G, G, n_networks)`
+- `basal.npy`: basal transcription parameters `(n_samples, G, n_networks)`
+- `mixture_parameters.npy`: burst kinetics parameters `(G+1, G)`
 
 **In `my_project/Check/`:**
 - Visual comparisons between real data and simulations
 
-**In `my_project/visualization/`:**
-- Analyses of the inferred regulatory network
-
 ### Parameter Interpretation
 
-- **Interactions (`inter.npy`)**: positive values = activation, negative = repression
-- **Basal parameters (`basal.npy`)**: constitutive gene expression
-- **Mixture parameters**: frequency and size of transcriptional bursts
+- **Interactions (`inter[i, j, k]`)**: weight of gene `i` on gene `j` in network state `k`; positive = activation, negative = repression
+- **Basal (`basal[s, g, k]`)**: constitutive transcription of gene `g` in sample `s` under network state `k`
+- **Mixture parameters**: frequency and size of transcriptional bursts per gene
 
 ## 🔧 Troubleshooting
 

@@ -3,10 +3,6 @@ simulate_network_KOV.py
 ----------------------
 Simulate gene expression under in-silico knock-out (KO) and over-expression (OV).
 
-Loads the inferred network model and simulates stochastic expression dynamics
-under various genetic perturbations (knockouts and overexpressions) to predict
-the effects of gene perturbations on network dynamics.
-
 Usage:
     python simulate_network_KOV.py -i <project_path> -s <split>
 
@@ -29,20 +25,10 @@ import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta
 import getopt
 import anndata as ad
-import scipy.sparse
 import os
 import pandas as pd
 
 def parse_gene_list(cell):
-    """
-    Parse a KO/OV cell that can contain multiple genes separated by commas.
-    
-    Args:
-        cell: String or numeric value from DataFrame cell
-    
-    Returns:
-        list: Parsed gene names, empty if null/zero
-    """
     if pd.isna(cell):
         return []
     cell = str(cell).strip()
@@ -52,29 +38,13 @@ def parse_gene_list(cell):
 
 
 def load_ko_ov_combinations(file_path):
-    """
-    Load KO/OV combinations from tab-separated file.
-    
-    Expects columns 'KO' and/or 'OV' with gene names (comma-separated for multiple).
-    
-    Args:
-        file_path: Path to KO_OV_list.txt
-    
-    Returns:
-        list: List of dicts with 'KO' and 'OV' keys containing gene lists
-    
-    Raises:
-        FileNotFoundError: If file does not exist
-        ValueError: If no KO or OV column found
-    """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"KO/OV list file not found: {file_path}")
-    
+
     combos = []
     with open(file_path, "r") as f:
         lines = f.readlines()
 
-    # Parse header
     header = lines[0].strip().split('\t')
     header = [h.strip().upper() for h in header]
 
@@ -84,7 +54,6 @@ def load_ko_ov_combinations(file_path):
     if ko_idx is None and ov_idx is None:
         raise ValueError("KO_OV_list.txt must contain 'KO' or 'OV' column")
 
-    # Parse combinations
     for line_num, line in enumerate(lines[1:], start=2):
         parts = line.rstrip().split('\t')
 
@@ -99,7 +68,7 @@ def load_ko_ov_combinations(file_path):
         kos = parse(ko_idx)
         ovs = parse(ov_idx)
 
-        if kos or ovs:  # Only add non-empty combinations
+        if kos or ovs:
             combos.append({'KO': kos, 'OV': ovs})
 
     return combos
@@ -109,15 +78,8 @@ def main(argv):
     """
     Simulate knockout/overexpression perturbations of the inferred network.
 
-    Loads the inferred network model and applies specified perturbations,
-    then simulates dynamics for each condition to predict network responses
-    to genetic manipulations.
-
     Args:
         argv: Command-line arguments (--input, --split).
-    
-    Returns:
-        None. Saves simulation results for each perturbation.
     """
     inputfile = ''
     split = ''
@@ -127,7 +89,7 @@ def main(argv):
         print("[simulate_network_KOV] Error: Invalid command-line arguments")
         print("[simulate_network_KOV] Usage: python simulate_network_KOV.py -i <project_path> -s <split>")
         sys.exit(2)
-    
+
     for opt, arg in opts:
         if opt in ("-i", "--input"):
             inputfile = arg
@@ -160,7 +122,7 @@ def main(argv):
 
     print(f"[simulate_network_KOV] Loaded {len(combos)} KO/OV combinations")
 
-    # Load gene expression data
+    # Load gene expression data (for gene count and var_names)
     data_path = os.path.join(p, 'Data', f'data_{split}.h5ad')
     try:
         if not os.path.exists(data_path):
@@ -171,30 +133,18 @@ def main(argv):
         print(f"[simulate_network_KOV] Error: {e}")
         sys.exit(1)
 
-    # Extract count matrix
-    if scipy.sparse.issparse(adata.X):
-        data_rna_extracted = adata.X.T.toarray()
-    else:
-        data_rna_extracted = adata.X.T
+    # ─── LOAD STIMULUS SCHEDULE ──────────────────────────────────────────
+    stim_sched = None
+    for sched_name in ('stimulus_schedule_simul.txt', 'stimulus_schedule.txt'):
+        sched_path = os.path.join(p, 'Data', sched_name)
+        if os.path.exists(sched_path):
+            stim_sched = np.loadtxt(sched_path)
+            print(f"[simulate_network_KOV] Loaded stimulus schedule from {sched_path}")
+            break
 
-    # Validate temporal information
-    try:
-        times = adata.obs['time'].values
-        if len(np.unique(times)) <= 1:
-            raise ValueError("Data must contain multiple timepoints in obs['time']")
-        print(f"[simulate_network_KOV] Detected {len(np.unique(times))} timepoints")
-    except KeyError:
-        print("[simulate_network_KOV] Error: data.obs['time'] not found")
-        sys.exit(1)
-    except ValueError as e:
-        print(f"[simulate_network_KOV] Error: {e}")
-        sys.exit(1)
+    print(f"[simulate_network_KOV] Data: {adata.shape[1]} genes")
 
-    data_rna = np.vstack([times, data_rna_extracted]).T
-    G = np.size(data_rna, 1)
-    print(f"[simulate_network_KOV] Data shape: {G} genes, {np.size(data_rna, 0)} cells")
-
-    model = NetworkModel_beta(G-1)
+    model = NetworkModel_beta(adata.shape[1])
 
     # Load network model parameters
     print("[simulate_network_KOV] Loading inferred network parameters...")
@@ -230,11 +180,39 @@ def main(argv):
 
     times.sort()
     print(f"[simulate_network_KOV] Will simulate {len(times)} timepoints")
-    
+
+    # ─── COMPUTE CLEAN BASELINE (unperturbed by training KOVs) ───────────────
+    basal_simul_raw = np.load(os.path.join(p, 'cardamomOT', 'basal_simul.npy'))
+    basal_t_simul_raw = np.load(os.path.join(p, 'cardamomOT', 'basal_t_simul.npy'))
+    EPS = 1e-16
+
+    if basal_simul_raw.ndim == 3:
+        mask_path = os.path.join(p, 'cardamomOT', 'basal_ref_mask.npy')
+        n_samp, G_tot_b, n_nw_b = basal_simul_raw.shape
+        basal_clean = np.zeros((G_tot_b, n_nw_b))
+        if os.path.exists(mask_path):
+            basal_ref_mask = np.load(mask_path)  # (n_samples, G_tot)
+            for g in range(G_tot_b):
+                free = np.where(~basal_ref_mask[:, g])[0]
+                basal_clean[g] = (basal_simul_raw[free, g, :].mean(axis=0)
+                                  if len(free) > 0
+                                  else basal_simul_raw[:, g, :].mean(axis=0))
+        else:
+            basal_clean = basal_simul_raw.mean(axis=0)
+        basal_mean_orig = basal_simul_raw.mean(axis=0)  # (G_tot, n_nw)
+        temporal_factor = basal_t_simul_raw / (basal_mean_orig[np.newaxis] + EPS)
+        basal_t_clean = basal_clean[np.newaxis] * temporal_factor  # (T, G_tot, n_nw)
+        print(f"[simulate_network_KOV] Computed clean 2D baseline from {n_samp}-sample basal")
+    else:
+        basal_clean = basal_simul_raw
+        basal_t_clean = basal_t_simul_raw
+
     N = np.sum(model.times_data == 0)
     times_simulation = np.zeros(len(times)*N)
     for t in range(0, len(times)):
         times_simulation[t*N:(t+1)*N] = times[t]
+
+    ns = model.n_stimuli
 
     # Simulate perturbations
     print(f"[simulate_network_KOV] Starting simulation of {len(combos)} perturbations...")
@@ -244,10 +222,10 @@ def main(argv):
         label = f"KO_{'-'.join(kos) if kos else 'none'}_OV_{'-'.join(ovs) if ovs else 'none'}"
         print(f"\n[simulate_network_KOV] Simulating condition {idx}/{len(combos)}: {label}")
 
-        # Reset model to baseline
+        # Reset model to clean (unperturbed) baseline
         try:
-            model.basal = np.load(os.path.join(p, 'cardamomOT', 'basal_simul.npy'))
-            model.basal_t = np.load(os.path.join(p, 'cardamomOT', 'basal_t_simul.npy'))
+            model.basal = basal_clean.copy()
+            model.basal_t = basal_t_clean.copy()
             model.prot = np.load(os.path.join(p, 'cardamomOT', 'data_prot_unitary.npy'))
             model.kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta.npy'))
         except FileNotFoundError as e:
@@ -257,7 +235,7 @@ def main(argv):
         # Apply knockouts
         for gene in kos:
             if gene in adata.var_names:
-                ind = 1 + adata.var_names.get_loc(gene)
+                ind = ns + adata.var_names.get_loc(gene)
                 model.basal_t[:, ind] = -100 - np.sum(model.inter_t[-1, :, ind])
                 model.prot[:, ind] = 0
                 print(f"[simulate_network_KOV]   KO: {gene} (index {ind})")
@@ -267,7 +245,7 @@ def main(argv):
         # Apply overexpressions
         for gene in ovs:
             if gene in adata.var_names:
-                ind = 1 + adata.var_names.get_loc(gene)
+                ind = ns + adata.var_names.get_loc(gene)
                 model.basal_t[:, ind] = 100 + np.sum(model.inter_t[-1, :, ind])
                 model.prot[:, ind] = 1
                 print(f"[simulate_network_KOV]   OV: {gene} (index {ind})")
@@ -276,7 +254,7 @@ def main(argv):
 
         # Simulate dynamics
         try:
-            model.simulate_network(times)
+            model.simulate_network(times, stimulus_schedule=stim_sched)
             cardamom_dir = os.path.join(p, 'cardamomOT')
             np.save(os.path.join(cardamom_dir, f'data_prot_simul_{label}'), model.prot)
             np.save(os.path.join(cardamom_dir, f'data_kon_simul_{label}'), model.kon_theta)

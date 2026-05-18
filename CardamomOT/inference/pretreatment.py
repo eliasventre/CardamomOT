@@ -52,12 +52,11 @@ def extract_degradation_rates(df, gene_list, cell_line=None, similarity_threshol
     return deg
 
 
-def select_DEgenes(data_rna, vect_samples_id, vect_celltype_id, proba,  
-                   list_genes, n_genes_tokeep_temporal=[1000], n_genes_tokeep_celltype=[1000], 
+def select_DEgenes(vect_t, vect_samples_id, vect_celltype_id, proba,
+                   list_genes, n_genes_tokeep_temporal=[1000], n_genes_tokeep_celltype=[1000],
                    limit_min=.01, verb=0):
 
     G: int = len(list_genes)
-    vect_t = data_rna[:, 0]
     times_full = np.sort(np.unique(vect_t))
     times = times_full[:-1]
     samples_id = np.unique(vect_samples_id)

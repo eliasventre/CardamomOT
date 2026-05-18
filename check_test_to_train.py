@@ -1,59 +1,56 @@
 """
 check_test_to_train.py
 ----------------------
-Validate network inference by comparing test set predictions to observations.
+Validate test-set inference by comparing predicted dynamics with observations.
 
-Compares inferred network dynamics on test set with observed test data.
-Generates plots and AnnData objects for visualization of inference quality.
+Loads the AnnData objects produced by infer_test.py and generates distribution
+comparison plots between real test data and the inferred/simulated trajectories.
 
 Usage:
     python check_test_to_train.py -i <project_path> -s <split> [-t <stim>] [-p <prior>]
 
-Required input files:
+Required input files (produced by infer_test.py):
     - Data/data_<split>.h5ad: observed test data
-    - cardamomOT/data_kon_beta_test.npy, data_kon_theta_test.npy: inferred dynamics
-    - cardamomOT/data_kon_simul_test.npy, data_rna_test.npy: simulation data
-    - cardamomOT/mixture_parameters.npy, pi_zinb.npy: model parameters
+    - cardamomOT/adata_beta_test_stim*_prior*.h5ad
+    - cardamomOT/adata_theta_test_stim*_prior*.h5ad
+    - cardamomOT/adata_sim_test_stim*_prior*.h5ad
+    - cardamomOT/adata_rna_traj_test_stim*_prior*.h5ad
 
 Output files:
-    - cardamomOT/adata_beta_test.h5ad: beta parameter trajectory
-    - cardamomOT/adata_theta_test.h5ad: theta parameter trajectory
-    - cardamomOT/adata_sim_test.h5ad: simulated trajectory
-    - results_article/*_test_to_train.png: comparison plots
+    - Check/test_to_train/: distribution comparison plots
+    - Check/altogether_test/: UMAP comparison plots
 """
 import numpy as np
 import sys
 import getopt
 import anndata as ad
-from CardamomOT import NetworkModel, plot_data_distrib, plot_data_umap_altogether
+from CardamomOT import plot_data_distrib, plot_data_umap_altogether
 import scipy.sparse
 import os
 
 
 def main(argv):
     """
-    Validate network inference on test set.
+    Validate test-set inference using pre-built AnnData objects from infer_test.py.
 
-    Loads test data and inferred dynamics, generates predictions,
-    and compares with observed data through plots and saved AnnData objects.
+    Loads trajectory and simulation AnnData objects, converts them to array format,
+    and generates comparison plots against real observed test data.
 
     Args:
         argv: Command-line arguments (--input, --split, --stim, --prior).
-    
-    Returns:
-        None. Saves validation plots and AnnData objects.
     """
     inputfile = ''
     split = ''
-    stim = 1
-    prior = 1
+    stim = 1.0
+    prior = 1.0
     try:
         opts, args = getopt.getopt(argv, "hi:s:t:p:", ["input=", "split=", "stim=", "prior="])
     except getopt.GetoptError:
         print("[check_test_to_train] Error: Invalid command-line arguments")
-        print("[check_test_to_train] Usage: python check_test_to_train.py -i <project_path> -s <split> [-t <stim>] [-p <prior>]")
+        print("[check_test_to_train] Usage: python check_test_to_train.py -i <project_path>"
+              " -s <split> [-t <stim>] [-p <prior>]")
         sys.exit(2)
-    
+
     for opt, arg in opts:
         if opt in ("-i", "--input"):
             inputfile = arg
@@ -72,147 +69,97 @@ def main(argv):
         sys.exit(1)
 
     p = '{}/'.format(inputfile)
+    cardamom_dir = os.path.join(p, 'cardamomOT')
 
-    # Load observed test data
+    # ─── LOAD OBSERVED TEST DATA ─────────────────────────────────────────
     data_path = os.path.join(p, 'Data', 'data_{}.h5ad'.format(split))
     try:
         if not os.path.exists(data_path):
             raise FileNotFoundError(f"Test data file not found at {data_path}")
         adata = ad.read_h5ad(data_path)
         print(f"[check_test_to_train] Loaded test data from {data_path}")
-        print(f"[check_test_to_train] Dataset contains {adata.shape[0]} cells and {adata.shape[1]} genes")
+        print(f"[check_test_to_train] Dataset: {adata.shape[0]} cells, {adata.shape[1]} genes")
     except FileNotFoundError as e:
         print(f"[check_test_to_train] Error: {e}")
         sys.exit(1)
-    except Exception as e:
-        print(f"[check_test_to_train] Error loading test data: {e}")
-        sys.exit(1)
-    
-    # Extract RNA data matrix
-    if scipy.sparse.issparse(adata.X):
-        data_rna_extracted = adata.X.T.toarray()
+
+    # Read depth normalization: divide data_real in memory, never touch adata
+    if 'rd' in adata.obs.columns:
+        cell_rd = np.clip(np.asarray(adata.obs['rd'].values, dtype=float), 1e-6, None)
+        print(f"[check_test_to_train] Read depth correction loaded from adata.obs['rd']")
     else:
-        data_rna_extracted = adata.X.T
-     
-    # Validate temporal information
+        cell_rd = np.ones(adata.shape[0], dtype=float)
+
+    if scipy.sparse.issparse(adata.X):
+        data_rna_extracted = adata.X.T.toarray().astype(float)
+    else:
+        data_rna_extracted = np.asarray(adata.X.T, dtype=float)
+    data_rna_extracted /= cell_rd[np.newaxis, :]   # (G, N) / (1, N)
+
     try:
-        times = adata.obs['time'].values 
+        times = adata.obs['time'].values
         if len(np.unique(times)) <= 1:
             raise ValueError("Dataset must contain temporal information with multiple timepoints")
         print(f"[check_test_to_train] Found {len(np.unique(times))} unique timepoints")
     except (KeyError, ValueError) as e:
         print(f"[check_test_to_train] Error: {e}")
         sys.exit(1)
-    
+
     data_real = np.vstack([times, data_rna_extracted]).astype(float)
 
-    # Load model parameters
+    # ─── LOAD PRE-BUILT ANNDATA OBJECTS ──────────────────────────────────
+    tag = f'stim{stim}_prior{prior}'
+    adata_files = {
+        'beta':     f'adata_beta_test_{tag}.h5ad',
+        'theta':    f'adata_theta_test_{tag}.h5ad',
+        'sim':      f'adata_sim_test_{tag}.h5ad',
+        'rna_traj': f'adata_rna_traj_test_{tag}.h5ad',
+    }
+
+    adatas = {}
     try:
-        mixture_parameters = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
-        c = mixture_parameters[-1, :]
-        kz = mixture_parameters[:-1, :] + 1e-6
-        pi_zinb = np.load(os.path.join(p, 'cardamomOT', 'pi_zinb.npy'))
-        print(f"[check_test_to_train] Loaded model parameters")
+        for key, fname in adata_files.items():
+            fpath = os.path.join(cardamom_dir, fname)
+            if not os.path.exists(fpath):
+                raise FileNotFoundError(f"Required AnnData file not found: {fpath}\n"
+                                        "Run infer_test.py first.")
+            adatas[key] = ad.read_h5ad(fpath)
+        print(f"[check_test_to_train] Loaded pre-built AnnData objects")
     except FileNotFoundError as e:
-        print(f"[check_test_to_train] Error: Missing parameter file: {e}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"[check_test_to_train] Error loading parameters: {e}")
+        print(f"[check_test_to_train] Error: {e}")
         sys.exit(1)
 
-    # Load inference results
-    try:
-        vect_kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta_test.npy')) + 1e-6
-        vect_kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta_test.npy')) + 1e-6
-        vect_kon_sim = np.load(os.path.join(p, 'cardamomOT', 'data_kon_simul_test.npy')) + 1e-6
-        rna_ref = np.load(os.path.join(p, 'cardamomOT', 'data_rna_test.npy'))
-        times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times_test.npy'))
-        times_simulation = np.load(os.path.join(p, 'cardamomOT', 'simulation_times_test.npy'))
-        print(f"[check_test_to_train] Loaded test set inference and simulation results")
-    except FileNotFoundError as e:
-        print(f"[check_test_to_train] Error: Missing forecast file: {e}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"[check_test_to_train] Error loading forecast data: {e}")
-        sys.exit(1)
-   
-    # Extract gene names and timepoints
+    # Convert adatas to array format expected by plotting functions
+    # data_* shape: (G+1, N_cells) — row 0 = times, rows 1: = gene expressions
+    def _adata_to_array(a):
+        X = a.X.toarray() if scipy.sparse.issparse(a.X) else np.asarray(a.X)
+        return np.vstack([a.obs['time'].values, X.T])
+
+    data_ref = _adata_to_array(adatas['rna_traj'])
+    data_beta = _adata_to_array(adatas['beta'])
+    data_netw_theta = _adata_to_array(adatas['theta'])
+    data_sim = _adata_to_array(adatas['sim'])
+
     names = adata.var_names
-    t_data = list(set(times_data))
-    t_data.sort()
-    t_simul = list(set(times_simulation))
-    t_simul.sort()
+    t_data = sorted(np.unique(adatas['beta'].obs['time'].values).tolist())
+    t_simul = sorted(np.unique(adatas['sim'].obs['time'].values).tolist())
+    print(f"[check_test_to_train] Trajectory timepoints: {t_data}")
+    print(f"[check_test_to_train] Simulation timepoints: {t_simul}")
 
-    print(f"[check_test_to_train] Data timepoints: {t_data}, Simulation timepoints: {t_simul}")
-
-    # Generate simulated data with noise
-    G = np.size(data_real, 0)-1
-    data_ref = np.zeros((G+1, np.size(vect_kon_beta, 0)))
-    data_ref[0, :] = times_data[:]
-    data_ref[1:, :] = rna_ref[:, 1:].T
-    data_beta = np.zeros((G+1, np.size(vect_kon_beta, 0)))
-    data_netw_theta = np.zeros((G+1, np.size(vect_kon_theta, 0)))
-    data_sim = np.zeros((G+1, np.size(vect_kon_sim, 0)))
-    data_beta[0, :] = times_data[:]
-    data_netw_theta[0, :] = times_data[:]
-    data_sim[0, :] = times_simulation[:]
-
-    # Add negative binomial noise and sparsity for simulations
-    zero_mask = (np.random.uniform(0, 1, (data_sim[1:, :].shape)) < pi_zinb.reshape((G, 1)))
-    print(f'[check_test_to_train] Sparsity ratio (simulation): {np.sum(zero_mask == 1)/np.size(data_sim[1:, :]):.3f}')
-    data_sim[1:, :] = np.random.negative_binomial((np.max(kz, 0)*vect_kon_sim)[:, 1:].T, (c / (c+1))[1:].reshape(G, 1))
-    data_sim[1:, :] = np.where(zero_mask, 0, data_sim[1:, :])
-
-    zero_mask = (np.random.uniform(0, 1, (data_beta[1:, :].shape)) < pi_zinb.reshape((G, 1)))
-    print(f'[check_test_to_train] Sparsity ratio (beta): {np.sum(zero_mask == 1)/np.size(data_beta[1:, :]):.3f}')
-    data_beta[1:, :] = np.random.negative_binomial((np.max(kz, 0)*vect_kon_beta)[:, 1:].T, (c / (c+1))[1:].reshape(G, 1))
-    data_beta[1:, :] = np.where(zero_mask, 0, data_beta[1:, :])
-
-    zero_mask = (np.random.uniform(0, 1, (data_netw_theta[1:, :].shape)) < pi_zinb.reshape((G, 1)))
-    print(f'[check_test_to_train] Sparsity ratio (theta): {np.sum(zero_mask == 1)/np.size(data_netw_theta[1:, :]):.3f}')
-    data_netw_theta[1:, :] = np.random.negative_binomial((np.max(kz, 0)*vect_kon_theta)[:, 1:].T, (c / (c+1))[1:].reshape(G, 1))
-    data_netw_theta[1:, :] = np.where(zero_mask, 0, data_netw_theta[1:, :])
-
-    # Initialize model for plotting
-    model = NetworkModel(G)
-    model.stimulus = stim
-    model.prior_network_pen = prior
-
+    # ─── GENERATE PLOTS ──────────────────────────────────────────────────
     print(f"[check_test_to_train] Generating validation plots...")
     try:
-        # Generate plots comparing predictions to observations
-        order = np.arange(len(names[1:]))
-        names = [names[0]] + list(names[order+1])
-
-        plot_data_distrib(data_real, data_sim, t_data, t_simul, names, inputfile, 'Check', 'test_to_train')
-        plot_data_umap_altogether(data_real, data_ref, data_beta, data_netw_theta, data_sim, t_data, t_simul, inputfile, 'Check', 'altogether_test')
+        plot_data_distrib(data_real, data_sim, t_data, t_simul, names,
+                          inputfile, 'Check', 'test_to_train')
+        plot_data_umap_altogether(data_real, data_ref, data_beta, data_netw_theta,
+                                  data_sim, t_data, t_simul, inputfile, 'Check', 'altogether_test',
+                                  cell_rd=cell_rd)
         print(f"[check_test_to_train] Generated comparison plots")
     except Exception as e:
         print(f"[check_test_to_train] Warning: Error generating plots: {e}")
 
-    # Save AnnData objects
-    try:
-        adata_beta = ad.AnnData(X=data_beta[1:, ].T)
-        adata_beta.var = adata.var.copy()
-        adata_beta.obs['time'] = times_simulation
-        adata_beta.write(os.path.join(p, f'cardamomOT/adata_beta_test_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
-        print(f"[check_test_to_train] Saved beta parameter trajectory")
+    print("[check_test_to_train] Test set validation completed successfully")
 
-        adata_theta = ad.AnnData(X=data_netw_theta[1:, ].T)
-        adata_theta.var = adata.var.copy()
-        adata_theta.obs['time'] = times_simulation
-        adata_theta.write(os.path.join(p, f'cardamomOT/adata_theta_test_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
-        print(f"[check_test_to_train] Saved theta parameter trajectory")
-
-        adata_sim = ad.AnnData(X=data_sim[1:, ].T)
-        adata_sim.var = adata.var.copy()
-        adata_sim.obs['time'] = times_simulation
-        adata_sim.write(os.path.join(p, f'cardamomOT/adata_sim_test_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
-        print(f"[check_test_to_train] Saved simulated trajectory")
-        print("[check_test_to_train] Test set validation completed successfully")
-    except Exception as e:
-        print(f"[check_test_to_train] Error saving AnnData objects: {e}")
-        sys.exit(1)
 
 if __name__ == "__main__":
-   main(sys.argv[1:])
+    main(sys.argv[1:])

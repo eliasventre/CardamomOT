@@ -30,7 +30,6 @@ from CardamomOT import NetworkModel as NetworkModel_beta
 import getopt
 import anndata as ad
 import pandas as pd
-import scipy.sparse
 import os
 
 verb = 1
@@ -39,15 +38,8 @@ def main(argv):
     """
     Adapt inferred network parameters for simulation.
 
-    Loads the inferred gene regulatory network and transforms parameters
-    to enable stochastic simulation of expression dynamics. Optionally
-    incorporates reference network information for improved inference.
-
     Args:
         argv: Command-line arguments (--input, --split).
-    
-    Returns:
-        None. Saves adapted parameters to cardamom/ directory.
     """
     inputfile = ''
     split = ''
@@ -57,7 +49,7 @@ def main(argv):
         print("[infer_network_simul] Error: Invalid command-line arguments")
         print("[infer_network_simul] Usage: python infer_network_simul.py -i <project_path> -s <split>")
         sys.exit(2)
-    
+
     for opt, arg in opts:
         if opt in ("-i", "--input"):
             inputfile = arg
@@ -82,35 +74,18 @@ def main(argv):
         print(f"[infer_network_simul] Loaded data from {data_path}")
     except FileNotFoundError as e:
         print(f"[infer_network_simul] Error: {e}")
-        print(f"[infer_network_simul] Please ensure Data/data_{split}.h5ad exists in {p}")
         sys.exit(1)
-    
-    # Extract count matrix
-    if scipy.sparse.issparse(adata.X):
-        data_rna_extracted = adata.X.T.toarray()
-    else:
-        data_rna_extracted = adata.X.T
-    
-    # Validate temporal information
-    try:
-        times = adata.obs['time'].values 
-        if len(np.unique(times)) <= 1:
-            raise ValueError("Data must contain multiple timepoints in obs['time']")
-        print(f"[infer_network_simul] Detected {len(np.unique(times))} timepoints")
-    except KeyError:
-        print("[infer_network_simul] Error: data.obs['time'] not found")
-        sys.exit(1)
-    except ValueError as e:
-        print(f"[infer_network_simul] Error: {e}")
-        sys.exit(1)
-    
-    data_rna = np.vstack([times, data_rna_extracted]).T
-    G = np.size(data_rna, 1)
-    genes_list = list(adata.var_names[:])
-    genes_list = ['Stimulus'] + [g.upper() for g in genes_list]
-    print(f"[infer_network_simul] Data shape: {G} genes, {np.size(data_rna, 0)} cells")
 
-    model = NetworkModel_beta(G-1)
+    # ─── LOAD STIMULUS SCHEDULE (optional) ──────────────────────────────
+    stim_sched = None
+    sched_path = os.path.join(p, 'Data', 'stimulus_schedule.txt')
+    if os.path.exists(sched_path):
+        stim_sched = np.loadtxt(sched_path)
+        print(f"[infer_network_simul] Loaded stimulus schedule from {sched_path}")
+    else:
+        print("[infer_network_simul] No stimulus schedule found, using default")
+
+    model = NetworkModel_beta(adata.shape[1])
 
     # Load inferred network parameters
     print("[infer_network_simul] Loading inferred network parameters...")
@@ -132,48 +107,53 @@ def main(argv):
         print("[infer_network_simul] Successfully loaded all network parameters")
     except FileNotFoundError as e:
         print(f"[infer_network_simul] Error: Missing parameter file: {e}")
-        print("[infer_network_simul] Please ensure network inference has been completed")
         sys.exit(1)
     except Exception as e:
         print(f"[infer_network_simul] Error loading parameters: {e}")
         sys.exit(1)
 
+    # Build stimulus schedule on model
+    times_unique = np.sort(np.unique(model.times_data))
+    model._stim_schedule = model._build_stimulus_schedule(times_unique, stim_sched)
+
     # Load reference network if available
-    model.ref_network = np.ones((G, G, model.n_networks))
+    G_tot = model.inter.shape[0]
+    ns = model.n_stimuli
+    genes_only = [g.upper() for g in adata.var_names]   # no stimulus prefix
+    model.ref_network = np.ones((G_tot, G_tot, model.n_networks))
     ref_path = os.path.join(p, 'cardamomOT', 'ref_network.csv')
     if os.path.exists(ref_path):
         print(f"[infer_network_simul] Loading reference network from {ref_path}")
         try:
-            # Load the complete matrix from CSV
             ref_df = pd.read_csv(ref_path, index_col=0)
-            # Ensure column names are strings
             ref_df.columns = ref_df.columns.astype(str)
             ref_df.index = ref_df.index.astype(str)
-            # Filter genes present in both ref_df and gene list
-            common_genes = [g for g in ref_df.index if g in genes_list]
-            # Extract submatrix in correct order
-            sub_df = ref_df.loc[common_genes, common_genes]
-            print(f"[infer_network_structure] shape of ref_network = {sub_df.shape}")
-            # Convert to numpy array
-            ref_mat = sub_df.to_numpy()
-            if ref_mat.shape[0] == G:
+            # CSV contains only genes (no stimulus rows/cols)
+            common_genes = [g for g in genes_only if g in ref_df.index]
+            if common_genes:
+                sub_df = ref_df.loc[common_genes, [c for c in common_genes if c in ref_df.columns]]
+                print(f"[infer_network_simul] ref_network gene block = {sub_df.shape}")
+                ref_mat = np.abs(sub_df.to_numpy())
+                row_idxs = [ns + genes_only.index(g) for g in sub_df.index]
+                col_idxs = [ns + genes_only.index(g) for g in sub_df.columns]
                 for n in range(model.n_networks):
-                    model.ref_network[:, :, n] = np.abs(ref_mat)
+                    for ii, ri in enumerate(row_idxs):
+                        model.ref_network[ri, col_idxs, n] = ref_mat[ii, :]
                 print(f"[infer_network_simul] Incorporated reference network with {len(common_genes)} genes")
             else:
-                print(f"[infer_network_simul] Warning: Reference network size ({ref_mat.shape[0]}) doesn't match data ({G})")
+                print("[infer_network_simul] Warning: no common genes found between CSV and data")
         except Exception as e:
             print(f"[infer_network_simul] Warning: Could not load reference network: {e}")
     else:
         print("[infer_network_simul] No reference network found, using inferred network only")
-    
-    model.ref_network *= (np.abs(model.inter) > 0) # Re-filter with null interactions
+
+    model.ref_network *= (np.abs(model.inter) > 0)
 
     # Adapt parameters for simulation
     print("[infer_network_simul] Adapting parameters for simulation...")
     model.adapt_to_unitary()
     print("[infer_network_simul] Parameter adaptation completed")
-    
+
     # Save adapted parameters
     cardamom_dir = os.path.join(p, 'cardamomOT')
     try:
@@ -192,4 +172,3 @@ def main(argv):
 
 if __name__ == "__main__":
    main(sys.argv[1:])
-

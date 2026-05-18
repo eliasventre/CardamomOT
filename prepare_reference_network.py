@@ -303,29 +303,27 @@ def build_edges_from_neko(neko_network, ref_network, max_path_length=10, verbose
 
 
 
-def subset_adj_by_genes(adj_matrix, node_index_list, gene_list, min_adj = 0):
+def subset_adj_by_genes(adj_matrix, node_index_list, gene_list, min_adj=0):
     """
     Return a reordered adjacency matrix restricted to a given list of genes.
 
+    The output is purely gene × gene — stimulus rows/columns are NOT included here;
+    they are added by the inference scripts when building the full model.ref_network.
 
     Args:
     adj_matrix (np.ndarray): square adjacency matrix (values -1, 0, 1)
-    node_index_list (dict): mapping {node_id -> index} for rows/columns of adj_matrix
-    gene_list (list of str): list of gene identifiers (order to follow)
-
+    node_index_list (list): ordered list of node identifiers matching adj_matrix rows/cols
+    gene_list (list of str): gene identifiers in desired output order
+    min_adj (float): default fill value for pairs absent from the prior network
 
     Returns:
-    sub_adj (np.ndarray): adjacency matrix of size len(gene_list) x len(gene_list)
-    - reordered following the input gene_list order
-    - missing genes (not in node_index_list) get rows of +1 (potential regulation from all)
-    - diagonal entries all set to +1
+    sub_adj (np.ndarray): (G × G) adjacency matrix following gene_list order
+    sub_adj_real (np.ndarray): signed version of the same matrix
     """
     n = len(gene_list)
-    sub_adj = min_adj * np.ones((n, n), dtype=float) 
-    sub_adj_real = np.zeros((n, n), dtype=float) 
+    sub_adj = min_adj * np.ones((n, n), dtype=float)
+    sub_adj_real = np.zeros((n, n), dtype=float)
 
-
-    # Fill where both genes exist in node_index_list
     for i, g1 in enumerate(gene_list):
         for j, g2 in enumerate(gene_list):
             if g1 in node_index_list and g2 in node_index_list:
@@ -333,11 +331,9 @@ def subset_adj_by_genes(adj_matrix, node_index_list, gene_list, min_adj = 0):
                 j0 = node_index_list.index(g2)
                 if abs(adj_matrix[i0, j0]) > min_adj:
                     sub_adj[i, j] = abs(adj_matrix[i0, j0])
-                    sub_adj_real[i, j] = np.sign(adj_matrix[i0, j0])          
+                    sub_adj_real[i, j] = np.sign(adj_matrix[i0, j0])
 
-    # # ensure diagonal and stimulus = 1
     np.fill_diagonal(sub_adj, 1)
-    sub_adj[0, :] = 1
     return sub_adj, sub_adj_real
 
 
@@ -355,8 +351,7 @@ def main(argv):
         if opt in ("-d", "--depth"):
             depth = int('{}'.format(arg))
 
-
-    p = '{}/'.format(inputfile)  # Name of the file where are the data
+    p = '{}/'.format(inputfile)
 
     data_path = os.path.join(p, 'Data', 'data_full.h5ad')
     if os.path.exists(data_path):
@@ -371,51 +366,48 @@ def main(argv):
                 "and put inside a count table named 'data.h5ad'."
             )
 
-    genes_list_init = list(adata.var_names[:])
-    genes_list_final = ['Stimulus'] + genes_list_init
+    # Gene list only — no stimulus rows/cols in the CSV.
+    # Stimulus handling is done inside the inference scripts (infer_network_structure,
+    # infer_network_simul) which expand the matrix and set stimulus entries to model.stimulus.
+    genes_list = [g.upper() for g in adata.var_names]
 
     if depth > 0:
-
-        ### Initial reference = full 1
-        ref_network_mat = np.ones((len(genes_list_init)+1, len(genes_list_init)+1))
-
-        ### Built theta_ref
-
-        new_net1 = Network(genes_list_init, resources = 'omnipath')
-        new_net1.complete_connection(maxlen=depth, algorithm="bfs", only_signed=True, connect_with_bias=False, consensus=True)
-        ref_network = Network(genes_list_init, resources = 'omnipath')
-        nodes_index_list = list(ref_network.nodes['Genesymbol'])
+        new_net1 = Network(list(adata.var_names), resources='omnipath')
+        new_net1.complete_connection(maxlen=depth, algorithm="bfs", only_signed=True,
+                                     connect_with_bias=False, consensus=True)
+        ref_network = Network(list(adata.var_names), resources='omnipath')
+        nodes_index_list = [g.upper() for g in ref_network.nodes['Genesymbol']]
         adj_matrix = build_edges_from_neko(new_net1, ref_network, max_path_length=depth, verbose=False)
         visualizer = NetworkVisualizer(ref_network, color_by='effect', noi=True)
         visualizer.render()
 
-        nodes_index_list = [g.upper() for g in nodes_index_list]
-        genes_list_final = ['Stimulus'] + [g.upper() for g in genes_list_init]          
-        print("Exemple var_names:", genes_list_final[:5])
+        print("Exemple var_names:", genes_list[:5])
         print("Exemple neko nodes:", nodes_index_list[:5])
-        print("Overlap:", len(set(genes_list_final) & set(nodes_index_list)), "/", len(genes_list_final))
-        ref_network_mat, ref_network_real = subset_adj_by_genes(adj_matrix, nodes_index_list, genes_list_final)
+        print("Overlap:", len(set(genes_list) & set(nodes_index_list)), "/", len(genes_list))
+
+        ref_network_mat, ref_network_real = subset_adj_by_genes(adj_matrix, nodes_index_list, genes_list)
         print('prior network', ref_network_mat)
-        
-        # Save the reference matrix
-        print('Network density and size: ', 'real = ', np.sum(np.abs(ref_network_real)), 
-                                            'for inference =', np.sum(np.abs(ref_network_mat)), 
-                                            'size', ref_network_real.shape)
-        
-        df = pd.DataFrame(ref_network_mat, 
-                        index=genes_list_final, 
-                        columns=genes_list_final)
+        print('Network density and size: real =', np.sum(np.abs(ref_network_real)),
+              '  for inference =', np.sum(np.abs(ref_network_mat)),
+              '  size', ref_network_real.shape)
+
+        df = pd.DataFrame(ref_network_mat, index=genes_list, columns=genes_list)
 
     else:
         path_ref = os.path.join(p, 'cardamomOT', 'ref_network.csv')
         if os.path.exists(path_ref):
             df = pd.read_csv(path_ref, index_col=0)
+            df.index   = df.index.astype(str)
+            df.columns = df.columns.astype(str)
+            # Strip any legacy stimulus rows/cols if present
+            stim_prefixes = ('Stimulus', 'stimulus', 'STIMULUS')
+            keep = [c for c in df.columns if not any(c.startswith(p_) for p_ in stim_prefixes)]
+            df = df.loc[keep, keep]
         else:
-            df = pd.DataFrame(np.ones((len(genes_list_final), len(genes_list_final))), 
-                        index=genes_list_final, 
-                        columns=genes_list_final)
+            df = pd.DataFrame(np.ones((len(genes_list), len(genes_list))),
+                              index=genes_list, columns=genes_list)
 
-    df.to_csv(p+"cardamomOT/ref_network.csv")
+    df.to_csv(p + "cardamomOT/ref_network.csv")
 
 
 if __name__ == "__main__":

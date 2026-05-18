@@ -270,6 +270,11 @@ def main(argv):
     if verb:
         print(f"[infer_rd] Dataset contains {N_cells} cells and {G_total} genes")
 
+    if G_total < 1000:
+        print(f"[infer_rd] Only {G_total} genes — read depth estimation requires at least 1000 genes. Skipping.")
+        print("[infer_rd] No 'rd' column will be added to adata.obs.")
+        return
+
     # Validate temporal information
     try:
         if "time" not in adata.obs.columns:

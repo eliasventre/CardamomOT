@@ -6,6 +6,26 @@ from matplotlib.lines import Line2D
 import os
 
 
+def _lib_size_normalize(data, scale=1e4):
+    """Normalize each cell (column) to `scale` total counts. Row 0 = times, untouched."""
+    counts = data[1:, :].astype(float)
+    totals = counts.sum(axis=0, keepdims=True)
+    totals = np.where(totals > 0, totals, 1.0)
+    result = data.copy().astype(float)
+    result[1:, :] = counts / totals * scale
+    return result
+
+
+def _should_lib_normalize(cell_rd, n_genes, cv_thresh=0.05, min_genes=1000):
+    """True when cell_rd is practically constant (no per-cell correction) and dataset is large enough."""
+    if n_genes < min_genes:
+        return False
+    if cell_rd is None:
+        return True
+    cv = np.std(cell_rd) / (np.mean(cell_rd) + 1e-16)
+    return cv < cv_thresh
+
+
 def configure(ax, xlim, ylim):
     ax.set_aspect('equal', 'box')
     ax.set_xlabel('UMAP1', fontsize=7, weight='bold')
@@ -18,8 +38,10 @@ def configure(ax, xlim, ylim):
     ax.set_ylim(ylim)
 
 
-def plot_data_umap_toref(data_ref_base, data_sim_base, times, file_from, file_to, complement, logscale=True):
+def plot_data_umap_toref(data_ref_base, data_sim_base, times, file_from, file_to, complement, logscale=True, cell_rd=None):
     data_ref, data_sim = data_ref_base.copy(), data_sim_base.copy()
+    if _should_lib_normalize(cell_rd, n_genes=data_ref.shape[0] - 1):
+        data_ref, data_sim = _lib_size_normalize(data_ref), _lib_size_normalize(data_sim)
     if logscale:
         data_ref[1:, :], data_sim[1:, :] = np.log(1 + data_ref[1:, :]), np.log(1 + data_sim[1:, :])
     # Compute the UMAP projection
@@ -87,12 +109,20 @@ def plot_data_umap_toref(data_ref_base, data_sim_base, times, file_from, file_to
     fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.02)
 
 
-def plot_data_umap_altogether(data_real_base, data_ref_base, data_beta_base, 
-                              data_theta_base, data_sim_base, times_data, times_simul, file_from, file_to, complement, logscale=True):
+def plot_data_umap_altogether(data_real_base, data_ref_base, data_beta_base,
+                              data_theta_base, data_sim_base, times_data, times_simul, file_from, file_to, complement, logscale=True, cell_rd=None):
 
     data_real, data_ref, data_beta, \
     data_theta, data_sim = data_real_base.copy(), data_ref_base.copy(), data_beta_base.copy(), \
                         data_theta_base.copy(), data_sim_base.copy()
+
+    if _should_lib_normalize(cell_rd, n_genes=data_real.shape[0] - 1):
+        data_real  = _lib_size_normalize(data_real)
+        data_ref   = _lib_size_normalize(data_ref)
+        data_beta  = _lib_size_normalize(data_beta)
+        data_theta = _lib_size_normalize(data_theta)
+        data_sim   = _lib_size_normalize(data_sim)
+
     ncells_subset = 5000
 
     data_real, data_ref, data_beta, data_theta, data_sim = subset_cells(data_real, ncells_subset), \

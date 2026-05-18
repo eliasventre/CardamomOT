@@ -23,7 +23,6 @@ import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta
 import anndata as ad
 import getopt
-import scipy.sparse
 import os
 import pickle
 
@@ -33,9 +32,6 @@ verb = 1
 def main(argv):
     """
     Main function to run the mixture model inference pipeline.
-
-    Loads temporal scRNA-seq data, estimates burst kinetics using a Poisson-gamma
-    or zero-inflated negative binomial mixture model, and saves calibrated parameters.
 
     Args:
         argv: Command-line arguments (--input, --split, --mean).
@@ -73,11 +69,6 @@ def main(argv):
         print(error_msg)
         raise FileNotFoundError(error_msg)
 
-    if scipy.sparse.issparse(adata.X):
-        data_rna_extracted = adata.X.T.toarray()
-    else:
-        data_rna_extracted = adata.X.T
-
     # ─── CHECK TEMPORAL INFORMATION ──────────────────────────────────────
     try:
         times = adata.obs['time'].values
@@ -94,44 +85,32 @@ def main(argv):
         print(f"Error: {e}")
         raise SystemExit(e)
 
-    data_rna = np.vstack([times, data_rna_extracted]).T
-    G = np.size(data_rna, 1)
-
-    # ─── LOAD READ DEPTH CORRECTION (optional) ──────────────────────────
-    if 'rd' in adata.obs.columns:
-        cell_rd = np.asarray(adata.obs['rd'].values, dtype=float)
-        # Safety: normalize to unit mean
-        cell_rd = cell_rd / (np.mean(cell_rd) + 1e-16)
+    # ─── LOAD STIMULUS SCHEDULE (optional) ──────────────────────────────
+    stim_sched = None
+    sched_path = os.path.join(p, 'Data', 'stimulus_schedule.txt')
+    if os.path.exists(sched_path):
+        stim_sched = np.loadtxt(sched_path)
         if verb:
-            min_rd, med_rd, max_rd = cell_rd.min(), np.median(cell_rd), cell_rd.max()
-            cv2_rd = np.var(cell_rd) / (np.mean(cell_rd)**2)
-            print(f"[infer_mixture] Read-depth correction enabled:")
-            print(f"  min={min_rd:.3f}  median={med_rd:.3f}  max={max_rd:.3f}  CV²={cv2_rd:.4f}")
-    else:
-        cell_rd = np.ones(adata.shape[0], dtype=float)
-        if verb:
-            print("[infer_mixture] No 'rd' column in adata.obs.")
-            print("  Tip: Run infer_rd.py first to estimate read-depth factors.")
-            print("  Using standard NB inference without read-depth correction.")
+            print(f"[infer_mixture] Loaded stimulus schedule from {sched_path}")
 
     # ─── INFER MIXTURE MODEL ────────────────────────────────────────────
-    model = NetworkModel_beta(G - 1)
+    model = NetworkModel_beta(adata.shape[1])
     if mean_forcing >= 0:
         model.mean_forcing_em = mean_forcing
         if verb:
             print(f"[infer_mixture] Mean forcing threshold set to {mean_forcing}")
-    
+
     if verb:
-        print(f"[infer_mixture] Starting mixture model inference ({G-1} genes)...")
-    
+        print(f"[infer_mixture] Starting mixture model inference ({adata.shape[1]} genes)...")
+
     model.fit_mixture(
-        data_rna,
+        adata,
         gene_names=list(adata.var_names),
         min_components=2,
         max_components=2,
         max_iter_kinetics=0,
-        cell_rd=cell_rd,
         verb=verb,
+        stimulus_schedule=stim_sched,
     )
 
     # ─── SAVE RESULTS ───────────────────────────────────────────────────
@@ -147,8 +126,7 @@ def main(argv):
     np.save(os.path.join(out_dir, 'n_networks'),         model.n_networks)
     np.save(os.path.join(out_dir, 'weights'),            model.weights)
     np.save(os.path.join(out_dir, 'mixture_parameters'), model.a)
-    np.save(os.path.join(out_dir, 'pi_zinb'),            model.pi)
-    np.save(os.path.join(out_dir, 'cell_rd'),            cell_rd)
+    np.save(os.path.join(out_dir, 'pi_zinb'),            model.pi_zinb)
 
     with open(os.path.join(out_dir, 'pi_init.pkl'), 'wb') as f:
         pickle.dump(model.pi_init, f)

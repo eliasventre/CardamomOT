@@ -78,16 +78,17 @@ def find_next_prot(d1, P0, M0, M1, mode_init, mode_end, alpha, s, delta_t):
     return mode_end * s + (Pint - mode_end * s) * np.exp(-d1*delta_t*(1-alpha))
 
 
-def count_errors(vect_prot, vect_kon, vect_proba, ks, Y, X, loss='CE', compute_with_proba=0):
+def count_errors(vect_prot, vect_kon, vect_proba, ks, Y, X, loss='CE', compute_with_proba=0, n_stimuli=1):
 
     N, G = vect_prot.shape
+    ns = n_stimuli
     if compute_with_proba:
         proba = base_kon_vector(Y, X, vect_prot)
-        cnt_errors = main_loss(proba[:, 1:], vect_proba[:, 1:], 1, loss)
+        cnt_errors = main_loss(proba[:, ns:], vect_proba[:, ns:], 1, loss)
     else:
         kon = kon_ref_vector(vect_prot, ks, X, Y)
-        cnt_errors = main_loss(kon[:, 1:], vect_kon[:, 1:], 1, loss)
-    return cnt_errors/(N*(G-1))
+        cnt_errors = main_loss(kon[:, ns:], vect_kon[:, ns:], 1, loss)
+    return cnt_errors/(N*(G-ns))
 
 
 @njit(fastmath=True, parallel=True)
@@ -106,13 +107,18 @@ def kon_ref_vector(y_prot, kz, theta_inter, theta_basal) -> np.ndarray:
 @njit(fastmath=True, parallel=True)
 def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, vect_rna_end,
                             vect_proba_init, vect_proba_end, mode_init, mode_end, alpha, s1, ks, d1, delta_t, basal, inter, loss='CE',
-                            compute_with_proba=1, n_iter=1, intensity_prior=1, q=.9) -> tuple[np.ndarray, np.ndarray]:
+                            compute_with_proba=1, n_iter=1, intensity_prior=1, q=.9,
+                            n_stimuli=1, stim_vals=np.ones(1)) -> tuple[np.ndarray, np.ndarray]:
     n1, G = vect_rna_init.shape
     n2 = vect_rna_end.shape[0]
+    ns = n_stimuli
 
     # Preallocation (important for Numba)
     dist = np.zeros((n1, n2))
-    vect_prot_end = np.ones((n1, n2, G + 1))
+    vect_prot_end = np.ones((n1, n2, G + ns))
+    for si in range(ns):
+        for j in range(n2):
+            vect_prot_end[:, j, si] = stim_vals[si]
     log_vect_rna_end = np.log1p(vect_rna_end)
     log_vect_rna_init = np.log1p(vect_rna_init)
 
@@ -144,7 +150,7 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
             prot_end_i[j, :] = find_next_prot(d1, prot_init_i, rna_init_i, vect_rna_end[j], mode_init_i, mode_end[j], alpha_i, s1, delta_t)
 
         # --- Storage ---
-        vect_prot_end[i, :, 1:] = prot_end_i[:, :]
+        vect_prot_end[i, :, ns:] = prot_end_i[:, :]
 
         for g in range(G):
             sorted_prot = np.sort(prot_end_i[:, g])
@@ -155,22 +161,22 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
 
         # --- Main loss ---
         if compute_with_proba:
-            sigma = base_kon_vector(basal, inter, vect_prot_end[i]) 
+            sigma = base_kon_vector(basal, inter, vect_prot_end[i])
             for j in range(0, n2):
                 diff_proba = vect_proba_end[j] - proba_init_i
                 diff_prot = prot_end_i[j] - prot_init_i
                 diff_rna = log_vect_rna_end[j] - log_rna_init_i
-                local_dist_i[j] = ((1.0 - 1.0 / G) * (np.sum(diff_proba * diff_proba) * weight_init + 
-                                    main_loss(sigma[j, 1:], vect_proba_end[j], 1, loss) * (1 - weight_init)) +
+                local_dist_i[j] = ((1.0 - 1.0 / G) * (np.sum(diff_proba * diff_proba) * weight_init +
+                                    main_loss(sigma[j, ns:], vect_proba_end[j], 1, loss) * (1 - weight_init)) +
                                     (0.5 / G) * (np.sum(diff_prot * diff_prot) + np.sum(diff_rna * diff_rna)))
         else:
-            sigma = kon_ref_vector(vect_prot_end[i], ks, inter, basal) 
+            sigma = kon_ref_vector(vect_prot_end[i], ks, inter, basal)
             for j in range(0, n2):
                 diff_k = vect_kon_end[j] - kon_init_i
                 diff_prot = prot_end_i[j] - prot_init_i
                 diff_rna = log_vect_rna_end[j] - log_rna_init_i
                 local_dist_i[j] = ((1.0 - 1.0 / G) * (np.sum(diff_k * diff_k) * weight_init +
-                                    main_loss(sigma[j, 1:], vect_kon_end[j], 1, loss) * (1 - weight_init)) +
+                                    main_loss(sigma[j, ns:], vect_kon_end[j], 1, loss) * (1 - weight_init)) +
                                     (0.5 / G) * (np.sum(diff_prot * diff_prot) + np.sum(diff_rna * diff_rna)))
         
         dist[i, :] = np.minimum(local_dist_i, 100.0)
@@ -180,16 +186,23 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
 
 
 def my_otdistance_simulated(vect_prot_init, vect_rna_init, vect_rna_end,
-                            vect_proba_end, s1, ks, d1, delta_t, basal, inter) -> tuple[np.ndarray, np.ndarray]:
-    
+                            vect_proba_end, s1, ks, d1, delta_t, basal, inter,
+                            n_stimuli=1, stim_vals=None) -> tuple[np.ndarray, np.ndarray]:
+
+    ns = n_stimuli
+    if stim_vals is None:
+        stim_vals = np.ones(ns, dtype=float)
+
     G = vect_rna_init.shape[1]
     n1, n2 = vect_rna_init.shape[0], vect_rna_end.shape[0]
     dist = np.ones((n1, n2))
-    vect_prot_end = np.ones((n1, n2, G + 1))
+    vect_prot_end = np.ones((n1, n2, G + ns))
+    for si in range(ns):
+        vect_prot_end[:, :, si] = stim_vals[si]
 
     def run_main_loop_for_cell(i):
-        d1_aug = np.concatenate(([1.0], d1))   # shape (G+1,)
-        P0_aug = np.concatenate(([1.0], vect_prot_init[i]))   # shape (G+1,)
+        d1_aug = np.concatenate([stim_vals, d1])
+        P0_aug = np.concatenate([stim_vals, vect_prot_init[i]])
         prot_end = simulate_next_prot_ode(d1_aug, ks, basal, inter, delta_t, 1, P0=P0_aug).p[-1]
         return prot_end
 
@@ -198,16 +211,15 @@ def my_otdistance_simulated(vect_prot_init, vect_rna_init, vect_rna_end,
             delayed(run_main_loop_for_cell)(i) for i in range(0, n1)
         )
     else:
-        # fallback sequential loop
         results = [run_main_loop_for_cell(i) for i in range(0, n1)]
 
     for i in range(n1):
         prot_end = results[i]
         for j in range(n2):
-            vect_prot_end[i, j, 1:] = prot_end[:]
+            vect_prot_end[i, j, ns:] = prot_end[ns:]
         sigma = base_kon_vector(basal, inter, vect_prot_end[i])
         for j in range(n2):
-            dist[i, j] += np.sum((sigma[j, 1:] - vect_proba_end[j]) ** 2)
+            dist[i, j] += np.sum((sigma[j, ns:] - vect_proba_end[j]) ** 2)
 
     return dist, vect_prot_end
 
@@ -216,29 +228,30 @@ def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init
                     y_kon_end_true, y_kon_end, y_prot_end, y_rna_end, mode_init, mode_end,
                     basal, inter, ks, delta_t, tol=.5, n_pas=25):
     
-    N, G = y_prot_init.shape
+    G = y_prot_init.shape[1]
+    ns = G - alpha_init.shape[1]  # n_stimuli derived from shapes
     alpha = alpha_init.copy()
-    cnt = np.zeros((N, G-1))
+    cnt = np.zeros_like(alpha_init)
     t: float = 1 / n_pas
 
     y_prot = np.ones_like(y_rna_end)
 
     ### We don't modify alphas that are not characterizing an enough important difference or for which the inference was bad
-    diff_kon = (np.abs(y_kon_end_true[:, 1:] - y_kon_init_true[:, 1:]) < tol)
+    diff_kon = (np.abs(y_kon_end_true[:, ns:] - y_kon_init_true[:, ns:]) < tol)
     cnt[diff_kon] = 1
 
     while t < 1 and np.min(cnt) < 1:
         alpha_tmp = alpha.copy() / t
         alpha_tmp = np.minimum(alpha_tmp, 1.0)  # shape (N, G)
 
-        y_prot[:, 1:] = find_next_prot(d1, y_prot_init[:, 1:], y_rna_init[:, 1:], y_rna_end[:, 1:], mode_init, mode_end, alpha_tmp, s1, t * delta_t)
+        y_prot[:, ns:] = find_next_prot(d1, y_prot_init[:, ns:], y_rna_init[:, ns:], y_rna_end[:, ns:], mode_init, mode_end, alpha_tmp, s1, t * delta_t)
 
         kon_new = kon_ref_vector(y_prot, ks, inter, basal)  # shape (N, G)
 
         # Condition: if abs(kon_new[i] - y_kon_init[i]) > abs(kon_new[i] - y_kon_end[i])
         # Only apply where cnt < 1
-        diff_init = np.abs(kon_new[:, 1:] - y_kon_init[:, 1:])
-        diff_end = np.abs(kon_new[:, 1:] - y_kon_end[:, 1:])
+        diff_init = np.abs(kon_new[:, ns:] - y_kon_init[:, ns:])
+        diff_end = np.abs(kon_new[:, ns:] - y_kon_end[:, ns:])
         bool_var = (cnt < 1) & (diff_init > diff_end)
         alpha[bool_var] = t
         cnt[bool_var] = 1

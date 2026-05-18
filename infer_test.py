@@ -1,46 +1,48 @@
 """
 infer_test.py
 -------------
-Infer regulatory network and simulate on test set.
+Infer trajectories and simulate on test set using pre-learned model parameters.
 
-Loads test data and network parameters, performs network inference,
-and generates simulations on the test dataset for validation.
+Classifies test cells into mixture modes with fixed kinetic parameters, then
+infers protein trajectories with a fixed regulatory network, simulates expression
+dynamics, and builds AnnData output objects equivalent to the training pipeline.
 
 Usage:
     python infer_test.py -i <project_path>
 
-Required input files:
-    - Data/data_test.h5ad: test count matrix
-    - cardamom/basal.npy, inter.npy: network parameters
-    - cardamom/mixture_parameters.npy, degradations.npy: kinetic parameters
-    - cardamom/basal_simul.npy, inter_simul.npy: simulation parameters
+Required input files (from training pipeline):
+    - Data/data_test.h5ad: test count matrix with temporal information
+    - cardamomOT/mixture_parameters.npy, n_networks.npy: mixture model parameters
+    - cardamomOT/pi_zinb.npy: zero-inflation parameters
+    - cardamomOT/basal_simul.npy, inter_simul.npy: adapted network parameters
+    - cardamomOT/basal_t_simul.npy, inter_t_simul.npy: temporal network parameters
+    - cardamomOT/ratios.npy, degradations.npy, degradations_temporal.npy: kinetics
 
 Output files:
-    - cardamom/data_prot_test.npy, data_rna_test.npy: inferred test dynamics
-    - cardamom/data_prot_simul_test.npy, data_kon_simul_test.npy: simulations
-    - cardamom/simulation_times_test.npy: simulation timepoints
+    - cardamomOT/data_prot_test.npy: protein trajectories for test cells
+    - cardamomOT/data_rna_test.npy: RNA trajectories for test cells
+    - cardamomOT/data_times_test.npy, data_samples_test.npy: trajectory metadata
+    - cardamomOT/data_kon_beta_test.npy, data_kon_theta_test.npy: kon parameters
+    - cardamomOT/proba_traj_test.npy: trajectory mode probabilities
+    - cardamomOT/data_prot_simul_test.npy, data_kon_simul_test.npy: simulations
+    - cardamomOT/simulation_times_test.npy: simulation timepoints
+    - cardamomOT/adata_*_test_stim*_prior*.h5ad: AnnData comparison objects
 """
 import sys; sys.path += ['../']
 import os
+import pickle
 import numpy as np
+import anndata as ad
 from CardamomOT import NetworkModel as NetworkModel_beta
 import getopt
-import anndata as ad
-import scipy.sparse
+
 
 def main(argv):
     """
-    Infer network dynamics on test set and generate simulations.
-
-    Loads learned network parameters and performs network inference
-    on test data. Then simulates expression trajectories using
-    learned dynamics for validation and comparison.
+    Infer test-set trajectories and produce all comparison AnnData objects.
 
     Args:
         argv: Command-line arguments (--input).
-    
-    Returns:
-        None. Saves inference and simulation results.
     """
     inputfile = ''
     try:
@@ -49,7 +51,7 @@ def main(argv):
         print("[infer_test] Error: Invalid command-line arguments")
         print("[infer_test] Usage: python infer_test.py -i <project_path>")
         sys.exit(2)
-    
+
     for opt, arg in opts:
         if opt in ("-i", "--input"):
             inputfile = arg
@@ -62,146 +64,227 @@ def main(argv):
         sys.exit(1)
 
     p = '{}/'.format(inputfile)
+    cardamom_dir = os.path.join(p, 'cardamomOT')
 
-    # Load test data
+    # ─── LOAD TEST DATA ──────────────────────────────────────────────────
     data_path = os.path.join(p, 'Data', 'data_test.h5ad')
     try:
         if not os.path.exists(data_path):
             raise FileNotFoundError(f"Test data file not found at {data_path}")
         adata = ad.read_h5ad(data_path)
         print(f"[infer_test] Loaded test data from {data_path}")
-        print(f"[infer_test] Dataset contains {adata.shape[0]} cells and {adata.shape[1]} genes")
+        print(f"[infer_test] Dataset: {adata.shape[0]} cells, {adata.shape[1]} genes")
     except FileNotFoundError as e:
         print(f"[infer_test] Error: {e}")
         sys.exit(1)
-    except Exception as e:
-        print(f"[infer_test] Error loading test data: {e}")
-        sys.exit(1)
-    
-    # Extract RNA data matrix
-    if scipy.sparse.issparse(adata.X):
-        data_rna_extracted = adata.X.T.toarray()
-    else:
-        data_rna_extracted = adata.X.T
-    
-    # Validate temporal information
+
     try:
-        times = adata.obs['time'].values 
-        if len(np.unique(times)) <= 1:
-            raise ValueError("Dataset must contain temporal information with multiple timepoints")
-        print(f"[infer_test] Found {len(np.unique(times))} unique timepoints: {sorted(np.unique(times))}")
+        times_obs = adata.obs['time'].values
+        if len(np.unique(times_obs)) <= 1:
+            raise ValueError("Dataset must contain multiple timepoints")
+        print(f"[infer_test] Found {len(np.unique(times_obs))} timepoints: {sorted(np.unique(times_obs))}")
     except (KeyError, ValueError) as e:
         print(f"[infer_test] Error: {e}")
         sys.exit(1)
-    
-    data_rna = np.vstack([times, data_rna_extracted]).T
-    vect_samples_id = adata.obs['dataset_id'].values if 'dataset_id' in adata.obs else np.zeros(adata.n_obs)
-    G = np.size(data_rna, 1)
 
-    print(f"[infer_test] Data shape: {data_rna.shape} ({adata.shape[0]} cells, {G-1} genes)")
+    # ─── STIMULUS SCHEDULES ──────────────────────────────────────────────
+    stim_sched = None
+    sched_path = os.path.join(p, 'Data', 'stimulus_schedule.txt')
+    if os.path.exists(sched_path):
+        stim_sched = np.loadtxt(sched_path)
+        print(f"[infer_test] Loaded stimulus schedule from {sched_path}")
 
-    # Initialize model
+    stim_sched_simul = None
+    sched_simul_path = os.path.join(p, 'Data', 'stimulus_schedule_simul.txt')
+    if os.path.exists(sched_simul_path):
+        stim_sched_simul = np.loadtxt(sched_simul_path)
+        print(f"[infer_test] Loaded simulation stimulus schedule from {sched_simul_path}")
+    else:
+        stim_sched_simul = stim_sched
+
+    # ─── INITIALIZE MODEL AND LOAD TRAINING PARAMETERS ──────────────────
+    model = NetworkModel_beta(adata.shape[1])
+    print(f"[infer_test] Initialized model with {adata.shape[1]} genes")
+
     try:
-        model = NetworkModel_beta(G-1)
-        print(f"[infer_test] Initialized network model with {G-1} genes")
-    except Exception as e:
-        print(f"[infer_test] Error initializing model: {e}")
-        sys.exit(1)
-
-    # Load model parameters
-    try:
-        model.basal = np.load(os.path.join(p, 'cardamomOT', 'basal.npy'))
-        model.inter = np.load(os.path.join(p, 'cardamomOT', 'inter.npy'))
-        model.a = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
-        model.times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
-        model.ratios = np.load(os.path.join(p, 'cardamomOT', 'ratios.npy'))
-        model.n_networks = np.load(os.path.join(p, 'cardamomOT', 'n_networks.npy'))
-        model.d = np.load(os.path.join(p, 'cardamomOT', 'degradations.npy'))
-        print(f"[infer_test] Loaded network parameters")
+        model.a = np.load(os.path.join(cardamom_dir, 'mixture_parameters.npy'))
+        model.n_networks = int(np.load(os.path.join(cardamom_dir, 'n_networks.npy')))
+        model.d = np.load(os.path.join(cardamom_dir, 'degradations.npy'))
+        pi_zinb = np.load(os.path.join(cardamom_dir, 'pi_zinb.npy'))
+        model.pi_zinb = pi_zinb   # per-gene zero-inflation (used by fit_mixture_test as ZINB prior)
+        pi_init_path = os.path.join(cardamom_dir, 'pi_init.pkl')
+        if os.path.exists(pi_init_path):
+            with open(pi_init_path, 'rb') as f:
+                model.pi_init = pickle.load(f)
+            print(f"[infer_test] Loaded pi_init (training mode proportions) from {pi_init_path}")
+        print(f"[infer_test] Loaded mixture and degradation parameters")
     except FileNotFoundError as e:
-        print(f"[infer_test] Error: Missing parameter file: {e}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"[infer_test] Error loading parameters: {e}")
+        print(f"[infer_test] Error: Missing mixture parameter file: {e}")
         sys.exit(1)
 
-    # Perform network inference on test set
-    print(f"[infer_test] Performing network inference on test set...")
+    # Load the unitary-scale network (from infer_network_simul.py)
     try:
-        model.infer_test(data_rna, vect_samples_id=vect_samples_id, verb=1)
-        print(f"[infer_test] Network inference completed")
-    except Exception as e:
-        print(f"[infer_test] Error during network inference: {e}")
-        sys.exit(1)
-    
-    # Save inference results
-    try:
-        np.save(os.path.join(p, 'cardamomOT', 'data_prot_test'), model.prot)
-        np.save(os.path.join(p, 'cardamomOT', 'data_rna_test'), model.rna)
-        np.save(os.path.join(p, 'cardamomOT', 'data_times_test'), model.times_data)
-        np.save(os.path.join(p, 'cardamomOT', 'data_kon_beta_test'), model.kon_beta)
-        np.save(os.path.join(p, 'cardamomOT', 'data_kon_theta_test'), model.kon_theta)
-        print(f"[infer_test] Saved inference results for test set")
-    except Exception as e:
-        print(f"[infer_test] Error saving inference results: {e}")
-        sys.exit(1)
-
-    # Load simulation parameters
-    try:
-        model.basal = np.load(os.path.join(p, 'cardamomOT', 'basal_simul.npy'))
-        model.inter = np.load(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))
-        print(f"[infer_test] Loaded simulation parameters")
+        basal_simul = np.load(os.path.join(cardamom_dir, 'basal_simul.npy'))
+        inter_simul = np.load(os.path.join(cardamom_dir, 'inter_simul.npy'))
+        basal_t_simul = np.load(os.path.join(cardamom_dir, 'basal_t_simul.npy'))
+        inter_t_simul = np.load(os.path.join(cardamom_dir, 'inter_t_simul.npy'))
+        ratios = np.load(os.path.join(cardamom_dir, 'ratios.npy'))
+        d_t = np.load(os.path.join(cardamom_dir, 'degradations_temporal.npy'))
+        print(f"[infer_test] Loaded unitary-scale simulation parameters")
     except FileNotFoundError as e:
         print(f"[infer_test] Error: Missing simulation parameter file: {e}")
         sys.exit(1)
-    except Exception as e:
-        print(f"[infer_test] Error loading simulation parameters: {e}")
-        sys.exit(1)
 
-    # Load simulation times if specified
-    times_file = os.path.join(p, 'Data', 'times_to_simulate.txt')
+    # Use mean basal over training samples for test trajectory inference
+    # (avoids sample-count mismatch between training and test sets)
+    if basal_simul.ndim == 3:
+        model.basal = basal_simul.mean(axis=0)   # (G_tot, n_networks)
+    else:
+        model.basal = basal_simul
+    model.inter = inter_simul
+    model.basal_t = basal_t_simul
+    model.inter_t = inter_t_simul
+    model.ratios = ratios
+    model.d_t = d_t
+
+    # Set ref_network (all ones = no structural prior for test)
+    G_tot = adata.shape[1] + model.n_stimuli
+    model.ref_network = np.ones((G_tot, G_tot, model.n_networks))
+
+    # Build stimulus schedule
+    times_unique = np.sort(np.unique(times_obs))
+    model._stim_schedule = model._build_stimulus_schedule(times_unique, stim_sched)
+
+    # ─── TRAJECTORY INFERENCE ON TEST SET ────────────────────────────────
+    # Classifies cells into modes (fixed kz/c) then infers trajectories with
+    # the pre-learned network (compute_theta=False, update_modes=True).
+    print(f"[infer_test] Running mixture classification and trajectory inference...")
     try:
-        if os.path.exists(times_file):
-            with open(times_file, "r") as f:
-                times = [float(line.strip()) for line in f if line.strip()]
-            if times[0] != 0:
-                times = [0] + times
-            print(f"[infer_test] Loaded simulation times from file: {times}")
-        else:
-            times = list(set(model.times_data))
-            print(f"[infer_test] Using inferred timepoints for simulation")
+        model.infer_test(adata, verb=1, stimulus_schedule=None)  # schedule already built
+        print(f"[infer_test] Test trajectory inference completed")
     except Exception as e:
-        print(f"[infer_test] Error loading simulation times: {e}")
+        import traceback; traceback.print_exc()
+        print(f"[infer_test] Error during inference: {e}")
         sys.exit(1)
 
-    times.sort()
-    N = int(model.prot.shape[0]/len(np.unique(model.times_data)))
-    times_simulation = np.zeros(len(times)*N)
-    for t in range(len(times)):
-        times_simulation[t*N:(t+1)*N] = times[t]
-    
-    print(f"[infer_test] Simulation times: {np.unique(times_simulation)}, {len(times_simulation)} total timepoints")
+    # ─── SAVE TRAJECTORY OUTPUTS ─────────────────────────────────────────
+    try:
+        np.save(os.path.join(cardamom_dir, 'data_prot_test'), model.prot)
+        np.save(os.path.join(cardamom_dir, 'data_rna_test'), model.rna)
+        np.save(os.path.join(cardamom_dir, 'data_times_test'), model.times_data)
+        np.save(os.path.join(cardamom_dir, 'data_samples_test'), model.samples_data)
+        np.save(os.path.join(cardamom_dir, 'data_kon_beta_test'), model.kon_beta)
+        np.save(os.path.join(cardamom_dir, 'data_kon_theta_test'), model.kon_theta)
+        np.save(os.path.join(cardamom_dir, 'proba_traj_test'), model.proba_traj)
+        print(f"[infer_test] Saved test trajectory outputs")
+    except Exception as e:
+        print(f"[infer_test] Error saving trajectory outputs: {e}")
+        sys.exit(1)
 
-    # Simulate network dynamics
+    # Keep copies before simulate_network overwrites model.prot / model.kon_theta
+    prot_traj_test = model.prot.copy()
+    times_data_test = model.times_data.copy()
+    kon_beta_test = model.kon_beta.copy()
+    kon_theta_test = model.kon_theta.copy()
+    rna_test = model.rna.copy()
+
+    # ─── SIMULATION TIMES ────────────────────────────────────────────────
+    times_file = os.path.join(p, 'Data', 'times_to_simulate.txt')
+    if os.path.exists(times_file):
+        with open(times_file, "r") as f:
+            sim_times = [float(line.strip()) for line in f if line.strip()]
+        if sim_times[0] != 0:
+            sim_times = [0.0] + sim_times
+        print(f"[infer_test] Loaded simulation times from file: {sim_times}")
+    else:
+        sim_times = sorted(np.unique(model.times_data).tolist())
+        print(f"[infer_test] Using inferred timepoints for simulation: {sim_times}")
+
+    # ─── NETWORK SIMULATION ───────────────────────────────────────────────
     print(f"[infer_test] Simulating network dynamics on test set...")
     try:
-        model.simulate_network(times)
+        model.simulate_network(sim_times, stimulus_schedule=stim_sched_simul)
         print(f"[infer_test] Network simulation completed")
     except Exception as e:
+        import traceback; traceback.print_exc()
         print(f"[infer_test] Error during simulation: {e}")
         sys.exit(1)
 
-    # Save simulation results
+    times_simulation_test = model.times_simul
+
     try:
-        np.save(os.path.join(p, 'cardamomOT', 'data_prot_simul_test'), model.prot)
-        np.save(os.path.join(p, 'cardamomOT', 'data_kon_simul_test'), model.kon_theta)
-        np.save(os.path.join(p, 'cardamomOT', 'simulation_times_test'), times_simulation)
-        print(f"[infer_test] Saved test set simulation results")
-        print("[infer_test] Test set inference and simulation completed successfully")
+        np.save(os.path.join(cardamom_dir, 'data_prot_simul_test'), model.prot)
+        np.save(os.path.join(cardamom_dir, 'data_kon_simul_test'), model.kon_theta)
+        np.save(os.path.join(cardamom_dir, 'simulation_times_test'), times_simulation_test)
+        print(f"[infer_test] Saved simulation outputs")
     except Exception as e:
-        print(f"[infer_test] Error saving simulation results: {e}")
+        print(f"[infer_test] Error saving simulation outputs: {e}")
         sys.exit(1)
 
-if __name__ == "__main__":
-   main(sys.argv[1:])
+    # ─── BUILD ANNDATA COMPARISON OBJECTS ────────────────────────────────
+    print("[infer_test] Building AnnData comparison objects...")
+    try:
+        ns = model.n_stimuli
+        G = adata.shape[1]   # number of genes (no stimulus)
 
+        c = model.a[-1, :]
+        kz = model.a[:-1, :] + 1e-6
+
+        vect_kon_beta = kon_beta_test + 1e-6        # (N_traj, G_tot)
+        vect_kon_theta = kon_theta_test + 1e-6
+        vect_kon_sim = model.kon_theta + 1e-6       # (N_sim, G_tot) after simulation
+
+        # Helper: NB sample matrix of shape (G, N) using pi_zinb sparsity
+        def _nb_sample(kon, times_vec):
+            n_cells = kon.shape[0]
+            n_param = (np.max(kz, axis=0) * kon)[:, ns:].T  # (G, N)
+            p_param = (c / (c + 1))[ns:].reshape(G, 1)
+            n_param = np.maximum(n_param, 1e-6)
+            p_param = np.clip(p_param, 1e-6, 1 - 1e-6)
+            zero_mask = np.random.uniform(0, 1, (G, n_cells)) < pi_zinb.reshape(G, 1)
+            counts = np.random.negative_binomial(n_param, p_param)
+            counts = np.where(zero_mask, 0, counts)
+            out = np.zeros((G + 1, n_cells))
+            out[0, :] = times_vec
+            out[1:, :] = counts
+            return out
+
+        data_beta = _nb_sample(vect_kon_beta, times_data_test)
+        data_netw_theta = _nb_sample(vect_kon_theta, times_data_test)
+        data_sim = _nb_sample(vect_kon_sim, times_simulation_test)
+
+        # RNA trajectory data
+        data_rna_traj = np.zeros((G + 1, rna_test.shape[0]))
+        data_rna_traj[0, :] = times_data_test
+        data_rna_traj[1:, :] = rna_test[:, ns:].T
+
+        stim = model.stimulus
+        prior = model.prior_network_pen
+
+        def _make_adata(matrix_2d, obs_times, suffix):
+            """matrix_2d: (G, N) — rows=genes, cols=cells."""
+            a = ad.AnnData(X=matrix_2d.T)
+            a.var = adata.var.copy()
+            a.obs['time'] = obs_times
+            a.write(os.path.join(cardamom_dir,
+                                 f'adata_{suffix}_test_stim{stim}_prior{prior}.h5ad'))
+            print(f"[infer_test] Saved adata_{suffix}_test_stim{stim}_prior{prior}.h5ad")
+
+        _make_adata(data_beta[1:], times_data_test, 'beta')
+        _make_adata(data_netw_theta[1:], times_data_test, 'theta')
+        _make_adata(data_sim[1:], times_simulation_test, 'sim')
+        _make_adata(data_rna_traj[1:], times_data_test, 'rna_traj')
+        _make_adata(prot_traj_test[:, ns:].T, times_data_test, 'prot_traj')
+        _make_adata(model.prot[:, ns:].T, times_simulation_test, 'prot_simul')
+
+        print(f"[infer_test] All AnnData objects saved to {cardamom_dir}")
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        print(f"[infer_test] Error building AnnData objects: {e}")
+        sys.exit(1)
+
+    print("[infer_test] Test set inference and simulation completed successfully")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
