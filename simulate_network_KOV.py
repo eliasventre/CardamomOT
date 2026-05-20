@@ -243,6 +243,7 @@ def main(argv):
             model.basal = basal_clean.copy()
             model.basal_t = basal_t_clean.copy()
             model.d_t = d_t_orig.copy()
+            model.production_factor = None   # reset per-gene creation rate scaling
             model.prot = np.load(os.path.join(p, 'cardamomOT', 'data_prot_unitary.npy'))
             model.kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta.npy'))
         except FileNotFoundError as e:
@@ -251,8 +252,9 @@ def main(argv):
 
         # Apply knockouts
         # - No percentage: silence via basal_t (complete KO, existing behaviour)
-        # - With percentage X: multiply degradation rates by 1/(1-X/100)
-        #   (higher degradation → lower steady-state expression)
+        # - With percentage X: scale the per-gene creation rate by (1 - X/100),
+        #   which correctly reduces steady-state expression in both ODE and PDMP modes
+        #   without altering degradation rates or dynamics speed.
         # model.prot[:N] stays WT so t=0 NB parameters are identical across conditions.
         for gene, pct in kos:
             if gene in adata.var_names:
@@ -261,16 +263,18 @@ def main(argv):
                     model.basal_t[:, ind] = -100 - np.sum(model.inter_t[-1, :, ind])
                     print(f"[simulate_network_KOV]   KO 100%: {gene} (index {ind})")
                 else:
-                    factor = 1.0 / max(1.0 - pct / 100.0, 1e-12)
-                    model.d_t[:, :, ind] *= factor
-                    print(f"[simulate_network_KOV]   KO {pct:.0f}%: {gene} (index {ind}), deg ×{factor:.3g}")
+                    factor = max(1.0 - pct / 100.0, 1e-12)
+                    if model.production_factor is None:
+                        model.production_factor = np.ones(adata.shape[1] + ns)
+                    model.production_factor[ind] = factor
+                    print(f"[simulate_network_KOV]   KO {pct:.0f}%: {gene} (index {ind}), creation ×{factor:.3g}")
             else:
                 print(f"[simulate_network_KOV]   Warning: Gene '{gene}' not found in data")
 
         # Apply overexpressions
         # - No percentage: activate via basal_t (complete OV, existing behaviour)
-        # - With percentage X: multiply degradation rates by (1-X/100)
-        #   (lower degradation → higher steady-state expression)
+        # - With percentage X: scale the per-gene creation rate by 1/(1 - X/100),
+        #   which correctly increases steady-state expression in both ODE and PDMP modes.
         for gene, pct in ovs:
             if gene in adata.var_names:
                 ind = ns + adata.var_names.get_loc(gene)
@@ -278,9 +282,11 @@ def main(argv):
                     model.basal_t[:, ind] = 100 + np.sum(model.inter_t[-1, :, ind])
                     print(f"[simulate_network_KOV]   OV 100%: {gene} (index {ind})")
                 else:
-                    factor = max(1.0 - pct / 100.0, 1e-12)
-                    model.d_t[:, :, ind] *= factor
-                    print(f"[simulate_network_KOV]   OV {pct:.0f}%: {gene} (index {ind}), deg ×{factor:.3g}")
+                    factor = 1.0 / max(1.0 - pct / 100.0, 1e-12)
+                    if model.production_factor is None:
+                        model.production_factor = np.ones(adata.shape[1] + ns)
+                    model.production_factor[ind] = factor
+                    print(f"[simulate_network_KOV]   OV {pct:.0f}%: {gene} (index {ind}), creation ×{factor:.3g}")
             else:
                 print(f"[simulate_network_KOV]   Warning: Gene '{gene}' not found in data")
 

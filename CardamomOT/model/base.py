@@ -122,10 +122,11 @@ class NetworkModel:
         self.use_temporal_degradations = 1 # If so, compute temporal degradation rates for simulations ?
 
         ## Simulations
-        self.simulation_stochastic = 1 # 1 if we simulate Bursty-like proteins, 0 if deterministic limit for proteins
-        self.finish_by_determinist = 1 # 1 if we simulate with deterministic limit for the last timepoint
+        self.simulation_stochastic = True # 1 if we simulate Bursty-like proteins, 0 if deterministic limit for proteins
+        self.finish_by_determinist = True # 1 if we simulate with deterministic limit for the last timepoint
         self.min_ratio = 1
         self.max_ratio = 50
+        self.production_factor = None  # per-gene creation rate scaling; None = all ones
 
         if n_genes is not None:
             G = n_genes + n_stimuli
@@ -1453,6 +1454,14 @@ class NetworkModel:
         rescale[ns:] = np.max(self.a[:-1, ns:], axis=0)
         kz = ks * rescale.reshape(ks.shape[0], 1)
 
+        # Per-gene production rate scaling for partial KO/OV (applied to burst rate,
+        # not degradation, so PDMP and ODE steady states are correctly reduced/increased)
+        prod_factor = np.ones(prot_modified.shape[1])
+        if self.production_factor is not None:
+            pf = np.asarray(self.production_factor, dtype=float)
+            n = min(len(pf), len(prod_factor))
+            prod_factor[:n] = pf[:n]
+
         basal_mean_glob = (self.basal.mean(axis=0)
                            if (self.basal.ndim == 3 and samples_data is not None)
                            else None)
@@ -1482,19 +1491,25 @@ class NetworkModel:
             else:
                 basal_cells = None
 
-            def run_main_loop_for_cell(n, _basal_cells=basal_cells, _basal_t_cnt=basal_t[cnt]):
+            def run_main_loop_for_cell(n, _basal_cells=basal_cells, _basal_t_cnt=basal_t[cnt],
+                                       _prod_factor=prod_factor):
                 basal_n = _basal_cells[n] if _basal_cells is not None else _basal_t_cnt
                 if self.simulation_stochastic:
+                    # Scale only the burst RATE (kz * d0) by prod_factor.
+                    # The burst SIZE (rescale * d0/d1) is left unchanged so that
+                    # the modification acts purely on production, not on dynamics speed.
                     return simulate_next_prot_pdmp(
                             degradations[1, :],
-                            kz * degradations[0, :].reshape(kz.shape[0], 1),
+                            kz * (degradations[0, :] * _prod_factor).reshape(kz.shape[0], 1),
                             rescale * (degradations[0, :] / degradations[1, :]),
                             basal_n, inter_t[cnt], delta_t,
                             self.scale_proteins, P0=prot_modified[start_index + n, :]
                         )
                 else:
+                    # Scale ks per gene: production ∝ ks, so P* scales by prod_factor.
                     return simulate_next_prot_ode(
-                        degradations[1, :], ks, basal_n, inter_t[cnt], delta_t,
+                        degradations[1, :], ks * _prod_factor[:, None],
+                        basal_n, inter_t[cnt], delta_t,
                         self.scale_proteins, P0=prot_modified[start_index + n, :]
                     )
 
