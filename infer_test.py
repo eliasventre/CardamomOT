@@ -33,6 +33,7 @@ import os
 import pickle
 import numpy as np
 import anndata as ad
+import pandas as pd
 from CardamomOT import NetworkModel as NetworkModel_beta
 import getopt
 
@@ -155,12 +156,68 @@ def main(argv):
     times_unique = np.sort(np.unique(times_obs))
     model._stim_schedule = model._build_stimulus_schedule(times_unique, stim_sched)
 
+    # ─── LOAD OPTIONAL PER-SAMPLE KO/OV PRIOR ───────────────────────────
+    basal_ref_test = None
+    kov_path = os.path.join(p, 'Data', 'KO_OV_inference.txt')
+    if os.path.exists(kov_path) and 'dataset_id' in adata.obs:
+        try:
+            ns = model.n_stimuli
+            G_tot_test = adata.shape[1] + ns
+            n_nw = model.n_networks
+            stim_labels = ['Stimulus'] if ns == 1 else [f'Stimulus_{i}' for i in range(ns)]
+            genes_only = [g.upper() for g in adata.var_names]
+
+            df_kov = pd.read_csv(kov_path, sep='\t', dtype=str).fillna('')
+            df_kov.columns = [c.strip().upper() for c in df_kov.columns]
+            if 'DATASET_ID' in df_kov.columns:
+                df_kov = df_kov.rename(columns={'DATASET_ID': 'SAMPLE_ID'})
+
+            unique_samples = np.sort(adata.obs['dataset_id'].unique())
+            n_samp = len(unique_samples)
+            sample_to_idx = {str(s): i for i, s in enumerate(unique_samples)}
+
+            basal_ref_test = np.zeros((n_samp, G_tot_test, n_nw))
+
+            def _parse_genes(cell):
+                if not cell or cell in ('0', 'nan', 'NAN'):
+                    return []
+                return [g.strip().upper() for g in cell.split(',') if g.strip()]
+
+            for _, row in df_kov.iterrows():
+                sid = str(row.get('SAMPLE_ID', '')).strip()
+                if sid not in sample_to_idx:
+                    continue
+                s_idx = sample_to_idx[sid]
+                for gene in _parse_genes(row.get('KO', '')):
+                    if gene in genes_only:
+                        gi = ns + genes_only.index(gene)
+                        basal_ref_test[s_idx, gi, :] = -100.0
+                for gene in _parse_genes(row.get('OV', '')):
+                    if gene in genes_only:
+                        gi = ns + genes_only.index(gene)
+                        basal_ref_test[s_idx, gi, :] = 100.0
+            print(f"[infer_test] Loaded per-sample KOV prior from {kov_path}")
+        except Exception as e:
+            print(f"[infer_test] Warning: could not load KO_OV_inference.txt: {e}")
+            basal_ref_test = None
+
+    # ─── LOAD OPTIONAL TRANSITION RATES ─────────────────────────────────
+    transition_rates_test = None
+    tr_path = os.path.join(p, 'Data', 'transition_rates.csv')
+    if os.path.exists(tr_path):
+        transition_rates_test = pd.read_csv(tr_path, index_col=0)
+        transition_rates_test.index = transition_rates_test.index.astype(str)
+        transition_rates_test.columns = transition_rates_test.columns.astype(str)
+        print(f"[infer_test] Loaded transition rates from {tr_path} shape={transition_rates_test.shape}")
+
     # ─── TRAJECTORY INFERENCE ON TEST SET ────────────────────────────────
     # Classifies cells into modes (fixed kz/c) then infers trajectories with
     # the pre-learned network (compute_theta=False, update_modes=True).
     print(f"[infer_test] Running mixture classification and trajectory inference...")
     try:
-        model.infer_test(adata, verb=1, stimulus_schedule=None)  # schedule already built
+        model.infer_test(adata, verb=1, stimulus_schedule=None,
+                         basal_ref=basal_ref_test,
+                         transition_rates=transition_rates_test)  # schedule already built
         print(f"[infer_test] Test trajectory inference completed")
     except Exception as e:
         import traceback; traceback.print_exc()

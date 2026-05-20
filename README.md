@@ -167,6 +167,9 @@ When `dataset_id` is present, CARDAMOM automatically:
 
 > Without `dataset_id`, all cells are treated as a single sample (`n_samples = 1`).
 
+**Keeping per-sample basals close to each other (`constrain_basal_uniform`):**
+By default the per-sample basals are free to diverge, which gives maximum flexibility but may overfit when samples differ only by targeted perturbations. Setting `model.constrain_basal_uniform = λ` (e.g. `λ = 100–1000`) adds an L2 penalty that pushes each gene's free-sample basals toward their common mean. The penalty is applied **per (sample, gene) pair**: a sample's basal for a given gene is excluded from the penalty if and only if that specific gene has a non-zero `basal_ref` for that sample (i.e. a KO or OV prior — see below). Concretely, for a `KO_CHGA` sample, only the CHGA basal is excluded; all other genes in that sample are still constrained to stay close to the wild-type values.
+
 ---
 
 ### Stimulus / exogenous signal (`n_stimuli`, `stimulus_schedule.txt`)
@@ -187,6 +190,8 @@ CARDAMOM supports one or several **exogenous inputs** (stimuli) that are not inf
 
 For a single stimulus channel, a single-column file suffices. Values between 0 and 1 are allowed and interpreted as partial stimulus strength.
 
+**Fewer rows than timepoints:** if the file contains fewer rows than the number of unique timepoints in the data, the missing timepoints automatically inherit the value of the **last row**. This is useful when a stimulus reaches a plateau and you only want to specify the transition rows explicitly. Providing *more* rows than timepoints raises an error.
+
 **Simulation-specific schedule:** to use a *different* schedule during forward simulation (e.g. to test a new stimulus protocol after training), place `Data/stimulus_schedule_simul.txt`. `simulate_network.py` and `simulate_network_KOV.py` look for this file first, falling back to `stimulus_schedule.txt` if absent.
 
 ---
@@ -199,7 +204,7 @@ The network inference step accepts optional arrays to **warm-start** the optimis
 |---|---|---|
 | `basal_init.npy` / `.csv` | `(G,)` or `(n_samples, G, n_networks)` | Initial values for basal parameters |
 | `inter_init.npy` / `.csv` | `(G, G)` or `(G, G, n_networks)` | Initial values for interaction matrix |
-| `basal_ref.npy` / `.csv` | same as `basal_init` | Regularisation target for basal (penalises deviations) |
+| `basal_ref.npy` / `.csv` | same as `basal_init` | Regularisation target for basal (penalises deviations; entries ≠ 0 also exclude that sample/gene from the `constrain_basal_uniform` penalty) |
 | `inter_ref.npy` / `.csv` | same as `inter_init` | Regularisation target for interactions |
 | `ref_network.csv` | `(G, G)` gene-indexed CSV | Binary/real prior interaction graph (sparsity mask) |
 
@@ -209,12 +214,12 @@ A 3-D `basal_init` of shape `(n_samples, G, n_networks)` warm-starts each sample
 
 ---
 
-### Per-sample KO / OV prior (`Data/basal_ref_KOV.txt`)
+### Per-sample KO / OV prior (`Data/KO_OV_inference.txt`)
 
 To encode prior knowledge about **which genes are knocked out (KO) or overexpressed (OV)** in specific samples, create a tab-separated file:
 
 ```
-# basal_ref_KOV.txt
+# KO_OV_inference.txt
 sample_id	KO	OV
 wt	        	
 ko_CHGA	CHGA	
@@ -232,12 +237,12 @@ When this file is present, `infer_network_structure.py` replaces `basal_ref` for
 
 ---
 
-### In-silico perturbation simulation (`Data/KO_OV_list.txt`)
+### In-silico perturbation simulation (`Data/KO_OV_simulate.txt`)
 
 After training, you can simulate arbitrary knock-out / over-expression combinations with `simulate_network_KOV.py`. Define the combinations in:
 
 ```
-# KO_OV_list.txt  (tab-separated, header required)
+# KO_OV_simulate.txt  (tab-separated, header required)
 KO	        OV
             		        # wild-type (no perturbation)
 CHGA	
@@ -248,7 +253,71 @@ POSTN	S100B,STMN2
 
 Each row produces one independent simulation. Results are saved as `cardamomOT/adata_prot_simul_KO_*_OV_*_stim*.h5ad`.
 
-If `basal_ref_KOV.txt` was used during training and `basal.npy` is therefore 3-D (per-sample), `simulate_network_KOV.py` automatically reconstructs a clean wild-type basal by averaging the unconstrained samples before applying each new perturbation.
+If `KO_OV_inference.txt` was used during training and `basal.npy` is therefore 3-D (per-sample), `simulate_network_KOV.py` automatically reconstructs a clean wild-type basal by averaging the unconstrained samples before applying each new perturbation.
+
+#### Partial KO / OV via degradation rates (`GENE-X` syntax)
+
+By default a KO silences a gene by setting its basal transcription to −∞ (complete silencing). For a **partial** perturbation of strength X% (0 < X < 100) append `-X` to the gene name:
+
+```
+# KO_OV_simulate.txt
+KO	        OV
+CHGA-80	                    # 80 % KO of CHGA
+		STMN2-60            # 60 % OV of STMN2
+CHGA-80	STMN2-60
+POSTN	S100B               # full KO / full OV (no suffix = 100 %, existing behaviour)
+```
+
+**Mechanism:** instead of modifying the basal transcription, partial perturbations multiply the RNA and protein degradation rates stored in `model.d_t`:
+
+| Mode | Degradation factor | Effect |
+|---|---|---|
+| KO `X`% | `× 1 / (1 − X/100)` | higher degradation → lower steady-state |
+| OV `X`% | `× (1 − X/100)` | lower degradation → higher steady-state |
+
+At X = 0 the factor is 1 (no effect). As X → 100 the KO factor diverges (full silencing) and the OV factor approaches 0 (full over-expression). The output file is labelled `KO_CHGApct80_OV_STMN2pct60` to distinguish it from a complete perturbation.
+
+> **Note on gene names with hyphens:** the `-X` suffix is recognised as a percentage only when `X` is a number strictly between 0 and 100. Gene names such as `HIF-1A` are therefore parsed correctly (the suffix `1` is outside the 0–100 exclusive range).
+
+---
+
+### Population dynamics: proliferation, death and cell-type transition rates
+
+CARDAMOM's optimal transport step assumes a static population by default. If cells proliferate or die between timepoints, or if some cell-type transitions are more likely than others, you can provide this information to correct the OT marginals and cost matrix.
+
+#### Proliferation and death rates (`adata.obs`)
+
+Add per-cell rates directly to the AnnData object before running `infer_network_structure.py`:
+
+```python
+adata.obs['prolif_rate'] = ...   # float, net proliferation rate per cell (e.g. from EdU staining)
+adata.obs['death_rate']  = ...   # float, net death rate per cell
+```
+
+When both columns are present, the OT marginals between consecutive timepoints t₁ and t₂ are modified:
+- **Source marginal** µᵢ ∝ exp(+(prolif_i − death_i) · Δt/2) — cells with higher net growth carry more weight as trajectory sources
+- **Target marginal** νⱼ ∝ exp(−(prolif_j − death_j) · Δt/2) — fast-growing cells at t₂ are down-weighted (they represent fewer distinct lineages)
+
+This is equivalent to computing a **demographically corrected** optimal transport (as in Waddington OT, Schiebinger et al. 2019): the resulting coupling captures intrinsic lineage transitions independently of population-level growth effects. If either column is absent it is treated as 0 (neutral, no correction).
+
+#### Cell-type transition rates (`Data/transition_rates.csv`)
+
+To bias the OT cost toward biologically plausible cell-type transitions, place a square CSV in the project's `Data/` folder:
+
+```
+# transition_rates.csv — rows = source type at t1, cols = target type at t2
+# values are relative likelihoods (need not sum to 1; will be normalised)
+         ,TypeA,TypeB,TypeC
+TypeA    ,  3.0,  1.0,  0.1
+TypeB    ,  0.5,  2.0,  0.5
+TypeC    ,  0.1,  0.5,  3.0
+```
+
+Row/column names must match the values of `adata.obs['cell_type']` (or `cell_types` / `celltype`). The matrix is **bistochastically normalised** (Sinkhorn–Knopp, 500 iterations) and rescaled to mean = 1 so the overall cost scale is preserved.
+
+The OT pairwise distance is then divided element-wise by the normalised transition weight: a transition with weight > 1 becomes cheaper (preferred), and a transition with weight < 1 becomes more expensive (penalised). Missing cell types default to the lowest transition weight (index 0).
+
+Both corrections are active simultaneously when the corresponding files are present. They apply during training (`infer_network_structure.py`) and on the test set (`infer_test.py`).
 
 ---
 
@@ -258,6 +327,8 @@ If `basal_ref_KOV.txt` was used during training and `basal.npy` is therefore 3-D
 my_project/
 ├── Data/
 │   ├── data.h5ad                  # required — obs['time'], obs['dataset_id'] (opt.), obs['rd'] (opt.)
+│   │                              #            obs['prolif_rate'] (opt.), obs['death_rate'] (opt.)
+│   │                              #            obs['cell_type'] (opt.)
 │   ├── gene_list.txt              # optional — subset of genes to use
 │   ├── stimulus_schedule.txt      # optional — stimulus values per timepoint
 │   ├── stimulus_schedule_simul.txt# optional — overrides stimulus schedule for simulation only
@@ -266,12 +337,13 @@ my_project/
 │   ├── inter_init.npy / .csv      # optional — warm-start for interactions
 │   ├── basal_ref.npy / .csv       # optional — regularisation target for basal
 │   ├── inter_ref.npy / .csv       # optional — regularisation target for interactions
-│   ├── basal_ref_KOV.txt          # optional — per-sample KO/OV prior (requires dataset_id)
-│   └── KO_OV_list.txt             # optional — in-silico perturbations to simulate
+│   ├── KO_OV_inference.txt          # optional — per-sample KO/OV prior (requires dataset_id)
+│   ├── KO_OV_simulate.txt             # optional — in-silico perturbations to simulate
+│   └── transition_rates.csv       # optional — cell-type transition cost matrix for OT
 └── cardamomOT/                    # generated by the pipeline
     ├── basal.npy                  # (n_samples, G, n_networks)
     ├── inter.npy                  # (G, G, n_networks)
-    ├── basal_ref_mask.npy         # (n_samples, G) bool — generated from basal_ref_KOV.txt
+    ├── basal_ref_mask.npy         # (n_samples, G) bool — generated from KO_OV_inference.txt
     └── ...
 ```
 

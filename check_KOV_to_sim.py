@@ -12,7 +12,7 @@ Usage:
 
 Required input files:
     - Data/data_<split>.h5ad: observed count matrix (wildtype)
-    - Data/KO_OV_list.txt: perturbation combinations
+    - Data/KO_OV_simulate.txt: perturbation combinations
     - cardamomOT/data_prot_simul_KO_*.npy: simulated proteins for each perturbation
     - cardamomOT/data_kon_simul_KO_*.npy: simulated bursting for each perturbation
 
@@ -20,54 +20,38 @@ Output files:
     - cardamomOT/adata_sim_KO_*.h5ad: AnnData objects for each perturbation
     - cardamomOT/adata_prot_simul_KO_*.h5ad: Protein trajectories for each perturbation
 """
+import re
 import numpy as np
 import sys, getopt
 import anndata as ad
 from CardamomOT import NetworkModel
 import scipy.sparse
 import os
-import pandas as pd
 
-def parse_gene_list(cell):
-    """
-    Parse a KO/OV cell that can contain multiple genes separated by commas.
-    
-    Args:
-        cell: String or numeric value from DataFrame cell
-    
-    Returns:
-        list: Parsed gene names, empty if null/zero
-    """
-    if pd.isna(cell):
-        return []
-    cell = str(cell).strip()
-    if cell in ['0', '', 'nan']:
-        return []
-    return [g.strip() for g in cell.split(',') if g.strip() != '']
+
+def _parse_gene_with_pct(token):
+    """Parse 'GENE-X' → (gene, X) or 'GENE' → (gene, None). X is a float 0–100."""
+    token = token.strip()
+    m = re.match(r'^(.+)-(\d+(?:\.\d+)?)$', token)
+    if m:
+        pct = float(m.group(2))
+        if 0.0 < pct < 100.0:
+            return m.group(1).strip(), pct
+    return token, None
+
+
+def _gene_label(gene, pct):
+    return f"{gene}pct{int(pct)}" if pct is not None else gene
 
 
 def load_ko_ov_combinations(file_path):
-    """
-    Load KO/OV combinations from tab-separated file.
-    
-    Args:
-        file_path: Path to KO_OV_list.txt
-    
-    Returns:
-        list: List of dicts with 'KO' and 'OV' keys
-    
-    Raises:
-        FileNotFoundError: If file does not exist
-        ValueError: If no KO or OV column found
-    """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"KO/OV list file not found: {file_path}")
-    
+
     combos = []
     with open(file_path, "r") as f:
         lines = f.readlines()
 
-    # Parse header
     header = lines[0].strip().split('\t')
     header = [h.strip().upper() for h in header]
 
@@ -75,9 +59,8 @@ def load_ko_ov_combinations(file_path):
     ov_idx = header.index("OV") if "OV" in header else None
 
     if ko_idx is None and ov_idx is None:
-        raise ValueError("KO_OV_list.txt must contain 'KO' or 'OV' column")
+        raise ValueError("KO_OV_simulate.txt must contain 'KO' or 'OV' column")
 
-    # Parse combinations
     for line in lines[1:]:
         parts = line.rstrip().split('\t')
 
@@ -87,7 +70,7 @@ def load_ko_ov_combinations(file_path):
             cell = parts[idx].strip()
             if cell in ['', '0']:
                 return []
-            return [g.strip() for g in cell.split(',') if g.strip()]
+            return [_parse_gene_with_pct(g) for g in cell.split(',') if g.strip()]
 
         kos = parse(ko_idx)
         ovs = parse(ov_idx)
@@ -137,11 +120,11 @@ def main(argv):
     p = '{}/'.format(inputfile)
 
     # Load KO/OV combinations
-    ko_ov_file = os.path.join(p, "Data", "KO_OV_list.txt")
+    ko_ov_file = os.path.join(p, "Data", "KO_OV_simulate.txt")
     try:
         combos = load_ko_ov_combinations(ko_ov_file)
         if len(combos) == 0:
-            print("[check_KOV_to_sim] No KO/OV combinations found in KO_OV_list.txt")
+            print("[check_KOV_to_sim] No KO/OV combinations found in KO_OV_simulate.txt")
             sys.exit(0)
         print(f"[check_KOV_to_sim] Loaded {len(combos)} KO/OV combinations")
     except FileNotFoundError as e:
@@ -211,7 +194,9 @@ def main(argv):
         kos = combo["KO"]
         ovs = combo["OV"]
 
-        label = f"KO_{'-'.join(kos) if kos else 'none'}_OV_{'-'.join(ovs) if ovs else 'none'}"
+        ko_label = '-'.join(_gene_label(g, p) for g, p in kos) if kos else 'none'
+        ov_label = '-'.join(_gene_label(g, p) for g, p in ovs) if ovs else 'none'
+        label = f"KO_{ko_label}_OV_{ov_label}"
         print(f"[check_KOV_to_sim] Processing combination {idx}/{len(combos)}: {label}")
         
         file_prefix = os.path.join(p, f"cardamomOT/data_kon_simul_{label}.npy")

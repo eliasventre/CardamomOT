@@ -180,12 +180,12 @@ def main(argv):
     inter_ref  = _load_gene_mat('inter_ref')
 
     # ─── PER-SAMPLE KOV PRIOR (overrides basal_ref if present) ──────────
-    # Data/basal_ref_KOV.txt : TSV with columns  sample_id | KO | OV
+    # Data/KO_OV_inference.txt : TSV with columns  sample_id | KO | OV
     # sample_id values must match adata.obs['dataset_id'].
     # KO genes get basal_ref = -100 (forced OFF), OV genes get +100 (forced ON).
     # Also saves basal_ref_mask.npy: bool (n_samples, G_tot) for downstream
     # simulate_network_KOV clean-basal computation.
-    kov_path = os.path.join(p, 'Data', 'basal_ref_KOV.txt')
+    kov_path = os.path.join(p, 'Data', 'KO_OV_inference.txt')
     if os.path.exists(kov_path):
         try:
             df_kov = pd.read_csv(kov_path, sep='\t', dtype=str).fillna('')
@@ -194,7 +194,7 @@ def main(argv):
             if 'DATASET_ID' in df_kov.columns:
                 df_kov = df_kov.rename(columns={'DATASET_ID': 'SAMPLE_ID'})
             if 'SAMPLE_ID' not in df_kov.columns:
-                raise ValueError("basal_ref_KOV.txt must have a 'sample_id' column")
+                raise ValueError("KO_OV_inference.txt must have a 'sample_id' column")
 
             unique_samples = (np.sort(adata.obs['dataset_id'].unique())
                               if 'dataset_id' in adata.obs else np.array(['0']))
@@ -232,11 +232,22 @@ def main(argv):
             print(f"[infer_network_structure] Loaded per-sample KOV prior from {kov_path} "
                   f"({n_samp} samples, mask nnz={basal_ref_mask.sum()})")
         except Exception as e:
-            print(f"[infer_network_structure] Warning: could not load basal_ref_KOV.txt: {e}")
+            print(f"[infer_network_structure] Warning: could not load KO_OV_inference.txt: {e}")
+
+    # ─── LOAD TRANSITION RATES (optional) ───────────────────────────────────
+    transition_rates = None
+    tr_path = os.path.join(p, 'Data', 'transition_rates.csv')
+    if os.path.exists(tr_path):
+        transition_rates = pd.read_csv(tr_path, index_col=0)
+        transition_rates.index = transition_rates.index.astype(str)
+        transition_rates.columns = transition_rates.columns.astype(str)
+        print(f"[infer_network_structure] Loaded transition rates from {tr_path} "
+              f"shape={transition_rates.shape}")
 
     model.fit_network(adata, intensity_prior=100, verb=1, stimulus_schedule=stim_sched,
                       basal_init=basal_init, inter_init=inter_init,
-                      basal_ref=basal_ref, inter_ref=inter_ref)
+                      basal_ref=basal_ref, inter_ref=inter_ref,
+                      transition_rates=transition_rates)
 
     # Save inferred network structure parameters
     cardamom_dir = os.path.join(p, 'cardamomOT')

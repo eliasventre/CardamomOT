@@ -9,7 +9,7 @@ N = 10
 # Print information
 verb = 1
 # number of initial couplings
-n_repet=1
+n_repet=2
 
 # Inference for Network4
 for r in range(0, N):

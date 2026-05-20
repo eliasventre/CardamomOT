@@ -8,33 +8,41 @@ Usage:
 
 Required input files:
     - Data/data_<split>.h5ad: count matrix with temporal information
-    - Data/KO_OV_list.txt: table defining KO/OV combinations (tab-separated)
+    - Data/KO_OV_simulate.txt: table defining KO/OV combinations (tab-separated)
     - cardamom/inter_t_simul.npy, basal_simul.npy: inferred parameters
 
 Output files:
     - cardamom/data_prot_simul_KO_*.npy: simulated protein for each perturbation
     - cardamom/data_kon_simul_KO_*.npy: simulated bursting for each perturbation
 
-KO_OV_list.txt format:
+KO_OV_simulate.txt format:
     KO          OV
     gene1       gene2,gene3
     gene4
 """
 import sys; sys.path += ['../']
+import re
 import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta
 import getopt
 import anndata as ad
 import os
-import pandas as pd
 
-def parse_gene_list(cell):
-    if pd.isna(cell):
-        return []
-    cell = str(cell).strip()
-    if cell in ['0', '', 'nan']:
-        return []
-    return [g.strip() for g in cell.split(',') if g.strip() != '']
+
+def _parse_gene_with_pct(token):
+    """Parse 'GENE-X' → (gene, X) or 'GENE' → (gene, None). X is a float 0–100.
+
+    A trailing '-<number>' suffix is interpreted as a percentage only when
+    the number is strictly between 0 and 100 (exclusive) so that gene names
+    like 'HIF-1A' are not accidentally matched.
+    """
+    token = token.strip()
+    m = re.match(r'^(.+)-(\d+(?:\.\d+)?)$', token)
+    if m:
+        pct = float(m.group(2))
+        if 0.0 < pct < 100.0:
+            return m.group(1).strip(), pct
+    return token, None
 
 
 def load_ko_ov_combinations(file_path):
@@ -52,7 +60,7 @@ def load_ko_ov_combinations(file_path):
     ov_idx = header.index("OV") if "OV" in header else None
 
     if ko_idx is None and ov_idx is None:
-        raise ValueError("KO_OV_list.txt must contain 'KO' or 'OV' column")
+        raise ValueError("KO_OV_simulate.txt must contain 'KO' or 'OV' column")
 
     for line_num, line in enumerate(lines[1:], start=2):
         parts = line.rstrip().split('\t')
@@ -63,7 +71,7 @@ def load_ko_ov_combinations(file_path):
             cell = parts[idx].strip()
             if cell in ['', '0']:
                 return []
-            return [g.strip() for g in cell.split(',') if g.strip()]
+            return [_parse_gene_with_pct(g) for g in cell.split(',') if g.strip()]
 
         kos = parse(ko_idx)
         ovs = parse(ov_idx)
@@ -106,7 +114,7 @@ def main(argv):
     p = f'{inputfile}/'
 
     # Load KO/OV combinations
-    ko_ov_file = os.path.join(p, "Data", "KO_OV_list.txt")
+    ko_ov_file = os.path.join(p, "Data", "KO_OV_simulate.txt")
     try:
         combos = load_ko_ov_combinations(ko_ov_file)
     except FileNotFoundError:
@@ -117,7 +125,7 @@ def main(argv):
         sys.exit(1)
 
     if len(combos) == 0:
-        print("[simulate_network_KOV] No KO/OV combinations found in KO_OV_list.txt")
+        print("[simulate_network_KOV] No KO/OV combinations found in KO_OV_simulate.txt")
         sys.exit(0)
 
     print(f"[simulate_network_KOV] Loaded {len(combos)} KO/OV combinations")
@@ -214,18 +222,27 @@ def main(argv):
 
     ns = model.n_stimuli
 
+    # Save original d_t so it can be restored for each perturbation
+    d_t_orig = model.d_t.copy()
+
+    def _gene_label(gene, pct):
+        return f"{gene}pct{int(pct)}" if pct is not None else gene
+
     # Simulate perturbations
     print(f"[simulate_network_KOV] Starting simulation of {len(combos)} perturbations...")
     for idx, combo in enumerate(combos, start=1):
-        kos = combo['KO']
+        kos = combo['KO']   # list of (gene, pct_or_None)
         ovs = combo['OV']
-        label = f"KO_{'-'.join(kos) if kos else 'none'}_OV_{'-'.join(ovs) if ovs else 'none'}"
+        ko_label = '-'.join(_gene_label(g, p) for g, p in kos) if kos else 'none'
+        ov_label = '-'.join(_gene_label(g, p) for g, p in ovs) if ovs else 'none'
+        label = f"KO_{ko_label}_OV_{ov_label}"
         print(f"\n[simulate_network_KOV] Simulating condition {idx}/{len(combos)}: {label}")
 
         # Reset model to clean (unperturbed) baseline
         try:
             model.basal = basal_clean.copy()
             model.basal_t = basal_t_clean.copy()
+            model.d_t = d_t_orig.copy()
             model.prot = np.load(os.path.join(p, 'cardamomOT', 'data_prot_unitary.npy'))
             model.kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta.npy'))
         except FileNotFoundError as e:
@@ -233,22 +250,37 @@ def main(argv):
             continue
 
         # Apply knockouts
-        for gene in kos:
+        # - No percentage: silence via basal_t (complete KO, existing behaviour)
+        # - With percentage X: multiply degradation rates by 1/(1-X/100)
+        #   (higher degradation → lower steady-state expression)
+        # model.prot[:N] stays WT so t=0 NB parameters are identical across conditions.
+        for gene, pct in kos:
             if gene in adata.var_names:
                 ind = ns + adata.var_names.get_loc(gene)
-                model.basal_t[:, ind] = -100 - np.sum(model.inter_t[-1, :, ind])
-                model.prot[:, ind] = 0
-                print(f"[simulate_network_KOV]   KO: {gene} (index {ind})")
+                if pct is None:
+                    model.basal_t[:, ind] = -100 - np.sum(model.inter_t[-1, :, ind])
+                    print(f"[simulate_network_KOV]   KO 100%: {gene} (index {ind})")
+                else:
+                    factor = 1.0 / max(1.0 - pct / 100.0, 1e-12)
+                    model.d_t[:, :, ind] *= factor
+                    print(f"[simulate_network_KOV]   KO {pct:.0f}%: {gene} (index {ind}), deg ×{factor:.3g}")
             else:
                 print(f"[simulate_network_KOV]   Warning: Gene '{gene}' not found in data")
 
         # Apply overexpressions
-        for gene in ovs:
+        # - No percentage: activate via basal_t (complete OV, existing behaviour)
+        # - With percentage X: multiply degradation rates by (1-X/100)
+        #   (lower degradation → higher steady-state expression)
+        for gene, pct in ovs:
             if gene in adata.var_names:
                 ind = ns + adata.var_names.get_loc(gene)
-                model.basal_t[:, ind] = 100 + np.sum(model.inter_t[-1, :, ind])
-                model.prot[:, ind] = 1
-                print(f"[simulate_network_KOV]   OV: {gene} (index {ind})")
+                if pct is None:
+                    model.basal_t[:, ind] = 100 + np.sum(model.inter_t[-1, :, ind])
+                    print(f"[simulate_network_KOV]   OV 100%: {gene} (index {ind})")
+                else:
+                    factor = max(1.0 - pct / 100.0, 1e-12)
+                    model.d_t[:, :, ind] *= factor
+                    print(f"[simulate_network_KOV]   OV {pct:.0f}%: {gene} (index {ind}), deg ×{factor:.3g}")
             else:
                 print(f"[simulate_network_KOV]   Warning: Gene '{gene}' not found in data")
 

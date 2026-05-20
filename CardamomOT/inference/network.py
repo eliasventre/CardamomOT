@@ -190,13 +190,20 @@ def _compute_sigma_per_sample(theta_inter, theta_basal_all, ref_network, yp, ys,
 
 
 def objective(X, weights_samples, ys, ypr, yp, ypm, yk, ks, G, g, n_networks, n_samples,
-              theta_ref, ref_network, l_pen, proba, weight_prev, loss, final):
+              theta_ref, ref_network, l_pen, proba, weight_prev, loss, final,
+              constrain_basal_uniform=0.0, basal_free_mask=None):
     """
     Loss function for a single gene — joint over all samples.
 
     theta shape: (G + n_samples, n_networks)
       rows 0..G-1      : interaction weights
       rows G..G+ns-1   : per-sample basal values
+
+    constrain_basal_uniform : float >= 0
+        Penalty strength that pushes free-sample basals toward their mean.
+        Samples whose basal is pinned by a KO/OV prior are excluded (basal_free_mask).
+    basal_free_mask : (n_samples,) bool array or None
+        True for samples that are NOT pinned by basal_ref for this gene.
     """
     theta = X.reshape(G + n_samples, n_networks)
     theta_inter = theta[:G]           # (G, n_networks)
@@ -230,11 +237,21 @@ def objective(X, weights_samples, ys, ypr, yp, ypm, yk, ks, G, g, n_networks, n_
         Q += theta_penalization((theta_inter - theta_ref[:G]) * (ref_network > 0), l_pen)
     else:
         Q += final_theta_penalization((theta_inter - theta_ref[:G]) * (ref_network > 0), l_pen)
+
+    # Uniformity penalty: push free-sample basals toward their common mean
+    if constrain_basal_uniform > 0.0 and basal_free_mask is not None:
+        free_idx = np.where(basal_free_mask)[0]
+        if len(free_idx) >= 2:
+            theta_free = theta_basal[free_idx, :]          # (n_free, n_networks)
+            mean_free  = theta_free.mean(axis=0)            # (n_networks,)
+            Q += constrain_basal_uniform * np.sum((theta_free - mean_free) ** 2)
+
     return Q
 
 
 def grad_theta(X, weights_samples, ys, ypr, yp, ypm, yk, ks, G, g, n_networks, n_samples,
-               theta_ref, ref_network, l_pen, proba, weight_prev, loss, final):
+               theta_ref, ref_network, l_pen, proba, weight_prev, loss, final,
+               constrain_basal_uniform=0.0, basal_free_mask=None):
     """Gradient of objective w.r.t. X = theta.ravel()."""
     theta = X.reshape(G + n_samples, n_networks)
     theta_inter = theta[:G]
@@ -288,6 +305,15 @@ def grad_theta(X, weights_samples, ys, ypr, yp, ypm, yk, ks, G, g, n_networks, n
         dq[:G] += grad_theta_penalization(theta_inter - theta_ref[:G], l_pen) * (ref_network > 0)
     else:
         dq[:G] += grad_final_theta_penalization(theta_inter - theta_ref[:G], l_pen) * (ref_network > 0)
+
+    # Gradient of uniformity penalty: 2λ(θ_basal[s] − mean) for free samples
+    if constrain_basal_uniform > 0.0 and basal_free_mask is not None:
+        free_idx = np.where(basal_free_mask)[0]
+        if len(free_idx) >= 2:
+            theta_free = theta_basal[free_idx, :]       # (n_free, n_networks)
+            mean_free  = theta_free.mean(axis=0)         # (n_networks,)
+            dq[G + free_idx, :] += 2.0 * constrain_basal_uniform * (theta_free - mean_free)
+
     return dq.ravel()
 
 
@@ -422,7 +448,8 @@ def grad_correc(X, correc_ref, inter, basal, weights_samples, ys, ypr, yp, ypm, 
 
 def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, theta_ref,
                    ref_network, ks, G, g, n_networks, n_samples, proba,
-                   l_pen, weight_prev=.5, loss='CE', final=0):
+                   l_pen, weight_prev=.5, loss='CE', final=0,
+                   constrain_basal_uniform=0.0, basal_free_mask=None, G_tol=None):
     """
     Joint L-BFGS-B optimisation of interactions + per-sample basals for one gene.
 
@@ -451,7 +478,7 @@ def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, th
             bounds[idx] = (v, None) if v > 0 else (None, v)
         elif ref_network_flat[idx] != 0.0:
             v = ref_network_flat[idx]
-            if v < 1: bounds[idx] = (None, 0) 
+            if v < 1: bounds[idx] = (None, 0)
             elif v > 1: bounds[idx] = (0, None)
             else: bounds[idx] = (None, None)
     # Basal rows (G..G+n_samples-1): unconstrained — leave as (None, None)
@@ -460,15 +487,18 @@ def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, th
                       ypr=y_proba, yp=y_prot, ypm=y_prot_mod, yk=y_kon,
                       ks=ks, G=G, g=g, n_networks=n_networks, n_samples=n_samples,
                       theta_ref=theta_ref, ref_network=np.abs(ref_network),
-                      l_pen=l_pen, proba=proba, weight_prev=weight_prev, loss=loss, final=final)
+                      l_pen=l_pen, proba=proba, weight_prev=weight_prev, loss=loss, final=final,
+                      constrain_basal_uniform=constrain_basal_uniform, basal_free_mask=basal_free_mask)
 
     grad_fn = partial(grad_theta, weights_samples=weights_samples, ys=y_samples,
                       ypr=y_proba, yp=y_prot, ypm=y_prot_mod, yk=y_kon,
                       ks=ks, G=G, g=g, n_networks=n_networks, n_samples=n_samples,
                       theta_ref=theta_ref, ref_network=np.abs(ref_network),
-                      l_pen=l_pen, proba=proba, weight_prev=weight_prev, loss=loss, final=final)
+                      l_pen=l_pen, proba=proba, weight_prev=weight_prev, loss=loss, final=final,
+                      constrain_basal_uniform=constrain_basal_uniform, basal_free_mask=basal_free_mask)
 
-    res = minimize(loss_fn, X_flat, jac=grad_fn, method="L-BFGS-B", bounds=bounds, tol=seuil / G)
+    _G_tol = G_tol if G_tol is not None else G
+    res = minimize(loss_fn, X_flat, jac=grad_fn, method="L-BFGS-B", bounds=bounds, tol=seuil / _G_tol)
     if not res.success:
         logger.error('Minimization failed for inference: %s', res.message)
 
@@ -476,7 +506,7 @@ def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, th
         error = check_grad(loss_fn, grad_fn, res.x)
         if error > .05:
             logger.debug("Gradient theta inference check error for gene %s: %s", g, error)
-            res = minimize(loss_fn, X_flat, bounds=bounds, method="L-BFGS-B", tol=seuil / G)
+            res = minimize(loss_fn, X_flat, bounds=bounds, method="L-BFGS-B", tol=seuil / _G_tol)
 
     theta_final = res.x.reshape(G + n_samples, n_networks)
     theta_final[:G] *= np.abs(ref_network)   # apply ref_network mask to interactions only
@@ -486,7 +516,7 @@ def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, th
 
 def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal, theta_ref,
                      ks, G, g, n_networks, n_samples, proba,
-                     l_pen, weight_prev=.5, loss='CE', correc_ref=0, final=0):
+                     l_pen, weight_prev=.5, loss='CE', correc_ref=0, final=0, G_tol=None):
     """
     Refinement step: optimise multiplicative correction factors over inter and per-sample basal.
 
@@ -495,7 +525,8 @@ def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal
     """
     correc = np.ones((G + n_samples, n_networks))
     diag = np.zeros((G, n_networks))
-    diag[g, :] = inter[g, :]
+    if g < G:   # g == G is the sentinel meaning "no self-regulation in active set"
+        diag[g, :] = inter[g, :]
     inter = inter.copy()
     inter -= diag
     basal = basal.copy()  # (n_samples, n_networks)
@@ -529,7 +560,8 @@ def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal
                       ks=ks, diag=diag, G=G, g=g, n_networks=n_networks, n_samples=n_samples,
                       proba=proba, l_pen=l_pen, weight_prev=weight_prev, loss=loss, final=final)
 
-    res = minimize(loss_fn, X_flat, jac=grad_fn, method="L-BFGS-B", bounds=bounds, tol=seuil / G)
+    _G_tol = G_tol if G_tol is not None else G
+    res = minimize(loss_fn, X_flat, jac=grad_fn, method="L-BFGS-B", bounds=bounds, tol=seuil / _G_tol)
     if not res.success:
         logger.error('Minimization failed for refining: %s', res.message)
 
@@ -537,7 +569,7 @@ def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal
         error = check_grad(loss_fn, grad_fn, res.x)
         if error > .05:
             logger.debug("Gradient theta refining check error for gene %s: %s", g, error)
-            res = minimize(loss_fn, X_flat, bounds=bounds, method="L-BFGS-B", tol=seuil / G)
+            res = minimize(loss_fn, X_flat, bounds=bounds, method="L-BFGS-B", tol=seuil / _G_tol)
 
     correc = res.x.reshape(G + n_samples, n_networks)
     inter[:, :] *= correc[:G, :]
@@ -550,13 +582,15 @@ def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal
 def main_loop_inference(g, y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, theta_ref,
                          ks, G, n_networks, n_samples, proba, l_gen, scale,
                          inter_tmp, basal_tmp, inter, basal, ref_network,
-                         weight_prev=.5, loss='CE', final=0):
+                         weight_prev=.5, loss='CE', final=0,
+                         constrain_basal_uniform=0.0, basal_free_mask=None, G_tol=None):
     """
     Joint inference (inter + per-sample basal) for a single gene g.
 
     theta_init : (G + n_samples, n_networks)
     basal      : (n_samples, n_networks)  — will be updated in-place (copy returned)
     inter      : (G, n_networks)          — will be updated in-place (copy returned)
+    basal_free_mask : (n_samples,) bool — True for samples NOT pinned by basal_ref for gene g
     Returns (basal, inter, basal_tmp, inter_tmp).
     """
     n_networks_tmp: int = int(1 + np.argmax(ks[1:]))
@@ -569,6 +603,8 @@ def main_loop_inference(g, y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_
         ref_network[:, :n_networks_tmp],
         ks[:n_networks_tmp + 1], G, g, n_networks_tmp, n_samples, proba,
         l_pen1, weight_prev=weight_prev * (1 - final), loss=loss, final=final,
+        constrain_basal_uniform=constrain_basal_uniform, basal_free_mask=basal_free_mask,
+        G_tol=G_tol,
     )
     # theta shape: (G + n_samples, n_networks_tmp)
     inter[:, :n_networks_tmp]    = theta[:G, :]
@@ -584,7 +620,7 @@ def main_loop_inference(g, y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_
         theta_ref[:, :n_networks_tmp],
         ks[:n_networks_tmp + 1], G, g, n_networks_tmp, n_samples, proba,
         l_pen2, weight_prev=weight_prev * (1 - final), loss=loss,
-        correc_ref=final, final=final,
+        correc_ref=final, final=final, G_tol=G_tol,
     )
 
     if n_networks_tmp < n_networks:
@@ -599,12 +635,18 @@ def inference_network(y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, n_stimu
                       basal_init=None, inter_init=None,
                       basal_ref=None, inter_ref=None,
                       scale=100, weight_prev=.5, loss='CE', final=0,
-                      samples_id=None) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+                      samples_id=None,
+                      constrain_basal_uniform=0.0) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Joint network inference: interactions shared across samples, basal per sample.
 
     Returns (basal, inter, basal_tmp, inter_tmp).
     basal shape: (n_samples, G, n_networks)
+
+    constrain_basal_uniform : float >= 0
+        When > 0, adds a penalty that pushes per-sample basals toward their common
+        mean for each gene. Samples whose basal is pinned by a non-zero basal_ref
+        (KO/OV priors) are excluded from the penalty for that gene.
     """
     try:
         from joblib import Parallel, delayed
@@ -650,32 +692,85 @@ def inference_network(y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, n_stimu
     if ref_network is None:
         ref_network = np.ones((G, G, n_networks))
 
+    # ── Compute free-sample mask from basal_ref ─────────────────────────────
+    # free_mask[s, g] = True  iff sample s is NOT pinned for gene g
+    # (i.e. basal_ref[s, g, :] is all-zero → no KO/OV prior)
+    if basal_ref is not None:
+        br_arr = np.asarray(basal_ref, dtype=float)
+        if br_arr.ndim == 3:                         # (n_samples, G, n_networks)
+            free_mask_2d = ~np.any(br_arr != 0.0, axis=-1)  # (n_samples, G)
+        else:                                        # 2-D: no per-sample pinning
+            free_mask_2d = np.ones((n_samples, G), dtype=bool)
+    else:
+        free_mask_2d = np.ones((n_samples, G), dtype=bool)
+
     l_gen: int = (1 + proba)
     inter_tmp = np.zeros((G, G, n_networks))
     basal_tmp  = np.zeros((n_samples, G, n_networks))
     inter      = np.zeros((G, G, n_networks))
     basal      = np.zeros((n_samples, G, n_networks))
 
-    def run_main_loop_for_gene(g):
-        return main_loop_inference(
-            g,
-            y_samples,
-            y_proba[:, g],
-            y_prot,
-            y_prot_mod[g, :, :],
-            y_kon[:, g],
-            theta_init_mat[:, g, :],    # (G + n_samples, n_networks)
-            theta_ref_mat[:, g, :],     # (G + n_samples, n_networks)
-            ks[g], G, n_networks, n_samples, proba, l_gen, scale,
-            inter_tmp[:, g, :],         # (G, n_networks)
-            basal_tmp[:, g, :],         # (n_samples, n_networks)
-            inter[:, g, :],             # (G, n_networks)
-            basal[:, g, :],             # (n_samples, n_networks)
-            ref_network[:, g, :],
-            weight_prev=weight_prev,
-            loss=loss,
-            final=final,
+    def run_main_loop_for_gene(g_tgt):
+        # Find active (non-zero) regulators for this target gene
+        active_src = np.where(np.any(ref_network[:, g_tgt, :] != 0, axis=-1))[0]
+        K_g = len(active_src)
+
+        if K_g == 0 or K_g == G:
+            # Dense path: no sub-selection, identical to previous behaviour.
+            # K_g == 0 case: no active regulators, so the dense path is used to
+            # safely optimize the basal only (interactions stay zero via ref_network masking).
+            return main_loop_inference(
+                g_tgt, y_samples, y_proba[:, g_tgt], y_prot,
+                y_prot_mod[g_tgt, :, :], y_kon[:, g_tgt],
+                theta_init_mat[:, g_tgt, :], theta_ref_mat[:, g_tgt, :],
+                ks[g_tgt], G, n_networks, n_samples, proba, l_gen, scale,
+                inter_tmp[:, g_tgt, :], basal_tmp[:, g_tgt, :],
+                inter[:, g_tgt, :], basal[:, g_tgt, :],
+                ref_network[:, g_tgt, :],
+                weight_prev=weight_prev, loss=loss, final=final,
+                constrain_basal_uniform=constrain_basal_uniform,
+                basal_free_mask=free_mask_2d[:, g_tgt],
+            )
+
+        # Sparse path: sub-select to K_g active regulators
+        yp_sub  = y_prot[:, active_src]                    # (N_cells, K_g)
+        ypm_sub = y_prot_mod[g_tgt, :, :][:, active_src]  # (N_cells, K_g)
+        rn_sub  = ref_network[active_src, g_tgt, :]        # (K_g, n_networks)
+
+        # Sub-select theta rows: active_src rows + per-sample basal rows (G..G+n_samples-1)
+        ti_g = theta_init_mat[:, g_tgt, :]
+        theta_init_sub = np.concatenate([ti_g[active_src], ti_g[G:]], axis=0)  # (K_g + n_samples, n_networks)
+        tr_g = theta_ref_mat[:, g_tgt, :]
+        theta_ref_sub  = np.concatenate([tr_g[active_src], tr_g[G:]], axis=0)  # (K_g + n_samples, n_networks)
+
+        # Position of g_tgt in active_src (sentinel K_g = "no self-regulation")
+        g_sub_matches = np.where(active_src == g_tgt)[0]
+        g_sub = int(g_sub_matches[0]) if len(g_sub_matches) > 0 else K_g
+
+        # Local arrays for the reduced sub-problem
+        inter_sub_loc     = np.zeros((K_g, n_networks))
+        basal_sub_loc     = np.zeros((n_samples, n_networks))
+        inter_tmp_sub_loc = np.zeros((K_g, n_networks))
+        basal_tmp_sub_loc = np.zeros((n_samples, n_networks))
+
+        basal_r, inter_sub_r, basal_tmp_r, inter_tmp_sub_r = main_loop_inference(
+            g_sub, y_samples, y_proba[:, g_tgt], yp_sub, ypm_sub, y_kon[:, g_tgt],
+            theta_init_sub, theta_ref_sub,
+            ks[g_tgt], K_g, n_networks, n_samples, proba, l_gen, scale,
+            inter_tmp_sub_loc, basal_tmp_sub_loc, inter_sub_loc, basal_sub_loc, rn_sub,
+            weight_prev=weight_prev, loss=loss, final=final,
+            constrain_basal_uniform=constrain_basal_uniform,
+            basal_free_mask=free_mask_2d[:, g_tgt],
+            G_tol=K_g,
         )
+
+        # Expand interaction results back to full G-dimensional space
+        inter_full     = np.zeros((G, n_networks))
+        inter_tmp_full = np.zeros((G, n_networks))
+        inter_full[active_src]     = inter_sub_r
+        inter_tmp_full[active_src] = inter_tmp_sub_r
+
+        return basal_r, inter_full, basal_tmp_r, inter_tmp_full
 
     if Parallel is not None:
         results = Parallel(n_jobs=-1)(

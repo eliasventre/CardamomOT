@@ -112,6 +112,7 @@ class NetworkModel:
         # Penalization/prior information
         self.stimulus = 1.0 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
         self.prior_network_pen = 1.0 # 1 if we don't use prior information. If not we can penalize the non-existing age in prior network with values between 1 and 0: 0 = impossible edge
+        self.constrain_basal_uniform = 0.0 # >= 0 penalty strength that pushes per-sample basals to be equal (ignores samples pinned by KO/OV basal_ref)
         # Filtering
         self.filter_network = 0 # Do we filter the network ? It also builds a temporal network using the filter criterium
 
@@ -162,18 +163,28 @@ class NetworkModel:
         stim = np.asarray(stimulus_schedule, dtype=float)
         if stim.ndim == 1:
             stim = stim[:, None]
-        assert stim.shape[0] == len(times_unique), (
-            f"stimulus_schedule has {stim.shape[0]} rows but {len(times_unique)} unique timepoints"
-        )
+        n_rows, n_tp = stim.shape[0], len(times_unique)
+        if n_rows < n_tp:
+            # Pad missing timepoints with the last row
+            stim = np.vstack([stim, np.tile(stim[-1], (n_tp - n_rows, 1))])
+        elif n_rows > n_tp:
+            raise ValueError(
+                f"stimulus_schedule has {n_rows} rows but only {n_tp} unique timepoints"
+            )
         if stim.shape[1] == 1 and self.n_stimuli > 1:
             stim = np.tile(stim, (1, self.n_stimuli))
         return {t: stim[i] for i, t in enumerate(times_unique)}
 
-    def core_binarization(self, data_rna, gene_names, vect_t, G_tot, min_components=1, max_components=5, refilter=0, max_iter_kinetics=100, cell_rd=None, verb=True):
+    def core_binarization(self, data_rna, gene_names, vect_t, G_tot, min_components=1, max_components=5, refilter=0, max_iter_kinetics=100, cell_rd=None, verb=True, kov_cell_mask=None):
         """
         Parameters
         ----------
         cell_rd : (N_cells,) array or None
+        kov_cell_mask : (N_cells, G_tot) int8 array or None
+            Per-cell KO/OV constraints derived from KO_OV_inference.
+            -1 → gene is KO for this cell (force to lowest mode),
+            +1 → gene is OV for this cell (force to highest mode),
+             0 → no constraint.
             Read depth scaling factors per cell (median = 1), typically
             stored in ``adata.obs['rd']``.  If ``None``, the standard
             Negative Binomial model without scaling is applied.
@@ -293,14 +304,34 @@ class NetworkModel:
         scale_max = np.max(self.a[:-1, :], axis=0)
         frequency_modes_smooth /= scale_max
 
+        # ── Force KO/OV cells to the correct mode after binarization ─────────
+        if kov_cell_mask is not None:
+            for g in range(ns, G_tot):
+                g_idx = g - ns
+                n_modes = len(ks[g_idx])
+                ko_cells = kov_cell_mask[:, g] < 0
+                ov_cells = kov_cell_mask[:, g] > 0
+                if np.any(ko_cells):
+                    frequency_proba_init[ko_cells, g, :] = 0
+                    frequency_proba_init[ko_cells, g, 0] = 1
+                    frequency_proba_modif[ko_cells, g, :] = 0
+                    frequency_proba_modif[ko_cells, g, 0] = 1
+                    frequency_modes_smooth[ko_cells, g] = self.a[0, g] / (scale_max[g] + EPS)
+                if np.any(ov_cells):
+                    frequency_proba_init[ov_cells, g, :] = 0
+                    frequency_proba_init[ov_cells, g, n_modes - 1] = 1
+                    frequency_proba_modif[ov_cells, g, :] = 0
+                    frequency_proba_modif[ov_cells, g, n_modes - 1] = 1
+                    frequency_modes_smooth[ov_cells, g] = self.a[n_modes - 1, g] / (scale_max[g] + EPS)
+
         if verb: print('Mean proba = ', np.mean(np.max(frequency_proba_init[:, ns:, :], axis=-1)),
               np.mean(np.max(frequency_proba_modif[:, ns:, :], axis=-1)))
-        
+
         return frequency_modes_smooth, frequency_proba_init, frequency_proba_modif, pi_zeros
 
 
 
-    def fit_mixture(self, data, refilter=0, gene_names=np.arange(1, 50000), min_components=2, max_components=2, max_iter_kinetics=0, cell_rd=None, verb=True, stimulus_schedule=None, time_key='time'):
+    def fit_mixture(self, data, refilter=0, gene_names=np.arange(1, 50000), min_components=2, max_components=2, max_iter_kinetics=0, cell_rd=None, verb=True, stimulus_schedule=None, time_key='time', kov_cell_mask=None):
         """
         Fit the mixture model parameters to the data.
 
@@ -339,12 +370,13 @@ class NetworkModel:
 
         frequency_modes_smooth, frequency_proba_init, frequency_proba_modif, pi_zeros = self.core_binarization(
                                         data_rna, gene_names, vect_t, G_tot,
-                                        min_components=min_components, 
-                                        max_components=max_components, 
-                                        refilter=refilter, 
+                                        min_components=min_components,
+                                        max_components=max_components,
+                                        refilter=refilter,
                                         max_iter_kinetics=max_iter_kinetics,
                                         cell_rd=cell_rd,
-                                        verb=verb)
+                                        verb=verb,
+                                        kov_cell_mask=kov_cell_mask)
 
         self.pi_zinb = pi_zeros
         self.modes = frequency_modes_smooth
@@ -415,6 +447,10 @@ class NetworkModel:
         proba_modified = y_proba_old.copy()
         vect_samples_id_modified = np.zeros(rna_modified.shape[0])
 
+        # Track which real cell (index into vect_rna) each simulated slot corresponds to.
+        # Updated in the sampling loop so growth rates and cell types stay exact.
+        sim_real_idx = np.full(rna_modified.shape[0], -1, dtype=int)
+
         # Set stimulus values per timepoint (schedule-based)
         for stim_s in range(ns):
             for t_i in np.unique(vect_t):
@@ -427,16 +463,18 @@ class NetworkModel:
                 prot_modified[sl, stim_s] = val * self.scale_proteins
                 kon_modified[sl, stim_s] = 1 if val >= 0.5 else 0
 
-        # Fill initial state (t = 0)
+        # Fill initial state (t = 0) and initialize sim_real_idx for those cells
         offset = 0
         for s, sample in enumerate(samples_id):
             cell_indices = (vect_samples_id == sample)
+            global_cell_idx = np.flatnonzero(cell_indices)
             selected_init = init_cells[s]
 
             kon_modified[offset+offset_init[s]:offset+offset_init[s] + N_samples[s], ns:] = self.modes[cell_indices][selected_init, ns:]
             if self.compute_with_proba:
                 proba_modified[offset+offset_init[s]:offset+offset_init[s] + N_samples[s]] = self.proba[cell_indices][selected_init]
             rna_modified[offset+offset_init[s]:offset+offset_init[s] + N_samples[s], ns:] = vect_rna[cell_indices][selected_init, ns:]
+            sim_real_idx[offset+offset_init[s]:offset+offset_init[s] + N_samples[s]] = global_cell_idx[selected_init]
 
             offset += N_full[s]
 
@@ -486,12 +524,50 @@ class NetworkModel:
                         n_stimuli=ns, stim_vals=np.asarray(self._stim_schedule[time], dtype=np.float64),
                     )
 
-                    mu = np.ones(N_sample)/N_sample
-                    nu = np.ones(N_cells)/N_cells
+                    cell_idx = np.flatnonzero(start_next)
+                    delta_t = times[t_idx + 1] - time
+                    # Real cell indices tracked for each simulated source cell
+                    src_real = sim_real_idx[current_indices]  # shape (N_sample,)
+
+                    # --- Transition rate cost adjustment (divide = lower cost for likely transitions) ---
+                    _tr = getattr(self, '_transition_rates', None)
+                    _ct = getattr(self, '_cell_types', None)
+                    if _tr is not None and _ct is not None:
+                        _labels = getattr(self, '_transition_type_labels', None)
+                        if _labels is not None:
+                            _lbl_to_i = {l: i for i, l in enumerate(_labels)}
+                            src_ti = np.array([_lbl_to_i.get(str(_ct[r]), 0) for r in src_real])
+                            tgt_ti = np.array([_lbl_to_i.get(str(_ct[j]), 0) for j in cell_idx])
+                        else:
+                            _uniq = np.unique(_ct)
+                            _ct_to_i = {c: i for i, c in enumerate(_uniq)}
+                            src_ti = np.array([_ct_to_i.get(_ct[r], 0) for r in src_real])
+                            tgt_ti = np.array([_ct_to_i.get(_ct[j], 0) for j in cell_idx])
+                        n_types_tr = _tr.shape[0]
+                        src_ti = np.clip(src_ti, 0, n_types_tr - 1)
+                        tgt_ti = np.clip(tgt_ti, 0, n_types_tr - 1)
+                        tr_w = _tr[np.ix_(src_ti, tgt_ti)]
+                        pairwise_dist = pairwise_dist / np.maximum(tr_w, 1e-10)
+
+                    # --- Growth-weighted OT marginals (exact per simulated cell via sim_real_idx) ---
+                    _pr = getattr(self, '_prolif_rate', None)
+                    _dr = getattr(self, '_death_rate', None)
+                    _has_growth = _pr is not None or _dr is not None
+                    if _has_growth:
+                        _p = _pr if _pr is not None else np.zeros(len(vect_t))
+                        _d = _dr if _dr is not None else np.zeros(len(vect_t))
+                        mu = np.exp((_p[src_real] - _d[src_real]) * delta_t / 2)
+                        mu /= mu.sum()
+                        nu = np.exp((_d[cell_idx] - _p[cell_idx]) * delta_t / 2)
+                        nu /= nu.sum()
+                    else:
+                        mu = np.ones(N_sample) / N_sample
+                        nu = np.ones(N_cells) / N_cells
+
                     tmp = np.log(G) # approximate number of errors expected by gene in the reconstructed modes
                     reg = max(self.init_entropic_noise * tmp * (1 / n_iter)**(1 - 1/n_iter), .01) # decrease entropic regularization with iterations - on purpose the slope is in 1/x for fast convergence
                     stopThr, numItermax = self.stopThr_init, int(10000 / min(1, reg))
-                    if not self.unbalanced_reg: 
+                    if not self.unbalanced_reg:
                         while stopThr <= self.stopThr_init*100:
                             try:
                                 coupling = ot.bregman.sinkhorn(
@@ -524,7 +600,6 @@ class NetworkModel:
                         else:
                             print('Warning, main Sinkhorn did not converge')
 
-                    cell_idx = np.flatnonzero(start_next)
                     for n in range(0, N_sample):
                         m = np.random.choice(N_cells, p=coupling[n] / coupling[n].sum())
                         target_index = next_index + n
@@ -536,6 +611,7 @@ class NetworkModel:
                         prot_modified[target_index, ns:] = next_prot[n, m, ns:]
                         prot_formodes[cell_idx[m], ns:] = next_prot[n, m, ns:]
                         to_keep_for_update[cell_idx[m]] = 1
+                        sim_real_idx[target_index] = cell_idx[m]
 
                         ### Re-assign the alpha to the new cells if alpha is associated to cells and not trajectories
                         if y_prot_old.sum() and time != times[-2]:
@@ -578,13 +654,18 @@ class NetworkModel:
         inter_ref=None,
         verb=True,
         compute_theta=True,
-        initialize_alpha=True
+        initialize_alpha=True,
+        kov_cell_mask=None,
     ):
         """
         Alternating optimization of trajectories and network (theta).
 
         basal_init / inter_init : (G_tot, n_networks) / (G_tot, G_tot, n_networks) or None
             Starting point for theta. Zeros if None.
+        kov_cell_mask : (N_cells, G_tot) int8 array or None
+            Per-cell KO/OV constraints. -1 → KO (force lowest mode),
+            +1 → OV (force highest mode), 0 → no constraint.
+            Applied after each update_modes step as a hard override.
         basal_ref / inter_ref : same shape or None
             Regularization target passed to inference_network. Zeros if None (no prior).
         """
@@ -720,7 +801,8 @@ class NetworkModel:
                     basal_ref=basal_ref, inter_ref=inter_ref,
                     proba=self.compute_with_proba, scale=self.scale_pen,
                     weight_prev=weight_prev, loss=self.loss_norm,
-                    final=0)
+                    final=0,
+                    constrain_basal_uniform=self.constrain_basal_uniform)
                 # basal is now (n_samples, G_tot, n_networks)
                 basal_mean = basal.mean(axis=0)
 
@@ -844,6 +926,21 @@ class NetworkModel:
                     tmp_proba, tmp_modes = results[idx]
                     self.proba[:, g, :], self.modes[:, g] = tmp_proba[:, :], tmp_modes[:]
 
+                # ── Force KO/OV cells to the correct mode after update ────────
+                if kov_cell_mask is not None:
+                    for g in range(ns, G_tot):
+                        l_max = 1 + int(np.argmax(ks[g, :]))
+                        ko_cells = kov_cell_mask[:, g] < 0
+                        ov_cells = kov_cell_mask[:, g] > 0
+                        if np.any(ko_cells):
+                            self.proba[ko_cells, g, :] = 0
+                            self.proba[ko_cells, g, 0] = 1
+                            self.modes[ko_cells, g] = ks[g, 0]
+                        if np.any(ov_cells):
+                            self.proba[ov_cells, g, :] = 0
+                            self.proba[ov_cells, g, l_max - 1] = 1
+                            self.modes[ov_cells, g] = ks[g, l_max - 1]
+
         # --- Updating the networks ---
         if compute_theta:
             if self.filter_network:
@@ -904,6 +1001,7 @@ class NetworkModel:
         inter_ref=None,
         verb=True,
         stimulus_schedule=None,
+        transition_rates=None,
         time_key='time',
     ):
         """
@@ -958,6 +1056,39 @@ class NetworkModel:
         except ImportError:
             pass
 
+        # --- Load per-cell growth rates and cell types from AnnData ---
+        self._prolif_rate = None
+        self._death_rate = None
+        self._cell_types = None
+        self._transition_rates = None
+        self._transition_type_labels = None
+        try:
+            import anndata as _ad
+            if isinstance(data, _ad.AnnData):
+                if 'prolif_rate' in data.obs:
+                    self._prolif_rate = data.obs['prolif_rate'].values.astype(float)
+                if 'death_rate' in data.obs:
+                    self._death_rate = data.obs['death_rate'].values.astype(float)
+                for _ct_col in ('cell_type', 'cell_types', 'celltype'):
+                    if _ct_col in data.obs:
+                        self._cell_types = data.obs[_ct_col].values.astype(str)
+                        break
+        except ImportError:
+            pass
+
+        if transition_rates is not None:
+            if hasattr(transition_rates, 'index') and hasattr(transition_rates, 'to_numpy'):
+                self._transition_type_labels = list(transition_rates.index.astype(str))
+                _Tr = transition_rates.to_numpy().astype(float)
+            else:
+                _Tr = np.asarray(transition_rates, dtype=float)
+            _Tr = np.clip(_Tr, 1e-10, None)
+            for _ in range(500):
+                _Tr /= _Tr.sum(axis=1, keepdims=True)
+                _Tr /= _Tr.sum(axis=0, keepdims=True)
+            _Tr /= _Tr.mean()
+            self._transition_rates = _Tr
+
         # If no sample ID provided, assume one global sample
         if vect_samples_id is None:
             vect_samples_id = np.zeros_like(vect_t)
@@ -1008,6 +1139,24 @@ class NetworkModel:
         basal_ref  = self._normalize_theta(basal_ref,  G_tot, nn, n_samples, is_inter=False)
         inter_ref  = self._normalize_theta(inter_ref,  G_tot, nn, n_samples, is_inter=True)
 
+        # --- Build per-cell KO/OV mask from basal_ref (±100 entries) ─────────
+        # kov_cell_mask[cell, g] = -1 (KO) / +1 (OV) / 0 (unconstrained)
+        kov_cell_mask = None
+        if basal_ref is not None:
+            br = np.asarray(basal_ref, dtype=float)
+            if br.ndim == 3 and np.any(np.abs(br) > 50):
+                cm = np.zeros((len(vect_t), G_tot), dtype=np.int8)
+                for s_idx, s in enumerate(samples_id):
+                    cell_idx = np.where(vect_samples_id == s)[0]
+                    ko_genes = np.where(br[s_idx, :, 0] < -50)[0]
+                    ov_genes = np.where(br[s_idx, :, 0] >  50)[0]
+                    if len(cell_idx) and len(ko_genes):
+                        cm[np.ix_(cell_idx, ko_genes)] = -1
+                    if len(cell_idx) and len(ov_genes):
+                        cm[np.ix_(cell_idx, ov_genes)] =  1
+                if np.any(cm != 0):
+                    kov_cell_mask = cm
+
         # --- Infer theta (basal/interactions) on reduced simulations with mixing ---
         self.loop_trajectories(
             data_rna=data_rna,
@@ -1032,6 +1181,7 @@ class NetworkModel:
             verb=verb,
             compute_theta=True,
             initialize_alpha=True,
+            kov_cell_mask=kov_cell_mask,
         )
 
 
@@ -1165,6 +1315,7 @@ class NetworkModel:
             scale=self.scale_pen * self.fact_simple,
             weight_prev=self.weight_prev, loss=self.loss_norm, final=1,
             samples_id=samples_id,
+            constrain_basal_uniform=self.constrain_basal_uniform,
         )
         basal_mean = basal.mean(axis=0)  # refresh after update
 
@@ -1513,9 +1664,15 @@ class NetworkModel:
 
 
 
-    def infer_test(self, data, vect_samples_id=None, verb=True, stimulus_schedule=None, time_key='time'):
+    def infer_test(self, data, vect_samples_id=None, verb=True, stimulus_schedule=None,
+                   basal_ref=None, transition_rates=None, time_key='time'):
         """
         Run inference pipeline on test data: kon estimation, trajectory inference, and alpha initialization.
+
+        basal_ref : (n_samples, G_tot, n_networks) array or None
+            Per-sample KO/OV prior (±100 entries) used to build kov_cell_mask.
+        transition_rates : DataFrame or array or None
+            Cell-type transition rate matrix for OT cost adjustment.
         """
         data_rna = self._parse_input(data, time_key)
         if stimulus_schedule is not None or self._stim_schedule is None:
@@ -1533,6 +1690,39 @@ class NetworkModel:
         if vect_samples_id is None:
             vect_samples_id = np.zeros_like(vect_t)
 
+        # --- Load per-cell growth rates and cell types from AnnData ---
+        self._prolif_rate = None
+        self._death_rate = None
+        self._cell_types = None
+        self._transition_rates = None
+        self._transition_type_labels = None
+        try:
+            import anndata as _ad
+            if isinstance(data, _ad.AnnData):
+                if 'prolif_rate' in data.obs:
+                    self._prolif_rate = data.obs['prolif_rate'].values.astype(float)
+                if 'death_rate' in data.obs:
+                    self._death_rate = data.obs['death_rate'].values.astype(float)
+                for _ct_col in ('cell_type', 'cell_types', 'celltype'):
+                    if _ct_col in data.obs:
+                        self._cell_types = data.obs[_ct_col].values.astype(str)
+                        break
+        except ImportError:
+            pass
+
+        if transition_rates is not None:
+            if hasattr(transition_rates, 'index') and hasattr(transition_rates, 'to_numpy'):
+                self._transition_type_labels = list(transition_rates.index.astype(str))
+                _Tr = transition_rates.to_numpy().astype(float)
+            else:
+                _Tr = np.asarray(transition_rates, dtype=float)
+            _Tr = np.clip(_Tr, 1e-10, None)
+            for _ in range(500):
+                _Tr /= _Tr.sum(axis=1, keepdims=True)
+                _Tr /= _Tr.sum(axis=0, keepdims=True)
+            _Tr /= _Tr.mean()
+            self._transition_rates = _Tr
+
         times = np.sort(np.unique(vect_t))
         kz = self.a[:-1]
         c = self.a[-1]
@@ -1545,19 +1735,50 @@ class NetworkModel:
         s1 = self.a[-1, ns:] / np.maximum(np.max(self.a[:-1, ns:], axis=0), 1e-9)
 
         samples_id = np.sort(np.unique(vect_samples_id))
+
+        # --- Build per-cell KO/OV mask and apply initial mode forcing ---
+        kov_cell_mask = None
+        if basal_ref is not None:
+            br = np.asarray(basal_ref, dtype=float)
+            if br.ndim == 3 and np.any(np.abs(br) > 50):
+                cm = np.zeros((len(vect_t), G_tot), dtype=np.int8)
+                for s_idx, s in enumerate(samples_id):
+                    cell_idx = np.where(vect_samples_id == s)[0]
+                    ko_genes = np.where(br[s_idx, :, 0] < -50)[0]
+                    ov_genes = np.where(br[s_idx, :, 0] >  50)[0]
+                    if len(cell_idx) and len(ko_genes):
+                        cm[np.ix_(cell_idx, ko_genes)] = -1
+                    if len(cell_idx) and len(ov_genes):
+                        cm[np.ix_(cell_idx, ov_genes)] =  1
+                if np.any(cm != 0):
+                    kov_cell_mask = cm
+                    # Force initial modes from fit_mixture_test
+                    for g in range(ns, G_tot):
+                        l_max = 1 + int(np.argmax(ks[g, :]))
+                        ko_cells = kov_cell_mask[:, g] < 0
+                        ov_cells = kov_cell_mask[:, g] > 0
+                        if np.any(ko_cells):
+                            self.proba[ko_cells, g, :] = 0
+                            self.proba[ko_cells, g, 0] = 1
+                            self.modes[ko_cells, g] = ks[g, 0]
+                        if np.any(ov_cells):
+                            self.proba[ov_cells, g, :] = 0
+                            self.proba[ov_cells, g, l_max - 1] = 1
+                            self.modes[ov_cells, g] = ks[g, l_max - 1]
+
         nb_cells = np.zeros((len(samples_id), len(times)), dtype=int)
         for s, sid in enumerate(samples_id):
             for t, time in enumerate(times):
                 nb_cells[s, t] = np.sum((vect_t[vect_samples_id == sid] == time))
-        
+
         if verb:
             print("[infer_test] Cell counts per sample/timepoint and genes:\n", nb_cells, G_tot)
 
         # --- Define number of cells used for inference ---
         N_samples = []
         for s in range(len(samples_id)):
-            n = int(np.max(nb_cells[s])) 
-            q, r = divmod(n, self.batch_size) 
+            n = int(np.max(nb_cells[s]))
+            q, r = divmod(n, self.batch_size)
             if q == 0: N_samples.append(n)
             else: N_samples.append(min(self.batch_size + 1+int(r/q), n))
 
@@ -1585,7 +1806,7 @@ class NetworkModel:
             init_cells_full=init_cells_full,
             nb_cells=nb_cells,
             N_full=N_full,
-            N_samples=N_samples, # N_samples if we reconstruct only subtrajectories
+            N_samples=N_samples,
             G_tot=G_tot,
             n_loops=self.n_loops,
             count_max=self.count_max,
@@ -1595,6 +1816,7 @@ class NetworkModel:
             verb=verb,
             compute_theta=False,
             initialize_alpha=True,
+            kov_cell_mask=kov_cell_mask,
         )
 
 
