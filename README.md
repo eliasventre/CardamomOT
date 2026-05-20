@@ -308,20 +308,22 @@ This is equivalent to computing a **demographically corrected** optimal transpor
 
 #### Cell-type transition rates (`Data/transition_rates.csv`)
 
-To bias the OT cost toward biologically plausible cell-type transitions, place a square CSV in the project's `Data/` folder:
+To bias the OT cost toward biologically plausible cell-type transitions, place a square CSV of **transition rates** (same units as proliferation/death rates) in the project's `Data/` folder:
 
 ```
 # transition_rates.csv — rows = source type at t1, cols = target type at t2
-# values are relative likelihoods (need not sum to 1; will be normalised)
+# values are instantaneous rates (≥ 0); higher rate = more likely transition
          ,TypeA,TypeB,TypeC
-TypeA    ,  3.0,  1.0,  0.1
-TypeB    ,  0.5,  2.0,  0.5
-TypeC    ,  0.1,  0.5,  3.0
+TypeA    ,  0.3,  0.1,  0.01
+TypeB    ,  0.05, 0.2,  0.05
+TypeC    ,  0.01, 0.05, 0.3
 ```
 
-Row/column names must match the values of `adata.obs['cell_type']` (or `cell_types` / `celltype`). The matrix is **bistochastically normalised** (Sinkhorn–Knopp, 500 iterations) and rescaled to mean = 1 so the overall cost scale is preserved.
+Row/column names must match the values of `adata.obs['cell_type']` (or `cell_types` / `celltype`).
 
-The OT pairwise distance is then divided element-wise by the normalised transition weight: a transition with weight > 1 becomes cheaper (preferred), and a transition with weight < 1 becomes more expensive (penalised). Missing cell types default to the lowest transition weight (index 0).
+At each pair of consecutive timepoints separated by Δt, transition probabilities are computed as `exp(rate × Δt)` and each row is rescaled to sum to `n_types` (number of cell types), so the mean weight per row equals 1 and the overall cost scale is preserved on average.
+
+The OT pairwise distance is then divided element-wise by these weights: a transition with weight > 1 becomes cheaper (preferred), and a transition with weight < 1 becomes more expensive (penalised). The weights therefore adapt automatically to the interval Δt — short intervals produce weights close to 1 for all transitions, while long intervals amplify the contrast between fast and slow transitions. Missing cell types default to index 0.
 
 Both corrections are active simultaneously when the corresponding files are present. They apply during training (`infer_network_structure.py`) and on the test set (`infer_test.py`).
 

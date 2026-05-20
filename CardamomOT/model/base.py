@@ -547,7 +547,12 @@ class NetworkModel:
                         n_types_tr = _tr.shape[0]
                         src_ti = np.clip(src_ti, 0, n_types_tr - 1)
                         tgt_ti = np.clip(tgt_ti, 0, n_types_tr - 1)
-                        tr_w = _tr[np.ix_(src_ti, tgt_ti)]
+                        # Convert rates → transition probabilities for this Δt,
+                        # then row-normalise so each row sums to n_cols (mean weight = 1,
+                        # cost scale is preserved on average).
+                        tr_prob = np.exp(_tr * delta_t)
+                        tr_prob = tr_prob / tr_prob.sum(axis=1, keepdims=True) * _tr.shape[1]
+                        tr_w = tr_prob[np.ix_(src_ti, tgt_ti)]
                         pairwise_dist = pairwise_dist / np.maximum(tr_w, 1e-10)
 
                     # --- Growth-weighted OT marginals (exact per simulated cell via sim_real_idx) ---
@@ -1083,12 +1088,7 @@ class NetworkModel:
                 _Tr = transition_rates.to_numpy().astype(float)
             else:
                 _Tr = np.asarray(transition_rates, dtype=float)
-            _Tr = np.clip(_Tr, 1e-10, None)
-            for _ in range(500):
-                _Tr /= _Tr.sum(axis=1, keepdims=True)
-                _Tr /= _Tr.sum(axis=0, keepdims=True)
-            _Tr /= _Tr.mean()
-            self._transition_rates = _Tr
+            self._transition_rates = np.clip(_Tr, 0.0, None)  # store raw non-negative rates
 
         # If no sample ID provided, assume one global sample
         if vect_samples_id is None:
@@ -1731,12 +1731,7 @@ class NetworkModel:
                 _Tr = transition_rates.to_numpy().astype(float)
             else:
                 _Tr = np.asarray(transition_rates, dtype=float)
-            _Tr = np.clip(_Tr, 1e-10, None)
-            for _ in range(500):
-                _Tr /= _Tr.sum(axis=1, keepdims=True)
-                _Tr /= _Tr.sum(axis=0, keepdims=True)
-            _Tr /= _Tr.mean()
-            self._transition_rates = _Tr
+            self._transition_rates = np.clip(_Tr, 0.0, None)  # store raw non-negative rates
 
         times = np.sort(np.unique(vect_t))
         kz = self.a[:-1]
