@@ -275,13 +275,7 @@ POSTN	S100B               # full KO / full OV (no suffix = 100 %, existing behav
 | KO `X`% | `× (1 − X/100)` | production reduced → lower steady-state |
 | OV `X`% | `× 1 / (1 − X/100)` | production increased → higher steady-state |
 
-This is the correct approach for both simulation modes:
-- **ODE**: steady state `P* = scale × ks_eff / d1` scales proportionally with the creation rate.
-- **PDMP** (stochastic): only the burst *rate* is scaled; the burst *size* (`∝ d1/d0`) is unchanged, so the production rate scales by the factor without altering convergence speed.
-
-Modifying degradation rates would leave the PDMP steady state unchanged (`P* = ks × scale_proteins` is independent of `d1` in the PDMP regime) and would only speed up or slow down dynamics rather than changing expression levels.
-
-At X = 0 the factor is 1 (no effect). As X → 100 the KO factor → 0 (full silencing) and the OV factor → ∞. The output file is labelled `KO_CHGApct80_OV_STMN2pct60` to distinguish it from a complete perturbation.
+At X = 0 the factor is 1 (no effect). As X → 100 the KO factor → 0 (full silencing) and the OV factor → ∞. The output file is labelled, for example, `KO_CHGApct80_OV_STMN2pct60` to distinguish it from a complete perturbation.
 
 > **Note on gene names with hyphens:** the `-X` suffix is recognised as a percentage only when `X` is a number strictly between 0 and 100. Gene names such as `HIF-1A` are therefore parsed correctly (the suffix `1` is outside the 0–100 exclusive range).
 
