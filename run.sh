@@ -21,17 +21,17 @@ mean="$5"
 # echo "Compute prior network"
 # python prepare_reference_network.py -i "${input_dir}" -d 4
 
-echo "Get kinetic rates"
-python get_kinetic_rates.py -i "${input_dir}" -s "${split}"
+# echo "Get kinetic rates"
+# python get_kinetic_rates.py -i "${input_dir}" -s "${split}"
 
-echo "Inference mixture"
-python infer_mixture.py -i "${input_dir}" -s "${split}" -m "${mean}"
+# echo "Inference mixture"
+# python infer_mixture.py -i "${input_dir}" -s "${split}" -m "${mean}"
 
-echo "Check mixture"
-python check_mixture_to_data.py -i "${input_dir}" -s "${split}" 
+# echo "Check mixture"
+# python check_mixture_to_data.py -i "${input_dir}" -s "${split}" 
 
-echo "Infer network structure"
-python infer_network_structure.py -i "${input_dir}" -s "${split}" 
+# echo "Infer network structure"
+# python infer_network_structure.py -i "${input_dir}" -s "${split}" 
 
 echo "Adapt network to simulate and degradation rates"
 python infer_network_simul.py -i "${input_dir}" -s "${split}" 
@@ -42,11 +42,11 @@ python simulate_network.py -i "${input_dir}" -s "${split}"
 echo "Check simulation"
 python check_sim_to_data.py -i "${input_dir}" -s "${split}" 
 
-if [ "$split" != "full" ]; then
-    echo "Infer and simulate test"
-    python infer_test.py -i "${input_dir}"
-    python check_test_to_train.py -i "${input_dir}" -s "${split}" 
-fi
+# if [ "$split" != "full" ]; then
+#     echo "Infer and simulate test"
+#     python infer_test.py -i "${input_dir}"
+#     python check_test_to_train.py -i "${input_dir}" -s "${split}" 
+# fi
 
 echo "Simulate KOV"
 python simulate_network_KOV.py -i "${input_dir}" -s "${split}"

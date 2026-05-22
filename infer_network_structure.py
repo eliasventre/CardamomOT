@@ -83,9 +83,14 @@ def main(argv):
         stim_sched = np.loadtxt(sched_path)
         print(f"[infer_network_structure] Loaded stimulus schedule from {sched_path}")
 
+    # ─── DETECT n_stimuli FROM SCHEDULE ─────────────────────────────────
+    _stim_arr = np.asarray(stim_sched) if stim_sched is not None else None
+    n_stimuli = int(_stim_arr.shape[1]) if (_stim_arr is not None and _stim_arr.ndim == 2) else 1
+    print(f"[infer_network_structure] n_stimuli detected: {n_stimuli}")
+
     # ─── LOAD MIXTURE PARAMETERS ────────────────────────────────────────
     try:
-        model = NetworkModel_beta(adata.shape[1])
+        model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
         model.modes = np.load(os.path.join(p, 'cardamomOT', 'modes.npy'))
         with open(os.path.join(p, 'cardamomOT', 'pi_init.pkl'), "rb") as f:
             model.pi_init = pickle.load(f)
@@ -264,6 +269,8 @@ def main(argv):
     np.save(os.path.join(cardamom_dir, 'proba_traj'), model.proba_traj)
     np.save(os.path.join(cardamom_dir, 'data_kon_theta'), model.kon_theta)
     np.save(os.path.join(cardamom_dir, 'data_kon_beta'), model.kon_beta)
+    if model.kon_beta_harissa is not None:
+        np.save(os.path.join(cardamom_dir, 'data_kon_beta_harissa'), model.kon_beta_harissa)
     np.save(os.path.join(cardamom_dir, 'alpha'), model.alpha)
     np.save(os.path.join(cardamom_dir, 'degradations'), model.d)
 

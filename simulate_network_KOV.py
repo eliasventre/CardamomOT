@@ -69,7 +69,7 @@ def load_ko_ov_combinations(file_path):
             if idx is None or idx >= len(parts):
                 return []
             cell = parts[idx].strip()
-            if cell in ['', '0']:
+            if cell.lower() in ('', '0', 'none', 'nan'):
                 return []
             return [_parse_gene_with_pct(g) for g in cell.split(',') if g.strip()]
 
@@ -150,9 +150,13 @@ def main(argv):
             print(f"[simulate_network_KOV] Loaded stimulus schedule from {sched_path}")
             break
 
-    print(f"[simulate_network_KOV] Data: {adata.shape[1]} genes")
+    # ─── DETECT n_stimuli FROM SCHEDULE ─────────────────────────────────
+    _stim_arr = np.asarray(stim_sched) if stim_sched is not None else None
+    n_stimuli = int(_stim_arr.shape[1]) if (_stim_arr is not None and _stim_arr.ndim == 2) else 1
 
-    model = NetworkModel_beta(adata.shape[1])
+    print(f"[simulate_network_KOV] Data: {adata.shape[1]} genes, n_stimuli={n_stimuli}")
+
+    model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
 
     # Load network model parameters
     print("[simulate_network_KOV] Loading inferred network parameters...")
@@ -160,6 +164,12 @@ def main(argv):
         model.d_t = np.load(os.path.join(p, 'cardamomOT', 'degradations_temporal.npy'))
         model.inter_t = np.load(os.path.join(p, 'cardamomOT', 'inter_t_simul.npy'))
         model.inter = np.load(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))
+        # Validate n_stimuli against loaded inter (authoritative for simulation)
+        n_stimuli_inter = model.inter.shape[0] - adata.shape[1]
+        if n_stimuli_inter != model.n_stimuli:
+            print(f"[simulate_network_KOV] Warning: correcting n_stimuli from {model.n_stimuli} "
+                  f"to {n_stimuli_inter} based on loaded inter_simul.npy")
+            model.n_stimuli = n_stimuli_inter
         model.a = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
         model.times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
         model.kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta.npy'))
@@ -244,7 +254,7 @@ def main(argv):
             model.basal_t = basal_t_clean.copy()
             model.d_t = d_t_orig.copy()
             model.production_factor = None   # reset per-gene creation rate scaling
-            model.prot = np.load(os.path.join(p, 'cardamomOT', 'data_prot_unitary.npy'))
+            model.prot = np.load(os.path.join(p, 'cardamomOT', 'data_prot_forsimul.npy'))
             model.kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta.npy'))
         except FileNotFoundError as e:
             print(f"[simulate_network_KOV] Error resetting model: {e}")

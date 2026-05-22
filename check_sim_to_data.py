@@ -110,6 +110,8 @@ def main(argv):
         sys.exit(1)
     
     data_real = np.vstack([times, data_rna_extracted]).astype(float)
+    G = np.size(data_real, 0)-1
+    model = NetworkModel(G)
 
     # Load mixture and simulation parameters
     print("[check_sim_to_data] Loading mixture and simulation parameters...")
@@ -125,6 +127,10 @@ def main(argv):
         times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
         times_simulation = np.load(os.path.join(p, 'cardamomOT', 'simulation_times.npy'))
         rna_ref = np.load(os.path.join(p, 'cardamomOT', 'data_rna.npy'))
+        mrna_simul_path = os.path.join(p, 'cardamomOT', 'data_mrna_simul.npy')
+        mrna_simul = np.load(mrna_simul_path) if os.path.exists(mrna_simul_path) and model.simulate_full_with_harissa else None
+        if mrna_simul is not None:
+            print("[check_sim_to_data] Harissa mRNA simulation found — will use directly (no NB sampling)")
         print("[check_sim_to_data] Successfully loaded all parameters")
     except FileNotFoundError as e:
         print(f"[check_sim_to_data] Error: Missing parameter file: {e}")
@@ -141,14 +147,15 @@ def main(argv):
 
     # Generate synthetic data from mixture and simulation models
     print("[check_sim_to_data] Generating synthetic data for distribution comparison...")
-    G = np.size(data_real, 0)-1
+    # n_stimuli inferred from rna_ref: columns 0..ns-1 are stimulus slots, ns..G_tot-1 are genes
+    ns = rna_ref.shape[1] - G
     data_ref = np.zeros((G+1, np.size(rna_ref, 0)))
     N_traj_rna = data_ref.shape[1] // len(np.unique(times_data))
     for t, time in enumerate(np.sort(np.unique(times_data))):
         data_ref[0, t*N_traj_rna:(t+1)*N_traj_rna] = time
     data_ref[0, N_traj_rna*len(np.unique(times_data)):] = times_data[-1]
-    data_ref[1:, :] = rna_ref[:, 1:].T
-    
+    data_ref[1:, :] = rna_ref[:, ns:].T
+
     data_beta = np.zeros((G+1, np.size(vect_kon_beta, 0)))
     data_netw_theta = np.zeros((G+1, np.size(vect_kon_theta, 0)))
     data_sim = np.zeros((G+1, np.size(vect_kon_sim, 0)))
@@ -156,26 +163,31 @@ def main(argv):
     data_netw_theta[0, :] = times_data[:]
     data_sim[0, :] = times_simulation[:]
 
-    # Generate zero-inflated samples from bursting parameters
-    zero_mask = (np.random.uniform(0, 1, (data_sim[1:, :].shape)) < pi_zinb.reshape((G, 1)))
-    zero_ratio_sim = np.sum(zero_mask == 1)/np.size(data_sim[1:, :])
-    print(f"[check_sim_to_data] Simulation zero-inflation ratio: {zero_ratio_sim:.4f}")
-    data_sim[1:, :] = np.random.negative_binomial((np.max(kz, 0)*vect_kon_sim)[:, 1:].T, (c / (c+1))[1:].reshape(G, 1))
-    data_sim[1:, :] = np.where(zero_mask, 0, data_sim[1:, :])
+    # Generate data_sim: either directly from Harissa mRNAs or via NB sampling
+    if mrna_simul is not None:
+        # Harissa mode: mRNAs are already simulated — use them directly
+        data_sim[1:, :] = mrna_simul[:, ns:].T
+        print("[check_sim_to_data] data_sim built from Harissa mRNA simulation (no NB sampling)")
+    else:
+        # Standard mode: sample counts from the NB burst model
+        zero_mask = (np.random.uniform(0, 1, (data_sim[1:, :].shape)) < pi_zinb.reshape((G, 1)))
+        zero_ratio_sim = np.sum(zero_mask == 1)/np.size(data_sim[1:, :])
+        print(f"[check_sim_to_data] Simulation zero-inflation ratio: {zero_ratio_sim:.4f}")
+        data_sim[1:, :] = np.random.negative_binomial((np.max(kz, 0)*vect_kon_sim)[:, ns:].T, (c / (c+1))[ns:].reshape(G, 1))
+        data_sim[1:, :] = np.where(zero_mask, 0, data_sim[1:, :])
 
     zero_mask = (np.random.uniform(0, 1, (data_beta[1:, :].shape)) < pi_zinb.reshape((G, 1)))
     zero_ratio_beta = np.sum(zero_mask == 1)/np.size(data_beta[1:, :])
     print(f"[check_sim_to_data] Beta (mixture) zero-inflation ratio: {zero_ratio_beta:.4f}")
-    data_beta[1:, :] = np.random.negative_binomial((np.max(kz, 0)*vect_kon_beta)[:, 1:].T, (c / (c+1))[1:].reshape(G, 1))
+    data_beta[1:, :] = np.random.negative_binomial((np.max(kz, 0)*vect_kon_beta)[:, ns:].T, (c / (c+1))[ns:].reshape(G, 1))
     data_beta[1:, :] = np.where(zero_mask, 0, data_beta[1:, :])
 
     zero_mask = (np.random.uniform(0, 1, (data_netw_theta[1:, :].shape)) < pi_zinb.reshape((G, 1)))
     zero_ratio_theta = np.sum(zero_mask == 1)/np.size(data_netw_theta[1:, :])
     print(f"[check_sim_to_data] Theta (network) zero-inflation ratio: {zero_ratio_theta:.4f}")
-    data_netw_theta[1:, :] = np.random.negative_binomial((np.max(kz, 0)*vect_kon_theta)[:, 1:].T, (c / (c+1))[1:].reshape(G, 1))
+    data_netw_theta[1:, :] = np.random.negative_binomial((np.max(kz, 0)*vect_kon_theta)[:, ns:].T, (c / (c+1))[ns:].reshape(G, 1))
     data_netw_theta[1:, :] = np.where(zero_mask, 0, data_netw_theta[1:, :])
 
-    model = NetworkModel(G)
     cardamom_dir = os.path.join(p, 'cardamomOT')
 
     # Save comparison datasets
@@ -201,14 +213,14 @@ def main(argv):
         adata_rna_traj.obs['time'] = data_ref[0, :]
         adata_rna_traj.write(os.path.join(cardamom_dir, f'adata_rna_traj_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
 
-        data_prot_traj = np.load(os.path.join(cardamom_dir, 'data_prot_unitary.npy'))
-        adata_prot_traj = ad.AnnData(X=data_prot_traj[:, 1:])
+        data_prot_traj = np.load(os.path.join(cardamom_dir, 'data_prot_forsimul.npy'))
+        adata_prot_traj = ad.AnnData(X=data_prot_traj[:, ns:])
         adata_prot_traj.var = adata.var.copy()
         adata_prot_traj.obs['time'] = times_data
         adata_prot_traj.write(os.path.join(cardamom_dir, f'adata_prot_traj_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
-        
+
         data_prot_simul = np.load(os.path.join(cardamom_dir, 'data_prot_simul.npy'))
-        adata_prot_simul = ad.AnnData(X=data_prot_simul[:, 1:])
+        adata_prot_simul = ad.AnnData(X=data_prot_simul[:, ns:])
         adata_prot_simul.var = adata.var.copy()
         adata_prot_simul.obs['time'] = times_simulation
         adata_prot_simul.write(os.path.join(cardamom_dir, f'adata_prot_simul_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))

@@ -36,7 +36,7 @@ setup(
     install_requires=[
         'numpy>=1.19',
         'scipy>=1.5',
-        "numba>=0.51; not (platform_system == 'Darwin' and platform_machine == 'arm64')",
+        "numba>=0.51; platform_system != 'Darwin' or platform_machine != 'arm64'",
         'anndata>=0.7',
         'scikit-learn>=0.23',
         'matplotlib>=3.3',

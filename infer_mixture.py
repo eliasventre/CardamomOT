@@ -93,8 +93,14 @@ def main(argv):
         if verb:
             print(f"[infer_mixture] Loaded stimulus schedule from {sched_path}")
 
+    # ─── DETECT n_stimuli FROM SCHEDULE ─────────────────────────────────
+    _stim_arr = np.asarray(stim_sched) if stim_sched is not None else None
+    n_stimuli = int(_stim_arr.shape[1]) if (_stim_arr is not None and _stim_arr.ndim == 2) else 1
+    if verb:
+        print(f"[infer_mixture] n_stimuli detected: {n_stimuli}")
+
     # ─── INFER MIXTURE MODEL ────────────────────────────────────────────
-    model = NetworkModel_beta(adata.shape[1])
+    model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
     if mean_forcing >= 0:
         model.mean_forcing_em = mean_forcing
         if verb:

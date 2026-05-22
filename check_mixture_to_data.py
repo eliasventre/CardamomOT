@@ -29,7 +29,7 @@ import scipy.sparse
 import os
 import ot
 
-plot_in_script = 1
+plot_in_script = 0
 
 def main(argv):
     """
@@ -137,6 +137,9 @@ def main(argv):
     # Generate synthetic data from mixture model
     print("[check_mixture_to_data] Generating synthetic data from mixture model...")
     G = np.size(data_real, 0)-1
+    # n_stimuli inferred from mixture_parameters: columns 0..ns-1 are stimulus slots
+    ns = mixture_parameters.shape[1] - G
+    print(f"[check_mixture_to_data] n_stimuli inferred: {ns}")
     data_beta = np.zeros((G+1, np.size(vect_kon_beta, 0)))
     data_beta[0, :] = times_data[:]
 
@@ -144,9 +147,9 @@ def main(argv):
     zero_mask = (np.random.uniform(0, 1, (data_beta[1:, :].shape)) < pi_zinb.reshape((G, 1)))
     zero_ratio = np.sum(zero_mask == 1)/np.size(data_beta[1:, :])
     print(f"[check_mixture_to_data] Applied zero-inflation with ratio: {zero_ratio:.4f}")
-    
-    # Sample from negative binomial distribution
-    data_beta[1:, :] = np.random.negative_binomial((np.max(kz, 0)*vect_kon_beta)[:, 1:].T, (c / (c+1))[1:].reshape(G, 1))
+
+    # Sample from negative binomial distribution (exclude stimulus columns ns:)
+    data_beta[1:, :] = np.random.negative_binomial((np.max(kz, 0)*vect_kon_beta)[:, ns:].T, (c / (c+1))[ns:].reshape(G, 1))
     data_beta[1:, :] = np.where(zero_mask, 0, data_beta[1:, :])
 
     # Save synthetic data 

@@ -68,7 +68,7 @@ def load_ko_ov_combinations(file_path):
             if idx is None or idx >= len(parts):
                 return []
             cell = parts[idx].strip()
-            if cell in ['', '0']:
+            if cell.lower() in ('', '0', 'none', 'nan'):
                 return []
             return [_parse_gene_with_pct(g) for g in cell.split(',') if g.strip()]
 
@@ -184,6 +184,8 @@ def main(argv):
         sys.exit(1)
 
     G = np.size(data_real, 0) - 1
+    # n_stimuli inferred from mixture_parameters: columns 0..ns-1 are stimulus slots
+    ns = mixture_parameters.shape[1] - G
 
     model = NetworkModel(G)
 
@@ -221,8 +223,8 @@ def main(argv):
         print(f'[check_KOV_to_sim] New zeros ratio for {label}: {np.sum(zero_mask == 1)/np.size(data_sim[1:, :]):.3f}')
 
         data_sim[1:, :] = np.random.negative_binomial(
-            (np.max(kz, 0) * vect_kon_sim)[:, 1:].T,
-            (c / (c + 1))[1:].reshape(G, 1)
+            (np.max(kz, 0) * vect_kon_sim)[:, ns:].T,
+            (c / (c + 1))[ns:].reshape(G, 1)
         )
         data_sim[1:, :] = np.where(zero_mask, 0, data_sim[1:, :])
 
@@ -245,7 +247,7 @@ def main(argv):
         if os.path.exists(prot_prefix):
             try:
                 data_prot_simul = np.load(prot_prefix)
-                adata_prot_simul = ad.AnnData(X=data_prot_simul[:, 1:])
+                adata_prot_simul = ad.AnnData(X=data_prot_simul[:, ns:])
                 adata_prot_simul.var = adata.var.copy()
                 adata_prot_simul.obs['time'] = times_simulation
                 

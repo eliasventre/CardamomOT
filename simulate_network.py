@@ -19,9 +19,11 @@ Output files:
 import sys; sys.path += ['../']
 import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta
+from CardamomOT.inference.degradations import KonCorrectionMLP
 import getopt
 import anndata as ad
 import os
+import torch
 
 def main(argv):
     """
@@ -75,8 +77,12 @@ def main(argv):
             print(f"[simulate_network] Loaded stimulus schedule from {sched_path}")
             break
 
-    model = NetworkModel_beta(adata.shape[1])
-    print(f"[simulate_network] Data: {adata.shape[1]} genes, {adata.shape[0]} cells")
+    # ─── DETECT n_stimuli FROM SCHEDULE ─────────────────────────────────
+    _stim_arr = np.asarray(stim_sched) if stim_sched is not None else None
+    n_stimuli = int(_stim_arr.shape[1]) if (_stim_arr is not None and _stim_arr.ndim == 2) else 1
+
+    model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
+    print(f"[simulate_network] Data: {adata.shape[1]} genes, {adata.shape[0]} cells, n_stimuli={n_stimuli}")
 
     # Load inferred network parameters
     print("[simulate_network] Loading inferred network parameters...")
@@ -84,10 +90,17 @@ def main(argv):
         model.d_t = np.load(os.path.join(p, 'cardamomOT', 'degradations_temporal.npy'))
         model.basal = np.load(os.path.join(p, 'cardamomOT', 'basal_simul.npy'))
         model.inter = np.load(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))
+        # Validate n_stimuli against loaded inter (authoritative for simulation)
+        n_stimuli_inter = model.inter.shape[0] - adata.shape[1]
+        if n_stimuli_inter != model.n_stimuli:
+            print(f"[simulate_network] Warning: correcting n_stimuli from {model.n_stimuli} "
+                  f"to {n_stimuli_inter} based on loaded inter_simul.npy")
+            model.n_stimuli = n_stimuli_inter
         model.basal_t = np.load(os.path.join(p, 'cardamomOT', 'basal_t_simul.npy'))
         model.inter_t = np.load(os.path.join(p, 'cardamomOT', 'inter_t_simul.npy'))
         model.a = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
-        model.prot = np.load(os.path.join(p, 'cardamomOT', 'data_prot_unitary.npy'))
+        model.prot = np.load(os.path.join(p, 'cardamomOT', 'data_prot_forsimul.npy'))
+        model.rna = np.load(os.path.join(p, 'cardamomOT', 'data_rna.npy'))
         model.times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
         model.kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta.npy'))
         model.proba_traj = np.load(os.path.join(p, 'cardamomOT', 'proba_traj.npy'))
@@ -97,6 +110,15 @@ def main(argv):
         if os.path.exists(samples_path):
             model.samples_data = np.load(samples_path)
             print("[simulate_network] Loaded per-cell sample IDs")
+        mlp_path = os.path.join(p, 'cardamomOT', 'kon_mlp.pt')
+        cfg_path = os.path.join(p, 'cardamomOT', 'kon_mlp_config.npy')
+        if os.path.exists(mlp_path) and os.path.exists(cfg_path):
+            G_genes = int(np.load(cfg_path)[0])
+            mlp = KonCorrectionMLP(G_genes)
+            mlp.load_state_dict(torch.load(mlp_path, map_location="cpu"))
+            mlp.eval()
+            model.kon_mlp = mlp
+            print("[simulate_network] Loaded kon correction MLP")
         print("[simulate_network] Successfully loaded all network parameters")
     except FileNotFoundError as e:
         print(f"[simulate_network] Error: Missing parameter file: {e}")
@@ -138,6 +160,9 @@ def main(argv):
         np.save(os.path.join(cardamom_dir, 'data_prot_simul'), model.prot)
         np.save(os.path.join(cardamom_dir, 'data_kon_simul'), model.kon_theta)
         np.save(os.path.join(cardamom_dir, 'simulation_times'), model.times_simul)
+        if model.simulate_full_with_harissa and hasattr(model, 'mrna_simul') and model.mrna_simul is not None:
+            np.save(os.path.join(cardamom_dir, 'data_mrna_simul'), model.mrna_simul)
+            print(f"[simulate_network] Saved mRNA simulation to data_mrna_simul.npy")
         print(f"[simulate_network] Successfully saved simulation results to {cardamom_dir}")
     except Exception as e:
         print(f"[simulate_network] Error saving simulation results: {e}")

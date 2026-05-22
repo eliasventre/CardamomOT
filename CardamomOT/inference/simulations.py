@@ -60,23 +60,24 @@ def kon_ref(y_prot, kz, theta_inter, theta_basal):
 
 
 @njit
-def flow(time, d1, P):
+def flow(time, d1, P, ns=1):
     """
     Deterministic flow for the bursty model.
     """
-    # Explicit solution of the ODE generating the flow
     Pnew = P*np.exp(-time*d1)
-    Pnew[0] = P[0] # Discard stimulus
+    for s in range(ns):
+        Pnew[s] = P[s]  # preserve stimulus dimensions 0..ns-1
     return Pnew
 
 @njit
-def step_ode(d1, ks, inter, basal, dt, scale, P):
+def step_ode(d1, ks, inter, basal, dt, scale, P, ns=1):
         """
         Euler step for the deterministic limit model.
         """
-        a = kon_ref(P, ks, inter, basal) 
+        a = kon_ref(P, ks, inter, basal)
         Pnew = scale*a + (P[-1, :] - scale*a)*np.exp(-d1*dt)
-        Pnew[0] = P[-1, 0] # Discard stimulus
+        for s in range(ns):
+            Pnew[s] = P[-1, s]  # preserve stimulus dimensions 0..ns-1
         return Pnew
 
 
@@ -97,7 +98,7 @@ class ApproxODE:
         self.euler_step = 1e-2/np.max(d)
 
 
-    def simulation(self, d1, ks, timepoints, scale, verb=False):
+    def simulation(self, d1, ks, timepoints, scale, ns=1, verb=False):
         """
         Simulation of the deterministic limit model, which is relevant when
         promoters and mRNA are much faster than proteins.
@@ -114,7 +115,7 @@ class ApproxODE:
         # Core loop for simulation and recording
         for t in timepoints:
             while T < t:
-                self.state['P'] = step_ode(d1, ks, self.inter, self.basal, dt, scale, self.state['P'].reshape((1, -1)))
+                self.state['P'] = step_ode(d1, ks, self.inter, self.basal, dt, scale, self.state['P'].reshape((1, -1)), ns)
                 T += dt
                 c += 1
             sim += [np.array([(self.state['P'][i]) for i in range(1,G)], dtype=type)]
@@ -131,7 +132,7 @@ class BurstyPDMP:
     """
     Bursty PDMP version of the network model (promoters not described)
     """
-    def __init__(self, ks, basal, inter) -> None:
+    def __init__(self, ks, basal, inter, ns=1) -> None:
         # Kinetic parameters
         G = basal.shape[0]
         # Network parameters
@@ -140,11 +141,11 @@ class BurstyPDMP:
         # Default state
         type: list[tuple[str, str]] = [('P', 'float')]
         self.state: np.ndarray[Any, np.dtype[Any]] = np.array([(0) for i in range(G)], dtype=type)
-        # Simulation parameter
-        self.thin_cst = np.sum(np.max(ks[1:, :], axis=1))
+        # Thinning constant: sum of max burst rates over gene dims only (exclude stim dims 0..ns-1)
+        self.thin_cst = np.sum(np.max(ks[ns:, :], axis=1))
 
 
-    def step(self, d1, ks, c, scale):
+    def step(self, d1, ks, c, scale, ns=1):
         """
         Compute the next jump and the next step of the
         thinning method, in the case of the bursty model.
@@ -154,12 +155,14 @@ class BurstyPDMP:
         # 0. Draw the waiting time before the next jump
         U = np.random.exponential(scale=1/tau)
 
-        # 1. Update the continuous states
-        P = flow(U, d1, self.state['P'])
+        # 1. Update the continuous states (stimulus dims preserved inside flow)
+        P = flow(U, d1, self.state['P'], ns)
         self.state['P'] = P
 
         # 2. Compute the next jump
         v = kon_ref(P.reshape((1, -1)), ks, self.inter, self.basal)/tau # i = 1, ..., G-1 : burst of prot i
+        for s in range(1, ns):
+            v[s] = 0.0  # stim2..stimN must not receive bursts
         v[0] = 1.0 - np.sum(v[1:]) # i = 0 : no change (phantom jump)
         # Deal robustly with precision errors
         i: np.signedinteger[Any] = np.searchsorted(np.cumsum(v), np.random.random(), side='right')
@@ -171,7 +174,7 @@ class BurstyPDMP:
         return U, jump
 
 
-    def simulation(self, d1, ks, c, timepoints, scale, verb=False):
+    def simulation(self, d1, ks, c, timepoints, scale, ns=1, verb=False):
         """
         Exact simulation of the network in the bursty PDMP case.
         """
@@ -185,13 +188,13 @@ class BurstyPDMP:
         for t in timepoints:
             while T < t:
                 Told, state_old = T, self.state.copy()
-                U, jump = self.step(d1, ks, c, scale)
+                U, jump = self.step(d1, ks, c, scale, ns)
                 T += U
                 if jump:
                     c1 += 1
                 else:
                     c0 += 1
-            P = flow(t - Told, d1, state_old['P'])
+            P = flow(t - Told, d1, state_old['P'], ns)
             sim += [np.array([(P[i]) for i in range(1,G)], dtype=types)]
         # Update the current state
         self.state['P'] = P
@@ -223,8 +226,9 @@ def simulate_next_prot_ode(d, a, basal, inter, t, scale, **kwargs) -> Simulation
         """
         Perform simulation of the network model (ODE version).
         """
-        # Get keyword arguments
         p0 = kwargs.get('P0')
+        ns = kwargs.get('ns', 1)
+        stim_vals = kwargs.get('stim_vals', None)  # schedule values at current time ti
         verb = kwargs.get('verb', False)
         if np.size(t) == 1:
             t = np.array([t])
@@ -232,36 +236,45 @@ def simulate_next_prot_ode(d, a, basal, inter, t, scale, **kwargs) -> Simulation
             msg = 'Time points must appear in increasing order'
             raise ValueError(msg)
         network: ApproxODE = ApproxODE(d, basal, inter)
-        # Burnin simulation without stimulus
         if p0 is not None:
-            network.state['P'][1:] = p0[1:]
-        # Activate the stimulus
-        network.state['P'][0] = 1
-        # Final simulation with stimulus
-        sim = network.simulation(d, a, t, scale, verb)
+            network.state['P'][ns:] = p0[ns:]  # gene dims only
+        # Stimulus dims: schedule is authoritative; fall back to p0 if not provided
+        if stim_vals is not None:
+            for s in range(ns):
+                network.state['P'][s] = stim_vals[s]
+        else:
+            if p0 is not None:
+                network.state['P'][1:ns] = p0[1:ns]  # stim2..stimN from p0
+            network.state['P'][0] = 1  # backward-compat: stim1 always active
+        sim = network.simulation(d, a, t, scale, ns=ns, verb=verb)
         p = sim['P']
         return Simulation(t, p)
 
 
 def simulate_next_prot_pdmp(d, a, c, basal, inter, t, scale, **kwargs) -> Simulation:
         """
-        Perform simulation of the network model (ODE version).
+        Perform simulation of the network model (PDMP version).
         """
-        # Get keyword arguments
         p0 = kwargs.get('P0')
+        ns = kwargs.get('ns', 1)
+        stim_vals = kwargs.get('stim_vals', None)  # schedule values at current time ti
         verb = kwargs.get('verb', False)
         if np.size(t) == 1:
             t = np.array([t])
         if np.any(t != np.sort(t)):
             msg = 'Time points must appear in increasing order'
             raise ValueError(msg)
-        network: BurstyPDMP = BurstyPDMP(a, basal, inter)
-        # Burnin simulation without stimulus
+        network: BurstyPDMP = BurstyPDMP(a, basal, inter, ns=ns)
         if p0 is not None:
-            network.state['P'][1:] = p0[1:]
-        # Activate the stimulus
-        network.state['P'][0] = 1
-        # Final simulation with stimulus
-        sim = network.simulation(d, a, c, t, scale, verb)
+            network.state['P'][ns:] = p0[ns:]  # gene dims only
+        # Stimulus dims: schedule is authoritative; fall back to p0 if not provided
+        if stim_vals is not None:
+            for s in range(ns):
+                network.state['P'][s] = stim_vals[s]
+        else:
+            if p0 is not None:
+                network.state['P'][1:ns] = p0[1:ns]  # stim2..stimN from p0
+            network.state['P'][0] = 1  # backward-compat: stim1 always active
+        sim = network.simulation(d, a, c, t, scale, ns=ns, verb=verb)
         p = sim['P']
         return Simulation(t, p)

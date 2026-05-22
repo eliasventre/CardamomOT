@@ -124,7 +124,7 @@ PERTURBATIONS = [
 # Utilitaires réseau
 # ──────────────────────────────────────────────────────────────
 
-def load_grn_matrix(p):
+def load_grn_matrix(p, ns):
     """Charge la matrice GRN inférée (inter_simul.npy) et renvoie (matrix, gene_names)."""
     # data_full.h5ad si disponible, sinon data_train.h5ad
     full_path = os.path.join(p, 'Data', 'data_full.h5ad')
@@ -132,7 +132,7 @@ def load_grn_matrix(p):
     adata = sc.read_h5ad(full_path if os.path.exists(full_path) else train_path)
     genes = list(adata.var_names)
     grn_path = os.path.join(p, 'cardamomOT', 'inter_simul.npy')
-    grn_mat = np.load(grn_path)[1:, 1:]
+    grn_mat = np.load(grn_path)[ns:, ns:]
     matrix = grn_mat[:, :, 0] if grn_mat.ndim == 3 else grn_mat
     return matrix, genes
 
@@ -403,7 +403,8 @@ def load_perturbation_data(cfg):
     perturb_id = cfg['perturb_id']
 
     # GRN
-    grn_matrix, gene_names = load_grn_matrix(p)
+    ns = 2 if cfg['dataset_group'] == 'Schiebinger' else 1
+    grn_matrix, gene_names = load_grn_matrix(p, ns)
     rank  = get_regulator_rank(grn_matrix, gene_names, gene)
     if gene == "Col4a2":
         G_net, max_int = build_gene_subgraph(grn_matrix, gene_names, gene, top_targets=4)

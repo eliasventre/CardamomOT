@@ -31,6 +31,7 @@ import getopt
 import anndata as ad
 import pandas as pd
 import os
+import torch
 
 verb = 1
 
@@ -85,7 +86,12 @@ def main(argv):
     else:
         print("[infer_network_simul] No stimulus schedule found, using default")
 
-    model = NetworkModel_beta(adata.shape[1])
+    # ─── DETECT n_stimuli FROM SCHEDULE ─────────────────────────────────
+    _stim_arr = np.asarray(stim_sched) if stim_sched is not None else None
+    n_stimuli = int(_stim_arr.shape[1]) if (_stim_arr is not None and _stim_arr.ndim == 2) else 1
+    print(f"[infer_network_simul] n_stimuli detected: {n_stimuli}")
+
+    model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
 
     # Load inferred network parameters
     print("[infer_network_simul] Loading inferred network parameters...")
@@ -104,6 +110,10 @@ def main(argv):
         model.alpha = np.load(os.path.join(p, 'cardamomOT', 'alpha.npy'))
         model.proba_traj = np.load(os.path.join(p, 'cardamomOT', 'proba_traj.npy'))
         model.n_networks = np.load(os.path.join(p, 'cardamomOT', 'n_networks.npy'))
+        kon_beta_h_path = os.path.join(p, 'cardamomOT', 'data_kon_beta_harissa.npy')
+        if os.path.exists(kon_beta_h_path):
+            model.kon_beta_harissa = np.load(kon_beta_h_path)
+            print("[infer_network_simul] Loaded kon_beta_harissa for Harissa-mode network re-inference")
         print("[infer_network_simul] Successfully loaded all network parameters")
     except FileNotFoundError as e:
         print(f"[infer_network_simul] Error: Missing parameter file: {e}")
@@ -147,24 +157,31 @@ def main(argv):
     else:
         print("[infer_network_simul] No reference network found, using inferred network only")
 
-    model.ref_network *= (np.abs(model.inter) > 0)
+    model.ref_network = np.maximum(model.prior_network_pen, model.ref_network)
+    model.ref_network[:ns, :] = model.stimulus
+    model.ref_network *= (np.abs(model.inter) > 1e-2)
 
     # Adapt parameters for simulation
     print("[infer_network_simul] Adapting parameters for simulation...")
-    model.adapt_to_unitary()
+    model.refine_network_degradations()
     print("[infer_network_simul] Parameter adaptation completed")
 
     # Save adapted parameters
     cardamom_dir = os.path.join(p, 'cardamomOT')
     try:
-        np.save(os.path.join(cardamom_dir, 'data_prot_unitary'), model.prot)
-        np.save(os.path.join(cardamom_dir, 'data_kon_unitary'), model.kon_theta)
+        np.save(os.path.join(cardamom_dir, 'data_prot_forsimul'), model.prot)
+        np.save(os.path.join(cardamom_dir, 'data_kon_forsimul'), model.kon_theta)
         np.save(os.path.join(cardamom_dir, 'basal_simul'), model.basal)
         np.save(os.path.join(cardamom_dir, 'inter_simul'), model.inter)
         np.save(os.path.join(cardamom_dir, 'basal_t_simul'), model.basal_t)
         np.save(os.path.join(cardamom_dir, 'inter_t_simul'), model.inter_t)
         np.save(os.path.join(cardamom_dir, 'ratios'), model.ratios)
         np.save(os.path.join(cardamom_dir, 'degradations_temporal.npy'), model.d_t)
+        if model.kon_mlp is not None:
+            torch.save(model.kon_mlp.state_dict(), os.path.join(cardamom_dir, 'kon_mlp.pt'))
+            np.save(os.path.join(cardamom_dir, 'kon_mlp_config'),
+                    np.array([model.kon_mlp.G_genes], dtype=np.int32))
+            print(f"[infer_network_simul] Saved kon_mlp to {cardamom_dir}/kon_mlp.pt")
         print(f"[infer_network_simul] Successfully saved adapted parameters to {cardamom_dir}")
     except Exception as e:
         print(f"[infer_network_simul] Error saving parameters: {e}")

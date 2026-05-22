@@ -220,11 +220,11 @@ To encode prior knowledge about **which genes are knocked out (KO) or overexpres
 
 ```
 # KO_OV_inference.txt
-sample_id	KO	OV
-wt	        	
-ko_CHGA	CHGA	
-ov_STMN2	 	STMN2
-ko_CHGA_ov_STMN2	CHGA	STMN2
+sample_id   KO  OV
+wt  0   0	
+ko_CHGA CHGA	0
+ov_STMN2    0   STMN2
+ko_CHGA_ov_STMN2    CHGA    STMN2
 ```
 
 - `sample_id` values must match `adata.obs['dataset_id']`.
@@ -244,10 +244,7 @@ After training, you can simulate arbitrary knock-out / over-expression combinati
 ```
 # KO_OV_simulate.txt  (tab-separated, header required)
 KO	        OV
-            		        # wild-type (no perturbation)
-CHGA	
-		STMN2
-CHGA	STMN2
+CHGA	STMN2           # wild-type (no perturbation)
 POSTN	S100B,STMN2
 ```
 
@@ -262,10 +259,8 @@ By default a KO silences a gene by setting its basal transcription to −∞ (co
 ```
 # KO_OV_simulate.txt
 KO	        OV
-CHGA-80	                    # 80 % KO of CHGA
-		STMN2-60            # 60 % OV of STMN2
-CHGA-80	STMN2-60
-POSTN	S100B               # full KO / full OV (no suffix = 100 %, existing behaviour)
+CHGA-80	    STMN2-60     # 80 % KO of CHGA # 60 % OV of STMN2
+POSTN	S100B            # full KO / full OV (no suffix = 100 %, existing behaviour)
 ```
 
 **Mechanism:** instead of modifying the basal transcription, partial perturbations scale the **per-gene creation rate** (burst rate in the stochastic PDMP, effective `ks` in the ODE) without touching the degradation rates:

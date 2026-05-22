@@ -184,46 +184,6 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
     return dist, vect_prot_end
 
 
-
-def my_otdistance_simulated(vect_prot_init, vect_rna_init, vect_rna_end,
-                            vect_proba_end, s1, ks, d1, delta_t, basal, inter,
-                            n_stimuli=1, stim_vals=None) -> tuple[np.ndarray, np.ndarray]:
-
-    ns = n_stimuli
-    if stim_vals is None:
-        stim_vals = np.ones(ns, dtype=float)
-
-    G = vect_rna_init.shape[1]
-    n1, n2 = vect_rna_init.shape[0], vect_rna_end.shape[0]
-    dist = np.ones((n1, n2))
-    vect_prot_end = np.ones((n1, n2, G + ns))
-    for si in range(ns):
-        vect_prot_end[:, :, si] = stim_vals[si]
-
-    def run_main_loop_for_cell(i):
-        d1_aug = np.concatenate([stim_vals, d1])
-        P0_aug = np.concatenate([stim_vals, vect_prot_init[i]])
-        prot_end = simulate_next_prot_ode(d1_aug, ks, basal, inter, delta_t, 1, P0=P0_aug).p[-1]
-        return prot_end
-
-    if Parallel is not None:
-        results = Parallel(n_jobs=-1)(
-            delayed(run_main_loop_for_cell)(i) for i in range(0, n1)
-        )
-    else:
-        results = [run_main_loop_for_cell(i) for i in range(0, n1)]
-
-    for i in range(n1):
-        prot_end = results[i]
-        for j in range(n2):
-            vect_prot_end[i, j, ns:] = prot_end[ns:]
-        sigma = base_kon_vector(basal, inter, vect_prot_end[i])
-        for j in range(n2):
-            dist[i, j] += np.sum((sigma[j, ns:] - vect_proba_end[j]) ** 2)
-
-    return dist, vect_prot_end
-
-
 def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init, y_rna_init, 
                     y_kon_end_true, y_kon_end, y_prot_end, y_rna_end, mode_init, mode_end,
                     basal, inter, ks, delta_t, tol=.5, n_pas=25):

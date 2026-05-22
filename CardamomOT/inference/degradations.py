@@ -91,22 +91,98 @@ def build_kon_fn(ks, theta_inter, bias, device="cpu"):
     return kon
 
 
+class KonCorrectionMLP(nn.Module):
+    """
+    Small MLP learning a per-gene multiplicative correction g(X) ∈ ℝ_{>0}^{G_genes}.
+
+    Used in the Harissa branch to capture the deviation between continuous
+    kon_beta_harissa estimates and the discrete-mode network prediction:
+        kon_corrected(X) = kon_network(X) * g(X)
+
+    Input  : protein vector X of shape (..., G_genes)
+    Output : per-gene correction factor of shape (..., G_genes), forced > 0 via softplus
+    """
+
+    def __init__(self, G_genes: int, hidden_dim: int = 32, n_layers: int = 2) -> None:
+        super().__init__()
+        layers: list[nn.Module] = [nn.Linear(G_genes, hidden_dim), nn.Tanh()]
+        for _ in range(n_layers - 1):
+            layers += [nn.Linear(hidden_dim, hidden_dim), nn.Tanh()]
+        layers.append(nn.Linear(hidden_dim, G_genes))
+        self.net = nn.Sequential(*layers)
+        self.G_genes = G_genes
+
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.softplus(self.net(X))
+
+
+def train_kon_correction_mlp(
+    y_prot: np.ndarray,
+    kon_harissa: np.ndarray,
+    kon_network: np.ndarray,
+    ns: int,
+    hidden_dim: int = 32,
+    n_layers: int = 2,
+    n_epochs: int = 300,
+    lr: float = 1e-3,
+    device: str = "cpu",
+) -> "KonCorrectionMLP":
+    """
+    Train a KonCorrectionMLP to learn g(X) ≈ kon_harissa / kon_network.
+
+    Args:
+        y_prot      : protein data (N*T, G_tot)
+        kon_harissa : continuous burst-rate estimates (N*T, G_tot)
+        kon_network : discrete-mode network predictions (N*T, G_tot)
+        ns          : number of stimulus dimensions to skip
+        hidden_dim  : hidden layer width
+        n_layers    : number of hidden layers
+        n_epochs    : training epochs
+        lr          : Adam learning rate
+        device      : torch device string
+
+    Returns:
+        Trained KonCorrectionMLP (on CPU).
+    """
+    G_genes = y_prot.shape[1] - ns
+    X_t = torch.tensor(y_prot[:, ns:].astype(np.float32), device=device)
+
+    ratio = kon_harissa[:, ns:] / np.clip(kon_network[:, ns:], 1e-8, None)
+    ratio = np.clip(ratio, 0.05, 20.0).astype(np.float32)
+    y_t = torch.tensor(ratio, device=device)
+
+    mlp = KonCorrectionMLP(G_genes, hidden_dim=hidden_dim, n_layers=n_layers).to(device)
+    optimizer = torch.optim.Adam(mlp.parameters(), lr=lr)
+    loss_fn = nn.MSELoss()
+
+    for _ in range(n_epochs):
+        optimizer.zero_grad()
+        loss = loss_fn(mlp(X_t), y_t)
+        loss.backward()
+        optimizer.step()
+
+    return mlp.cpu().eval()
+
+
 class GeneRegulatoryODE_softmax(nn.Module):
     """
     ODE model for gene regulatory dynamics with generalized softmax-based kon.
     Learns gene-specific degradation rates (d) and scale factors.
+    Optionally applies a KonCorrectionMLP multiplicative correction (Harissa branch).
     """
 
-    def __init__(self, G, d_init, ks, theta_inter, bias, n_stimuli=1, stim_vals=None, device="cpu") -> None:
+    def __init__(self, G, d_init, ks, theta_inter, bias, n_stimuli=1, stim_vals=None,
+                 device="cpu", kon_mlp=None) -> None:
         """
         Args:
-            G : number of genes
-            d_init : initial degradation rates (array of size G)
-            ks : array of shape (n_modes, G) -> base kon rates for each mode
-            theta_inter : array of shape (G, G, n_modes-1) -> regulatory interactions
-            bias : array of shape (G, n_modes-1) -> bias for each gene and mode
-            n_stimuli : number of stimulus columns (default 1)
-            stim_vals : fixed stimulus values shape (n_stimuli,); defaults to ones
+            G           : number of genes (total, including stimuli)
+            d_init      : initial degradation rates (array of size G)
+            ks          : array of shape (n_modes, G)
+            theta_inter : array of shape (G, G, n_modes-1)
+            bias        : array of shape (G, n_modes-1)
+            n_stimuli   : number of stimulus columns (default 1)
+            stim_vals   : fixed stimulus values shape (n_stimuli,); defaults to ones
+            kon_mlp     : optional KonCorrectionMLP; if provided, kon[:, ns:] *= g(X[:, ns:])
         """
         super().__init__()
         self.G = int(G)
@@ -132,10 +208,14 @@ class GeneRegulatoryODE_softmax(nn.Module):
 
         self.n_modes = int(self.ks.shape[0])
 
+        # ----- optional harissa correction MLP -----
+        self.kon_mlp = kon_mlp  # KonCorrectionMLP or None; not registered as submodule (frozen)
+
     def forward(self, t, X):
         """
         Compute dX/dt for a given state X at time t.
         Includes learned scaling of theta_inter and bias.
+        When kon_mlp is set, applies a frozen per-gene multiplicative correction.
         """
         squeeze_output = False
         if X.dim() == 1:
@@ -165,6 +245,12 @@ class GeneRegulatoryODE_softmax(nn.Module):
         base_kon: torch.Tensor = torch.softmax(Z, dim=-1)
         ks_expanded = self.ks.T.unsqueeze(0)  # (1, G, n_modes)
         kon: torch.Tensor = torch.sum(base_kon * ks_expanded.to(X.device), dim=-1)
+
+        # ----- apply harissa correction (frozen, no grad) -----
+        if self.kon_mlp is not None:
+            with torch.no_grad():
+                g = self.kon_mlp(X[:, ns:].to("cpu")).to(X.device)
+            kon[:, ns:] = kon[:, ns:] * g
 
         # degradation and ODE dynamics
         d_eff: torch.Tensor = torch.nn.functional.softplus(self.d_param.to(X.device))
@@ -238,12 +324,12 @@ def inference_epsilon_temporal(
         ratios_init_vec = ratios_init[interval_idx]  # shape (G,)
 
         # local ODE to compute kon(X)
-        stim0_t = torch.tensor(stim0, dtype=torch.float32)
+        stim1_t = torch.tensor(stim1, dtype=torch.float32)
         class LocalODE_for_eps(nn.Module):
             def __init__(self, d_vec) -> None:
                 super().__init__()
                 self.register_buffer("d_eff_buf", torch.tensor(d_vec, dtype=torch.float32))
-                self.register_buffer("stim0_buf", stim0_t)
+                self.register_buffer("stim_buf", stim1_t)
 
             def forward(self, t, X):
                 squeeze_output = False
@@ -251,7 +337,7 @@ def inference_epsilon_temporal(
                     X = X.unsqueeze(0)
                     squeeze_output = True
                 X = X.clone()
-                X[:, :ns] = self.stim0_buf.to(X.device)
+                X[:, :ns] = self.stim_buf.to(X.device)
                 n_modes = ks.shape[0]
                 Z: torch.Tensor = torch.zeros((X.shape[0], G, n_modes), device=X.device)
                 for k in range(n_modes - 1):
@@ -351,6 +437,7 @@ def inference_degradation_prot(
     batch_size=None, verbose=True,
     n_stimuli=1, stim_schedule=None,
     samples_data=None,
+    kon_mlp=None,
 ) -> tuple[np.ndarray, np.ndarray, float, "GeneRegulatoryODE_softmax"]:
     """
     Estimate degradation rates and scaling factors from protein time-course data.
@@ -390,7 +477,8 @@ def inference_degradation_prot(
         ode_funcs = [
             GeneRegulatoryODE_softmax(
                 G, d_init, ks, theta_inter, bias[s_idx],
-                n_stimuli=ns, stim_vals=stim_first, device=device
+                n_stimuli=ns, stim_vals=stim_first, device=device,
+                kon_mlp=kon_mlp,
             ).to(device)
             for s_idx in range(n_samples)
         ]
@@ -428,7 +516,7 @@ def inference_degradation_prot(
 
             for (s_idx, t0, t1, X0_full, X1_full, stim0, stim1) in all_pairs:
                 ode = ode_funcs[s_idx]
-                ode.stim_vals.copy_(torch.tensor(stim0, dtype=torch.float32))
+                ode.stim_vals.copy_(torch.tensor(stim1, dtype=torch.float32))
                 n_cells = X0_full.shape[0]
                 cur_bs  = n_cells if batch_size is None else batch_size
                 perm    = np.random.permutation(n_cells)
@@ -474,7 +562,8 @@ def inference_degradation_prot(
     stim_first = pairs[0][4] if pairs else np.ones(ns, dtype=np.float32)
     ode_func: GeneRegulatoryODE_softmax = GeneRegulatoryODE_softmax(
         G, d_init, ks, theta_inter, bias,
-        n_stimuli=ns, stim_vals=stim_first, device=device
+        n_stimuli=ns, stim_vals=stim_first, device=device,
+        kon_mlp=kon_mlp,
     ).to(device)
 
     optimizer = torch.optim.Adam([ode_func.d_param, ode_func.scale_param], lr=lr)
@@ -487,7 +576,7 @@ def inference_degradation_prot(
         total_loss, total_count = 0.0, 0
 
         for (t0, t1, X0_full, X1_full, stim0, stim1) in pairs:
-            ode_func.stim_vals.copy_(torch.tensor(stim0, dtype=torch.float32))
+            ode_func.stim_vals.copy_(torch.tensor(stim1, dtype=torch.float32))
             n_cells = X0_full.shape[0]
             current_batch_size = n_cells if batch_size is None else batch_size
 
