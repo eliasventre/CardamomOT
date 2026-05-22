@@ -1521,10 +1521,13 @@ class NetworkModel:
                                                                   n_stimuli=ns, stim_schedule=self._stim_schedule)
 
             for cnt in range(0, len(times)-1):
-                if self.use_temporal_degradations:
-                    self.ratios[cnt, :] = 1/eps_temporal[cnt]
-                else:
-                    self.ratios[cnt, :] = 1/eps_global
+                # if self.use_temporal_degradations:
+                #     self.ratios[cnt, :] = 1/eps_temporal[cnt]
+                # else:
+                #     self.ratios[cnt, :] = 1/eps_global
+                if verb:
+                    print('[refine_network_degradations]  degradations_rates mrns', self.d_t[cnt, 1] * self.ratios[cnt], self.d[0, :])
+                    print('[refine_network_degradations]  degradations_rates prot', self.d_t[cnt, 1], self.d[1, :])
 
         self.basal, self.inter = basal, inter
         self.basal_t, self.inter_t = basal_t, inter_t
@@ -1605,7 +1608,7 @@ class NetworkModel:
             degradations = self.d_t[cnt].copy()
             if self.simulation_stochastic:
                 self.ratios[cnt] = np.clip(self.ratios[cnt], self.min_ratio, self.max_ratio)
-                degradations[0, :] = degradations[1, :] * self.ratios[cnt] * (1 + np.sqrt(cnt))
+                degradations[0, :] = degradations[1, :] * self.ratios[cnt] # * (1 + np.sqrt(cnt))
                 # degradations[0, :] = np.clip(degradations[0, :], self.min_ratio * degradations[1, :], self.max_ratio * degradations[1, :])
 
             if self.finish_by_determinist:
@@ -2139,4 +2142,4 @@ class NetworkModel:
 
         self.fit_mixture(data_rna, min_components=2, max_components=2, refilter=5.0, max_iter_kinetics=100)
         self.fit_network(data_rna, intensity_prior=intensity_prior, verb=verb)
-        # self.refine_network_degradations()
+        self.refine_network_degradations()
