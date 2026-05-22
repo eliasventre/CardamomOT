@@ -1514,18 +1514,20 @@ class NetworkModel:
                 inter      *= mean_scale[None, :, None]
                 basal_mean  = basal.mean(axis=0)
 
-            eps_temporal, eps_global = inference_epsilon_temporal(y_prot,
-                                                                  self.times_data,
-                                                                  basal_t, inter_t, ks.T * self.scale_proteins, self.d_t[:, 1, :],
-                                                                  k1 * self.scale_proteins, self.ratios, self.alpha, verbose=False,
-                                                                  n_stimuli=ns, stim_schedule=self._stim_schedule)
+            # eps_temporal, eps_global = inference_epsilon_temporal(y_prot,
+            #                                                       self.times_data,
+            #                                                       basal_t, inter_t, ks.T * self.scale_proteins, self.d_t[:, 1, :],
+            #                                                       k1 * self.scale_proteins, self.ratios, self.alpha, verbose=False,
+            #                                                       n_stimuli=ns, stim_schedule=self._stim_schedule)
 
-            for cnt in range(0, len(times)-1):
+            # for cnt in range(0, len(times)-1):
                 # if self.use_temporal_degradations:
                 #     self.ratios[cnt, :] = 1/eps_temporal[cnt]
                 # else:
                 #     self.ratios[cnt, :] = 1/eps_global
-                if verb:
+
+            if verb:
+                for cnt in range(0, len(times)-1):
                     print('[refine_network_degradations]  degradations_rates mrns', self.d_t[cnt, 1] * self.ratios[cnt], self.d[0, :])
                     print('[refine_network_degradations]  degradations_rates prot', self.d_t[cnt, 1], self.d[1, :])
 
@@ -1607,9 +1609,9 @@ class NetworkModel:
 
             degradations = self.d_t[cnt].copy()
             if self.simulation_stochastic:
-                self.ratios[cnt] = np.clip(self.ratios[cnt], self.min_ratio, self.max_ratio)
+                # self.ratios[cnt] = np.clip(self.ratios[cnt], self.min_ratio, self.max_ratio)
                 degradations[0, :] = degradations[1, :] * self.ratios[cnt] # * (1 + np.sqrt(cnt))
-                # degradations[0, :] = np.clip(degradations[0, :], self.min_ratio * degradations[1, :], self.max_ratio * degradations[1, :])
+                degradations[0, :] = np.clip(degradations[0, :], self.min_ratio * degradations[1, :], self.max_ratio * degradations[1, :])
 
             if self.finish_by_determinist:
                 if time >= times[-2] or time > times[-1] * (len(times)-1) / len(times): # We finish by a deterministic simulation to reach final equilibrium
