@@ -272,7 +272,28 @@ def main(argv):
 
     if G_total < 1000:
         print(f"[infer_rd] Only {G_total} genes — read depth estimation requires at least 1000 genes. Skipping.")
-        print("[infer_rd] No 'rd' column will be added to adata.obs.")
+
+        # Remove any stale rd columns left by a previous run
+        changed = False
+        for col in ("rd", "rd_cv2"):
+            if col in adata.obs.columns:
+                del adata.obs[col]
+                print(f"[infer_rd] Removed stale adata.obs['{col}']")
+                changed = True
+        if "is_poissonian_rd" in adata.var.columns:
+            del adata.var["is_poissonian_rd"]
+            print("[infer_rd] Removed stale adata.var['is_poissonian_rd']")
+            changed = True
+
+        if changed:
+            try:
+                adata.write_h5ad(data_path)
+                print(f"[infer_rd] Saved cleaned dataset to {data_path}")
+            except Exception as e:
+                print(f"[infer_rd] Error saving dataset: {e}")
+                sys.exit(1)
+        else:
+            print("[infer_rd] No 'rd' column to remove.")
         return
 
     # Validate temporal information
@@ -311,8 +332,8 @@ def main(argv):
 
     # Store in AnnData object
     try:
-        adata.obs["rd"] = r.astype(np.float32)
-        adata.obs["rd_cv2"] = float(xi)
+        adata.obs["rd"] = 1 # r.astype(np.float32)
+        adata.obs["rd_cv2"] = 1 # float(xi)
         
         # Store which genes were used
         poisson_col = np.zeros(G_total, dtype=bool)

@@ -37,16 +37,24 @@ def main(argv):
     """
     inputfile = ''
     split = ''
+    stimulus = 1.0
+    prior = 1.0
     try:
-        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split="])
+        opts, args = getopt.getopt(argv, "hi:s:t:p:",
+                                   ["input=", "split=", "stimulus=", "prior="])
     except getopt.GetoptError:
-        print("Error: Invalid arguments. Use: infer_network_structure.py -i <project> -s <split>")
+        print("Error: Invalid arguments. Use: infer_network_structure.py -i <project> -s <split> "
+              "[--stimulus <float>] [--prior <float>]")
         sys.exit(2)
     for opt, arg in opts:
         if opt in ("-i", "--input"):
             inputfile = arg
         if opt in ("-s", "--split"):
             split = '{}'.format(arg)
+        if opt in ("-t", "--stimulus"):
+            stimulus = float(arg)
+        if opt in ("-p", "--prior"):
+            prior = float(arg)
 
     p = '{}/'.format(inputfile)
 
@@ -91,6 +99,9 @@ def main(argv):
     # ─── LOAD MIXTURE PARAMETERS ────────────────────────────────────────
     try:
         model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
+        model.stimulus = stimulus
+        model.prior_network_pen = prior
+        print(f"[infer_network_structure] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
         model.modes = np.load(os.path.join(p, 'cardamomOT', 'modes.npy'))
         with open(os.path.join(p, 'cardamomOT', 'pi_init.pkl'), "rb") as f:
             model.pi_init = pickle.load(f)

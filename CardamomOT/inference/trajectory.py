@@ -100,7 +100,28 @@ def kon_ref_vector(y_prot, kz, theta_inter, theta_basal) -> np.ndarray:
         for j in prange(sigma.shape[1]):
             for k in prange(sigma.shape[2]):
                 out[i, j] += kz[j, k] * sigma[i, j, k]
-    
+
+    return out
+
+
+def _kon_per_sample(y_prot, ks, inter, basal, samples_data=None):
+    """
+    kon_ref_vector with per-sample basal support.
+
+    When basal is 2-D (G, n_networks) or samples_data is None, delegates to
+    kon_ref_vector directly.  When basal is 3-D (n_samples, G, n_networks),
+    routes each cell to its sample's basal slice via samples_data.
+    """
+    if basal.ndim < 3 or samples_data is None:
+        return kon_ref_vector(y_prot, ks, inter, basal)
+    samples_id = np.sort(np.unique(samples_data))
+    out = np.zeros((y_prot.shape[0], y_prot.shape[1]))
+    for s_idx, s in enumerate(samples_id):
+        mask = (samples_data == s)
+        if not np.any(mask):
+            continue
+        basal_s = basal[min(s_idx, basal.shape[0] - 1)]
+        out[mask] = kon_ref_vector(y_prot[mask], ks, inter, basal_s)
     return out
 
     
@@ -184,9 +205,9 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
     return dist, vect_prot_end
 
 
-def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init, y_rna_init, 
+def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init, y_rna_init,
                     y_kon_end_true, y_kon_end, y_prot_end, y_rna_end, mode_init, mode_end,
-                    basal, inter, ks, delta_t, tol=.5, n_pas=25):
+                    basal, inter, ks, delta_t, tol=.5, n_pas=25, samples_data=None):
     
     G = y_prot_init.shape[1]
     ns = G - alpha_init.shape[1]  # n_stimuli derived from shapes
@@ -206,7 +227,7 @@ def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init
 
         y_prot[:, ns:] = find_next_prot(d1, y_prot_init[:, ns:], y_rna_init[:, ns:], y_rna_end[:, ns:], mode_init, mode_end, alpha_tmp, s1, t * delta_t)
 
-        kon_new = kon_ref_vector(y_prot, ks, inter, basal)  # shape (N, G)
+        kon_new = _kon_per_sample(y_prot, ks, inter, basal, samples_data=samples_data)  # shape (N, G)
 
         # Condition: if abs(kon_new[i] - y_kon_init[i]) > abs(kon_new[i] - y_kon_end[i])
         # Only apply where cnt < 1
@@ -222,11 +243,16 @@ def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init
 
 
 def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
-                   seuil_intensity=5e-2, seuil_variations=.01, n_order=10):
-    
-    G, n_networks = basal_ref.shape
-    
-    kon_vector = kon_ref_vector(prot_traj, ks, inter_ref, basal_ref)
+                   seuil_intensity=5e-2, seuil_variations=.01, n_order=10, samples_data=None):
+
+    if basal_ref.ndim == 3:
+        n_samples, G, n_networks = basal_ref.shape
+        basal_2d = basal_ref.mean(axis=0)  # only for shape/intensity checks
+    else:
+        G, n_networks = basal_ref.shape
+        basal_2d = basal_ref
+
+    kon_vector = _kon_per_sample(prot_traj, ks, inter_ref, basal_ref, samples_data=samples_data)
 
     def core_filter(inter_ref, kon_vector, genes_list):
         inter_t = np.zeros((T, G, G, n_networks))
@@ -236,7 +262,7 @@ def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
         for g1 in genes_list:
             for n in range(n_networks):
                 inter_tmp[g1, :, n] = 0
-                kon_vector_nog1 = kon_ref_vector(prot_traj, ks, inter_tmp, basal_ref)
+                kon_vector_nog1 = _kon_per_sample(prot_traj, ks, inter_tmp, basal_ref, samples_data=samples_data)
                 for g2 in range(0, G):
                     val = abs(inter_ref[g1, g2, n])
                     if val >= seuil_intensity:

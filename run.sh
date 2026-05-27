@@ -11,9 +11,11 @@ split="$2"
 change="$3"
 rate="$4"
 mean="$5"
+stimulus="${6:-1.0}"
+prior="${7:-1.0}"
 
 # echo "Inference rd"
-# python infer_rd.py -i "${input_dir}" 
+# python infer_rd.py -i "${input_dir}"
 
 # echo "Select DE genes and split cells"
 # python select_DEgenes_and_split.py -i "${input_dir}" -c "${change}" -r "${rate}" -s "${split}" -m "${mean}"
@@ -28,30 +30,30 @@ mean="$5"
 # python infer_mixture.py -i "${input_dir}" -s "${split}" -m "${mean}"
 
 # echo "Check mixture"
-# python check_mixture_to_data.py -i "${input_dir}" -s "${split}" 
+# python check_mixture_to_data.py -i "${input_dir}" -s "${split}"
 
 # echo "Infer network structure"
-# python infer_network_structure.py -i "${input_dir}" -s "${split}" 
+# python infer_network_structure.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}"
 
 echo "Adapt network to simulate and degradation rates"
-python infer_network_simul.py -i "${input_dir}" -s "${split}" 
+python infer_network_simul.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}"
 
 echo "Simulate network"
 python simulate_network.py -i "${input_dir}" -s "${split}"
 
 echo "Check simulation"
-python check_sim_to_data.py -i "${input_dir}" -s "${split}" 
+python check_sim_to_data.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}"
 
 # if [ "$split" != "full" ]; then
 #     echo "Infer and simulate test"
-#     python infer_test.py -i "${input_dir}"
-#     python check_test_to_train.py -i "${input_dir}" -s "${split}" 
+#     python infer_test.py -i "${input_dir}" --stimulus "${stimulus}" --prior "${prior}"
+#     python check_test_to_train.py -i "${input_dir}" -s "${split}"
 # fi
 
-echo "Simulate KOV"
-python simulate_network_KOV.py -i "${input_dir}" -s "${split}"
+# echo "Simulate KOV"
+# python simulate_network_KOV.py -i "${input_dir}" -s "${split}"
 
-echo "Check KOV"
-python check_KOV_to_sim.py -i "${input_dir}" -s "${split}" 
+# echo "Check KOV"
+# python check_KOV_to_sim.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}"
 
 echo "All scripts executed !"

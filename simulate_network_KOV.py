@@ -173,9 +173,14 @@ def main(argv):
         model.a = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
         model.times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
         model.kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta.npy'))
+        model.rna = np.load(os.path.join(p, 'cardamomOT', 'data_rna.npy'))
         model.proba_traj = np.load(os.path.join(p, 'cardamomOT', 'proba_traj.npy'))
         model.ratios = np.load(os.path.join(p, 'cardamomOT', 'ratios.npy'))
         model.n_networks = np.load(os.path.join(p, 'cardamomOT', 'n_networks.npy'))
+        samples_path = os.path.join(p, 'cardamomOT', 'data_samples.npy')
+        if os.path.exists(samples_path):
+            model.samples_data = np.load(samples_path)
+            print("[simulate_network_KOV] Loaded per-cell sample IDs")
         print("[simulate_network_KOV] Successfully loaded all parameters")
     except FileNotFoundError as e:
         print(f"[simulate_network_KOV] Error: Missing parameter file: {e}")
@@ -206,24 +211,48 @@ def main(argv):
 
     if basal_simul_raw.ndim == 3:
         mask_path = os.path.join(p, 'cardamomOT', 'basal_ref_mask.npy')
-        n_samp, G_tot_b, n_nw_b = basal_simul_raw.shape
-        basal_clean = np.zeros((G_tot_b, n_nw_b))
+        n_samp, G_tot_b, _ = basal_simul_raw.shape
+
+        # ── Build per-sample clean basal (3-D) ────────────────────────────────
+        # Start from the per-sample inferred basal and replace, for each gene
+        # that was forced during training (basal_ref_mask), the perturbed
+        # samples with the mean of the *free* (unforced) samples.
+        basal_clean_3d = basal_simul_raw.copy()   # (n_samp, G_tot, n_nw)
         if os.path.exists(mask_path):
-            basal_ref_mask = np.load(mask_path)  # (n_samples, G_tot)
+            basal_ref_mask = np.load(mask_path)   # (n_samples, G_tot)
             for g in range(G_tot_b):
-                free = np.where(~basal_ref_mask[:, g])[0]
-                basal_clean[g] = (basal_simul_raw[free, g, :].mean(axis=0)
-                                  if len(free) > 0
-                                  else basal_simul_raw[:, g, :].mean(axis=0))
+                perturbed = np.where(basal_ref_mask[:, g])[0]
+                free      = np.where(~basal_ref_mask[:, g])[0]
+                if len(perturbed) > 0:
+                    clean_g = (basal_simul_raw[free, g, :].mean(axis=0)
+                               if len(free) > 0
+                               else basal_simul_raw[:, g, :].mean(axis=0))
+                    basal_clean_3d[perturbed, g, :] = clean_g
+
+        # 2-D average kept for ops that still need it (e.g. non-per-sample path)
+        basal_clean = basal_clean_3d.mean(axis=0)   # (G_tot, n_nw)
+
+        # ── Build temporal clean basal, preserving per-sample structure ────────
+        if basal_t_simul_raw.ndim == 4:
+            # (T-1, n_samp, G_tot, n_nw): normalise by *per-sample* static basal
+            # so the temporal modulation is correct for each sample.
+            temporal_factor = basal_t_simul_raw / (basal_simul_raw[np.newaxis] + EPS)
+            basal_t_clean = basal_clean_3d[np.newaxis] * temporal_factor  # (T-1, n_samp, G_tot, n_nw)
+            print(f"[simulate_network_KOV] basal_t_simul is 4-D (per-sample); "
+                  f"keeping {n_samp} samples for per-sample routing")
         else:
-            basal_clean = basal_simul_raw.mean(axis=0)
-        basal_mean_orig = basal_simul_raw.mean(axis=0)  # (G_tot, n_nw)
-        temporal_factor = basal_t_simul_raw / (basal_mean_orig[np.newaxis] + EPS)
-        basal_t_clean = basal_clean[np.newaxis] * temporal_factor  # (T, G_tot, n_nw)
-        print(f"[simulate_network_KOV] Computed clean 2D baseline from {n_samp}-sample basal")
+            # (T-1, G_tot, n_nw): normalise by sample-mean static basal
+            basal_mean_orig = basal_simul_raw.mean(axis=0)   # (G_tot, n_nw)
+            temporal_factor = basal_t_simul_raw / (basal_mean_orig[np.newaxis] + EPS)
+            basal_t_clean = basal_clean[np.newaxis] * temporal_factor     # (T-1, G_tot, n_nw)
+
+        print(f"[simulate_network_KOV] Clean baseline from {n_samp}-sample basal "
+              f"(basal_t shape: {basal_t_clean.shape})")
     else:
-        basal_clean = basal_simul_raw
-        basal_t_clean = basal_t_simul_raw
+        # 2-D basal (no per-sample structure)
+        basal_clean    = basal_simul_raw
+        basal_clean_3d = None
+        basal_t_clean  = basal_t_simul_raw
 
     N = np.sum(model.times_data == 0)
     times_simulation = np.zeros(len(times)*N)
@@ -248,9 +277,11 @@ def main(argv):
         label = f"KO_{ko_label}_OV_{ov_label}"
         print(f"\n[simulate_network_KOV] Simulating condition {idx}/{len(combos)}: {label}")
 
-        # Reset model to clean (unperturbed) baseline
+        # Reset model to clean (unperturbed) baseline.
+        # Use the per-sample 3-D basal when available so that simulate_trajectories_unitary
+        # can route each cell to its own sample's basal (same as simulate_network.py).
         try:
-            model.basal = basal_clean.copy()
+            model.basal = basal_clean_3d.copy() if basal_clean_3d is not None else basal_clean.copy()
             model.basal_t = basal_t_clean.copy()
             model.d_t = d_t_orig.copy()
             model.production_factor = None   # reset per-gene creation rate scaling
@@ -270,7 +301,10 @@ def main(argv):
             if gene in adata.var_names:
                 ind = ns + adata.var_names.get_loc(gene)
                 if pct is None:
-                    model.basal_t[:, ind] = -100 - np.sum(model.inter_t[-1, :, ind])
+                    if model.basal_t.ndim == 4:
+                        model.basal_t[:, :, ind] = -100 - np.sum(model.inter_t[-1, :, ind])
+                    else:
+                        model.basal_t[:, ind] = -100 - np.sum(model.inter_t[-1, :, ind])
                     print(f"[simulate_network_KOV]   KO 100%: {gene} (index {ind})")
                 else:
                     factor = max(1.0 - pct / 100.0, 1e-12)
@@ -289,7 +323,10 @@ def main(argv):
             if gene in adata.var_names:
                 ind = ns + adata.var_names.get_loc(gene)
                 if pct is None:
-                    model.basal_t[:, ind] = 100 + np.sum(model.inter_t[-1, :, ind])
+                    if model.basal_t.ndim == 4:
+                        model.basal_t[:, :, ind] = 100 + np.sum(model.inter_t[-1, :, ind])
+                    else:
+                        model.basal_t[:, ind] = 100 + np.sum(model.inter_t[-1, :, ind])
                     print(f"[simulate_network_KOV]   OV 100%: {gene} (index {ind})")
                 else:
                     factor = 1.0 / max(1.0 - pct / 100.0, 1e-12)

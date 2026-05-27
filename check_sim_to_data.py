@@ -46,18 +46,26 @@ def main(argv):
     """
     inputfile = ''
     split = ''
+    stimulus = 1.0
+    prior = 1.0
     try:
-        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split="])
+        opts, args = getopt.getopt(argv, "hi:s:t:p:",
+                                   ["input=", "split=", "stimulus=", "prior="])
     except getopt.GetoptError:
         print("[check_sim_to_data] Error: Invalid command-line arguments")
-        print("[check_sim_to_data] Usage: python check_sim_to_data.py -i <project_path> -s <split>")
+        print("[check_sim_to_data] Usage: python check_sim_to_data.py -i <project_path> -s <split> "
+              "[--stimulus <float>] [--prior <float>]")
         sys.exit(2)
-    
+
     for opt, arg in opts:
         if opt in ("-i", "--input"):
             inputfile = arg
         elif opt in ("-s", "--split"):
             split = '{}'.format(arg)
+        elif opt in ("-t", "--stimulus"):
+            stimulus = float(arg)
+        elif opt in ("-p", "--prior"):
+            prior = float(arg)
         elif opt == "-h":
             print(__doc__)
             sys.exit(0)
@@ -112,6 +120,9 @@ def main(argv):
     data_real = np.vstack([times, data_rna_extracted]).astype(float)
     G = np.size(data_real, 0)-1
     model = NetworkModel(G)
+    model.stimulus = stimulus
+    model.prior_network_pen = prior
+    print(f"[check_sim_to_data] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
 
     # Load mixture and simulation parameters
     print("[check_sim_to_data] Loading mixture and simulation parameters...")
@@ -232,8 +243,8 @@ def main(argv):
     if plot_in_script:
         print("[check_sim_to_data] Generating distribution comparison plots...")
         try:
-            plot_data_distrib(data_real, data_sim, t_data, t_simul, names, inputfile, outputfile, complement1)
-            plot_data_umap_altogether(data_real, data_ref, data_beta, data_netw_theta,
+            plot_data_distrib(data_ref, data_sim, t_data, t_simul, names, inputfile, outputfile, complement1)
+            plot_data_umap_altogether(data_ref, data_ref, data_beta, data_netw_theta,
                                   data_sim, t_data, t_simul, inputfile, 'Check', 'altogether_sim',
                                   cell_rd=cell_rd)
             print("[check_sim_to_data] Plots successfully generated")

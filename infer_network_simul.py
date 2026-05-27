@@ -44,11 +44,15 @@ def main(argv):
     """
     inputfile = ''
     split = ''
+    stimulus = 1.0
+    prior = 1.0
     try:
-        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split="])
+        opts, args = getopt.getopt(argv, "hi:s:t:p:",
+                                   ["input=", "split=", "stimulus=", "prior="])
     except getopt.GetoptError:
         print("[infer_network_simul] Error: Invalid command-line arguments")
-        print("[infer_network_simul] Usage: python infer_network_simul.py -i <project_path> -s <split>")
+        print("[infer_network_simul] Usage: python infer_network_simul.py -i <project_path> -s <split> "
+              "[--stimulus <float>] [--prior <float>]")
         sys.exit(2)
 
     for opt, arg in opts:
@@ -56,6 +60,10 @@ def main(argv):
             inputfile = arg
         elif opt in ("-s", "--split"):
             split = '{}'.format(arg)
+        elif opt in ("-t", "--stimulus"):
+            stimulus = float(arg)
+        elif opt in ("-p", "--prior"):
+            prior = float(arg)
         elif opt == "-h":
             print(__doc__)
             sys.exit(0)
@@ -92,6 +100,9 @@ def main(argv):
     print(f"[infer_network_simul] n_stimuli detected: {n_stimuli}")
 
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
+    model.stimulus = stimulus
+    model.prior_network_pen = prior
+    print(f"[infer_network_simul] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
 
     # Load inferred network parameters
     print("[infer_network_simul] Loading inferred network parameters...")
@@ -177,11 +188,6 @@ def main(argv):
         np.save(os.path.join(cardamom_dir, 'inter_t_simul'), model.inter_t)
         np.save(os.path.join(cardamom_dir, 'ratios'), model.ratios)
         np.save(os.path.join(cardamom_dir, 'degradations_temporal.npy'), model.d_t)
-        if model.kon_mlp is not None:
-            torch.save(model.kon_mlp.state_dict(), os.path.join(cardamom_dir, 'kon_mlp.pt'))
-            np.save(os.path.join(cardamom_dir, 'kon_mlp_config'),
-                    np.array([model.kon_mlp.G_genes], dtype=np.int32))
-            print(f"[infer_network_simul] Saved kon_mlp to {cardamom_dir}/kon_mlp.pt")
         print(f"[infer_network_simul] Successfully saved adapted parameters to {cardamom_dir}")
     except Exception as e:
         print(f"[infer_network_simul] Error saving parameters: {e}")

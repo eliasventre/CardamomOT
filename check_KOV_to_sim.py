@@ -97,18 +97,26 @@ def main(argv):
     """
     inputfile = ''
     split = ''
+    stimulus = 1.0
+    prior = 1.0
     try:
-        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split="])
+        opts, args = getopt.getopt(argv, "hi:s:t:p:",
+                                   ["input=", "split=", "stimulus=", "prior="])
     except getopt.GetoptError:
         print("[check_KOV_to_sim] Error: Invalid command-line arguments")
-        print("[check_KOV_to_sim] Usage: python check_KOV_to_sim.py -i <project_path> -s <split>")
+        print("[check_KOV_to_sim] Usage: python check_KOV_to_sim.py -i <project_path> -s <split> "
+              "[--stimulus <float>] [--prior <float>]")
         sys.exit(2)
-    
+
     for opt, arg in opts:
         if opt in ("-i", "--input"):
             inputfile = arg
         elif opt in ("-s", "--split"):
             split = '{}'.format(arg)
+        elif opt in ("-t", "--stimulus"):
+            stimulus = float(arg)
+        elif opt in ("-p", "--prior"):
+            prior = float(arg)
         elif opt == "-h":
             print(__doc__)
             sys.exit(0)
@@ -188,6 +196,9 @@ def main(argv):
     ns = mixture_parameters.shape[1] - G
 
     model = NetworkModel(G)
+    model.stimulus = stimulus
+    model.prior_network_pen = prior
+    print(f"[check_KOV_to_sim] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
 
     # Create AnnData objects for each perturbation combination
     print(f"[check_KOV_to_sim] Creating AnnData objects for {len(combos)} KO/OV combinations")

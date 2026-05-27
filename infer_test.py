@@ -46,16 +46,24 @@ def main(argv):
         argv: Command-line arguments (--input).
     """
     inputfile = ''
+    stimulus = 1.0
+    prior = 1.0
     try:
-        opts, args = getopt.getopt(argv, "hi:", ["input="])
+        opts, args = getopt.getopt(argv, "hi:t:p:",
+                                   ["input=", "stimulus=", "prior="])
     except getopt.GetoptError:
         print("[infer_test] Error: Invalid command-line arguments")
-        print("[infer_test] Usage: python infer_test.py -i <project_path>")
+        print("[infer_test] Usage: python infer_test.py -i <project_path> "
+              "[--stimulus <float>] [--prior <float>]")
         sys.exit(2)
 
     for opt, arg in opts:
         if opt in ("-i", "--input"):
             inputfile = arg
+        elif opt in ("-t", "--stimulus"):
+            stimulus = float(arg)
+        elif opt in ("-p", "--prior"):
+            prior = float(arg)
         elif opt == "-h":
             print(__doc__)
             sys.exit(0)
@@ -110,7 +118,10 @@ def main(argv):
 
     # ─── INITIALIZE MODEL AND LOAD TRAINING PARAMETERS ──────────────────
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
-    print(f"[infer_test] Initialized model with {adata.shape[1]} genes")
+    model.stimulus = stimulus
+    model.prior_network_pen = prior
+    print(f"[infer_test] Initialized model with {adata.shape[1]} genes, "
+          f"stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
 
     try:
         model.a = np.load(os.path.join(cardamom_dir, 'mixture_parameters.npy'))

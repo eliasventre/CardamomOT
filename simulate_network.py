@@ -19,11 +19,9 @@ Output files:
 import sys; sys.path += ['../']
 import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta
-from CardamomOT.inference.degradations import KonCorrectionMLP
 import getopt
 import anndata as ad
 import os
-import torch
 
 def main(argv):
     """
@@ -110,15 +108,6 @@ def main(argv):
         if os.path.exists(samples_path):
             model.samples_data = np.load(samples_path)
             print("[simulate_network] Loaded per-cell sample IDs")
-        mlp_path = os.path.join(p, 'cardamomOT', 'kon_mlp.pt')
-        cfg_path = os.path.join(p, 'cardamomOT', 'kon_mlp_config.npy')
-        if os.path.exists(mlp_path) and os.path.exists(cfg_path):
-            G_genes = int(np.load(cfg_path)[0])
-            mlp = KonCorrectionMLP(G_genes)
-            mlp.load_state_dict(torch.load(mlp_path, map_location="cpu"))
-            mlp.eval()
-            model.kon_mlp = mlp
-            print("[simulate_network] Loaded kon correction MLP")
         print("[simulate_network] Successfully loaded all network parameters")
     except FileNotFoundError as e:
         print(f"[simulate_network] Error: Missing parameter file: {e}")

@@ -75,6 +75,13 @@ python -m CardamomOT.cli pipeline -i my_project -s full -c 1 -r 0.6 -m 0.5
 - `-r 0.6`: rate parameter for kinetics
 - `-m 0.5`: mean expression threshold
 
+**`run.sh` script parameters** (positional):
+```bash
+./run.sh <input_dir> <split> <change> <rate> <mean> [stimulus=1.0] [prior=1.0]
+```
+- `stimulus` (6th arg, default `1.0`): penalization of stimulus edges — `0` = no stimulus influence, `1` = full
+- `prior` (7th arg, default `1.0`): penalization of edges absent from the prior network — `0` = forbidden, `1` = no prior
+
 #### Results
 
 The pipeline automatically creates these directories:
@@ -123,6 +130,9 @@ You can also run the Python scripts directly:
 ```bash
 # Example: infer network structure only
 python infer_network_structure.py -i my_project -s full
+
+# With stimulus penalization and prior network penalization
+python infer_network_structure.py -i my_project -s full --stimulus 0.0 --prior 0.5
 
 # With verbose output for debugging
 python infer_mixture.py -i my_project -s full -m 0.5 --verbose
@@ -193,6 +203,52 @@ For a single stimulus channel, a single-column file suffices. Values between 0 a
 **Fewer rows than timepoints:** if the file contains fewer rows than the number of unique timepoints in the data, the missing timepoints automatically inherit the value of the **last row**. This is useful when a stimulus reaches a plateau and you only want to specify the transition rows explicitly. Providing *more* rows than timepoints raises an error.
 
 **Simulation-specific schedule:** to use a *different* schedule during forward simulation (e.g. to test a new stimulus protocol after training), place `Data/stimulus_schedule_simul.txt`. `simulate_network.py` and `simulate_network_KOV.py` look for this file first, falling back to `stimulus_schedule.txt` if absent.
+
+---
+
+### Stimulus and prior-network penalization (`--stimulus`, `--prior`)
+
+Two scalar parameters let you **tune the influence of the stimulus and of a prior interaction graph** on network inference and simulation. They can be passed directly on the command line to all relevant scripts, or via `run.sh` / `run_pipeline.sh`.
+
+#### `--stimulus` (default `1.0`)
+
+Controls how strongly the **stimulus** regulates genes in the reference network matrix:
+
+| Value | Effect |
+|---|---|
+| `1.0` | Default — stimulus rows are set to 1 (full influence) |
+| `0.0` | Stimulus rows are zeroed out — the stimulus has no regulatory influence |
+| `0.5` | Intermediate penalization |
+
+```bash
+# In run.sh (6th positional argument, default 1.0)
+./run.sh experimental_datasets/Kameneva full 0 0.7 0.5 0.0   # disable stimulus
+
+# Or on a single script
+python infer_network_simul.py -i my_project -s full --stimulus 0.0
+```
+
+#### `--prior` (default `1.0`)
+
+Controls how strongly the **prior interaction graph** (`ref_network.csv`) penalizes edges that are absent from the prior:
+
+| Value | Effect |
+|---|---|
+| `1.0` | Default — no penalization; all edges are equally possible |
+| `0.0` | Edges absent from the prior are forbidden (`ref_network` acts as a hard sparsity mask) |
+| `0.5` | Soft penalization — absent edges are allowed but discouraged |
+
+```bash
+# In run.sh (7th positional argument, default 1.0)
+./run.sh experimental_datasets/Kameneva full 0 0.7 0.5 1.0 0.5   # soft prior
+
+# Or on a single script
+python infer_network_simul.py -i my_project -s full --prior 0.5
+```
+
+> Both parameters have their **default values defined in `NetworkModel`** (`base.py`) so omitting them leaves the behaviour unchanged. They correspond to `model.stimulus` and `model.prior_network_pen` in the source code.
+
+**Affected scripts:** `infer_network_structure.py`, `infer_network_simul.py`, `check_sim_to_data.py`, `infer_test.py`, `check_KOV_to_sim.py`. Output file names embed both values (e.g. `adata_sim_stim1.0_prior0.5.h5ad`) so runs with different settings are kept separate.
 
 ---
 
