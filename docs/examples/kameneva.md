@@ -34,28 +34,17 @@ The regulatory network captures the transition from multipotent progenitors (*SO
 
 ### In-silico perturbations
 
-KO experiments targeting *CHGA* with over-expression of *STMN2* test the role of chromaffin-to-sympathoblast reversibility:
-
-```python
-import anndata as ad
-
-ko_chga_ov_stmn2 = ad.read_h5ad(
-    "cardamomOT/adata_prot_simul_KO_CHGA_OV_STMN2_stim1.0_prior1.0.h5ad"
-)
-```
-
-Pre-computed results for several `stim` values are stored in `experimental_datasets/Kameneva/cardamomOT/`.
+KO experiments targeting *CHGA* with over-expression of *STMN2* test the role of chromaffin-to-sympathoblast reversibility. Pre-computed results for several `--stimulus` values are stored in `experimental_datasets/Kameneva/cardamomOT/` and visualised with `utils/plot_data_to_sim_KOV.ipynb`.
 
 ## Sensitivity to the stimulus parameter
 
-The `--stimulus` flag controls the strength of the penalisation applied to edges involving the external stimulus signal. A sweep over values 0.2, 0.3, 0.5, and 1.0 demonstrates that the core regulatory topology is robust across this range while the precise edge weights vary.
+A sweep over `--stimulus` values 0.2, 0.3, 0.5 and 1.0 demonstrates that the core regulatory topology is robust while precise edge weights vary. The pre-computed outputs for each value are available in `experimental_datasets/Kameneva/cardamomOT/`.
 
-```python
-import anndata as ad
+## Post-analysis notebooks
 
-for stim in [0.2, 0.3, 0.5, 1.0]:
-    adata = ad.read_h5ad(
-        f"cardamomOT/adata_beta_stim{stim}_prior1.0.h5ad"
-    )
-    print(f"stim={stim}: {adata.shape}")
-```
+| Notebook | Content |
+|---|---|
+| `plot_networks.ipynb` | Inferred GRN across stimulus values |
+| `plot_data_to_sim.ipynb` | Data vs simulation comparison (UMAP, marginals) |
+| `plot_data_to_sim_KOV.ipynb` | `KO_CHGA_OV_none`, `KO_none_OV_STMN2`, and combined perturbations |
+| `compare_cell_types.ipynb` | Sympathoblast/chromaffin proportions in data vs simulation |

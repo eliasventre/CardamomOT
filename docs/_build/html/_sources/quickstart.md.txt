@@ -62,7 +62,7 @@ cardamomot pipeline \
     -i my_project \
     -s full \                  # dataset split: full | train
     -c 0 \                     # differential gene selection (0=off, 1=on)
-    -r 0.7 \                   # rate parameter for kinetics
+    -r 1.0 \                   # cell-selection split rate (default 1)
     -m 1.0 \                   # mean expression threshold (-1=auto)
     --stimulus 1.0 \           # stimulus-edge penalisation in [0,1]
     --prior 1.0 \              # prior-network weighting in [0,1]
@@ -88,54 +88,54 @@ cardamomot step -i my_project network_inference
 
 ## Examine results
 
-Results land in `my_project/cardamom_output/`:
+Results land in `my_project/cardamomOT/`:
 
 ```
-cardamom_output/
+my_project/
 ├── cardamomOT/
-│   ├── adata_beta.h5ad           # kinetic parameters
-│   ├── adata_rna_traj_*.h5ad     # inferred RNA trajectories
-│   └── adata_prot_simul_*.h5ad   # simulated protein levels
-└── *.log
+│   ├── adata_beta_stim<s>_prior<p>.h5ad      # kinetic + network parameters
+│   ├── adata_rna_traj_stim<s>_prior<p>.h5ad  # inferred RNA trajectories
+│   ├── adata_prot_simul_stim<s>_prior<p>.h5ad # simulated protein levels
+│   └── adata_prot_simul_KO_<gene>_*.h5ad     # in-silico perturbation outputs
+└── Check/                                     # diagnostic figures
 ```
 
-Load and inspect the inferred model from Python:
+## Post-analysis
+
+The `utils/` directory contains Jupyter notebooks for the standard post-pipeline analyses:
+
+| Notebook | What it does |
+|---|---|
+| `plot_networks.ipynb` | Visualise the inferred GRN (edge weights, thresholding) |
+| `plot_data_to_sim.ipynb` | Compare observed data to simulated trajectories (UMAPs, marginals) |
+| `plot_data_to_sim_KOV.ipynb` | Compare wild-type and KO/OV simulations |
+| `compare_cell_types.ipynb` | Train a cell-type classifier and compare proportions across conditions |
+| `compare_cell_types_across_KOV.ipynb` | Cell-type proportions under each in-silico perturbation |
+
+These notebooks use the high-level functions exported by the package:
 
 ```python
 import anndata as ad
-from CardamomOT import NetworkModel
+from CardamomOT import (
+    train_classifier, predict_cell_types, plot_cell_type_proportions,
+    compare_marginals, plot_data_pmf_temporal,
+    plot_data_umap_toref, plot_data_umap_altogether,
+    animate_dynamic_grns,
+)
 
-# Load inferred parameters
-adata_beta = ad.read_h5ad("my_project/cardamom_output/cardamomOT/adata_beta.h5ad")
+p = "my_project/"
 
-# Reconstruct and simulate the network
-model = NetworkModel(adata_beta)
-simulation = model.simulate(n_cells=500)
-```
+# Load observed data and simulations
+adata      = ad.read_h5ad(p + "Data/data_full.h5ad")
+adata_sim  = ad.read_h5ad(p + "cardamomOT/adata_prot_simul_stim1.0_prior1.0.h5ad")
 
-## Python API
+# Compare marginal distributions per gene and time point
+compare_marginals(adata, adata_sim)
 
-For fine-grained control, CardamomOT can be used entirely from Python:
-
-```python
-import anndata as ad
-from CardamomOT import NetworkModel
-from CardamomOT.inference import kon_ref_vector, extract_degradation_rates
-
-adata = ad.read_h5ad("Data/data.h5ad")
-
-# --- step 1: burst kinetics ---
-adata_beta = kon_ref_vector(adata, ...)
-
-# --- step 2: degradation rates ---
-adata_beta = extract_degradation_rates(adata_beta, ...)
-
-# --- step 3: network inference ---
-model = NetworkModel(adata_beta)
-model.fit(adata, ...)
-
-# --- step 4: simulation ---
-simulated = model.simulate(n_cells=1000, time_points=[0, 2, 4, 7])
+# Cell-type classification and proportion comparison
+clf = train_classifier(adata, label_key="cell_type")
+predict_cell_types(clf, adata_sim)
+plot_cell_type_proportions(adata, adata_sim)
 ```
 
 See the [API reference](api.md) for all parameters.

@@ -335,28 +335,37 @@
 </section>
 <section id="in-silico-perturbations">
 <h3>In-silico perturbations<a class="headerlink" href="#in-silico-perturbations" title="Link to this heading">¶</a></h3>
-<p>KO experiments targeting <em>CHGA</em> with over-expression of <em>STMN2</em> test the role of chromaffin-to-sympathoblast reversibility:</p>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">anndata</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">ad</span>
-
-<span class="n">ko_chga_ov_stmn2</span> <span class="o">=</span> <span class="n">ad</span><span class="o">.</span><span class="n">read_h5ad</span><span class="p">(</span>
-    <span class="s2">&quot;cardamomOT/adata_prot_simul_KO_CHGA_OV_STMN2_stim1.0_prior1.0.h5ad&quot;</span>
-<span class="p">)</span>
-</pre></div>
-</div>
-<p>Pre-computed results for several <code class="docutils literal notranslate"><span class="pre">stim</span></code> values are stored in <code class="docutils literal notranslate"><span class="pre">experimental_datasets/Kameneva/cardamomOT/</span></code>.</p>
+<p>KO experiments targeting <em>CHGA</em> with over-expression of <em>STMN2</em> test the role of chromaffin-to-sympathoblast reversibility. Pre-computed results for several <code class="docutils literal notranslate"><span class="pre">--stimulus</span></code> values are stored in <code class="docutils literal notranslate"><span class="pre">experimental_datasets/Kameneva/cardamomOT/</span></code> and visualised with <code class="docutils literal notranslate"><span class="pre">utils/plot_data_to_sim_KOV.ipynb</span></code>.</p>
 </section>
 </section>
 <section id="sensitivity-to-the-stimulus-parameter">
 <h2>Sensitivity to the stimulus parameter<a class="headerlink" href="#sensitivity-to-the-stimulus-parameter" title="Link to this heading">¶</a></h2>
-<p>The <code class="docutils literal notranslate"><span class="pre">--stimulus</span></code> flag controls the strength of the penalisation applied to edges involving the external stimulus signal. A sweep over values 0.2, 0.3, 0.5, and 1.0 demonstrates that the core regulatory topology is robust across this range while the precise edge weights vary.</p>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">anndata</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">ad</span>
-
-<span class="k">for</span> <span class="n">stim</span> <span class="ow">in</span> <span class="p">[</span><span class="mf">0.2</span><span class="p">,</span> <span class="mf">0.3</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">]:</span>
-    <span class="n">adata</span> <span class="o">=</span> <span class="n">ad</span><span class="o">.</span><span class="n">read_h5ad</span><span class="p">(</span>
-        <span class="sa">f</span><span class="s2">&quot;cardamomOT/adata_beta_stim</span><span class="si">{</span><span class="n">stim</span><span class="si">}</span><span class="s2">_prior1.0.h5ad&quot;</span>
-    <span class="p">)</span>
-    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;stim=</span><span class="si">{</span><span class="n">stim</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">adata</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
-</pre></div>
+<p>A sweep over <code class="docutils literal notranslate"><span class="pre">--stimulus</span></code> values 0.2, 0.3, 0.5 and 1.0 demonstrates that the core regulatory topology is robust while precise edge weights vary. The pre-computed outputs for each value are available in <code class="docutils literal notranslate"><span class="pre">experimental_datasets/Kameneva/cardamomOT/</span></code>.</p>
+</section>
+<section id="post-analysis-notebooks">
+<h2>Post-analysis notebooks<a class="headerlink" href="#post-analysis-notebooks" title="Link to this heading">¶</a></h2>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Notebook</p></th>
+<th class="head"><p>Content</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">plot_networks.ipynb</span></code></p></td>
+<td><p>Inferred GRN across stimulus values</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">plot_data_to_sim.ipynb</span></code></p></td>
+<td><p>Data vs simulation comparison (UMAP, marginals)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">plot_data_to_sim_KOV.ipynb</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">KO_CHGA_OV_none</span></code>, <code class="docutils literal notranslate"><span class="pre">KO_none_OV_STMN2</span></code>, and combined perturbations</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">compare_cell_types.ipynb</span></code></p></td>
+<td><p>Sympathoblast/chromaffin proportions in data vs simulation</p></td>
+</tr>
+</tbody>
+</table>
 </div>
 </section>
 </section>
@@ -425,6 +434,7 @@
 </ul>
 </li>
 <li><a class="reference internal" href="#sensitivity-to-the-stimulus-parameter">Sensitivity to the stimulus parameter</a></li>
+<li><a class="reference internal" href="#post-analysis-notebooks">Post-analysis notebooks</a></li>
 </ul>
 </li>
 </ul>

@@ -353,23 +353,36 @@
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">experimental_datasets</span><span class="o">/</span><span class="n">Semrau</span><span class="o">/</span><span class="n">cardamomOT</span><span class="o">/</span><span class="n">adata_prot_simul_KO_none_OV_</span><span class="o">&lt;</span><span class="n">gene</span><span class="o">&gt;</span><span class="n">_</span><span class="o">*.</span><span class="n">h5ad</span>
 </pre></div>
 </div>
-<p>Load and compare with wild-type simulation:</p>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">anndata</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">ad</span>
-<span class="kn">import</span><span class="w"> </span><span class="nn">matplotlib.pyplot</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">plt</span>
-
-<span class="n">wt</span>  <span class="o">=</span> <span class="n">ad</span><span class="o">.</span><span class="n">read_h5ad</span><span class="p">(</span><span class="s2">&quot;cardamomOT/adata_prot_simul_stim1.0_prior1.0.h5ad&quot;</span><span class="p">)</span>
-<span class="n">ko</span>  <span class="o">=</span> <span class="n">ad</span><span class="o">.</span><span class="n">read_h5ad</span><span class="p">(</span><span class="s2">&quot;cardamomOT/adata_prot_simul_KO_none_OV_Zfp42_stim1.0_prior1.0.h5ad&quot;</span><span class="p">)</span>
-
-<span class="kn">from</span><span class="w"> </span><span class="nn">CardamomOT</span><span class="w"> </span><span class="kn">import</span> <span class="n">compare_marginals</span>
-<span class="n">compare_marginals</span><span class="p">(</span><span class="n">wt</span><span class="p">,</span> <span class="n">ko</span><span class="p">,</span> <span class="n">genes</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;Zfp42&quot;</span><span class="p">,</span> <span class="s2">&quot;Nanog&quot;</span><span class="p">,</span> <span class="s2">&quot;Gata6&quot;</span><span class="p">])</span>
-<span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
-</pre></div>
+<p>Wild-type and KO outputs can be compared using the <code class="docutils literal notranslate"><span class="pre">utils/plot_data_to_sim_KOV.ipynb</span></code> notebook,
+which calls <code class="docutils literal notranslate"><span class="pre">plot_results_rna_clean</span></code> for each perturbation condition.</p>
+</section>
+</section>
+<section id="post-analysis-notebooks">
+<h2>Post-analysis notebooks<a class="headerlink" href="#post-analysis-notebooks" title="Link to this heading">¶</a></h2>
+<p>The following notebooks in <code class="docutils literal notranslate"><span class="pre">utils/</span></code> apply to this dataset:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Notebook</p></th>
+<th class="head"><p>Content</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">plot_networks.ipynb</span></code></p></td>
+<td><p>Inferred GRN with edge thresholding</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">plot_data_to_sim.ipynb</span></code></p></td>
+<td><p>UMAP and marginal comparison between data and simulation</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">plot_data_to_sim_KOV.ipynb</span></code></p></td>
+<td><p>Wild-type vs KO/OV simulations (<code class="docutils literal notranslate"><span class="pre">KO_none_OV_Zfp42</span></code>, <code class="docutils literal notranslate"><span class="pre">KO_none_OV_Dnmt3a</span></code>, …)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">compare_cell_types.ipynb</span></code></p></td>
+<td><p>Cell-type proportions in data vs simulation</p></td>
+</tr>
+</tbody>
+</table>
 </div>
-</section>
-</section>
-<section id="notebook">
-<h2>Notebook<a class="headerlink" href="#notebook" title="Link to this heading">¶</a></h2>
-<p>An interactive notebook walking through this analysis is available in the repository at <code class="docutils literal notranslate"><span class="pre">experimental_datasets/Semrau/pipeline.ipynb</span></code>.</p>
 </section>
 </section>
 
@@ -438,7 +451,7 @@
 <li><a class="reference internal" href="#in-silico-knock-outs">In-silico knock-outs</a></li>
 </ul>
 </li>
-<li><a class="reference internal" href="#notebook">Notebook</a></li>
+<li><a class="reference internal" href="#post-analysis-notebooks">Post-analysis notebooks</a></li>
 </ul>
 </li>
 </ul>

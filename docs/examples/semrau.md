@@ -52,20 +52,16 @@ CardamomOT supports virtual knock-out (KO) experiments by setting one or more ge
 experimental_datasets/Semrau/cardamomOT/adata_prot_simul_KO_none_OV_<gene>_*.h5ad
 ```
 
-Load and compare with wild-type simulation:
+Wild-type and KO outputs can be compared using the `utils/plot_data_to_sim_KOV.ipynb` notebook,
+which calls `plot_results_rna_clean` for each perturbation condition.
 
-```python
-import anndata as ad
-import matplotlib.pyplot as plt
+## Post-analysis notebooks
 
-wt  = ad.read_h5ad("cardamomOT/adata_prot_simul_stim1.0_prior1.0.h5ad")
-ko  = ad.read_h5ad("cardamomOT/adata_prot_simul_KO_none_OV_Zfp42_stim1.0_prior1.0.h5ad")
+The following notebooks in `utils/` apply to this dataset:
 
-from CardamomOT import compare_marginals
-compare_marginals(wt, ko, genes=["Zfp42", "Nanog", "Gata6"])
-plt.show()
-```
-
-## Notebook
-
-An interactive notebook walking through this analysis is available in the repository at `experimental_datasets/Semrau/pipeline.ipynb`.
+| Notebook | Content |
+|---|---|
+| `plot_networks.ipynb` | Inferred GRN with edge thresholding |
+| `plot_data_to_sim.ipynb` | UMAP and marginal comparison between data and simulation |
+| `plot_data_to_sim_KOV.ipynb` | Wild-type vs KO/OV simulations (`KO_none_OV_Zfp42`, `KO_none_OV_Dnmt3a`, …) |
+| `compare_cell_types.ipynb` | Cell-type proportions in data vs simulation |

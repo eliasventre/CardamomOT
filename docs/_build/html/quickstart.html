@@ -423,7 +423,7 @@
 <span class="w">    </span>-i<span class="w"> </span>my_project<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>-s<span class="w"> </span>full<span class="w"> </span><span class="se">\ </span><span class="w">                 </span><span class="c1"># dataset split: full | train</span>
 <span class="w">    </span>-c<span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="se">\ </span><span class="w">                    </span><span class="c1"># differential gene selection (0=off, 1=on)</span>
-<span class="w">    </span>-r<span class="w"> </span><span class="m">0</span>.7<span class="w"> </span><span class="se">\ </span><span class="w">                  </span><span class="c1"># rate parameter for kinetics</span>
+<span class="w">    </span>-r<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">                  </span><span class="c1"># cell-selection split rate (default 1)</span>
 <span class="w">    </span>-m<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">                  </span><span class="c1"># mean expression threshold (-1=auto)</span>
 <span class="w">    </span>--stimulus<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">          </span><span class="c1"># stimulus-edge penalisation in [0,1]</span>
 <span class="w">    </span>--prior<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">             </span><span class="c1"># prior-network weighting in [0,1]</span>
@@ -465,49 +465,68 @@ cardamomot<span class="w"> </span>step<span class="w"> </span>-i<span class="w">
 </section>
 <section id="examine-results">
 <h2>Examine results<a class="headerlink" href="#examine-results" title="Link to this heading">¶</a></h2>
-<p>Results land in <code class="docutils literal notranslate"><span class="pre">my_project/cardamom_output/</span></code>:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>cardamom_output/
+<p>Results land in <code class="docutils literal notranslate"><span class="pre">my_project/cardamomOT/</span></code>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>my_project/
 ├── cardamomOT/
-│   ├── adata_beta.h5ad           # kinetic parameters
-│   ├── adata_rna_traj_*.h5ad     # inferred RNA trajectories
-│   └── adata_prot_simul_*.h5ad   # simulated protein levels
-└── *.log
-</pre></div>
-</div>
-<p>Load and inspect the inferred model from Python:</p>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">anndata</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">ad</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">CardamomOT</span><span class="w"> </span><span class="kn">import</span> <span class="n">NetworkModel</span>
-
-<span class="c1"># Load inferred parameters</span>
-<span class="n">adata_beta</span> <span class="o">=</span> <span class="n">ad</span><span class="o">.</span><span class="n">read_h5ad</span><span class="p">(</span><span class="s2">&quot;my_project/cardamom_output/cardamomOT/adata_beta.h5ad&quot;</span><span class="p">)</span>
-
-<span class="c1"># Reconstruct and simulate the network</span>
-<span class="n">model</span> <span class="o">=</span> <span class="n">NetworkModel</span><span class="p">(</span><span class="n">adata_beta</span><span class="p">)</span>
-<span class="n">simulation</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">simulate</span><span class="p">(</span><span class="n">n_cells</span><span class="o">=</span><span class="mi">500</span><span class="p">)</span>
+│   ├── adata_beta_stim&lt;s&gt;_prior&lt;p&gt;.h5ad      # kinetic + network parameters
+│   ├── adata_rna_traj_stim&lt;s&gt;_prior&lt;p&gt;.h5ad  # inferred RNA trajectories
+│   ├── adata_prot_simul_stim&lt;s&gt;_prior&lt;p&gt;.h5ad # simulated protein levels
+│   └── adata_prot_simul_KO_&lt;gene&gt;_*.h5ad     # in-silico perturbation outputs
+└── Check/                                     # diagnostic figures
 </pre></div>
 </div>
 </section>
-<section id="python-api">
-<h2>Python API<a class="headerlink" href="#python-api" title="Link to this heading">¶</a></h2>
-<p>For fine-grained control, CardamomOT can be used entirely from Python:</p>
+<section id="post-analysis">
+<h2>Post-analysis<a class="headerlink" href="#post-analysis" title="Link to this heading">¶</a></h2>
+<p>The <code class="docutils literal notranslate"><span class="pre">utils/</span></code> directory contains Jupyter notebooks for the standard post-pipeline analyses:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Notebook</p></th>
+<th class="head"><p>What it does</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">plot_networks.ipynb</span></code></p></td>
+<td><p>Visualise the inferred GRN (edge weights, thresholding)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">plot_data_to_sim.ipynb</span></code></p></td>
+<td><p>Compare observed data to simulated trajectories (UMAPs, marginals)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">plot_data_to_sim_KOV.ipynb</span></code></p></td>
+<td><p>Compare wild-type and KO/OV simulations</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">compare_cell_types.ipynb</span></code></p></td>
+<td><p>Train a cell-type classifier and compare proportions across conditions</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">compare_cell_types_across_KOV.ipynb</span></code></p></td>
+<td><p>Cell-type proportions under each in-silico perturbation</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>These notebooks use the high-level functions exported by the package:</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">anndata</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">ad</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">CardamomOT</span><span class="w"> </span><span class="kn">import</span> <span class="n">NetworkModel</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">CardamomOT.inference</span><span class="w"> </span><span class="kn">import</span> <span class="n">kon_ref_vector</span><span class="p">,</span> <span class="n">extract_degradation_rates</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">CardamomOT</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">train_classifier</span><span class="p">,</span> <span class="n">predict_cell_types</span><span class="p">,</span> <span class="n">plot_cell_type_proportions</span><span class="p">,</span>
+    <span class="n">compare_marginals</span><span class="p">,</span> <span class="n">plot_data_pmf_temporal</span><span class="p">,</span>
+    <span class="n">plot_data_umap_toref</span><span class="p">,</span> <span class="n">plot_data_umap_altogether</span><span class="p">,</span>
+    <span class="n">animate_dynamic_grns</span><span class="p">,</span>
+<span class="p">)</span>
 
-<span class="n">adata</span> <span class="o">=</span> <span class="n">ad</span><span class="o">.</span><span class="n">read_h5ad</span><span class="p">(</span><span class="s2">&quot;Data/data.h5ad&quot;</span><span class="p">)</span>
+<span class="n">p</span> <span class="o">=</span> <span class="s2">&quot;my_project/&quot;</span>
 
-<span class="c1"># --- step 1: burst kinetics ---</span>
-<span class="n">adata_beta</span> <span class="o">=</span> <span class="n">kon_ref_vector</span><span class="p">(</span><span class="n">adata</span><span class="p">,</span> <span class="o">...</span><span class="p">)</span>
+<span class="c1"># Load observed data and simulations</span>
+<span class="n">adata</span>      <span class="o">=</span> <span class="n">ad</span><span class="o">.</span><span class="n">read_h5ad</span><span class="p">(</span><span class="n">p</span> <span class="o">+</span> <span class="s2">&quot;Data/data_full.h5ad&quot;</span><span class="p">)</span>
+<span class="n">adata_sim</span>  <span class="o">=</span> <span class="n">ad</span><span class="o">.</span><span class="n">read_h5ad</span><span class="p">(</span><span class="n">p</span> <span class="o">+</span> <span class="s2">&quot;cardamomOT/adata_prot_simul_stim1.0_prior1.0.h5ad&quot;</span><span class="p">)</span>
 
-<span class="c1"># --- step 2: degradation rates ---</span>
-<span class="n">adata_beta</span> <span class="o">=</span> <span class="n">extract_degradation_rates</span><span class="p">(</span><span class="n">adata_beta</span><span class="p">,</span> <span class="o">...</span><span class="p">)</span>
+<span class="c1"># Compare marginal distributions per gene and time point</span>
+<span class="n">compare_marginals</span><span class="p">(</span><span class="n">adata</span><span class="p">,</span> <span class="n">adata_sim</span><span class="p">)</span>
 
-<span class="c1"># --- step 3: network inference ---</span>
-<span class="n">model</span> <span class="o">=</span> <span class="n">NetworkModel</span><span class="p">(</span><span class="n">adata_beta</span><span class="p">)</span>
-<span class="n">model</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">adata</span><span class="p">,</span> <span class="o">...</span><span class="p">)</span>
-
-<span class="c1"># --- step 4: simulation ---</span>
-<span class="n">simulated</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">simulate</span><span class="p">(</span><span class="n">n_cells</span><span class="o">=</span><span class="mi">1000</span><span class="p">,</span> <span class="n">time_points</span><span class="o">=</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">7</span><span class="p">])</span>
+<span class="c1"># Cell-type classification and proportion comparison</span>
+<span class="n">clf</span> <span class="o">=</span> <span class="n">train_classifier</span><span class="p">(</span><span class="n">adata</span><span class="p">,</span> <span class="n">label_key</span><span class="o">=</span><span class="s2">&quot;cell_type&quot;</span><span class="p">)</span>
+<span class="n">predict_cell_types</span><span class="p">(</span><span class="n">clf</span><span class="p">,</span> <span class="n">adata_sim</span><span class="p">)</span>
+<span class="n">plot_cell_type_proportions</span><span class="p">(</span><span class="n">adata</span><span class="p">,</span> <span class="n">adata_sim</span><span class="p">)</span>
 </pre></div>
 </div>
 <p>See the <a class="reference internal" href="api.html"><span class="std std-doc">API reference</span></a> for all parameters.</p>
@@ -575,7 +594,7 @@ cardamomot<span class="w"> </span>step<span class="w"> </span>-i<span class="w">
 <li><a class="reference internal" href="#run-in-batch-mode">Run in batch mode</a></li>
 <li><a class="reference internal" href="#run-individual-steps">Run individual steps</a></li>
 <li><a class="reference internal" href="#examine-results">Examine results</a></li>
-<li><a class="reference internal" href="#python-api">Python API</a></li>
+<li><a class="reference internal" href="#post-analysis">Post-analysis</a></li>
 </ul>
 </li>
 </ul>

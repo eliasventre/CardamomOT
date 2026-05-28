@@ -39,44 +39,20 @@ Key differences from the other datasets:
 
 Pre-computed outputs for both `--prior 0.5` and `--prior 1.0` are stored in `experimental_datasets/Schiebinger/cardamomOT/`.
 
-## Loading pre-computed results
+## Post-analysis notebooks
 
-```python
-import anndata as ad
-from CardamomOT import NetworkModel, plot_data_pmf_temporal
-import matplotlib.pyplot as plt
+Pre-computed outputs are visualised with the notebooks in `utils/`:
 
-# Load inferred kinetic parameters
-adata_beta = ad.read_h5ad(
-    "experimental_datasets/Schiebinger/cardamomOT/adata_beta_stim1.0_prior1.0.h5ad"
-)
-
-# Load simulated trajectories
-adata_sim = ad.read_h5ad(
-    "experimental_datasets/Schiebinger/cardamomOT/adata_prot_simul_stim1.0_prior1.0.h5ad"
-)
-
-# Load real RNA trajectories for comparison
-adata_rna = ad.read_h5ad(
-    "experimental_datasets/Schiebinger/cardamomOT/adata_rna_traj_stim1.0_prior1.0.h5ad"
-)
-
-# Compare marginals: simulated vs observed
-plot_data_pmf_temporal(adata_sim, adata_rna, genes=["Klf4", "Esrrb", "Col5a2"])
-plt.tight_layout()
-plt.show()
-```
+| Notebook | Content |
+|---|---|
+| `plot_networks.ipynb` | Inferred GRN (stimulus-driven vs autonomous edges) |
+| `plot_data_to_sim.ipynb` | Data vs simulation comparison across 18 time points |
+| `plot_data_to_sim_KOV.ipynb` | `KO_none_OV_Obox6-Zfp42` and other perturbations |
+| `compare_cell_types.ipynb` | MEF/iPSC proportions in data vs simulation |
 
 ## In-silico KO experiments
 
-Silencing the reprogramming factors in-silico and observing whether the system can still reach the iPSC attractor:
-
-```python
-ko_obox6_zfp42 = ad.read_h5ad(
-    "experimental_datasets/Schiebinger/cardamomOT/"
-    "adata_prot_simul_KO_none_OV_Obox6-Zfp42_stim1.0_prior1.0.h5ad"
-)
-```
+Silencing reprogramming factors in-silico tests whether the system can reach the iPSC attractor autonomously. Pre-computed outputs (e.g. `KO_none_OV_Obox6-Zfp42`, `KO_none_OV_Zfp42`) are stored in `experimental_datasets/Schiebinger/cardamomOT/` and compared to the wild-type simulation using `utils/plot_data_to_sim_KOV.ipynb`.
 
 ## Key methodological point
 

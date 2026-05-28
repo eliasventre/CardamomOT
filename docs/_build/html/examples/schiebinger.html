@@ -340,43 +340,36 @@
 </ul>
 <p>Pre-computed outputs for both <code class="docutils literal notranslate"><span class="pre">--prior</span> <span class="pre">0.5</span></code> and <code class="docutils literal notranslate"><span class="pre">--prior</span> <span class="pre">1.0</span></code> are stored in <code class="docutils literal notranslate"><span class="pre">experimental_datasets/Schiebinger/cardamomOT/</span></code>.</p>
 </section>
-<section id="loading-pre-computed-results">
-<h2>Loading pre-computed results<a class="headerlink" href="#loading-pre-computed-results" title="Link to this heading">¶</a></h2>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">anndata</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">ad</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">CardamomOT</span><span class="w"> </span><span class="kn">import</span> <span class="n">NetworkModel</span><span class="p">,</span> <span class="n">plot_data_pmf_temporal</span>
-<span class="kn">import</span><span class="w"> </span><span class="nn">matplotlib.pyplot</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">plt</span>
-
-<span class="c1"># Load inferred kinetic parameters</span>
-<span class="n">adata_beta</span> <span class="o">=</span> <span class="n">ad</span><span class="o">.</span><span class="n">read_h5ad</span><span class="p">(</span>
-    <span class="s2">&quot;experimental_datasets/Schiebinger/cardamomOT/adata_beta_stim1.0_prior1.0.h5ad&quot;</span>
-<span class="p">)</span>
-
-<span class="c1"># Load simulated trajectories</span>
-<span class="n">adata_sim</span> <span class="o">=</span> <span class="n">ad</span><span class="o">.</span><span class="n">read_h5ad</span><span class="p">(</span>
-    <span class="s2">&quot;experimental_datasets/Schiebinger/cardamomOT/adata_prot_simul_stim1.0_prior1.0.h5ad&quot;</span>
-<span class="p">)</span>
-
-<span class="c1"># Load real RNA trajectories for comparison</span>
-<span class="n">adata_rna</span> <span class="o">=</span> <span class="n">ad</span><span class="o">.</span><span class="n">read_h5ad</span><span class="p">(</span>
-    <span class="s2">&quot;experimental_datasets/Schiebinger/cardamomOT/adata_rna_traj_stim1.0_prior1.0.h5ad&quot;</span>
-<span class="p">)</span>
-
-<span class="c1"># Compare marginals: simulated vs observed</span>
-<span class="n">plot_data_pmf_temporal</span><span class="p">(</span><span class="n">adata_sim</span><span class="p">,</span> <span class="n">adata_rna</span><span class="p">,</span> <span class="n">genes</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;Klf4&quot;</span><span class="p">,</span> <span class="s2">&quot;Esrrb&quot;</span><span class="p">,</span> <span class="s2">&quot;Col5a2&quot;</span><span class="p">])</span>
-<span class="n">plt</span><span class="o">.</span><span class="n">tight_layout</span><span class="p">()</span>
-<span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
-</pre></div>
+<section id="post-analysis-notebooks">
+<h2>Post-analysis notebooks<a class="headerlink" href="#post-analysis-notebooks" title="Link to this heading">¶</a></h2>
+<p>Pre-computed outputs are visualised with the notebooks in <code class="docutils literal notranslate"><span class="pre">utils/</span></code>:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Notebook</p></th>
+<th class="head"><p>Content</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">plot_networks.ipynb</span></code></p></td>
+<td><p>Inferred GRN (stimulus-driven vs autonomous edges)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">plot_data_to_sim.ipynb</span></code></p></td>
+<td><p>Data vs simulation comparison across 18 time points</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">plot_data_to_sim_KOV.ipynb</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">KO_none_OV_Obox6-Zfp42</span></code> and other perturbations</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">compare_cell_types.ipynb</span></code></p></td>
+<td><p>MEF/iPSC proportions in data vs simulation</p></td>
+</tr>
+</tbody>
+</table>
 </div>
 </section>
 <section id="in-silico-ko-experiments">
 <h2>In-silico KO experiments<a class="headerlink" href="#in-silico-ko-experiments" title="Link to this heading">¶</a></h2>
-<p>Silencing the reprogramming factors in-silico and observing whether the system can still reach the iPSC attractor:</p>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">ko_obox6_zfp42</span> <span class="o">=</span> <span class="n">ad</span><span class="o">.</span><span class="n">read_h5ad</span><span class="p">(</span>
-    <span class="s2">&quot;experimental_datasets/Schiebinger/cardamomOT/&quot;</span>
-    <span class="s2">&quot;adata_prot_simul_KO_none_OV_Obox6-Zfp42_stim1.0_prior1.0.h5ad&quot;</span>
-<span class="p">)</span>
-</pre></div>
-</div>
+<p>Silencing reprogramming factors in-silico tests whether the system can reach the iPSC attractor autonomously. Pre-computed outputs (e.g. <code class="docutils literal notranslate"><span class="pre">KO_none_OV_Obox6-Zfp42</span></code>, <code class="docutils literal notranslate"><span class="pre">KO_none_OV_Zfp42</span></code>) are stored in <code class="docutils literal notranslate"><span class="pre">experimental_datasets/Schiebinger/cardamomOT/</span></code> and compared to the wild-type simulation using <code class="docutils literal notranslate"><span class="pre">utils/plot_data_to_sim_KOV.ipynb</span></code>.</p>
 </section>
 <section id="key-methodological-point">
 <h2>Key methodological point<a class="headerlink" href="#key-methodological-point" title="Link to this heading">¶</a></h2>
@@ -443,7 +436,7 @@
 <li><a class="reference internal" href="#biological-context">Biological context</a></li>
 <li><a class="reference internal" href="#the-non-trivial-stimulus-schedule">The non-trivial stimulus schedule</a></li>
 <li><a class="reference internal" href="#cardamomot-configuration">CardamomOT configuration</a></li>
-<li><a class="reference internal" href="#loading-pre-computed-results">Loading pre-computed results</a></li>
+<li><a class="reference internal" href="#post-analysis-notebooks">Post-analysis notebooks</a></li>
 <li><a class="reference internal" href="#in-silico-ko-experiments">In-silico KO experiments</a></li>
 <li><a class="reference internal" href="#key-methodological-point">Key methodological point</a></li>
 </ul>
