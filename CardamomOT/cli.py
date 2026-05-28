@@ -234,7 +234,7 @@ def main() -> None:
     p_pipe.add_argument('-s', '--split', default='full', help='data split (full/train)')
     p_pipe.add_argument('-c', '--change', default='0',
                         help='differential gene selection (0=off, 1=on)')
-    p_pipe.add_argument('-r', '--rate', default='1', help='gene-selection split rate (default: 1)')
+    p_pipe.add_argument('-r', '--rate', default='1', help='cell-selection split rate (default: 1)')
     p_pipe.add_argument('-m', '--mean', default='-1', help='mean expression threshold (-1=auto)')
     p_pipe.add_argument('--stimulus', default='-1',
                         help='stimulus-edge penalisation in [0,1] (-1=model default)')
