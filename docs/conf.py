@@ -1,5 +1,24 @@
 import sys
 import os
+from unittest.mock import MagicMock
+
+# Mock heavy scientific dependencies — not installed in the ReadTheDocs build env
+_MOCK_MODULES = [
+    "numpy", "numpy.random", "numpy.linalg",
+    "scipy", "scipy.sparse", "scipy.stats", "scipy.optimize",
+    "pandas",
+    "anndata",
+    "scanpy", "scanpy.pp",
+    "sklearn", "sklearn.ensemble",
+    "matplotlib", "matplotlib.pyplot", "matplotlib.patches", "matplotlib.cm",
+    "umap",
+    "networkx",
+    "harissa",
+    "numexpr", "numexpr.utils",
+]
+for _mod in _MOCK_MODULES:
+    if _mod not in sys.modules:
+        sys.modules[_mod] = MagicMock()
 
 sys.path.insert(0, os.path.abspath(".."))
 
@@ -40,7 +59,7 @@ autoapi_keep_files = True
 
 # -- nbsphinx -----------------------------------------------------------------
 nbsphinx_execute = "never"  # notebooks are pre-executed and committed with outputs
-nbsphinx_allow_errors = False
+nbsphinx_allow_errors = True
 
 # -- intersphinx --------------------------------------------------------------
 intersphinx_mapping = {
