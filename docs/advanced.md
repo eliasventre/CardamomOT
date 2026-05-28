@@ -43,7 +43,10 @@ HAND2
 cardamomot step select_DEgenes_and_split -i my_project -s full -c 0
 ```
 
-When `gene_list.txt` is present the automatic selection is skipped and only those genes are used throughout the pipeline.
+When `gene_list.txt` is present, those genes are **added** to the final selection — they are not a replacement. The full behaviour depends on the `-c` flag:
+
+- **`-c 1`**: genes variable across time, conditions, and cell types are selected automatically, then the genes in `gene_list.txt` are appended (provided they are non-constant in time).
+- **`-c 0`**: no automatic differential selection is performed; only the genes in `gene_list.txt` that are non-constant in time are kept.
 
 ---
 
