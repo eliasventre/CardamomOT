@@ -9,7 +9,9 @@ from .characterize_cell_type import (
 )
 from .plot_results import (
     plot_results_rna_mixture, plot_results_rna_clean, plot_results_prot,
-    plot_results_rna_clean_kov,
+)
+from .plot_results_kov import (
+    plot_results_sim_kov, compare_cell_types,
 )
 from .plot_networks import (
     analyse_reseau, reseau_top_regulateurs, plot_network,
@@ -22,6 +24,6 @@ __all__ = [
     'predict_cell_types', 'train_classifier', 'plot_cell_type_proportions',
     'check_cell_types_full', 'check_cell_types_mixture',
     'plot_results_rna_mixture', 'plot_results_rna_clean', 'plot_results_prot',
-    'plot_results_rna_clean_kov',
+    'plot_results_sim_kov', 'compare_cell_types',
     'analyse_reseau', 'reseau_top_regulateurs', 'plot_network',
 ]

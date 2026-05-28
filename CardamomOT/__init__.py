@@ -78,7 +78,8 @@ from .tools import (
     plot_results_rna_mixture,
     plot_results_rna_clean,
     plot_results_prot,
-    plot_results_rna_clean_kov,
+    plot_results_sim_kov,
+    compare_cell_types,
     analyse_reseau,
     reseau_top_regulateurs,
     plot_network,
@@ -122,7 +123,9 @@ __all__ = [
     "plot_results_rna_mixture",
     "plot_results_rna_clean",
     "plot_results_prot",
-    "plot_results_rna_clean_kov",
+    # KO/OV perturbation analysis
+    "plot_results_sim_kov",
+    "compare_cell_types",
     # Network visualisation
     "analyse_reseau",
     "reseau_top_regulateurs",

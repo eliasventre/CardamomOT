@@ -151,9 +151,9 @@ exported by the package. You can also call these functions directly in your own 
 |---|---|
 | `plot_networks.ipynb` | Inferred GRN — per-regulator subgraphs and reduced network (`plot_network`) |
 | `plot_data_to_sim.ipynb` | Compare data, NB mixture, trajectories and simulation (UMAPs) |
-| `plot_data_to_sim_KOV.ipynb` | Compare wild-type simulation to KO/OV perturbations |
+| `plot_data_to_sim_KOV.ipynb` | Compare wild-type simulation to KO/OV perturbations (`plot_results_sim_kov`) |
 | `compare_cell_types.ipynb` | Train cell-type classifier and compare proportions across stages |
-| `compare_cell_types_across_KOV.ipynb` | Cell-type proportions under each in-silico perturbation |
+| `compare_cell_types_across_KOV.ipynb` | Cell-type proportions under each in-silico perturbation (`compare_cell_types`) |
 
 ### Typical workflow
 
@@ -167,7 +167,8 @@ from CardamomOT import (
     plot_results_rna_clean,
     plot_results_prot,
     plot_network,
-    plot_results_rna_clean_kov,
+    plot_results_sim_kov,
+    compare_cell_types,
 )
 
 p = "my_project/"   # trailing slash required
@@ -190,7 +191,9 @@ plot_results_prot(1, p, stim=stim, prior=prior)
 plot_network(p, seuil=0, network=0, train="full")
 
 # ── KO/OV comparison (if perturbation steps were run) ────────────────────────
-plot_results_rna_clean_kov(0, p, combo="KO_Gata6_OV_none", stim=stim, prior=prior)
+combo = "KO_Gene_OV_none"
+compare_cell_types(p, combo, split="full")
+plot_results_sim_kov(0, p, combo, stim=stim, prior=prior)
 ```
 
 See the [API reference](api.md) for all parameters.
