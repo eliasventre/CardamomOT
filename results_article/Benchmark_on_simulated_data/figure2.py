@@ -385,7 +385,7 @@ def main():
     print("Saved figure_2.png")
     try:
         from PIL import Image
-        Image.open('figure_2.png').convert('RGB').save('figure_2.pdf', 'PDF', resolution=300)
+        Image.open('figure_2.png').convert('RGB').save('figure_2.pdf', 'PDF', resolution=600)
         print("Saved figure_2.pdf")
     except ImportError:
         print("(PIL not available -- skipping PDF export)")

@@ -113,16 +113,16 @@ def draw_umap(ax, coords, time_vals, title, s=5, show_colorbar=False):
     """UMAP scatter coloured by time, figure_2 style."""
     sc_obj = ax.scatter(coords[:, 0], coords[:, 1],
                         c=time_vals, cmap='viridis', alpha=0.6, s=s, lw=0)
-    ax.set_title(title, fontsize=7)
+    ax.set_title(title, fontsize=9)
     ax.set_xticks([]); ax.set_yticks([])
-    ax.set_xlabel('UMAP 1', fontsize=6)
-    ax.set_ylabel('UMAP 2', fontsize=6)
+    ax.set_xlabel('UMAP 1', fontsize=8)
+    ax.set_ylabel('UMAP 2', fontsize=8)
     if show_colorbar:
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='4%', pad=0.05)
         cb = plt.colorbar(sc_obj, cax=cax)
-        cb.set_label('Time', fontsize=5)
-        cb.ax.tick_params(labelsize=4, length=2, pad=1)
+        cb.set_label('Time', fontsize=7)
+        cb.ax.tick_params(labelsize=6, length=2, pad=1)
         cb.locator = plt.MaxNLocator(nbins=4)
         cb.update_ticks()
 
@@ -157,23 +157,24 @@ def draw_mean_sd(ax, adata_traj, adata_beta, adata_sim,
                         color=color, alpha=0.18)
         ax.plot(unique_t, means, color=color, lw=1.5, label=label)
 
-    ax.set_title(gene_name, fontsize=7, pad=2)
+    ax.set_title(gene_name, fontsize=10, pad=2)
     if show_xlabel:
-        ax.set_xlabel('Time', fontsize=6, labelpad=2)
+        ax.set_xlabel('Time', fontsize=7, labelpad=2)
     if show_ylabel:
-        ax.set_ylabel('Mean ± SD', fontsize=6, labelpad=2)
+        ax.set_ylabel('Mean ± SD', fontsize=7, labelpad=2)
     else:
         ax.set_ylabel('')
     ax.tick_params(labelsize=5, pad=2)
     for sp in ax.spines.values():
         sp.set_linewidth(0.6)
     if show_legend:
-        ax.legend(fontsize=5, frameon=False, loc='upper center')
+        ax.legend(fontsize=6, frameon=False, loc='upper center')
 
 
 def draw_celltype_timeline(ax, adata_beta, adata_sim, title,
                            time_key='time', cell_type_key='cell_type',
-                           n_timepoints=6, show_legend=False):
+                           n_timepoints=6, show_legend=False,
+                           box_aspect=0.6):
     """
     Stacked-bar cell-type composition — 2 bar groups per timepoint:
       left  (solid)       = adata_beta
@@ -213,6 +214,10 @@ def draw_celltype_timeline(ax, adata_beta, adata_sim, title,
     bots = [np.zeros(n_display), np.zeros(n_display)]
     handles, used_labels = [], []
 
+    def _legend_label(cell_type):
+        label = str(cell_type).replace('_', ' ')
+        return label[:1].upper() + label[1:] if label else label
+
     for ct in all_cts:
         col = color_map[ct]
         pb  = np.array([d[ct] for d in props_beta])
@@ -229,20 +234,23 @@ def draw_celltype_timeline(ax, adata_beta, adata_sim, title,
 
     ax.set_xticks(x)
     ax.set_xticklabels([f'{int(t)}' for t in display_times],
-                       fontsize=4, rotation=30)
-    ax.set_ylabel('Proportion', fontsize=6)
+                       fontsize=6, rotation=0)
+    ax.set_ylabel('Proportion', fontsize=7)
     ax.set_ylim(0, 1.05)
-    ax.set_title(title, fontsize=6)
+    ax.set_title(title, fontsize=8)
     ax.tick_params(axis='both', labelsize=5)
+    ax.set_box_aspect(box_aspect)
+    ax.set_anchor('N')
     for sp in ax.spines.values():
         sp.set_linewidth(0.6)
 
     if show_legend:
         n_cols = max(1, len(used_labels) // 2)
-        ax.legend(handles=handles, labels=used_labels,
-                  fontsize=5, loc='upper center', ncol=n_cols,
+        legend_labels = [_legend_label(ct) for ct in used_labels]
+        ax.legend(handles=handles, labels=legend_labels,
+                  fontsize=6, loc='upper center', ncol=n_cols,
                   bbox_to_anchor=(0.5, -0.16),
-                  title='Reference | Simulated', title_fontsize=5, framealpha=0.5)
+                  title='Reference | Simulated', title_fontsize=6, framealpha=0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +325,7 @@ def main():
     # ── Layout ────────────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(8.27, 11.69))
     gs   = gridspec.GridSpec(2, 2, figure=fig,
-                              height_ratios=[3, 1.5], width_ratios=[2, 1],
+                              height_ratios=[3, 1.2], width_ratios=[1.8, 1],
                               hspace=0.2, wspace=0.28)
     gs01 = gs[0, 0].subgridspec(3, 2, hspace=0.25, wspace=0.2)
     gs02 = gs[0, 1].subgridspec(3, 1, hspace=0.60, wspace=0.3)
@@ -383,7 +391,7 @@ def main():
                 ax,
                 a_traj, a_beta, a_sim,
                 gene_idx, f'{dset} — {gnames[gene_idx]}',
-                show_legend=False,
+                show_legend=(ax in (axes[9], axes[12])),
                 show_xlabel=is_last_dataset,   # 'Time' only for M N O
                 show_ylabel=show_main_annotations,
             )

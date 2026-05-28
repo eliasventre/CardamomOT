@@ -498,3 +498,9 @@ See source files to modify:
 
 [1] E. Ventre. [Reverse engineering of a mechanistic model of gene expression using metastability and temporal dynamics](https://content.iospress.com/articles/in-silico-biology/isb210226). *In Silico Biology*, 2021.
 
+## Article data
+Datas analyzed in this article are available at :
+• Semrau et al. (2017): GEO accession GSE79578.
+• Kameneva et al. (2021): GEO accession GSE147821.
+• Schiebinger et al. (2019): GEO accession GSE106340 and
+https://singlecell.broadinstitute.org/single_cell/study/SCP295/
