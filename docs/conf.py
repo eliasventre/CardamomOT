@@ -31,11 +31,8 @@ autoapi_dirs = ["../CardamomOT"]
 autoapi_type = "python"
 autoapi_options = [
     "members",
-    "undoc-members",
     "show-inheritance",
     "show-module-summary",
-    "special-members",
-    "imported-members",
 ]
 autoapi_ignore = ["*cli*.py", "*logging*.py"]
 autoapi_add_toctree_entry = False

@@ -7,7 +7,7 @@ from .characterize_cell_type import (
     predict_cell_types, train_classifier, plot_cell_type_proportions,
     check_cell_types_full, check_cell_types_mixture,
 )
-from .plot_results import (
+from .plot_results_sim import (
     plot_results_rna_mixture, plot_results_rna_clean, plot_results_prot,
 )
 from .plot_results_kov import (
