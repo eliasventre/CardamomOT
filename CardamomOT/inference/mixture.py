@@ -137,8 +137,9 @@ def infer_kinetics_temporal_scaled(x, s, times, a_init=np.ones(100), b_init=1,
     Scaled version of :func:`infer_kinetics_temporal`.
     Model: X_i | basin k ∼ NB(a_k, b / s_i).
     The only differences with the original are:
-      - the gradient uses log(b/s_i) instead of log(b)
-      - the analytic update for b uses Σ x_i/s_i instead of Σ x_i
+
+    - the gradient uses log(b/s_i) instead of log(b)
+    - the analytic update for b uses Σ x_i/s_i instead of Σ x_i
     """
     t = np.sort(list(set(times)))
     m: int = t.size
@@ -408,10 +409,11 @@ def hard_em_scaled(data, s, n_components, ks_init, c_init, seuil,
                    preserve_mean_values=0, mean_forcing=1.0):
     """
     Hard EM avec scaling cellulaire.
-    Seuls changements vs hard_em :
-      - E-step via predict_resp
-      - M-step via infer_kinetics_temporal_scaled
-      - _apply_temporal_constraints travaille sur x/s pour les moyennes
+    Seuls changements vs hard_em:
+
+    - E-step via predict_resp
+    - M-step via infer_kinetics_temporal_scaled
+    - _apply_temporal_constraints travaille sur x/s pour les moyennes
     """
     n_cells = data.size
     ks, c   = ks_init.copy(), c_init

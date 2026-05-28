@@ -218,12 +218,10 @@ class NetworkModel:
         cell_rd : (N_cells,) array or None
         kov_cell_mask : (N_cells, G_tot) int8 array or None
             Per-cell KO/OV constraints derived from KO_OV_inference.
-            -1 → gene is KO for this cell (force to lowest mode),
-            +1 → gene is OV for this cell (force to highest mode),
-             0 → no constraint.
-            Read depth scaling factors per cell (median = 1), typically
-            stored in ``adata.obs['rd']``.  If ``None``, the standard
-            Negative Binomial model without scaling is applied.
+
+            - -1: gene is KO for this cell (force to lowest mode)
+            - +1: gene is OV for this cell (force to highest mode)
+            - 0: no constraint
         """
 
         # Get kinetic parameters
@@ -1250,10 +1248,14 @@ class NetworkModel:
         """
         Estimate protein trajectories when d1, theta, and alpha are known.
 
-        kon_beta : optional array of shape (T*N, G_tot). 
-        s : per-gene protein scale (float or array, G_genes). Defaults to self.scale_proteins.
-            Must match the s1 used in my_otdistance when building y_prot; pass self.s1
-            to reproduce protein trajectories exactly (e.g. in refine_network_degradations).
+        Parameters
+        ----------
+        kon_beta : array of shape (T*N, G_tot), optional
+            Pre-computed burst frequencies. If None, uses ``self.kon_beta``.
+        s : float or array of shape (G_genes,), optional
+            Per-gene protein scale. Defaults to ``self.scale_proteins``.
+            Must match the s1 used in my_otdistance when building y_prot; pass
+            ``self.s1`` to reproduce protein trajectories exactly.
         """
         if kon_beta is None:
             kon_beta = self.kon_beta
@@ -1595,11 +1597,13 @@ class NetworkModel:
             #
             # In both cases: self.ratios[cnt] = 1/ε = d0/d1, so that
             #   d0_sim = d1 * ratios = d1 * (d0/d1) = d0  ✓
+
+            # prior_d1d0 = d1/d0 from the literature (initial self.ratios)
+            prior_d1d0 = self.d[1, :] / self.d[0, :]   # shape (G,)
+            print(prior_d1d0)
+
             if self.simulate_full_with_harissa:
                 # ── Branch A: Harissa / MLP ───────────────────────────────────
-                # prior_d1d0 = d1/d0 from the literature (initial self.ratios)
-                prior_d1d0 = self.d[1, :] / self.d[0, :]   # shape (G,)
-
                 ratios_temporal, ratios_global = infer_ratio_d0_d1_full(
                     self.prot,
                     self.times_data,
@@ -1627,10 +1631,7 @@ class NetworkModel:
 
             else:
                 # ── Branch B: ODE residuals / variance matching ───────────────
-                # prior ε = d1/d0 from literature (quasi-stationary limit)
-                prior_eps = self.d[1, :] / self.d[0, :]   # shape (G,)
-
-                eps_temporal, eps_global = infer_ratio_d0_d1_unitary(
+                ratios_temporal, ratios_global = infer_ratio_d0_d1_unitary(
                     self.prot[cells_to_use == 1],
                     self.times_data[cells_to_use == 1],
                     basal_t,           # (T-1, G, n_nets) or (G, n_nets)
@@ -1642,16 +1643,16 @@ class NetworkModel:
                     stim_schedule=self._stim_schedule,
                     samples_data=self.samples_data[cells_to_use == 1],
                     lambda_deg=self.lambda_deg0,
-                    prior_eps=prior_eps,
+                    prior_eps=prior_d1d0,
                     scale=self.scale_proteins,
                     verbose=verb,
                 )  # eps_temporal (T-1, G), eps_global (G,) — all d1/d0
 
                 if self.use_temporal_degradations:
                     for cnt in range(len(times) - 1):
-                        self.ratios[cnt, :] = 1.0 / eps_temporal[cnt]
+                        self.ratios[cnt, :] = 1.0 / ratios_temporal[cnt]
                 else:
-                    self.ratios[:] = (1.0 / eps_global)[None, :]
+                    self.ratios[:] = (1.0 / ratios_global)[None, :]
 
             # ── Smooth ratios after d0/d1 computation ────────────────────────
             if _sigma is not None and self.use_temporal_degradations:
