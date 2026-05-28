@@ -44,6 +44,7 @@ The package is described in:
 
 installation
 quickstart
+advanced
 ```
 
 ```{toctree}

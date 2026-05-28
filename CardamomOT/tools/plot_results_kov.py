@@ -136,13 +136,11 @@ def _plot_celltype_panel(adatas, names, class_order=None):
 # Public API
 # ---------------------------------------------------------------------------
 
-def plot_results_sim_kov(project_on_full, p, combo, stim=1.0, prior=1.0, normlog=True):
+def plot_results_sim_kov(p, combo, stim=1.0, prior=1.0, project_on_full=False, normlog=True):
     """Compare wild-type simulation to a KO/OV perturbation (UMAP).
 
     Parameters
     ----------
-    project_on_full : bool
-        If True, fit UMAP on NB mixture and project others.
     p : str
         Path to the project directory (trailing slash included).
     combo : str
@@ -151,6 +149,8 @@ def plot_results_sim_kov(project_on_full, p, combo, stim=1.0, prior=1.0, normlog
         Stimulus-edge penalisation value used during inference.
     prior : float
         Prior-network weighting value used during inference.
+    project_on_full : bool
+        If True, fit UMAP on NB mixture and project others.
     normlog : bool
         Apply normalisation and log1p before UMAP.
     """

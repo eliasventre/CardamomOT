@@ -172,28 +172,29 @@ from CardamomOT import (
 )
 
 p = "my_project/"   # trailing slash required
+split = "full"      # dataset split used during the pipeline ("full" or "train")
+stim, prior = 1.0, 1.0  # match the values passed to the pipeline
 label = "cell_type"
-stim, prior = 1.0, 1.0
 
 # ── Cell-type characterisation ───────────────────────────────────────────────
-adata_full = ad.read_h5ad(p + "Data/data_train.h5ad")
+adata_full = ad.read_h5ad(p + f"Data/data_{split}.h5ad")
 clf = train_classifier(adata_full, label_key=label)
 check_cell_types_mixture(clf, p, adata_full)
 check_cell_types_full(clf, p, stim=stim, prior=prior)
 
 # ── UMAP comparisons ─────────────────────────────────────────────────────────
-plot_results_rna_mixture("full", 0, p)
-plot_results_rna_clean("full", 0, p, stim=stim, prior=prior,
-                        normtransform=False, logtransform=True)
-plot_results_prot(1, p, stim=stim, prior=prior)
+plot_results_rna_mixture(split, p)
+plot_results_rna_clean(split, p, stim=stim, prior=prior,
+                       normtransform=False, logtransform=True)
+plot_results_prot(p, stim=stim, prior=prior)
 
 # ── Inferred GRN ─────────────────────────────────────────────────────────────
-plot_network(p, seuil=0, network=0, train="full")
+plot_network(p, seuil=0, network=0, train=split)
 
 # ── KO/OV comparison (if perturbation steps were run) ────────────────────────
 combo = "KO_Gene_OV_none"
-compare_cell_types(p, combo, split="full")
-plot_results_sim_kov(0, p, combo, stim=stim, prior=prior)
+compare_cell_types(p, combo, split=split)
+plot_results_sim_kov(p, combo, stim=stim, prior=prior)
 ```
 
 See the [API reference](api.md) for all parameters.

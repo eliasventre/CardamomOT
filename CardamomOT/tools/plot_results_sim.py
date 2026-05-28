@@ -139,17 +139,17 @@ def _joint_umap(adatas, names, norm=True, log=True):
 # Public API
 # ---------------------------------------------------------------------------
 
-def plot_results_rna_mixture(split, project_on_full, p, normtransform=True, logtransform=True):
+def plot_results_rna_mixture(split, p, project_on_full=False, normtransform=True, logtransform=True):
     """Compare observed data to the NB mixture fit (UMAP by time and cell type).
 
     Parameters
     ----------
     split : str
         Data split to load (``"full"`` or ``"train"``).
-    project_on_full : bool
-        If True, fit UMAP on data and project mixture; otherwise fit jointly.
     p : str
         Path to the project directory (trailing slash included).
+    project_on_full : bool
+        If True, fit UMAP on data and project mixture; otherwise fit jointly.
     normtransform : bool
         Apply total-count normalisation before UMAP.
     logtransform : bool
@@ -188,7 +188,7 @@ def plot_results_rna_mixture(split, project_on_full, p, normtransform=True, logt
     _plot_celltype_panel(adatas, names, class_order)
 
 
-def plot_results_rna_clean(split, project_on_full, p, stim=1.0, prior=1.0,
+def plot_results_rna_clean(split, p, stim=1.0, prior=1.0, project_on_full=False,
                            normtransform=True, logtransform=True):
     """Compare inferred RNA trajectories across all pipeline stages (UMAP).
 
@@ -199,14 +199,14 @@ def plot_results_rna_clean(split, project_on_full, p, stim=1.0, prior=1.0,
     ----------
     split : str
         Data split (``"full"`` or ``"train"``).
-    project_on_full : bool
-        If True, fit UMAP on the NB mixture and project others.
     p : str
         Path to the project directory (trailing slash included).
     stim : float
         Stimulus-edge penalisation value used during inference.
     prior : float
         Prior-network weighting value used during inference.
+    project_on_full : bool
+        If True, fit UMAP on the NB mixture and project others.
     normtransform : bool
         Apply total-count normalisation before UMAP.
     logtransform : bool
@@ -240,19 +240,19 @@ def plot_results_rna_clean(split, project_on_full, p, stim=1.0, prior=1.0,
     _plot_celltype_panel(adatas, names, class_order)
 
 
-def plot_results_prot(project_on_full, p, stim=1.0, prior=1.0):
+def plot_results_prot(p, stim=1.0, prior=1.0, project_on_full=False):
     """Compare protein trajectories and simulations (UMAP colored by time).
 
     Parameters
     ----------
-    project_on_full : bool
-        If True, fit UMAP on trajectories and project simulations.
     p : str
         Path to the project directory (trailing slash included).
     stim : float
         Stimulus-edge penalisation value used during inference.
     prior : float
         Prior-network weighting value used during inference.
+    project_on_full : bool
+        If True, fit UMAP on trajectories and project simulations.
     """
     s, q = stim, prior
     adata_traj = ad.read_h5ad(p + f'cardamomOT/adata_prot_traj_stim{s}_prior{q}.h5ad')
