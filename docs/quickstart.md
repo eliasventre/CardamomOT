@@ -149,7 +149,7 @@ exported by the package. You can also call these functions directly in your own 
 
 | Notebook | What it does |
 |---|---|
-| `plot_networks.ipynb` | Inferred GRN — per-regulator subgraphs and reduced network |
+| `plot_networks.ipynb` | Inferred GRN — per-regulator subgraphs and reduced network (`plot_network`) |
 | `plot_data_to_sim.ipynb` | Compare data, NB mixture, trajectories and simulation (UMAPs) |
 | `plot_data_to_sim_KOV.ipynb` | Compare wild-type simulation to KO/OV perturbations |
 | `compare_cell_types.ipynb` | Train cell-type classifier and compare proportions across stages |
@@ -163,38 +163,34 @@ from CardamomOT import (
     train_classifier,
     check_cell_types_mixture,
     check_cell_types_full,
+    plot_results_rna_mixture,
     plot_results_rna_clean,
     plot_results_prot,
-    plot_networks,
+    plot_network,
     plot_results_rna_clean_kov,
 )
 
 p = "my_project/"   # trailing slash required
+label = "cell_type"
+stim, prior = 1.0, 1.0
 
-# ── 1. Train a cell-type classifier on the observed data ─────────────────────
-adata_full = ad.read_h5ad(p + "Data/data_full.h5ad")
-clf = train_classifier(adata_full, label_key="cell_type")
+# ── Cell-type characterisation ───────────────────────────────────────────────
+adata_full = ad.read_h5ad(p + "Data/data_train.h5ad")
+clf = train_classifier(adata_full, label_key=label)
+check_cell_types_mixture(clf, p, adata_full)
+check_cell_types_full(clf, p, stim=stim, prior=prior)
 
-# ── 2. Compare cell-type proportions: data vs NB mixture ─────────────────────
-check_cell_types_mixture(clf, p, adata_full, stim=1.0, prior=1.0)
+# ── UMAP comparisons ─────────────────────────────────────────────────────────
+plot_results_rna_mixture("full", 0, p)
+plot_results_rna_clean("full", 0, p, stim=stim, prior=prior,
+                        normtransform=False, logtransform=True)
+plot_results_prot(1, p, stim=stim, prior=prior)
 
-# ── 3. Compare proportions across all pipeline stages ────────────────────────
-check_cell_types_full(clf, p, stim=1.0, prior=1.0)
+# ── Inferred GRN ─────────────────────────────────────────────────────────────
+plot_network(p, seuil=0, network=0, train="full")
 
-# ── 4. UMAP comparison: reference / mixture / network / simulation ────────────
-plot_results_rna_clean("full", project_on_full=False, p=p, stim=1.0, prior=1.0)
-
-# ── 5. Protein-level UMAP: trajectories vs simulation ────────────────────────
-plot_results_prot(project_on_full=True, p=p, stim=1.0, prior=1.0)
-
-# ── 6. Visualise the inferred GRN ────────────────────────────────────────────
-plot_networks(p, stim=1.0, prior=1.0, train="full")
-
-# ── 7. KO/OV comparison (if perturbation steps were run) ─────────────────────
-plot_results_rna_clean_kov(
-    project_on_full=False, p=p,
-    combo="KO_Gata6_OV_none", stim=1.0, prior=1.0,
-)
+# ── KO/OV comparison (if perturbation steps were run) ────────────────────────
+plot_results_rna_clean_kov(0, p, combo="KO_Gata6_OV_none", stim=stim, prior=prior)
 ```
 
 See the [API reference](api.md) for all parameters.

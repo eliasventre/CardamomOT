@@ -79,10 +79,9 @@ from .tools import (
     plot_results_rna_clean,
     plot_results_prot,
     plot_results_rna_clean_kov,
-    add_edges_from_matrix,
     analyse_reseau,
     reseau_top_regulateurs,
-    plot_networks,
+    plot_network,
 )
 
 # ============================================================================
@@ -125,10 +124,9 @@ __all__ = [
     "plot_results_prot",
     "plot_results_rna_clean_kov",
     # Network visualisation
-    "add_edges_from_matrix",
     "analyse_reseau",
     "reseau_top_regulateurs",
-    "plot_networks",
+    "plot_network",
 ]
 
 logger.debug(f"CARDAMOM {__version__} loaded successfully")

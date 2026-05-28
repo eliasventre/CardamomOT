@@ -12,7 +12,7 @@ from .plot_results import (
     plot_results_rna_clean_kov,
 )
 from .plot_networks import (
-    add_edges_from_matrix, analyse_reseau, reseau_top_regulateurs, plot_networks,
+    analyse_reseau, reseau_top_regulateurs, plot_network,
 )
 
 
@@ -23,5 +23,5 @@ __all__ = [
     'check_cell_types_full', 'check_cell_types_mixture',
     'plot_results_rna_mixture', 'plot_results_rna_clean', 'plot_results_prot',
     'plot_results_rna_clean_kov',
-    'add_edges_from_matrix', 'analyse_reseau', 'reseau_top_regulateurs', 'plot_networks',
+    'analyse_reseau', 'reseau_top_regulateurs', 'plot_network',
 ]
