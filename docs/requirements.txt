@@ -1,0 +1,7 @@
+sphinx>=7.0
+furo>=2024.1.29
+myst-parser>=3.0
+sphinx-autoapi>=3.0
+nbsphinx>=0.9
+sphinx-design>=0.5
+ipython>=7.0
