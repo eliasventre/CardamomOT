@@ -22,91 +22,107 @@ except ImportError:
     HAS_QUESTIONARY = False
 
 
-# Define pipeline steps in order
+# Define pipeline steps in order.
+# "default": True  → checked by default in interactive mode
+# "default": False → unchecked by default (optional step)
 PIPELINE_STEPS = [
     {
         "id": "infer_rd",
-        "name": "Estimate read depth correction",
+        "name": "Read-depth correction (optional)",
         "script": "infer_rd.py",
-        "description": "Compute per-cell read depth factors (optional)",
+        "description": "Compute per-cell read depth factors",
+        "default": False,
     },
     {
         "id": "select_DEgenes",
-        "name": "Select DE genes & split cells",
+        "name": "Gene selection",
         "script": "select_DEgenes_and_split.py",
-        "description": "Filter genes by variability and split cells into train/test",
+        "description": "Filter differentially expressed genes and split cells into train/test",
+        "default": True,
     },
     {
         "id": "prepare_reference_network",
-        "name": "Prepare reference network (optional)",
+        "name": "Network constraint (optional)",
         "script": "prepare_reference_network.py",
         "description": "Build prior knowledge network from biological databases",
+        "default": False,
     },
     {
         "id": "get_kinetic_rates",
-        "name": "Get kinetic rates",
+        "name": "Kinetics",
         "script": "get_kinetic_rates.py",
         "description": "Estimate mRNA degradation and synthesis rates",
+        "default": True,
     },
     {
         "id": "infer_mixture",
-        "name": "Infer mixture model",
+        "name": "Mixture model",
         "script": "infer_mixture.py",
-        "description": "Learn kinetic parameters and cell state assignments",
+        "description": "Fit negative-binomial burst parameters per gene",
+        "default": True,
     },
     {
         "id": "check_mixture_to_data",
-        "name": "Check mixture model fit",
+        "name": "Check mixture",
         "script": "check_mixture_to_data.py",
         "description": "Validate mixture model parameters against data",
+        "default": True,
     },
     {
         "id": "infer_network_structure",
-        "name": "Infer network structure",
+        "name": "Network inference",
         "script": "infer_network_structure.py",
-        "description": "Infer gene regulatory network from data and priors",
+        "description": "Learn gene regulatory interactions via optimal transport",
+        "default": True,
     },
     {
         "id": "infer_network_simul",
-        "name": "Adapt network for simulation",
+        "name": "Network adaptation",
         "script": "infer_network_simul.py",
         "description": "Prepare network parameters for forward simulation",
+        "default": True,
     },
     {
         "id": "simulate_network",
-        "name": "Simulate network dynamics",
+        "name": "Simulation",
         "script": "simulate_network.py",
-        "description": "Generate synthetic trajectories from learned model",
+        "description": "Generate synthetic single-cell trajectories from the learned model",
+        "default": True,
     },
     {
         "id": "check_sim_to_data",
-        "name": "Check simulated vs observed data",
+        "name": "Check simulation",
         "script": "check_sim_to_data.py",
-        "description": "Validate simulations match experimental data distribution",
-    },
-    {
-        "id": "simulate_network_KOV",
-        "name": "Simulate knockouts/overexpressions",
-        "script": "simulate_network_KOV.py",
-        "description": "Simulate gene expression under genetic perturbations (KO/OV)",
-    },
-    {
-        "id": "check_KOV_to_sim",
-        "name": "Check KO/OV simulations",
-        "script": "check_KOV_to_sim.py",
-        "description": "Validate perturbation simulations against wildtype data",
+        "description": "Validate simulations against experimental data distribution",
+        "default": True,
     },
     {
         "id": "infer_test",
-        "name": "Infer on test set",
+        "name": "Test — inference (optional)",
         "script": "infer_test.py",
-        "description": "Infer regulatory network and simulate on test dataset",
+        "description": "Infer network and simulate on held-out test set",
+        "default": False,
     },
     {
         "id": "check_test_to_train",
-        "name": "Check test vs train predictions",
+        "name": "Test — check (optional)",
         "script": "check_test_to_train.py",
-        "description": "Validate network inference by comparing test predictions to observations",
+        "description": "Compare test predictions to training observations",
+        "default": False,
+    },
+    {
+        "id": "simulate_network_KOV",
+        "name": "Perturb — KO/OV simulation",
+        "script": "simulate_network_KOV.py",
+        "description": "Simulate gene expression under in-silico knock-out/over-expression",
+        "default": True,
+    },
+    {
+        "id": "check_KOV_to_sim",
+        "name": "Perturb — check KO/OV",
+        "script": "check_KOV_to_sim.py",
+        "description": "Compare perturbation simulations to wild-type",
+        "default": True,
     },
 ]
 
@@ -218,9 +234,9 @@ def interactive_step_selection() -> List[str]:
     choices = []
     for step in PIPELINE_STEPS:
         choices.append({
-            "name": f"{step['name']:<35} {step['description']}",
+            "name": f"{step['name']:<45} {step['description']}",
             "value": step["script"],
-            "checked": True,  # All checked by default
+            "checked": step.get("default", True),
         })
 
     selected = questionary.checkbox(
@@ -448,7 +464,7 @@ def run_pipeline_interactive(project_path: str, use_defaults: bool = False):
     # 2. Select steps
     if use_defaults:
         print("🚀 Running pipeline with DEFAULT settings...")
-        selected_scripts = [step["script"] for step in PIPELINE_STEPS]
+        selected_scripts = [step["script"] for step in PIPELINE_STEPS if step.get("default", True)]
     else:
         selected_scripts = interactive_step_selection()
 

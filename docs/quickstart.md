@@ -28,15 +28,24 @@ The simplest entry point is the interactive `run` command, which presents a chec
 cardamomot run my_project/
 ```
 
-Steps available:
+Steps (checked by default unless marked *optional*):
 
-1. **Read-depth correction** — normalise sequencing depth across cells
-2. **Mixture model** — fit negative-binomial burst parameters per gene
-3. **Gene selection** — retain the most informative genes
-4. **Network structure** — inject prior knowledge (optional)
-5. **Network inference** — learn regulatory interactions via optimal transport
-6. **Network adaptation** — prepare the network for simulation
-7. **Simulation** — generate synthetic single-cell trajectories
+| Step | Description | Default |
+|---|---|---|
+| Read-depth correction | Compute per-cell read-depth factors | optional |
+| **Gene selection** | Filter DE genes; split cells into train/test | ✓ |
+| Network constraint | Build prior network from databases | optional |
+| **Kinetics** | Estimate mRNA degradation and synthesis rates | ✓ |
+| **Mixture model** | Fit negative-binomial burst parameters per gene | ✓ |
+| Check mixture | Validate mixture against data | ✓ |
+| **Network inference** | Learn regulatory interactions via optimal transport | ✓ |
+| **Network adaptation** | Prepare network parameters for simulation | ✓ |
+| **Simulation** | Generate synthetic single-cell trajectories | ✓ |
+| Check simulation | Validate simulations vs data | ✓ |
+| Test — inference | Infer and simulate on held-out test set | optional |
+| Test — check | Compare test predictions to training observations | optional |
+| **Perturb (KO/OV)** | Simulate in-silico knock-outs / over-expressions | ✓ |
+| Check KO/OV | Compare perturbations to wild-type simulation | ✓ |
 
 To run all steps with default parameters without any prompt:
 
@@ -51,17 +60,24 @@ For scripting or cluster submission, use the `pipeline` sub-command:
 ```bash
 cardamomot pipeline \
     -i my_project \
-    -s full \       # dataset split: full | train
-    -c 1 \          # differential gene selection
-    -r 0.6 \        # kinetics rate parameter
-    -m 0.5          # mean expression threshold
+    -s full \                  # dataset split: full | train
+    -c 0 \                     # differential gene selection (0=off, 1=on)
+    -r 0.7 \                   # rate parameter for kinetics
+    -m 1.0 \                   # mean expression threshold (-1=auto)
+    --stimulus 1.0 \           # stimulus-edge penalisation in [0,1]
+    --prior 1.0 \              # prior-network weighting in [0,1]
+    --force-basins 1.0 \       # preserve NB mode means in [0,1]
+    --temporal-basins 1        # enforce temporal mode consistency (0 or 1)
 ```
 
-To activate stimulus-schedule handling (e.g. for datasets with non-trivial perturbation timing):
+**Optional-section flags** (add any combination):
 
-```bash
-cardamomot pipeline -i my_project --stimulus 0.5
-```
+| Flag | Effect |
+|---|---|
+| `--rd` | Enable read-depth correction step |
+| `--ref` | Enable prior-network preparation step |
+| `--test` | Enable test-set inference steps |
+| `--no-kov` | Disable KO/OV perturbation steps |
 
 ## Run individual steps
 

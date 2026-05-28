@@ -35,7 +35,7 @@ CardamomOT combines optimal transport and mechanistic modelling to jointly infer
 
 The package is described in:
 
-> Mauge Y. and Ventre E. (2026). *Joint gene regulatory network and trajectory inference from temporal single-cell snapshots*.
+> Maugé Y. and Ventre E. (2026). *CardamomOT: a mechanistic optimal transport-based framework for gene regulatory network inference, trajectory reconstruction and generative modeling*. doi: [10.64898/2026.03.31.715390](https://doi.org/10.64898/2026.03.31.715390)
 
 ```{toctree}
 :maxdepth: 2

@@ -15,16 +15,20 @@ This dataset captures the earliest bifurcation in the mouse blastocyst inner cel
 cardamomot pipeline \
     -i experimental_datasets/Semrau \
     -s full \
-    -c 1 \
-    -r 0.6 \
-    -m 0.5 \
+    -c 0 \
+    -r 0.7 \
+    -m 1.0 \
     --stimulus 1.0 \
-    --prior 1.0
+    --prior 1.0 \
+    --force-basins 1.0 \
+    --temporal-basins 1
 ```
 
 Key choices:
-- `-c 1` activates differential gene selection, keeping genes that change significantly across time.
-- `--prior 1.0` uses full prior-knowledge weighting for the network structure.
+- `-m 1.0` sets the mean expression threshold to 1 (appropriate for this low-gene-count dataset).
+- `--force-basins 1.0 --temporal-basins 1` enforces temporal consistency of NB modes across time points.
+- `--prior 1.0` uses full prior-network weighting for the network constraint.
+- KO/OV perturbation steps run by default (`--no-kov` would disable them).
 
 ## Results
 

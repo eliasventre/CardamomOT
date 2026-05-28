@@ -20,15 +20,24 @@ The time schedule of reprogramming factor expression must be provided alongside 
 ```bash
 cardamomot pipeline \
     -i experimental_datasets/Schiebinger \
-    -s full \
+    -s train \
     -c 0 \
-    -r 0.6 \
+    -r 0.3 \
     -m 0.5 \
     --stimulus 1.0 \
-    --prior 0.5
+    --prior 1.0 \
+    --force-basins 0.0 \
+    --temporal-basins 0 \
+    --test
 ```
 
-Two configurations are compared (`--prior 0.5` and `--prior 1.0`) to assess the influence of the structural prior on the inferred network at different stimulus strengths. Pre-computed outputs for both settings are stored in `experimental_datasets/Schiebinger/cardamomOT/`.
+Key differences from the other datasets:
+- `-s train` splits cells into train/test sets, enabling held-out evaluation.
+- `-r 0.3` uses a lower rate parameter suited to the longer time range (18 days).
+- `--force-basins 0.0 --temporal-basins 0` disables NB mode forcing, appropriate for the continuous reprogramming dynamics.
+- `--test` activates the test-set inference steps (`infer_test` + `check_test_to_train`).
+
+Pre-computed outputs for both `--prior 0.5` and `--prior 1.0` are stored in `experimental_datasets/Schiebinger/cardamomOT/`.
 
 ## Loading pre-computed results
 

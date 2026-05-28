@@ -320,15 +320,25 @@
 <h2>CardamomOT configuration<a class="headerlink" href="#cardamomot-configuration" title="Link to this heading">¶</a></h2>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cardamomot<span class="w"> </span>pipeline<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>-i<span class="w"> </span>experimental_datasets/Schiebinger<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>-s<span class="w"> </span>full<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-s<span class="w"> </span>train<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>-c<span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>-r<span class="w"> </span><span class="m">0</span>.6<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-r<span class="w"> </span><span class="m">0</span>.3<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>-m<span class="w"> </span><span class="m">0</span>.5<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>--stimulus<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--prior<span class="w"> </span><span class="m">0</span>.5
+<span class="w">    </span>--prior<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--force-basins<span class="w"> </span><span class="m">0</span>.0<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--temporal-basins<span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--test
 </pre></div>
 </div>
-<p>Two configurations are compared (<code class="docutils literal notranslate"><span class="pre">--prior</span> <span class="pre">0.5</span></code> and <code class="docutils literal notranslate"><span class="pre">--prior</span> <span class="pre">1.0</span></code>) to assess the influence of the structural prior on the inferred network at different stimulus strengths. Pre-computed outputs for both settings are stored in <code class="docutils literal notranslate"><span class="pre">experimental_datasets/Schiebinger/cardamomOT/</span></code>.</p>
+<p>Key differences from the other datasets:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">-s</span> <span class="pre">train</span></code> splits cells into train/test sets, enabling held-out evaluation.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-r</span> <span class="pre">0.3</span></code> uses a lower rate parameter suited to the longer time range (18 days).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--force-basins</span> <span class="pre">0.0</span> <span class="pre">--temporal-basins</span> <span class="pre">0</span></code> disables NB mode forcing, appropriate for the continuous reprogramming dynamics.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--test</span></code> activates the test-set inference steps (<code class="docutils literal notranslate"><span class="pre">infer_test</span></code> + <code class="docutils literal notranslate"><span class="pre">check_test_to_train</span></code>).</p></li>
+</ul>
+<p>Pre-computed outputs for both <code class="docutils literal notranslate"><span class="pre">--prior</span> <span class="pre">0.5</span></code> and <code class="docutils literal notranslate"><span class="pre">--prior</span> <span class="pre">1.0</span></code> are stored in <code class="docutils literal notranslate"><span class="pre">experimental_datasets/Schiebinger/cardamomOT/</span></code>.</p>
 </section>
 <section id="loading-pre-computed-results">
 <h2>Loading pre-computed results<a class="headerlink" href="#loading-pre-computed-results" title="Link to this heading">¶</a></h2>

@@ -2,7 +2,7 @@
 
 [![Documentation](https://readthedocs.org/projects/cardamomot/badge/?version=latest)](https://cardamomot.readthedocs.io/en/latest/)
 
-CARDAMOM is an executable gene regulatory network (GRN) inference method, adapted to time-course scRNA-seq datasets. The algorithm consists in calibrating the parameters of a mechanistic model of gene expression: the calibrated model can then be simulated, which allows to reproduce the dataset used for inference. The first inference method has been introduced in [[1](#Ventre2021)]. It has been benchmarked along with other GRN inference tools and applied to a real dataset in [[2](#Ventre2023)]. The second version is presented in [[2](#Mauge2026)] and combines GRN and trajectory inference method and shows a strong improvement over the first version.  The simulation part is based on the [Harissa](https://github.com/ulysseherbach/harissa) package.
+CARDAMOM is an executable gene regulatory network (GRN) inference method, adapted to time-course scRNA-seq datasets. The algorithm consists in calibrating the parameters of a mechanistic model of gene expression: the calibrated model can then be simulated, which allows to reproduce the dataset used for inference. The first inference method has been introduced in [[1](#Ventre2021)]. It has been benchmarked along with other GRN inference tools and applied to a real dataset in [[2](#Ventre2023)]. The second version is presented in [[3](#Mauge2026)] and combines GRN and trajectory inference method and shows a strong improvement over the first version.  The simulation part is based on the [Harissa](https://github.com/ulysseherbach/harissa) package.
 
 ## 🚀 Quick Start
 
@@ -492,7 +492,7 @@ See source files to modify:
 
 ## 📖 Références
 
-[3] Y. Mauge, E. Ventre. [Mechanistic optimal transport reveals gene regulatory networks and cellular trajectories from temporal single-cell transcriptomics]. *bioRxiv*, 2026.
+[3] Y. Maugé, E. Ventre. [CardamomOT: a mechanistic optimal transport-based framework for gene regulatory network inference, trajectory reconstruction and generative modeling](https://doi.org/10.64898/2026.03.31.715390). *bioRxiv*, 2026.
 
 [2] E. Ventre, U. Herbach et al. [One model fits all: Combining inference and simulation of gene regulatory networks](https://doi.org/10.1371/journal.pcbi.1010962). *PLOS Computational Biology*, 2023.
 

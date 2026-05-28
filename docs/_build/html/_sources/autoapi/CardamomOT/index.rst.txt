@@ -25,7 +25,7 @@ CardamomOT
 
    1. Ventre E, et al. (2021).
    2. Ventre E, et al. (2023).
-   2. Mauge Y, et Ventre, E. (2026).
+   3. Maugé Y. and Ventre E. (2026). CardamomOT: a mechanistic optimal transport-based framework for gene regulatory network inference, trajectory reconstruction and generative modeling. doi: 10.64898/2026.03.31.715390
 
    Author
    ------

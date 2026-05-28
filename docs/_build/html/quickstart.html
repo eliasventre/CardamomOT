@@ -342,16 +342,75 @@
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cardamomot<span class="w"> </span>run<span class="w"> </span>my_project/
 </pre></div>
 </div>
-<p>Steps available:</p>
-<ol class="arabic simple">
-<li><p><strong>Read-depth correction</strong> — normalise sequencing depth across cells</p></li>
-<li><p><strong>Mixture model</strong> — fit negative-binomial burst parameters per gene</p></li>
-<li><p><strong>Gene selection</strong> — retain the most informative genes</p></li>
-<li><p><strong>Network structure</strong> — inject prior knowledge (optional)</p></li>
-<li><p><strong>Network inference</strong> — learn regulatory interactions via optimal transport</p></li>
-<li><p><strong>Network adaptation</strong> — prepare the network for simulation</p></li>
-<li><p><strong>Simulation</strong> — generate synthetic single-cell trajectories</p></li>
-</ol>
+<p>Steps (checked by default unless marked <em>optional</em>):</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Step</p></th>
+<th class="head"><p>Description</p></th>
+<th class="head"><p>Default</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Read-depth correction</p></td>
+<td><p>Compute per-cell read-depth factors</p></td>
+<td><p>optional</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Gene selection</strong></p></td>
+<td><p>Filter DE genes; split cells into train/test</p></td>
+<td><p>✓</p></td>
+</tr>
+<tr class="row-even"><td><p>Network constraint</p></td>
+<td><p>Build prior network from databases</p></td>
+<td><p>optional</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Kinetics</strong></p></td>
+<td><p>Estimate mRNA degradation and synthesis rates</p></td>
+<td><p>✓</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Mixture model</strong></p></td>
+<td><p>Fit negative-binomial burst parameters per gene</p></td>
+<td><p>✓</p></td>
+</tr>
+<tr class="row-odd"><td><p>Check mixture</p></td>
+<td><p>Validate mixture against data</p></td>
+<td><p>✓</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Network inference</strong></p></td>
+<td><p>Learn regulatory interactions via optimal transport</p></td>
+<td><p>✓</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Network adaptation</strong></p></td>
+<td><p>Prepare network parameters for simulation</p></td>
+<td><p>✓</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Simulation</strong></p></td>
+<td><p>Generate synthetic single-cell trajectories</p></td>
+<td><p>✓</p></td>
+</tr>
+<tr class="row-odd"><td><p>Check simulation</p></td>
+<td><p>Validate simulations vs data</p></td>
+<td><p>✓</p></td>
+</tr>
+<tr class="row-even"><td><p>Test — inference</p></td>
+<td><p>Infer and simulate on held-out test set</p></td>
+<td><p>optional</p></td>
+</tr>
+<tr class="row-odd"><td><p>Test — check</p></td>
+<td><p>Compare test predictions to training observations</p></td>
+<td><p>optional</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Perturb (KO/OV)</strong></p></td>
+<td><p>Simulate in-silico knock-outs / over-expressions</p></td>
+<td><p>✓</p></td>
+</tr>
+<tr class="row-odd"><td><p>Check KO/OV</p></td>
+<td><p>Compare perturbations to wild-type simulation</p></td>
+<td><p>✓</p></td>
+</tr>
+</tbody>
+</table>
+</div>
 <p>To run all steps with default parameters without any prompt:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cardamomot<span class="w"> </span>run<span class="w"> </span>my_project/<span class="w"> </span>--default
 </pre></div>
@@ -362,15 +421,39 @@
 <p>For scripting or cluster submission, use the <code class="docutils literal notranslate"><span class="pre">pipeline</span></code> sub-command:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cardamomot<span class="w"> </span>pipeline<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>-i<span class="w"> </span>my_project<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>-s<span class="w"> </span>full<span class="w"> </span><span class="se">\ </span><span class="w">      </span><span class="c1"># dataset split: full | train</span>
-<span class="w">    </span>-c<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\ </span><span class="w">         </span><span class="c1"># differential gene selection</span>
-<span class="w">    </span>-r<span class="w"> </span><span class="m">0</span>.6<span class="w"> </span><span class="se">\ </span><span class="w">       </span><span class="c1"># kinetics rate parameter</span>
-<span class="w">    </span>-m<span class="w"> </span><span class="m">0</span>.5<span class="w">          </span><span class="c1"># mean expression threshold</span>
+<span class="w">    </span>-s<span class="w"> </span>full<span class="w"> </span><span class="se">\ </span><span class="w">                 </span><span class="c1"># dataset split: full | train</span>
+<span class="w">    </span>-c<span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="se">\ </span><span class="w">                    </span><span class="c1"># differential gene selection (0=off, 1=on)</span>
+<span class="w">    </span>-r<span class="w"> </span><span class="m">0</span>.7<span class="w"> </span><span class="se">\ </span><span class="w">                  </span><span class="c1"># rate parameter for kinetics</span>
+<span class="w">    </span>-m<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">                  </span><span class="c1"># mean expression threshold (-1=auto)</span>
+<span class="w">    </span>--stimulus<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">          </span><span class="c1"># stimulus-edge penalisation in [0,1]</span>
+<span class="w">    </span>--prior<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">             </span><span class="c1"># prior-network weighting in [0,1]</span>
+<span class="w">    </span>--force-basins<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">      </span><span class="c1"># preserve NB mode means in [0,1]</span>
+<span class="w">    </span>--temporal-basins<span class="w"> </span><span class="m">1</span><span class="w">        </span><span class="c1"># enforce temporal mode consistency (0 or 1)</span>
 </pre></div>
 </div>
-<p>To activate stimulus-schedule handling (e.g. for datasets with non-trivial perturbation timing):</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cardamomot<span class="w"> </span>pipeline<span class="w"> </span>-i<span class="w"> </span>my_project<span class="w"> </span>--stimulus<span class="w"> </span><span class="m">0</span>.5
-</pre></div>
+<p><strong>Optional-section flags</strong> (add any combination):</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Flag</p></th>
+<th class="head"><p>Effect</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--rd</span></code></p></td>
+<td><p>Enable read-depth correction step</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--ref</span></code></p></td>
+<td><p>Enable prior-network preparation step</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--test</span></code></p></td>
+<td><p>Enable test-set inference steps</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--no-kov</span></code></p></td>
+<td><p>Disable KO/OV perturbation steps</p></td>
+</tr>
+</tbody>
+</table>
 </div>
 </section>
 <section id="run-individual-steps">

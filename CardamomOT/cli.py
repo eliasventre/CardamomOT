@@ -168,19 +168,44 @@ def _run_script(script: str, args: List[str]) -> None:
 
 
 def _pipeline(args: argparse.Namespace) -> None:
-    kw = ['-i', args.input, '-s', args.split, '-c', args.change,
-          '-r', args.rate, '-m', args.mean]
-    _run_script('infer_rd.py', ['-i', args.input])
-    _run_script('select_DEgenes_and_split.py', kw)
-    _run_script('get_kinetic_rates.py', ['-i', args.input, '-s', args.split])
-    _run_script('infer_mixture.py', ['-i', args.input, '-s', args.split, '-m', args.mean])
-    _run_script('check_mixture_to_data.py', ['-i', args.input, '-s', args.split])
-    _run_script('infer_network_structure.py', ['-i', args.input, '-s', args.split])
-    _run_script('infer_network_simul.py', ['-i', args.input, '-s', args.split])
-    _run_script('simulate_network.py', ['-i', args.input, '-s', args.split])
-    _run_script('check_sim_to_data.py', ['-i', args.input, '-s', args.split])
-    _run_script('simulate_network_KOV.py', ['-i', args.input, '-s', args.split])
-    _run_script('check_KOV_to_sim.py', ['-i', args.input, '-s', args.split])
+    inp = args.input
+    sp = args.split
+    stim = args.stimulus
+    prior = args.prior
+    fb = args.force_basins
+    tb = args.temporal_basins
+
+    if args.rd:
+        _run_script('infer_rd.py', ['-i', inp])
+
+    _run_script('select_DEgenes_and_split.py',
+                ['-i', inp, '-s', sp, '-c', args.change, '-r', args.rate, '-m', args.mean])
+
+    if args.ref:
+        _run_script('prepare_reference_network.py', ['-i', inp, '-d', '4'])
+
+    _run_script('get_kinetic_rates.py', ['-i', inp, '-s', sp])
+    _run_script('infer_mixture.py',
+                ['-i', inp, '-s', sp, '-m', args.mean, '-f', fb, '-t', tb])
+    _run_script('check_mixture_to_data.py', ['-i', inp, '-s', sp])
+    _run_script('infer_network_structure.py',
+                ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior, '-f', fb, '-b', tb])
+    _run_script('infer_network_simul.py',
+                ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior])
+    _run_script('simulate_network.py', ['-i', inp, '-s', sp])
+    _run_script('check_sim_to_data.py',
+                ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior])
+
+    if args.test:
+        _run_script('infer_test.py',
+                    ['-i', inp, '--stimulus', stim, '--prior', prior, '-f', fb, '-b', tb])
+        _run_script('check_test_to_train.py', ['-i', inp, '-s', sp])
+
+    if not args.no_kov:
+        _run_script('simulate_network_KOV.py', ['-i', inp, '-s', sp])
+        _run_script('check_KOV_to_sim.py',
+                    ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior])
+
     print("\nPipeline complete.")
 
 
@@ -206,10 +231,27 @@ def main() -> None:
 
     p_pipe = subparsers.add_parser('pipeline', help='run the full analysis pipeline')
     p_pipe.add_argument('-i', '--input', required=True, help='project directory')
-    p_pipe.add_argument('-s', '--split', default='full', help='data split')
-    p_pipe.add_argument('-c', '--change', default='0', help='change flag')
-    p_pipe.add_argument('-r', '--rate', default='1.0', help='rate parameter')
-    p_pipe.add_argument('-m', '--mean', default='1.0', help='mean parameter')
+    p_pipe.add_argument('-s', '--split', default='full', help='data split (full/train)')
+    p_pipe.add_argument('-c', '--change', default='0',
+                        help='differential gene selection (0=off, 1=on)')
+    p_pipe.add_argument('-r', '--rate', default='0', help='rate parameter for kinetics')
+    p_pipe.add_argument('-m', '--mean', default='-1', help='mean expression threshold (-1=auto)')
+    p_pipe.add_argument('--stimulus', default='-1',
+                        help='stimulus-edge penalisation in [0,1] (-1=model default)')
+    p_pipe.add_argument('--prior', default='-1',
+                        help='prior-network weighting in [0,1] (-1=model default)')
+    p_pipe.add_argument('--force-basins', default='-1', dest='force_basins',
+                        help='preserve NB mode means in [0,1] (-1=model default)')
+    p_pipe.add_argument('--temporal-basins', default='-1', dest='temporal_basins',
+                        help='enforce temporal mode consistency (0 or 1)')
+    p_pipe.add_argument('--rd', action='store_true', default=False,
+                        help='run read-depth correction (default: off)')
+    p_pipe.add_argument('--ref', action='store_true', default=False,
+                        help='run prepare_reference_network (default: off)')
+    p_pipe.add_argument('--test', action='store_true', default=False,
+                        help='run test-set inference steps (default: off)')
+    p_pipe.add_argument('--no-kov', action='store_true', default=False,
+                        help='skip KO/OV perturbation steps (default: run them)')
     p_pipe.set_defaults(func=_pipeline)
 
     p_step = subparsers.add_parser('step', help='run individual step')

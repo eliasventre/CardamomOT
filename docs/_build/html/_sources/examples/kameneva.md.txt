@@ -15,11 +15,13 @@ The sympathoadrenal lineage arises from neural crest cells that migrate to the a
 cardamomot pipeline \
     -i experimental_datasets/Kameneva \
     -s full \
-    -c 1 \
-    -r 0.6 \
+    -c 0 \
+    -r 0.7 \
     -m 0.5 \
     --stimulus 1.0 \
-    --prior 1.0
+    --prior 1.0 \
+    --force-basins 1.0 \
+    --temporal-basins 1
 ```
 
 Multiple `--stimulus` values (0.2, 0.3, 0.5, 1.0) were explored to assess sensitivity to the stimulus-edge penalisation, as reflected in the pre-computed outputs.
