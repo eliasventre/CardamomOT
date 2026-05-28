@@ -22,7 +22,7 @@ conda activate cardamom_light
 input_dir="$1"
 split="${2:-full}"
 change="${3:-0}"
-rate="${4:-0}"
+rate="${4:-1}"
 mean="${5:--1}"
 stimulus="${6:--1}"
 prior="${7:--1}"

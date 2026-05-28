@@ -62,7 +62,7 @@ cardamomot pipeline \
     -i my_project \
     -s full \                  # dataset split: full | train
     -c 0 \                     # differential gene selection (0=off, 1=on)
-    -r 0.7 \                   # rate parameter for kinetics
+    -r 1.0 \                   # gene-selection split rate (default 1)
     -m 1.0 \                   # mean expression threshold (-1=auto)
     --stimulus 1.0 \           # stimulus-edge penalisation in [0,1]
     --prior 1.0 \              # prior-network weighting in [0,1]

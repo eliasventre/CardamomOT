@@ -77,7 +77,7 @@ python -m CardamomOT.cli pipeline -i my_project -s full -c 1 -r 0.6 -m 0.5
 | `-i my_project` | **yes** | — | path to your project directory |
 | `-s` / `--split` | no | `full` | dataset split: `full` or `train` |
 | `-c` / `--change` | no | `0` | change flag (1 = differential gene selection) |
-| `-r` / `--rate` | no | `0` | rate parameter for kinetics |
+| `-r` / `--rate` | no | `1` | gene-selection split rate |
 | `-m` / `--mean` | no | model default | mean expression threshold for burst fitting |
 | `--stimulus` | no | model default (`1.0`) | stimulus edge penalization (`0`–`1`) |
 | `--prior` | no | model default (`1.0`) | prior-absent edge penalization (`0`–`1`) |
