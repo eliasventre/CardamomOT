@@ -22,16 +22,30 @@ The most commonly used objects are re-exported at package level:
 
 ```python
 from CardamomOT import (
-    NetworkModel,          # core model class
-    kon_ref_vector,        # burst kinetics fitting
+    NetworkModel,                  # core model class
+    kon_ref_vector,                # burst kinetics fitting
     extract_degradation_rates,
     select_DEgenes,
-    # --- visualisation ---
+    # --- marginals & UMAP ---
     plot_data_distrib,
     plot_data_pmf_temporal,
     plot_data_umap_toref,
     compare_marginals,
-    animate_dynamic_grns,
+    # --- cell-type analysis ---
+    train_classifier,
     predict_cell_types,
+    check_cell_types_full,
+    check_cell_types_mixture,
+    # --- result comparison ---
+    plot_results_rna_mixture,
+    plot_results_rna_clean,
+    plot_results_prot,
+    # --- KO/OV perturbations ---
+    plot_results_sim_kov,
+    compare_cell_types,
+    # --- network visualisation ---
+    analyse_reseau,
+    reseau_top_regulateurs,
+    plot_network,
 )
 ```
