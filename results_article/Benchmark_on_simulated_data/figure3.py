@@ -32,7 +32,7 @@ c = {
 # Figure: 6.85 in wide (=174 mm, double-column A4), 7.5 in tall (~190 mm)
 # hspace increased slightly to accommodate rotated labels
 fig = plt.figure(figsize=(6.85, 7.5))
-grid = gs.GridSpec(5, 3, hspace=0.55, wspace=0.18,
+grid = gs.GridSpec(5, 3, hspace=0.55, wspace=0.13,
     height_ratios=[1,1,1,1,1], width_ratios=[6,1,7])
 
 def configure(ax):
@@ -155,5 +155,5 @@ ax.legend(loc='upper right', ncol=2, **p)
 ax.set_xticks(size)
 ax.set_xlabel('No. of genes', fontsize=6, labelpad=1.8)
 
-fig.savefig('figure_3.pdf', dpi=300, bbox_inches='tight', pad_inches=0)
-plt.show()
+fig.savefig('figure_3.pdf', dpi=300, bbox_inches='tight', pad_inches=0.1)
+#plt.show()
