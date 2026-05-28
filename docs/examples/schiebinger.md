@@ -23,7 +23,7 @@ cardamomot pipeline \
     -s train \
     -c 0 \
     -r 0.3 \
-    -m 0.5 \
+    --mean-forcing 0.5 \
     --stimulus 1.0 \
     --prior 1.0 \
     --force-basins 0.0 \

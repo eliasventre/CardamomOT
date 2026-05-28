@@ -91,13 +91,13 @@ def add_split_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def add_means_argument(parser: argparse.ArgumentParser) -> None:
+def add_mean_forcing_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "-m", "--means",
+        "-m", "--mean-forcing",
         type=float,
-        default=-1,
+        default=0.5,
         metavar="VALUE",
-        help="Mean expression threshold (default: auto)",
+        help="Mean-forcing intensity for NB mixture (model default: 0.5)",
     )
 
 
@@ -186,10 +186,10 @@ def _pipeline(args: argparse.Namespace) -> None:
 
     _run_script('get_kinetic_rates.py', ['-i', inp, '-s', sp])
     _run_script('infer_mixture.py',
-                ['-i', inp, '-s', sp, '-m', args.mean, '-f', fb, '-t', tb])
+                ['-i', inp, '-s', sp, '--mean-forcing', args.mean, '--force-basins', fb, '--temporal-basins', tb])
     _run_script('check_mixture_to_data.py', ['-i', inp, '-s', sp])
     _run_script('infer_network_structure.py',
-                ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior, '-f', fb, '-b', tb])
+                ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior, '--force-basins', fb, '--temporal-basins', tb])
     _run_script('infer_network_simul.py',
                 ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior])
     _run_script('simulate_network.py', ['-i', inp, '-s', sp])
@@ -198,7 +198,7 @@ def _pipeline(args: argparse.Namespace) -> None:
 
     if args.test:
         _run_script('infer_test.py',
-                    ['-i', inp, '--stimulus', stim, '--prior', prior, '-f', fb, '-b', tb])
+                    ['-i', inp, '--stimulus', stim, '--prior', prior, '--force-basins', fb, '--temporal-basins', tb])
         _run_script('check_test_to_train.py', ['-i', inp, '-s', sp])
 
     if not args.no_kov:
@@ -235,7 +235,8 @@ def main() -> None:
     p_pipe.add_argument('-c', '--change', default='0',
                         help='differential gene selection (0=off, 1=on)')
     p_pipe.add_argument('-r', '--rate', default='1', help='cell-selection split rate (default: 1)')
-    p_pipe.add_argument('-m', '--mean', default='-1', help='mean expression threshold (-1=auto)')
+    p_pipe.add_argument('-m', '--mean-forcing', default='0.5', dest='mean',
+                        help='mean-forcing intensity for NB mixture (model default: 0.5)')
     p_pipe.add_argument('--stimulus', default='-1',
                         help='stimulus-edge penalisation in [0,1] (-1=model default)')
     p_pipe.add_argument('--prior', default='-1',

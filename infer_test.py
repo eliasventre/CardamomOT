@@ -53,11 +53,11 @@ def main(argv):
     try:
         opts, args = getopt.getopt(argv, "hi:t:p:f:b:",
                                    ["input=", "stimulus=", "prior=",
-                                    "force_basins=", "temporal_basins="])
+                                    "force-basins=", "temporal-basins="])
     except getopt.GetoptError:
         print("[infer_test] Error: Invalid command-line arguments")
         print("[infer_test] Usage: python infer_test.py -i <project_path> "
-              "[--stimulus <float>] [--prior <float>] [--force_basins <int>] [--temporal_basins <int>]")
+              "[--stimulus <float>] [--prior <float>] [--force-basins <int>] [--temporal-basins <int>]")
         sys.exit(2)
 
     for opt, arg in opts:
@@ -67,9 +67,9 @@ def main(argv):
             stimulus = float(arg)
         elif opt in ("-p", "--prior"):
             prior = float(arg)
-        elif opt in ("-f", "--force_basins"):
+        elif opt in ("-f", "--force-basins"):
             force_basins = int(arg)
-        elif opt in ("-b", "--temporal_basins"):
+        elif opt in ("-b", "--temporal-basins"):
             temporal_basins = int(arg)
         elif opt == "-h":
             print(__doc__)

@@ -40,7 +40,7 @@ def main(argv):
     split = ''
     mean_forcing = -1
     try:
-        opts, args = getopt.getopt(argv, "hi:c:r:s:m:", ["input=", "change=", "rate=", "split=", "mean="])
+        opts, args = getopt.getopt(argv, "hi:c:r:s:m:", ["input=", "change=", "rate=", "split=", "mean-forcing="])
     except getopt.GetoptError:
         print("[select_DEgenes_and_split] Error: Invalid command-line arguments")
         sys.exit(2)
@@ -54,7 +54,7 @@ def main(argv):
             rate = '{}'.format(arg)
         elif opt in ("-s", "--split"):
             split = '{}'.format(arg)
-        elif opt in ("-m", "--mean"):
+        elif opt in ("-m", "--mean-forcing"):
             mean_forcing = float(arg)
         elif opt == "-h":
             print(__doc__)

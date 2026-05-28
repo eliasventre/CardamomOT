@@ -418,17 +418,21 @@
 </section>
 <section id="run-in-batch-mode">
 <h2>Run in batch mode<a class="headerlink" href="#run-in-batch-mode" title="Link to this heading">¶</a></h2>
-<p>For scripting or cluster submission, use the <code class="docutils literal notranslate"><span class="pre">pipeline</span></code> sub-command:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cardamomot<span class="w"> </span>pipeline<span class="w"> </span><span class="se">\</span>
+<p>For scripting or cluster submission, use the <code class="docutils literal notranslate"><span class="pre">pipeline</span></code> sub-command. <strong>Only <code class="docutils literal notranslate"><span class="pre">-i</span></code> is required</strong>; every other argument has a default inherited from the model (<code class="docutils literal notranslate"><span class="pre">base.py</span></code>):</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Minimal call — all parameters use model defaults</span>
+cardamomot<span class="w"> </span>pipeline<span class="w"> </span>-i<span class="w"> </span>my_project
+
+<span class="c1"># Full explicit call</span>
+cardamomot<span class="w"> </span>pipeline<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>-i<span class="w"> </span>my_project<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>-s<span class="w"> </span>full<span class="w"> </span><span class="se">\ </span><span class="w">                 </span><span class="c1"># dataset split: full | train</span>
-<span class="w">    </span>-c<span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="se">\ </span><span class="w">                    </span><span class="c1"># differential gene selection (0=off, 1=on)</span>
-<span class="w">    </span>-r<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">                  </span><span class="c1"># cell-selection split rate (default 1)</span>
-<span class="w">    </span>-m<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">                  </span><span class="c1"># mean expression threshold (-1=auto)</span>
-<span class="w">    </span>--stimulus<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">          </span><span class="c1"># stimulus-edge penalisation in [0,1]</span>
-<span class="w">    </span>--prior<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">             </span><span class="c1"># prior-network weighting in [0,1]</span>
-<span class="w">    </span>--force-basins<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">      </span><span class="c1"># preserve NB mode means in [0,1]</span>
-<span class="w">    </span>--temporal-basins<span class="w"> </span><span class="m">1</span><span class="w">        </span><span class="c1"># enforce temporal mode consistency (0 or 1)</span>
+<span class="w">    </span>-s<span class="w"> </span>full<span class="w"> </span><span class="se">\ </span><span class="w">                      </span><span class="c1"># dataset split: full | train  (default: full)</span>
+<span class="w">    </span>-c<span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="se">\ </span><span class="w">                         </span><span class="c1"># differential gene selection (0=off, 1=on)  (default: 0)</span>
+<span class="w">    </span>-r<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\ </span><span class="w">                         </span><span class="c1"># cell-selection split rate  (default: 1)</span>
+<span class="w">    </span>--mean-forcing<span class="w"> </span><span class="m">0</span>.5<span class="w"> </span><span class="se">\ </span><span class="w">           </span><span class="c1"># mean-forcing intensity for NB mixture  (default: 0.5)</span>
+<span class="w">    </span>--stimulus<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">               </span><span class="c1"># stimulus-edge penalisation in [0,1]</span>
+<span class="w">    </span>--prior<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">                  </span><span class="c1"># prior-network weighting in [0,1]</span>
+<span class="w">    </span>--force-basins<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span><span class="se">\ </span><span class="w">           </span><span class="c1"># preserve NB mode means in [0,1]</span>
+<span class="w">    </span>--temporal-basins<span class="w"> </span><span class="m">1</span><span class="w">             </span><span class="c1"># enforce temporal mode consistency (0 or 1)</span>
 </pre></div>
 </div>
 <p><strong>Optional-section flags</strong> (add any combination):</p>
@@ -437,20 +441,25 @@
 <thead>
 <tr class="row-odd"><th class="head"><p>Flag</p></th>
 <th class="head"><p>Effect</p></th>
+<th class="head"><p>Default</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--rd</span></code></p></td>
-<td><p>Enable read-depth correction step</p></td>
+<td><p>Read-depth correction (<code class="docutils literal notranslate"><span class="pre">infer_rd</span></code>)</p></td>
+<td><p>off</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--ref</span></code></p></td>
-<td><p>Enable prior-network preparation step</p></td>
+<td><p>Prior-network preparation (<code class="docutils literal notranslate"><span class="pre">prepare_reference_network</span></code>)</p></td>
+<td><p>off</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--test</span></code></p></td>
-<td><p>Enable test-set inference steps</p></td>
+<td><p>Test-set inference (<code class="docutils literal notranslate"><span class="pre">infer_test</span></code> + <code class="docutils literal notranslate"><span class="pre">check_test_to_train</span></code>)</p></td>
+<td><p>off</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--no-kov</span></code></p></td>
-<td><p>Disable KO/OV perturbation steps</p></td>
+<td><p>Skip perturbation steps (<code class="docutils literal notranslate"><span class="pre">simulate_network_KOV</span></code> + <code class="docutils literal notranslate"><span class="pre">check_KOV_to_sim</span></code>)</p></td>
+<td><p>on</p></td>
 </tr>
 </tbody>
 </table>
@@ -458,8 +467,45 @@
 </section>
 <section id="run-individual-steps">
 <h2>Run individual steps<a class="headerlink" href="#run-individual-steps" title="Link to this heading">¶</a></h2>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Example: re-run only network inference</span>
-cardamomot<span class="w"> </span>step<span class="w"> </span>-i<span class="w"> </span>my_project<span class="w"> </span>network_inference
+<p>Each step can be run independently with <code class="docutils literal notranslate"><span class="pre">cardamomot</span> <span class="pre">step</span> <span class="pre">&lt;script_name&gt;</span> <span class="pre">[args]</span></code>, using the exact same arguments as in <code class="docutils literal notranslate"><span class="pre">run.sh</span></code>. The script name is the filename without <code class="docutils literal notranslate"><span class="pre">.py</span></code>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># ── Optional: read-depth correction (run before gene selection) ───────────────</span>
+cardamomot<span class="w"> </span>step<span class="w"> </span>infer_rd<span class="w"> </span>-i<span class="w"> </span>my_project
+
+<span class="c1"># ── Gene selection and cell split ─────────────────────────────────────────────</span>
+cardamomot<span class="w"> </span>step<span class="w"> </span>select_DEgenes_and_split<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-i<span class="w"> </span>my_project<span class="w"> </span>-s<span class="w"> </span>full<span class="w"> </span>-c<span class="w"> </span><span class="m">0</span><span class="w"> </span>-r<span class="w"> </span><span class="m">1</span><span class="w"> </span>--mean-forcing<span class="w"> </span><span class="m">0</span>.5
+
+<span class="c1"># ── Optional: prior network (run after gene selection) ────────────────────────</span>
+cardamomot<span class="w"> </span>step<span class="w"> </span>prepare_reference_network<span class="w"> </span>-i<span class="w"> </span>my_project<span class="w"> </span>-d<span class="w"> </span><span class="m">4</span>
+
+<span class="c1"># ── Kinetics ──────────────────────────────────────────────────────────────────</span>
+cardamomot<span class="w"> </span>step<span class="w"> </span>get_kinetic_rates<span class="w"> </span>-i<span class="w"> </span>my_project<span class="w"> </span>-s<span class="w"> </span>full
+
+<span class="c1"># ── Mixture model ─────────────────────────────────────────────────────────────</span>
+cardamomot<span class="w"> </span>step<span class="w"> </span>infer_mixture<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-i<span class="w"> </span>my_project<span class="w"> </span>-s<span class="w"> </span>full<span class="w"> </span>--mean-forcing<span class="w"> </span><span class="m">0</span>.5<span class="w"> </span>--force-basins<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span>--temporal-basins<span class="w"> </span><span class="m">1</span>
+cardamomot<span class="w"> </span>step<span class="w"> </span>check_mixture_to_data<span class="w"> </span>-i<span class="w"> </span>my_project<span class="w"> </span>-s<span class="w"> </span>full
+
+<span class="c1"># ── Network inference ─────────────────────────────────────────────────────────</span>
+cardamomot<span class="w"> </span>step<span class="w"> </span>infer_network_structure<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-i<span class="w"> </span>my_project<span class="w"> </span>-s<span class="w"> </span>full<span class="w"> </span>--stimulus<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span>--prior<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span>--force-basins<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span>--temporal-basins<span class="w"> </span><span class="m">1</span>
+cardamomot<span class="w"> </span>step<span class="w"> </span>infer_network_simul<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-i<span class="w"> </span>my_project<span class="w"> </span>-s<span class="w"> </span>full<span class="w"> </span>--stimulus<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span>--prior<span class="w"> </span><span class="m">1</span>.0
+
+<span class="c1"># ── Simulation ────────────────────────────────────────────────────────────────</span>
+cardamomot<span class="w"> </span>step<span class="w"> </span>simulate_network<span class="w"> </span>-i<span class="w"> </span>my_project<span class="w"> </span>-s<span class="w"> </span>full
+cardamomot<span class="w"> </span>step<span class="w"> </span>check_sim_to_data<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-i<span class="w"> </span>my_project<span class="w"> </span>-s<span class="w"> </span>full<span class="w"> </span>--stimulus<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span>--prior<span class="w"> </span><span class="m">1</span>.0
+
+<span class="c1"># ── Optional: test set (requires -s train) ────────────────────────────────────</span>
+cardamomot<span class="w"> </span>step<span class="w"> </span>infer_test<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-i<span class="w"> </span>my_project<span class="w"> </span>--stimulus<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span>--prior<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span>--force-basins<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span>--temporal-basins<span class="w"> </span><span class="m">1</span>
+cardamomot<span class="w"> </span>step<span class="w"> </span>check_test_to_train<span class="w"> </span>-i<span class="w"> </span>my_project<span class="w"> </span>-s<span class="w"> </span>train
+
+<span class="c1"># ── Perturbations (default) ───────────────────────────────────────────────────</span>
+cardamomot<span class="w"> </span>step<span class="w"> </span>simulate_network_KOV<span class="w"> </span>-i<span class="w"> </span>my_project<span class="w"> </span>-s<span class="w"> </span>full
+cardamomot<span class="w"> </span>step<span class="w"> </span>check_KOV_to_sim<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-i<span class="w"> </span>my_project<span class="w"> </span>-s<span class="w"> </span>full<span class="w"> </span>--stimulus<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span>--prior<span class="w"> </span><span class="m">1</span>.0
 </pre></div>
 </div>
 </section>

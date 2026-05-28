@@ -78,7 +78,7 @@ python -m CardamomOT.cli pipeline -i my_project -s full -c 1 -r 0.6 -m 0.5
 | `-s` / `--split` | no | `full` | dataset split: `full` or `train` |
 | `-c` / `--change` | no | `0` | change flag (1 = differential gene selection) |
 | `-r` / `--rate` | no | `1` | cell-selection split rate |
-| `-m` / `--mean` | no | model default | mean expression threshold for burst fitting |
+| `-m` / `--mean-forcing` | no | `0.5` | mean-forcing intensity for NB mixture |
 | `--stimulus` | no | model default (`1.0`) | stimulus edge penalization (`0`–`1`) |
 | `--prior` | no | model default (`1.0`) | prior-absent edge penalization (`0`–`1`) |
 | `-f` / `--force_basins` | no | model default (`1.0`) | weight for preserving NB mixture mode means (`0`–`1`) |

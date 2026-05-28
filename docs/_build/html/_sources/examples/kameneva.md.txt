@@ -17,7 +17,7 @@ cardamomot pipeline \
     -s full \
     -c 0 \
     -r 0.7 \
-    -m 0.5 \
+    --mean-forcing 0.5 \
     --stimulus 1.0 \
     --prior 1.0 \
     --force-basins 1.0 \

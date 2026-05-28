@@ -44,10 +44,10 @@ def main(argv):
     try:
         opts, args = getopt.getopt(argv, "hi:s:t:p:f:b:",
                                    ["input=", "split=", "stimulus=", "prior=",
-                                    "force_basins=", "temporal_basins="])
+                                    "force-basins=", "temporal-basins="])
     except getopt.GetoptError:
         print("Error: Invalid arguments. Use: infer_network_structure.py -i <project> -s <split> "
-              "[--stimulus <float>] [--prior <float>] [--force_basins <int>] [--temporal_basins <int>]")
+              "[--stimulus <float>] [--prior <float>] [--force-basins <int>] [--temporal-basins <int>]")
         sys.exit(2)
     for opt, arg in opts:
         if opt in ("-i", "--input"):
@@ -58,9 +58,9 @@ def main(argv):
             stimulus = float(arg)
         if opt in ("-p", "--prior"):
             prior = float(arg)
-        if opt in ("-f", "--force_basins"):
+        if opt in ("-f", "--force-basins"):
             force_basins = int(arg)
-        if opt in ("-b", "--temporal_basins"):
+        if opt in ("-b", "--temporal-basins"):
             temporal_basins = int(arg)
 
     p = '{}/'.format(inputfile)

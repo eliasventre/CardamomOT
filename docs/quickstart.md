@@ -55,35 +55,77 @@ cardamomot run my_project/ --default
 
 ## Run in batch mode
 
-For scripting or cluster submission, use the `pipeline` sub-command:
+For scripting or cluster submission, use the `pipeline` sub-command. **Only `-i` is required**; every other argument has a default inherited from the model (`base.py`):
 
 ```bash
+# Minimal call — all parameters use model defaults
+cardamomot pipeline -i my_project
+
+# Full explicit call
 cardamomot pipeline \
     -i my_project \
-    -s full \                  # dataset split: full | train
-    -c 0 \                     # differential gene selection (0=off, 1=on)
-    -r 1.0 \                   # cell-selection split rate (default 1)
-    -m 1.0 \                   # mean expression threshold (-1=auto)
-    --stimulus 1.0 \           # stimulus-edge penalisation in [0,1]
-    --prior 1.0 \              # prior-network weighting in [0,1]
-    --force-basins 1.0 \       # preserve NB mode means in [0,1]
-    --temporal-basins 1        # enforce temporal mode consistency (0 or 1)
+    -s full \                       # dataset split: full | train  (default: full)
+    -c 0 \                          # differential gene selection (0=off, 1=on)  (default: 0)
+    -r 1 \                          # cell-selection split rate  (default: 1)
+    --mean-forcing 0.5 \            # mean-forcing intensity for NB mixture  (default: 0.5)
+    --stimulus 1.0 \                # stimulus-edge penalisation in [0,1]
+    --prior 1.0 \                   # prior-network weighting in [0,1]
+    --force-basins 1.0 \            # preserve NB mode means in [0,1]
+    --temporal-basins 1             # enforce temporal mode consistency (0 or 1)
 ```
 
 **Optional-section flags** (add any combination):
 
-| Flag | Effect |
-|---|---|
-| `--rd` | Enable read-depth correction step |
-| `--ref` | Enable prior-network preparation step |
-| `--test` | Enable test-set inference steps |
-| `--no-kov` | Disable KO/OV perturbation steps |
+| Flag | Effect | Default |
+|---|---|---|
+| `--rd` | Read-depth correction (`infer_rd`) | off |
+| `--ref` | Prior-network preparation (`prepare_reference_network`) | off |
+| `--test` | Test-set inference (`infer_test` + `check_test_to_train`) | off |
+| `--no-kov` | Skip perturbation steps (`simulate_network_KOV` + `check_KOV_to_sim`) | on |
 
 ## Run individual steps
 
+Each step can be run independently with `cardamomot step <script_name> [args]`, using the exact same arguments as in `run.sh`. The script name is the filename without `.py`:
+
 ```bash
-# Example: re-run only network inference
-cardamomot step -i my_project network_inference
+# ── Optional: read-depth correction (run before gene selection) ───────────────
+cardamomot step infer_rd -i my_project
+
+# ── Gene selection and cell split ─────────────────────────────────────────────
+cardamomot step select_DEgenes_and_split \
+    -i my_project -s full -c 0 -r 1 --mean-forcing 0.5
+
+# ── Optional: prior network (run after gene selection) ────────────────────────
+cardamomot step prepare_reference_network -i my_project -d 4
+
+# ── Kinetics ──────────────────────────────────────────────────────────────────
+cardamomot step get_kinetic_rates -i my_project -s full
+
+# ── Mixture model ─────────────────────────────────────────────────────────────
+cardamomot step infer_mixture \
+    -i my_project -s full --mean-forcing 0.5 --force-basins 1.0 --temporal-basins 1
+cardamomot step check_mixture_to_data -i my_project -s full
+
+# ── Network inference ─────────────────────────────────────────────────────────
+cardamomot step infer_network_structure \
+    -i my_project -s full --stimulus 1.0 --prior 1.0 --force-basins 1.0 --temporal-basins 1
+cardamomot step infer_network_simul \
+    -i my_project -s full --stimulus 1.0 --prior 1.0
+
+# ── Simulation ────────────────────────────────────────────────────────────────
+cardamomot step simulate_network -i my_project -s full
+cardamomot step check_sim_to_data \
+    -i my_project -s full --stimulus 1.0 --prior 1.0
+
+# ── Optional: test set (requires -s train) ────────────────────────────────────
+cardamomot step infer_test \
+    -i my_project --stimulus 1.0 --prior 1.0 --force-basins 1.0 --temporal-basins 1
+cardamomot step check_test_to_train -i my_project -s train
+
+# ── Perturbations (default) ───────────────────────────────────────────────────
+cardamomot step simulate_network_KOV -i my_project -s full
+cardamomot step check_KOV_to_sim \
+    -i my_project -s full --stimulus 1.0 --prior 1.0
 ```
 
 ## Examine results
@@ -102,40 +144,57 @@ my_project/
 
 ## Post-analysis
 
-The `utils/` directory contains Jupyter notebooks for the standard post-pipeline analyses:
+The `utils/` directory contains Jupyter notebooks that call the post-analysis functions
+exported by the package. You can also call these functions directly in your own scripts.
 
 | Notebook | What it does |
 |---|---|
-| `plot_networks.ipynb` | Visualise the inferred GRN (edge weights, thresholding) |
-| `plot_data_to_sim.ipynb` | Compare observed data to simulated trajectories (UMAPs, marginals) |
-| `plot_data_to_sim_KOV.ipynb` | Compare wild-type and KO/OV simulations |
-| `compare_cell_types.ipynb` | Train a cell-type classifier and compare proportions across conditions |
+| `plot_networks.ipynb` | Inferred GRN — per-regulator subgraphs and reduced network |
+| `plot_data_to_sim.ipynb` | Compare data, NB mixture, trajectories and simulation (UMAPs) |
+| `plot_data_to_sim_KOV.ipynb` | Compare wild-type simulation to KO/OV perturbations |
+| `compare_cell_types.ipynb` | Train cell-type classifier and compare proportions across stages |
 | `compare_cell_types_across_KOV.ipynb` | Cell-type proportions under each in-silico perturbation |
 
-These notebooks use the high-level functions exported by the package:
+### Typical workflow
 
 ```python
 import anndata as ad
 from CardamomOT import (
-    train_classifier, predict_cell_types, plot_cell_type_proportions,
-    compare_marginals, plot_data_pmf_temporal,
-    plot_data_umap_toref, plot_data_umap_altogether,
-    animate_dynamic_grns,
+    train_classifier,
+    check_cell_types_mixture,
+    check_cell_types_full,
+    plot_results_rna_clean,
+    plot_results_prot,
+    plot_networks,
+    plot_results_rna_clean_kov,
 )
 
-p = "my_project/"
+p = "my_project/"   # trailing slash required
 
-# Load observed data and simulations
-adata      = ad.read_h5ad(p + "Data/data_full.h5ad")
-adata_sim  = ad.read_h5ad(p + "cardamomOT/adata_prot_simul_stim1.0_prior1.0.h5ad")
+# ── 1. Train a cell-type classifier on the observed data ─────────────────────
+adata_full = ad.read_h5ad(p + "Data/data_full.h5ad")
+clf = train_classifier(adata_full, label_key="cell_type")
 
-# Compare marginal distributions per gene and time point
-compare_marginals(adata, adata_sim)
+# ── 2. Compare cell-type proportions: data vs NB mixture ─────────────────────
+check_cell_types_mixture(clf, p, adata_full, stim=1.0, prior=1.0)
 
-# Cell-type classification and proportion comparison
-clf = train_classifier(adata, label_key="cell_type")
-predict_cell_types(clf, adata_sim)
-plot_cell_type_proportions(adata, adata_sim)
+# ── 3. Compare proportions across all pipeline stages ────────────────────────
+check_cell_types_full(clf, p, stim=1.0, prior=1.0)
+
+# ── 4. UMAP comparison: reference / mixture / network / simulation ────────────
+plot_results_rna_clean("full", project_on_full=False, p=p, stim=1.0, prior=1.0)
+
+# ── 5. Protein-level UMAP: trajectories vs simulation ────────────────────────
+plot_results_prot(project_on_full=True, p=p, stim=1.0, prior=1.0)
+
+# ── 6. Visualise the inferred GRN ────────────────────────────────────────────
+plot_networks(p, stim=1.0, prior=1.0, train="full")
+
+# ── 7. KO/OV comparison (if perturbation steps were run) ─────────────────────
+plot_results_rna_clean_kov(
+    project_on_full=False, p=p,
+    combo="KO_Gata6_OV_none", stim=1.0, prior=1.0,
+)
 ```
 
 See the [API reference](api.md) for all parameters.

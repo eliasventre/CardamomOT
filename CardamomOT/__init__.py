@@ -70,14 +70,19 @@ from .tools import (
     compare_marginals,
     plot_data_umap_toref,
     plot_data_umap_altogether,
-    animate_dynamic_grns,
-    interactive_edit_positions,
-    enforce_min_distance,
-    filter_edges,
-    compute_max_variation_times,
     predict_cell_types,
     train_classifier,
     plot_cell_type_proportions,
+    check_cell_types_full,
+    check_cell_types_mixture,
+    plot_results_rna_mixture,
+    plot_results_rna_clean,
+    plot_results_prot,
+    plot_results_rna_clean_kov,
+    add_edges_from_matrix,
+    analyse_reseau,
+    reseau_top_regulateurs,
+    plot_networks,
 )
 
 # ============================================================================
@@ -108,15 +113,22 @@ __all__ = [
     "compare_marginals",
     "plot_data_umap_toref",
     "plot_data_umap_altogether",
-    "animate_dynamic_grns",
-    "interactive_edit_positions",
-    "enforce_min_distance",
-    "filter_edges",
-    "compute_max_variation_times",
     # Analysis tools
     "predict_cell_types",
     "train_classifier",
     "plot_cell_type_proportions",
+    "check_cell_types_full",
+    "check_cell_types_mixture",
+    # Post-analysis plotting
+    "plot_results_rna_mixture",
+    "plot_results_rna_clean",
+    "plot_results_prot",
+    "plot_results_rna_clean_kov",
+    # Network visualisation
+    "add_edges_from_matrix",
+    "analyse_reseau",
+    "reseau_top_regulateurs",
+    "plot_networks",
 ]
 
 logger.debug(f"CARDAMOM {__version__} loaded successfully")

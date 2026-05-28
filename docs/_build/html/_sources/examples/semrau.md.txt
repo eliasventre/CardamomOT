@@ -17,11 +17,12 @@ cardamomot pipeline \
     -s full \
     -c 0 \
     -r 0.7 \
-    -m 1.0 \
+    --mean-forcing 1.0 \
     --stimulus 1.0 \
     --prior 1.0 \
     --force-basins 1.0 \
     --temporal-basins 1
+
 ```
 
 Key choices:

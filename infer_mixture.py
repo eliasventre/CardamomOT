@@ -43,20 +43,20 @@ def main(argv):
     temporal_basins = -1
 
     try:
-        opts, args = getopt.getopt(argv, "hi:s:m:f:t:", ["input=", "split=", "mean=", "force=", "temporal="])
+        opts, args = getopt.getopt(argv, "hi:s:m:f:b:", ["input=", "split=", "mean-forcing=", "force-basins=", "temporal-basins="])
     except getopt.GetoptError:
-        print("Error: Invalid arguments. Use: infer_mixture.py -i <project> -s <split> [-m <threshold>] [-f <force_basins>] [-t <temporal_basins>]")
+        print("Error: Invalid arguments. Use: infer_mixture.py -i <project> -s <split> [-m <mean_forcing>] [-f <force_basins>] [-b <temporal_basins>]")
         sys.exit(2)
     for opt, arg in opts:
         if opt in ("-i", "--input"):
             inputfile = arg
         if opt in ("-s", "--split"):
             split = '{}'.format(arg)
-        if opt in ("-m", "--mean"):
+        if opt in ("-m", "--mean-forcing"):
             mean_forcing = float(arg)
-        if opt in ("-f", "--force"):
+        if opt in ("-f", "--force-basins"):
             force_basins = int(arg)
-        if opt in ("-t", "--temporal"):
+        if opt in ("-b", "--temporal-basins"):
             temporal_basins = int(arg)
 
     p = '{}/'.format(inputfile)

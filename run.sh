@@ -9,7 +9,7 @@ conda activate cardamom_light
 #   split          : full | train
 #   change         : 0/1 — differential gene selection
 #   rate           : float — rate parameter for kinetics
-#   mean           : float — mean expression threshold (-1 = auto)
+#   mean_forcing   : float — mean-forcing intensity for NB mixture (model default 0.5, -1 = use model default)
 #   stimulus       : float in [0,1] — penalize stimulus edges (-1 = model default)
 #   prior          : float in [0,1] — penalize edges absent from prior network (-1 = model default)
 #   force_basins   : float in [0,1] — preserve mode means in NB mixture (-1 = model default)
@@ -23,7 +23,7 @@ input_dir="$1"
 split="${2:-full}"
 change="${3:-0}"
 rate="${4:-1}"
-mean="${5:--1}"
+mean_forcing="${5:--1}"
 stimulus="${6:--1}"
 prior="${7:--1}"
 force_basins="${8:--1}"
@@ -39,7 +39,7 @@ if [ "$rd" = "1" ]; then
 fi
 
 echo "Select DE genes and split cells"
-python select_DEgenes_and_split.py -i "${input_dir}" -c "${change}" -r "${rate}" -s "${split}" -m "${mean}"
+python select_DEgenes_and_split.py -i "${input_dir}" -c "${change}" -r "${rate}" -s "${split}" --mean-forcing "${mean_forcing}"
 
 if [ "$ref" = "1" ]; then
     echo "Compute prior network"
@@ -50,13 +50,13 @@ echo "Get kinetic rates"
 python get_kinetic_rates.py -i "${input_dir}" -s "${split}"
 
 echo "Inference mixture"
-python infer_mixture.py -i "${input_dir}" -s "${split}" -m "${mean}" -f "${force_basins}" -t "${temporal_basins}"
+python infer_mixture.py -i "${input_dir}" -s "${split}" --mean-forcing "${mean_forcing}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"
 
 echo "Check mixture"
 python check_mixture_to_data.py -i "${input_dir}" -s "${split}"
 
 echo "Infer network structure"
-python infer_network_structure.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}" -f "${force_basins}" -b "${temporal_basins}"
+python infer_network_structure.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"
 
 echo "Adapt network to simulate and degradation rates"
 python infer_network_simul.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}"
@@ -69,7 +69,7 @@ python check_sim_to_data.py -i "${input_dir}" -s "${split}" --stimulus "${stimul
 
 if [ "$test" = "1" ]; then
     echo "Infer and simulate test"
-    python infer_test.py -i "${input_dir}" --stimulus "${stimulus}" --prior "${prior}" -f "${force_basins}" -b "${temporal_basins}"
+    python infer_test.py -i "${input_dir}" --stimulus "${stimulus}" --prior "${prior}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"
     python check_test_to_train.py -i "${input_dir}" -s "${split}"
 fi
 
