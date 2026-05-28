@@ -55,7 +55,7 @@ autoapi_options = [
 ]
 autoapi_ignore = ["*cli*.py", "*logging*.py"]
 autoapi_add_toctree_entry = False
-autoapi_keep_files = True
+autoapi_keep_files = False
 
 # -- nbsphinx -----------------------------------------------------------------
 nbsphinx_execute = "never"  # notebooks are pre-executed and committed with outputs

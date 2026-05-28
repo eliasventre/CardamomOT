@@ -72,3 +72,6 @@ miniconda/
 # Project-specific
 # ============================================================================
 pypath_log/
+
+# Sphinx autoapi — generated at build time, never commit
+docs/autoapi/
