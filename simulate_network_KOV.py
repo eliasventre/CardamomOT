@@ -27,6 +27,7 @@ from CardamomOT import NetworkModel as NetworkModel_beta
 import getopt
 import anndata as ad
 import os
+import copy
 
 
 def _parse_gene_with_pct(token):
@@ -261,15 +262,13 @@ def main(argv):
 
     ns = model.n_stimuli
 
-    # Save original d_t so it can be restored for each perturbation
-    d_t_orig = model.d_t.copy()
-
     def _gene_label(gene, pct):
         return f"{gene}pct{int(pct)}" if pct is not None else gene
 
     # Simulate perturbations
     print(f"[simulate_network_KOV] Starting simulation of {len(combos)} perturbations...")
     for idx, combo in enumerate(combos, start=1):
+        model_combo = copy.deepcopy(model)
         kos = combo['KO']   # list of (gene, pct_or_None)
         ovs = combo['OV']
         ko_label = '-'.join(_gene_label(g, p) for g, p in kos) if kos else 'none'
@@ -281,12 +280,11 @@ def main(argv):
         # Use the per-sample 3-D basal when available so that simulate_trajectories_unitary
         # can route each cell to its own sample's basal (same as simulate_network.py).
         try:
-            model.basal = basal_clean_3d.copy() if basal_clean_3d is not None else basal_clean.copy()
-            model.basal_t = basal_t_clean.copy()
-            model.d_t = d_t_orig.copy()
-            model.production_factor = None   # reset per-gene creation rate scaling
-            model.prot = np.load(os.path.join(p, 'cardamomOT', 'data_prot_forsimul.npy'))
-            model.kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta.npy'))
+            model_combo.basal = basal_clean_3d.copy() if basal_clean_3d is not None else basal_clean.copy()
+            model_combo.basal_t = basal_t_clean.copy()
+            model_combo.production_factor = None   # reset per-gene creation rate scaling
+            model_combo.prot = np.load(os.path.join(p, 'cardamomOT', 'data_prot_forsimul.npy'))
+            model_combo.kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta.npy'))
         except FileNotFoundError as e:
             print(f"[simulate_network_KOV] Error resetting model: {e}")
             continue
@@ -301,16 +299,16 @@ def main(argv):
             if gene in adata.var_names:
                 ind = ns + adata.var_names.get_loc(gene)
                 if pct is None:
-                    if model.basal_t.ndim == 4:
-                        model.basal_t[:, :, ind] = -100 - np.sum(model.inter_t[-1, :, ind])
+                    if model_combo.basal_t.ndim == 4:
+                        model_combo.basal_t[:, :, ind] = -100 - np.sum(model_combo.inter_t[-1, :, ind])
                     else:
-                        model.basal_t[:, ind] = -100 - np.sum(model.inter_t[-1, :, ind])
+                        model_combo.basal_t[:, ind] = -100 - np.sum(model_combo.inter_t[-1, :, ind])
                     print(f"[simulate_network_KOV]   KO 100%: {gene} (index {ind})")
                 else:
                     factor = max(1.0 - pct / 100.0, 1e-12)
-                    if model.production_factor is None:
-                        model.production_factor = np.ones(adata.shape[1] + ns)
-                    model.production_factor[ind] = factor
+                    if model_combo.production_factor is None:
+                        model_combo.production_factor = np.ones(adata.shape[1] + ns)
+                    model_combo.production_factor[ind] = factor
                     print(f"[simulate_network_KOV]   KO {pct:.0f}%: {gene} (index {ind}), creation ×{factor:.3g}")
             else:
                 print(f"[simulate_network_KOV]   Warning: Gene '{gene}' not found in data")
@@ -323,26 +321,26 @@ def main(argv):
             if gene in adata.var_names:
                 ind = ns + adata.var_names.get_loc(gene)
                 if pct is None:
-                    if model.basal_t.ndim == 4:
-                        model.basal_t[:, :, ind] = 100 + np.sum(model.inter_t[-1, :, ind])
+                    if model_combo.basal_t.ndim == 4:
+                        model_combo.basal_t[:, :, ind] = 100 + np.sum(model_combo.inter_t[-1, :, ind])
                     else:
-                        model.basal_t[:, ind] = 100 + np.sum(model.inter_t[-1, :, ind])
+                        model_combo.basal_t[:, ind] = 100 + np.sum(model_combo.inter_t[-1, :, ind])
                     print(f"[simulate_network_KOV]   OV 100%: {gene} (index {ind})")
                 else:
                     factor = 1.0 / max(1.0 - pct / 100.0, 1e-12)
-                    if model.production_factor is None:
-                        model.production_factor = np.ones(adata.shape[1] + ns)
-                    model.production_factor[ind] = factor
+                    if model_combo.production_factor is None:
+                        model_combo.production_factor = np.ones(adata.shape[1] + ns)
+                    model_combo.production_factor[ind] = factor
                     print(f"[simulate_network_KOV]   OV {pct:.0f}%: {gene} (index {ind}), creation ×{factor:.3g}")
             else:
                 print(f"[simulate_network_KOV]   Warning: Gene '{gene}' not found in data")
 
         # Simulate dynamics
         try:
-            model.simulate_network(times, stimulus_schedule=stim_sched)
+            model_combo.simulate_network(times, stimulus_schedule=stim_sched)
             cardamom_dir = os.path.join(p, 'cardamomOT')
-            np.save(os.path.join(cardamom_dir, f'data_prot_simul_{label}'), model.prot)
-            np.save(os.path.join(cardamom_dir, f'data_kon_simul_{label}'), model.kon_theta)
+            np.save(os.path.join(cardamom_dir, f'data_prot_simul_{label}'), model_combo.prot)
+            np.save(os.path.join(cardamom_dir, f'data_kon_simul_{label}'), model_combo.kon_theta)
             print(f"[simulate_network_KOV]   Results saved for condition: {label}")
         except Exception as e:
             print(f"[simulate_network_KOV]   Error simulating condition {idx}: {e}")

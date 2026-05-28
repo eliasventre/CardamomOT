@@ -97,8 +97,8 @@ def main(argv):
     """
     inputfile = ''
     split = ''
-    stimulus = 1.0
-    prior = 1.0
+    stimulus = -1.0
+    prior = -1.0
     try:
         opts, args = getopt.getopt(argv, "hi:s:t:p:",
                                    ["input=", "split=", "stimulus=", "prior="])
@@ -196,8 +196,10 @@ def main(argv):
     ns = mixture_parameters.shape[1] - G
 
     model = NetworkModel(G)
-    model.stimulus = stimulus
-    model.prior_network_pen = prior
+    if stimulus >= 0:
+        model.stimulus = stimulus
+    if prior >= 0:
+        model.prior_network_pen = prior
     print(f"[check_KOV_to_sim] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
 
     # Create AnnData objects for each perturbation combination

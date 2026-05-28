@@ -34,16 +34,18 @@ def main(argv):
     Main function to run the mixture model inference pipeline.
 
     Args:
-        argv: Command-line arguments (--input, --split, --mean).
+        argv: Command-line arguments (--input, --split, --mean, --force, --temporal).
     """
     inputfile  = ''
     split      = ''
     mean_forcing = -1
+    force_basins = -1
+    temporal_basins = -1
 
     try:
-        opts, args = getopt.getopt(argv, "hi:s:m:", ["input=", "split=", "mean="])
+        opts, args = getopt.getopt(argv, "hi:s:m:f:t:", ["input=", "split=", "mean=", "force=", "temporal="])
     except getopt.GetoptError:
-        print("Error: Invalid arguments. Use: infer_mixture.py -i <project> -s <split> [-m <threshold>]")
+        print("Error: Invalid arguments. Use: infer_mixture.py -i <project> -s <split> [-m <threshold>] [-f <force_basins>] [-t <temporal_basins>]")
         sys.exit(2)
     for opt, arg in opts:
         if opt in ("-i", "--input"):
@@ -52,6 +54,10 @@ def main(argv):
             split = '{}'.format(arg)
         if opt in ("-m", "--mean"):
             mean_forcing = float(arg)
+        if opt in ("-f", "--force"):
+            force_basins = int(arg)
+        if opt in ("-t", "--temporal"):
+            temporal_basins = int(arg)
 
     p = '{}/'.format(inputfile)
 
@@ -101,6 +107,12 @@ def main(argv):
 
     # ─── INFER MIXTURE MODEL ────────────────────────────────────────────
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
+    if force_basins >= 0:
+        model.force_basins = force_basins
+    if temporal_basins >= 0:
+        model.temporal_basins = temporal_basins
+    if verb:
+        print(f"[infer_mixture] force_basins={model.force_basins}, temporal_basins={model.temporal_basins}")
     if mean_forcing >= 0:
         model.mean_forcing_em = mean_forcing
         if verb:

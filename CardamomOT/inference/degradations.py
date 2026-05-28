@@ -5,7 +5,7 @@ This module provides PyTorch models and helper functions used by the
 CARDAMOM pipeline when learning gene-specific degradation parameters
 from protein dynamics.  It includes the
 :class:`GeneRegulatoryODE_softmax` neural ODE model and the
-:func:`inference_epsilon_temporal` routine among other utilities.
+:func:`infer_ratio_d0_d1_unitary` routine among other utilities.
 """
 
 import numpy as np
@@ -508,10 +508,10 @@ class GeneRegulatoryODE_softmax(nn.Module):
 
 
 # ---------------------------
-# inference_epsilon_temporal
+# infer_ratio_d0_d1_unitary
 # ---------------------------
 
-def inference_epsilon_temporal(
+def infer_ratio_d0_d1_unitary(
     X_prot, times, bias, theta_inter, ks,
     d_learned_temporal, k1_vec,
     n_stimuli=1, stim_schedule=None,
@@ -523,40 +523,44 @@ def inference_epsilon_temporal(
     verbose=True, kon_mlp=None,
     scale=1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Estimate ε_i = d1_i/d0_i from ODE residuals (bursty-PDMP consistency).
+    """Estimate ε_i = d1_i/d0_i from ODE residuals (bursty-PDMP variance matching).
 
     **Theoretical background.**
 
-    In the bursty-PDMP model, the instantaneous variance of protein level X_i is:
+    In the bursty PDMP actually simulated (see :class:`BurstyPDMP`), the burst
+    parameters at interval ``cnt`` are:
+
+    * burst **rate**  : ``λ_i = k1_i · kon_norm_i(P) · d0_i``
+    * burst **size**  : ``Exp(k1_i · d0_i / (scale · d1_i))``
+      i.e. mean burst = ``scale · d1_i / (k1_i · d0_i)``
+
+    This ensures the mean-field ODE limit is ``dP_i/dt = d1_i(kon_i/k1_i − P_i)``.
+
+    By Campbell's theorem (leading term for small dt):
 
     .. math::
 
-        \\operatorname{Var}[\\Delta X_i \\mid dt] \\approx
-        2 \\, d_{1,i} \\, \\varepsilon_i \\, k_{on,i}(P) / k_{1,i} \\cdot dt
+        \\operatorname{Var}[\\Delta X_i] \\approx
+        \\lambda_i \\cdot E[B_i^2] \\cdot dt
+        = 2\\,dt\\cdot k_{on,i}(P)\\cdot\\mathrm{scale}\\,
+          \\frac{d_{1,i}^2}{k_{1,i}^2\\,d_{0,i}}
+        = \\varepsilon_i \\cdot h_{ic}
 
-    where :math:`\\varepsilon_i = d_{1,i}/d_{0,i}` is the mRNA/protein timescale
-    ratio and :math:`k_{1,i} = \\max_k a_{ki}` is the maximum burst rate.
-
-    The ODE predicts the *mean* trajectory; its residuals against snapshot data
-    at the next timepoint capture the stochastic variance. Equating them gives
-    the method-of-moments estimator:
+    where :math:`\\varepsilon_i = d_{1,i}/d_{0,i}` and
 
     .. math::
 
-        \\varepsilon_i = \\frac{\\sum_c (X_{\\mathrm{pred},c} - X_{1,c})^2}
-                                 {\\sum_c h_{ic}}
+        h_{ic} = 2\\,dt\\cdot\\mathrm{scale}\\cdot
+                 \\frac{d_{1,i}}{k_{1,i}^2}\\cdot k_{on,i}(P_c)
 
-    with :math:`h_{ic} = 2 \\, d_{1,i} \\, k_{on,i}(P_c) \\, dt / k_{1,i}`.
-
-    With Tikhonov regularisation (``lambda_deg > 0``):
+    The regularised method-of-moments estimator is:
 
     .. math::
 
-        \\varepsilon_i = \\frac{\\sum_c (X_c^2) + \\lambda \\, \\varepsilon_{\\mathrm{prior}}}
-                                 {\\sum_c h_{ic} + \\lambda}
-
-    The result is ``self.ratios[cnt] = 1 / ε_temporal[cnt]`` (= d0/d1), and in
-    simulation: ``d0_sim = d1 * ratios = d1 * (d0/d1) = d0``.
+        \\varepsilon_i =
+        \\frac{\\sum_c (X_{\\mathrm{pred},c} - X_{1,c})^2
+               + \\lambda\\,\\varepsilon_{\\mathrm{prior},i}}
+              {\\sum_c h_{ic} + \\lambda}
 
     Args:
         X_prot             : ``(N, G)`` protein observations (all timepoints).
@@ -566,24 +570,24 @@ def inference_epsilon_temporal(
         theta_inter        : ``(T-1, G, G, n_nets)`` GRN interaction tensor.
         ks                 : ``(n_modes, G)`` softmax burst-rate amplitudes
                              (already multiplied by ``scale_proteins``).
-        d_learned_temporal : ``(T-1, G)`` learned protein degradation rates.
+        d_learned_temporal : ``(T-1, G)`` learned protein degradation rates d1.
         k1_vec             : ``(G,)`` max burst rate × scale (= ``k1 * scale``).
         n_stimuli          : Number of stimulus columns (default 1).
         stim_schedule      : ``{float: np.ndarray(ns)}`` stimulus values per time.
         samples_data       : ``(N,)`` per-cell sample index (optional).
         method, rtol, atol : ODE solver settings.
         lambda_deg         : Tikhonov weight; 0 = pure MoM, large → prior.
-        prior_eps          : ``(G,)`` prior for ε. Defaults to all-ones.
+        prior_eps          : ``(G,)`` prior for ε = d1/d0. Defaults to all-ones.
         outlier_quantile   : Fraction of cells to keep (sorted by residual).
         min_kon            : Minimum kon value for a cell to contribute.
-        eps_min, eps_max   : Output clipping bounds.
+        eps_min, eps_max   : Output clipping bounds for ε = d1/d0.
         verbose            : Log per-interval diagnostics.
         kon_mlp            : Optional :class:`KonCorrectionMLP` (Harissa branch).
         scale              : Protein scale (``self.scale_proteins``). Default 1.0.
 
     Returns:
-        eps_temporal : ``(T-1, G)`` per-interval ε estimates (d1/d0).
-        eps_global   : ``(G,)`` global ε estimate pooled over all intervals.
+        eps_temporal : ``(T-1, G)`` per-interval ε = d1/d0 estimates.
+        eps_global   : ``(G,)`` global ε pooled over all intervals.
     """
     device = "cpu"
     X_prot   = np.asarray(X_prot,  dtype=np.float32)
@@ -600,7 +604,7 @@ def inference_epsilon_temporal(
     assert d_learned_temporal.shape[0] == T - 1, "d_learned_temporal must have (T-1, G)"
     assert k1_vec.shape[0] == G
 
-    # ── Prior for ε (used by regularisation) ────────────────────────────────
+    # ── Prior for ε = d1/d0 (used by regularisation) ────────────────────────
     r_prior = (
         np.ones(G, dtype=np.float64)
         if prior_eps is None
@@ -609,15 +613,15 @@ def inference_epsilon_temporal(
     lam = float(lambda_deg)
 
     # ── LS accumulators (float64) ────────────────────────────────────────────
-    # Model: E[(X_pred - X_data)²_i] = ε_i · h_{ic}
-    # where h_{ic} = 2 · d1_i · kon_i(P_c) / k1_i · dt
+    # Bursty-PDMP model (Campbell's theorem for Exp bursts):
+    #   Var(ΔX_i) = ε_i · h_{ic}
+    # where  ε_i = d1_i/d0_i  and
+    #        h_{ic} = 2 · dt · scale · d1_i/k1_i² · kon_i(P_c)
     # Regularised MoM: ε_i = (Σ res²_{ci} + λ·ε_prior) / (Σ h_{ic} + λ)
     num_t   = np.zeros((T - 1, G), dtype=np.float64)   # Σ residuals²
     denom_t = np.zeros((T - 1, G), dtype=np.float64)   # Σ h
     num_g   = np.zeros(G,          dtype=np.float64)
     denom_g = np.zeros(G,          dtype=np.float64)
-
-    scale2 = float(scale) ** 2   # for general scale (= 1 when scale_proteins = 1)
 
     for cnt in range(T - 1):
         t0 = float(unique_times[cnt])
@@ -708,9 +712,10 @@ def inference_epsilon_temporal(
         # ── Residuals and denominator ─────────────────────────────────────────
         residuals = (X_pred - X1_np) ** 2   # (n_pairs, G)
 
-        # h_{ic} = 2 * d1_i * kon_i(P_c) / k1_i * dt
-        # (scale² factor cancels since X is in protein units and kon is too)
-        h_mat = (2.0 * dt / scale2) * (d_param_vec / k1_i)[None, :] * kon_avg   # (n_pairs, G)
+        # h_{ic} = 2 · dt · scale · d1_i/k1_i² · kon_i(P_c)
+        # Derived from Campbell's theorem: burst rate=k1·kon_norm·d0, burst size~Exp(k1·d0/(scale·d1))
+        #   Var(ΔP_i) = burst_rate · E[B²] · dt = ε_i · 2·dt·scale·(d1_i/k1_i²)·kon_i
+        h_mat = (2.0 * dt * float(scale)) * (d_param_vec / k1_i**2)[None, :] * kon_avg   # (n_pairs, G)
         h_mat[:, :ns] = 0.0   # stimuli don't get ε estimated
 
         # ── Outlier filtering: exclude top (1 - outlier_quantile) per gene ────
@@ -748,28 +753,28 @@ def inference_epsilon_temporal(
                 float(np.nanmean(eps_cnt)),
             )
 
-    # ── Solve regularised MoM ─────────────────────────────────────────────────
+    # ── Solve regularised MoM for ε = d1/d0 ─────────────────────────────────
     # ε_i = (Σ res²_ci  +  λ · ε_prior_i) / (Σ h_ic  +  λ)
     eff_denom_t = denom_t + lam
     eff_num_t   = num_t   + lam * r_prior[None, :]
     has_t       = eff_denom_t > 0
-    r_t = np.where(has_t,
-                   eff_num_t / np.where(has_t, eff_denom_t, 1.0),
-                   r_prior[None, :])
-    eps_temporal = np.clip(r_t, eps_min, eps_max).astype(np.float32)
+    eps_temporal_raw = np.where(has_t,
+                                eff_num_t / np.where(has_t, eff_denom_t, 1.0),
+                                r_prior[None, :])
+    eps_temporal = np.clip(eps_temporal_raw, eps_min, eps_max).astype(np.float32)
     eps_temporal[:, :ns] = 1.0
 
     eff_denom_g = denom_g + lam
     eff_num_g   = num_g   + lam * r_prior
     has_g       = eff_denom_g > 0
-    r_g = np.where(has_g,
-                   eff_num_g / np.where(has_g, eff_denom_g, 1.0),
-                   r_prior)
-    eps_global = np.clip(r_g, eps_min, eps_max).astype(np.float32)
-    eps_global[:ns] = 1.0
+    eps_global_raw = np.where(has_g,
+                              eff_num_g / np.where(has_g, eff_denom_g, 1.0),
+                              r_prior)
+    eps_global = np.clip(eps_global_raw, eps_min, eps_max).astype(np.float32)
+    eps_global[:ns] = 0.2
 
     if verbose:
-        logger.info("Global  ε (d1/d0) per gene : %s", eps_global[ns:])
+        logger.info("Global  ε = d1/d0 per gene : %s", eps_global[ns:])
         logger.info("Temporal ε (mean)  per gene : %s", eps_temporal[:, ns:].mean(axis=0))
 
     return eps_temporal, eps_global
@@ -1038,10 +1043,10 @@ def inference_degradation_prot(
 
 
 # ---------------------------
-# infer_ratio_d0_d1_from_mlp
+# infer_ratio_d0_d1_full
 # ---------------------------
 
-def infer_ratio_d0_d1_from_mlp(
+def infer_ratio_d0_d1_full(
     X_prot,
     times,
     bias,
@@ -1110,7 +1115,7 @@ def infer_ratio_d0_d1_from_mlp(
 
     **Usage in base.py**::
 
-        ratios_temporal, ratios_global = infer_ratio_d0_d1_from_mlp(...)
+        ratios_temporal, ratios_global = infer_ratio_d0_d1_full(...)
         # temporal (one ratio per interval):
         self.ratios[cnt] = 1.0 / ratios_temporal[cnt]
         # global (one shared ratio):
@@ -1123,8 +1128,9 @@ def infer_ratio_d0_d1_from_mlp(
         theta_inter  : GRN interactions — ``(G, G, n_modes-1)`` or
                        ``(n_samples, G, G, n_modes-1)``.
         ks           : Mode amplitudes, shape ``(n_modes, G)``.
-        d_learned    : Protein degradation rates ``(G,)`` from
-                       :func:`inference_degradation_prot`.
+        d_learned    : Protein degradation rates, shape ``(G,)`` (constant) or
+                       ``(T-1, G)`` (temporal). When 2-D, interval ``cnt``
+                       uses ``d_learned[cnt]`` for the ODE simulation.
         k1_vec       : Kept for interface compatibility (not used internally).
         kon_mlp      : Trained :class:`KonCorrectionMLP`.
         prior_d1d0   : ``(G,)`` prior for d1/d0 used when ``lambda_deg > 0``.
@@ -1174,7 +1180,7 @@ def infer_ratio_d0_d1_from_mlp(
     times    = np.asarray(times,        dtype=np.float32)
     bias_np  = np.asarray(bias,         dtype=np.float32)
     theta_np = np.asarray(theta_inter,  dtype=np.float32)
-    d_arr    = np.asarray(d_learned,    dtype=np.float32)
+    d_arr    = np.asarray(d_learned,    dtype=np.float32)   # (G,) or (T-1, G)
     _ = k1_vec   # interface compat; X is already in normalised units
 
     ns      = int(n_stimuli)
@@ -1236,24 +1242,37 @@ def infer_ratio_d0_d1_from_mlp(
         )
 
         # ── Select bias / theta ──────────────────────────────────────────────
-        if bias_np.ndim == 3 and samples_data is not None:
-            s_idx    = int(np.asarray(samples_data)[mask0][0])
-            bias_cnt = bias_np[s_idx]
+        # Supported layouts (mirroring infer_ratio_d0_d1_unitary):
+        #   bias : (G, n_nets)                    — constant
+        #          (T-1, G, n_nets)               — time-indexed
+        #          (T-1, n_samples, G, n_nets)    — time + sample indexed
+        #   theta: (G, G, n_nets)                 — constant
+        #          (T-1, G, G, n_nets)            — time-indexed
+        #          (T-1, n_samples, G, G, n_nets) — time + sample indexed
+        if bias_np.ndim == 3:
+            bias_cnt = bias_np[cnt]                                 # (G, n_nets)
+        elif bias_np.ndim == 4:
+            s_idx    = int(np.asarray(samples_data)[mask0][0]) if samples_data is not None else 0
+            bias_cnt = bias_np[cnt, s_idx]                         # (G, n_nets)
         else:
-            bias_cnt = bias_np
+            bias_cnt = bias_np                                      # (G, n_nets)
 
-        if theta_np.ndim == 4 and samples_data is not None:
-            s_idx     = int(np.asarray(samples_data)[mask0][0])
-            theta_cnt = theta_np[s_idx]
+        if theta_np.ndim == 4:
+            theta_cnt = theta_np[cnt]                              # (G, G, n_nets)
+        elif theta_np.ndim == 5:
+            s_idx     = int(np.asarray(samples_data)[mask0][0]) if samples_data is not None else 0
+            theta_cnt = theta_np[cnt, s_idx]                      # (G, G, n_nets)
         else:
-            theta_cnt = theta_np
+            theta_cnt = theta_np                                   # (G, G, n_nets)
 
         bias_t      = torch.tensor(bias_cnt.astype(np.float32))
         theta_cnt_t = torch.tensor(theta_cnt.astype(np.float32))
 
         # ── 1. Simulate full trajectory (n_steps+1 evaluation points) ────────
+        d_cnt = d_arr[cnt] if d_arr.ndim == 2 else d_arr
+        d1_t  = torch.tensor(d_cnt, dtype=torch.float32)   # (G,) d1_j for all genes
         ode = GeneRegulatoryODE_softmax(
-            G, d_arr, ks, theta_cnt, bias_cnt,
+            G, d_cnt, ks, theta_cnt, bias_cnt,
             n_stimuli=ns, stim_vals=stim1,
             device=device, kon_mlp=kon_mlp,
         ).to(device)
@@ -1338,17 +1357,17 @@ def infer_ratio_d0_d1_from_mlp(
 
             ln_jac_i = jac_i / (kon_beta[:, i:i+1].detach() + 1e-10)   # (n_ts*N, G)
 
-            # h_i = Σ_j (∂ ln kon_i / ∂X_j) · drive_j      [NO d1 factor]
+            # h_i = Σ_j (∂ ln kon_i / ∂X_j) · (d1_j/d1_i) · drive_j
             #
-            # Derivation (first-order mRNA lag):
-            #   1 - g_i  ≈  (1/d0_i) · d(ln kon_i)/dt
+            # Exact derivation (first-order mRNA lag):
+            #   1 - g_i  =  (1/d0_i) · d(ln kon_i)/dt
             #             =  (1/d0_i) · Σ_j ∂(ln kon_i)/∂X_j · d1_j · drive_j
-            #             ≈  (d1_i/d0_i) · Σ_j ∂(ln kon_i)/∂X_j · drive_j
-            #                              └──────────── h_i ────────────────┘
-            # (uniform-d1 approx: d1_j ≈ d1_i for all j)
-            #
-            # → LS gives r_i = d1_i/d0_i directly.  No d1 factor needed.
-            h_i = (ln_jac_i * drive).sum(dim=-1)   # (n_ts*N,)
+            #             =  (d1_i/d0_i) · Σ_j ∂(ln kon_i)/∂X_j · (d1_j/d1_i) · drive_j
+            #                              └────────────────── h_i ──────────────────────┘
+            # No uniform-d1 approximation needed: we weight each term by d1_j/d1_i.
+            d1_i_val  = d1_t[i].clamp(min=1e-10)
+            d1_weight = (d1_t / d1_i_val).unsqueeze(0)          # (1, G)
+            h_i = (ln_jac_i * drive * d1_weight).sum(dim=-1)   # (n_ts*N,)
             y_i = 1.0 - g_batch[:, gene_idx]               # (n_ts*N,)  y = 1 − g
 
             # Keep only points that are not near-equilibrium AND where the
@@ -1398,7 +1417,7 @@ def infer_ratio_d0_d1_from_mlp(
     r_g = np.where(has_data_g, eff_num_g / np.where(has_data_g, eff_denom_g, 1.0),
                    r_prior)
     ratios_global = np.clip(r_g, clip_lo, clip_hi).astype(np.float32)
-    ratios_global[:ns] = 1.0   # stimuli: neutral
+    ratios_global[:ns] = 0.2   # stimuli: neutral
 
     if verbose:
         logger.info("Global  d1/d0 per gene : %s", ratios_global[ns:])

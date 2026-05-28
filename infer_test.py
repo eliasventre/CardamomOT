@@ -46,15 +46,18 @@ def main(argv):
         argv: Command-line arguments (--input).
     """
     inputfile = ''
-    stimulus = 1.0
-    prior = 1.0
+    stimulus = -1.0
+    prior = -1.0
+    force_basins = -1
+    temporal_basins = -1
     try:
-        opts, args = getopt.getopt(argv, "hi:t:p:",
-                                   ["input=", "stimulus=", "prior="])
+        opts, args = getopt.getopt(argv, "hi:t:p:f:b:",
+                                   ["input=", "stimulus=", "prior=",
+                                    "force_basins=", "temporal_basins="])
     except getopt.GetoptError:
         print("[infer_test] Error: Invalid command-line arguments")
         print("[infer_test] Usage: python infer_test.py -i <project_path> "
-              "[--stimulus <float>] [--prior <float>]")
+              "[--stimulus <float>] [--prior <float>] [--force_basins <int>] [--temporal_basins <int>]")
         sys.exit(2)
 
     for opt, arg in opts:
@@ -64,6 +67,10 @@ def main(argv):
             stimulus = float(arg)
         elif opt in ("-p", "--prior"):
             prior = float(arg)
+        elif opt in ("-f", "--force_basins"):
+            force_basins = int(arg)
+        elif opt in ("-b", "--temporal_basins"):
+            temporal_basins = int(arg)
         elif opt == "-h":
             print(__doc__)
             sys.exit(0)
@@ -118,10 +125,17 @@ def main(argv):
 
     # ─── INITIALIZE MODEL AND LOAD TRAINING PARAMETERS ──────────────────
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
-    model.stimulus = stimulus
-    model.prior_network_pen = prior
+    if stimulus >= 0:
+        model.stimulus = stimulus
+    if prior >= 0:
+        model.prior_network_pen = prior
+    if force_basins >= 0:
+        model.force_basins = force_basins
+    if temporal_basins >= 0:
+        model.temporal_basins = temporal_basins
     print(f"[infer_test] Initialized model with {adata.shape[1]} genes, "
-          f"stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
+          f"stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}, "
+          f"force_basins={model.force_basins}, temporal_basins={model.temporal_basins}")
 
     try:
         model.a = np.load(os.path.join(cardamom_dir, 'mixture_parameters.npy'))

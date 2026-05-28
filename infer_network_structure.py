@@ -37,14 +37,17 @@ def main(argv):
     """
     inputfile = ''
     split = ''
-    stimulus = 1.0
-    prior = 1.0
+    stimulus = -1.0
+    prior = -1.0
+    force_basins = -1
+    temporal_basins = -1
     try:
-        opts, args = getopt.getopt(argv, "hi:s:t:p:",
-                                   ["input=", "split=", "stimulus=", "prior="])
+        opts, args = getopt.getopt(argv, "hi:s:t:p:f:b:",
+                                   ["input=", "split=", "stimulus=", "prior=",
+                                    "force_basins=", "temporal_basins="])
     except getopt.GetoptError:
         print("Error: Invalid arguments. Use: infer_network_structure.py -i <project> -s <split> "
-              "[--stimulus <float>] [--prior <float>]")
+              "[--stimulus <float>] [--prior <float>] [--force_basins <int>] [--temporal_basins <int>]")
         sys.exit(2)
     for opt, arg in opts:
         if opt in ("-i", "--input"):
@@ -55,6 +58,10 @@ def main(argv):
             stimulus = float(arg)
         if opt in ("-p", "--prior"):
             prior = float(arg)
+        if opt in ("-f", "--force_basins"):
+            force_basins = int(arg)
+        if opt in ("-b", "--temporal_basins"):
+            temporal_basins = int(arg)
 
     p = '{}/'.format(inputfile)
 
@@ -99,9 +106,16 @@ def main(argv):
     # ─── LOAD MIXTURE PARAMETERS ────────────────────────────────────────
     try:
         model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
-        model.stimulus = stimulus
-        model.prior_network_pen = prior
-        print(f"[infer_network_structure] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
+        if stimulus >= 0:
+            model.stimulus = stimulus
+        if prior >= 0:
+            model.prior_network_pen = prior
+        if force_basins >= 0:
+            model.force_basins = force_basins
+        if temporal_basins >= 0:
+            model.temporal_basins = temporal_basins
+        print(f"[infer_network_structure] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}, "
+              f"force_basins={model.force_basins}, temporal_basins={model.temporal_basins}")
         model.modes = np.load(os.path.join(p, 'cardamomOT', 'modes.npy'))
         with open(os.path.join(p, 'cardamomOT', 'pi_init.pkl'), "rb") as f:
             model.pi_init = pickle.load(f)

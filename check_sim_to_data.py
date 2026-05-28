@@ -28,7 +28,7 @@ from CardamomOT import NetworkModel, plot_data_umap_altogether, plot_data_distri
 import scipy.sparse
 import os
 
-plot_in_script = 1
+plot_in_script = 0
 
 def main(argv):
     """
@@ -46,8 +46,8 @@ def main(argv):
     """
     inputfile = ''
     split = ''
-    stimulus = 1.0
-    prior = 1.0
+    stimulus = -1.0
+    prior = -1.0
     try:
         opts, args = getopt.getopt(argv, "hi:s:t:p:",
                                    ["input=", "split=", "stimulus=", "prior="])
@@ -120,8 +120,10 @@ def main(argv):
     data_real = np.vstack([times, data_rna_extracted]).astype(float)
     G = np.size(data_real, 0)-1
     model = NetworkModel(G)
-    model.stimulus = stimulus
-    model.prior_network_pen = prior
+    if stimulus >= 0:
+        model.stimulus = stimulus
+    if prior >= 0:
+        model.prior_network_pen = prior
     print(f"[check_sim_to_data] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
 
     # Load mixture and simulation parameters

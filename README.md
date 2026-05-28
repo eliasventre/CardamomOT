@@ -68,19 +68,27 @@ conda activate cardamom_env
 python -m CardamomOT.cli pipeline -i my_project -s full -c 1 -r 0.6 -m 0.5
 ```
 
-**Important parameters:**
-- `-i my_project`: path to your project directory
-- `-s full`: dataset split for inference (full or train)
-- `-c 1`: change flag (e.g. stimulus)
-- `-r 0.6`: rate parameter for kinetics
-- `-m 0.5`: mean expression threshold
+**Parameters:**
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `-i my_project` | **yes** | — | path to your project directory |
+| `-s` / `--split` | no | `full` | dataset split: `full` or `train` |
+| `-c` / `--change` | no | `0` | change flag (1 = differential gene selection) |
+| `-r` / `--rate` | no | `0` | rate parameter for kinetics |
+| `-m` / `--mean` | no | model default | mean expression threshold for burst fitting |
+| `--stimulus` | no | model default (`1.0`) | stimulus edge penalization (`0`–`1`) |
+| `--prior` | no | model default (`1.0`) | prior-absent edge penalization (`0`–`1`) |
+| `-f` / `--force_basins` | no | model default (`1.0`) | weight for preserving NB mixture mode means (`0`–`1`) |
+| `-b` / `--temporal_basins` | no | model default (`1`) | preserve mode means temporally (`0` or `1`) |
+
+When an optional parameter is omitted, the value defined in `NetworkModel` (`base.py`) is used unchanged. Passing a value explicitly overrides it for that run only.
 
 **`run.sh` script parameters** (positional):
 ```bash
-./run.sh <input_dir> <split> <change> <rate> <mean> [stimulus=1.0] [prior=1.0]
+./run.sh <input_dir> [split=full] [change=0] [rate=0] [mean] [stimulus] [prior] [force_basins] [temporal_basins]
 ```
-- `stimulus` (6th arg, default `1.0`): penalization of stimulus edges — `0` = no stimulus influence, `1` = full
-- `prior` (7th arg, default `1.0`): penalization of edges absent from the prior network — `0` = forbidden, `1` = no prior
+Only `input_dir` is required; all other arguments fall back to their model defaults when omitted.
 
 #### Results
 
@@ -210,45 +218,54 @@ For a single stimulus channel, a single-column file suffices. Values between 0 a
 
 Two scalar parameters let you **tune the influence of the stimulus and of a prior interaction graph** on network inference and simulation. They can be passed directly on the command line to all relevant scripts, or via `run.sh` / `run_pipeline.sh`.
 
-#### `--stimulus` (default `1.0`)
+**Default values** are defined in `NetworkModel` (`base.py`) as `model.stimulus = 1.0` and `model.prior_network_pen = 1.0`. Omitting these arguments (or passing `-1` programmatically as the sentinel) leaves the behaviour unchanged. Only pass them explicitly when you want to override the model default for a specific run.
+
+#### `--stimulus` (model default `1.0`)
 
 Controls how strongly the **stimulus** regulates genes in the reference network matrix:
 
 | Value | Effect |
 |---|---|
-| `1.0` | Default — stimulus rows are set to 1 (full influence) |
+| `1.0` | Model default — stimulus rows are set to 1 (full influence) |
 | `0.0` | Stimulus rows are zeroed out — the stimulus has no regulatory influence |
 | `0.5` | Intermediate penalization |
 
 ```bash
-# In run.sh (6th positional argument, default 1.0)
+# In run.sh (6th positional argument — omit to use model default)
 ./run.sh experimental_datasets/Kameneva full 0 0.7 0.5 0.0   # disable stimulus
 
 # Or on a single script
 python infer_network_simul.py -i my_project -s full --stimulus 0.0
 ```
 
-#### `--prior` (default `1.0`)
+#### `--prior` (model default `1.0`)
 
 Controls how strongly the **prior interaction graph** (`ref_network.csv`) penalizes edges that are absent from the prior:
 
 | Value | Effect |
 |---|---|
-| `1.0` | Default — no penalization; all edges are equally possible |
+| `1.0` | Model default — no penalization; all edges are equally possible |
 | `0.0` | Edges absent from the prior are forbidden (`ref_network` acts as a hard sparsity mask) |
 | `0.5` | Soft penalization — absent edges are allowed but discouraged |
 
 ```bash
-# In run.sh (7th positional argument, default 1.0)
+# In run.sh (7th positional argument — omit to use model default)
 ./run.sh experimental_datasets/Kameneva full 0 0.7 0.5 1.0 0.5   # soft prior
 
 # Or on a single script
 python infer_network_simul.py -i my_project -s full --prior 0.5
 ```
 
-> Both parameters have their **default values defined in `NetworkModel`** (`base.py`) so omitting them leaves the behaviour unchanged. They correspond to `model.stimulus` and `model.prior_network_pen` in the source code.
+#### `--force_basins` (model default `1.0`) and `--temporal_basins` (model default `1`)
 
-**Affected scripts:** `infer_network_structure.py`, `infer_network_simul.py`, `check_sim_to_data.py`, `infer_test.py`, `check_KOV_to_sim.py`. Output file names embed both values (e.g. `adata_sim_stim1.0_prior0.5.h5ad`) so runs with different settings are kept separate.
+`force_basins` (float in `[0, 1]`) controls how strongly the NB mixture fitting is anchored to the initial mode means: `1.0` = fully constrained to preserve mode positions, `0.0` = free EM with no mean constraint. Intermediate values interpolate between the two. `temporal_basins` (0 or 1) additionally enforces the constraint across timepoints.
+
+```bash
+# In run.sh (8th and 9th positional arguments — omit to use model defaults)
+./run.sh experimental_datasets/Kameneva full 0 0.7 0.5 1.0 1.0 0.5 0   # relaxed mean constraint, no temporal
+```
+
+**Affected scripts:** `infer_network_structure.py`, `infer_mixture.py`, `infer_network_simul.py`, `check_sim_to_data.py`, `infer_test.py`, `check_KOV_to_sim.py`. Output file names embed `stimulus` and `prior` values (e.g. `adata_sim_stim1.0_prior0.5.h5ad`) so runs with different settings are kept separate.
 
 ---
 

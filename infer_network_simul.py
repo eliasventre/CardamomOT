@@ -44,8 +44,8 @@ def main(argv):
     """
     inputfile = ''
     split = ''
-    stimulus = 1.0
-    prior = 1.0
+    stimulus = -1.0
+    prior = -1.0
     try:
         opts, args = getopt.getopt(argv, "hi:s:t:p:",
                                    ["input=", "split=", "stimulus=", "prior="])
@@ -100,8 +100,10 @@ def main(argv):
     print(f"[infer_network_simul] n_stimuli detected: {n_stimuli}")
 
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
-    model.stimulus = stimulus
-    model.prior_network_pen = prior
+    if stimulus >= 0:
+        model.stimulus = stimulus
+    if prior >= 0:
+        model.prior_network_pen = prior
     print(f"[infer_network_simul] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
 
     # Load inferred network parameters
@@ -170,7 +172,7 @@ def main(argv):
 
     model.ref_network = np.maximum(model.prior_network_pen, model.ref_network)
     model.ref_network[:ns, :] = model.stimulus
-    model.ref_network *= (np.abs(model.inter) > 1e-2)
+    # model.ref_network *= (np.abs(model.inter) > 1e-2)
 
     # Adapt parameters for simulation
     print("[infer_network_simul] Adapting parameters for simulation...")
