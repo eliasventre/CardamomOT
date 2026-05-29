@@ -123,7 +123,8 @@ cardamomot step check_sim_to_data \
 # ── Optional: test set (requires -s train) ────────────────────────────────────
 cardamomot step infer_test \
     -i my_project --stimulus 1.0 --prior 1.0 --force-basins 1.0 --temporal-basins 1
-cardamomot step check_test_to_train -i my_project -s train
+cardamomot step check_test_to_train \
+    -i my_project -s train --stimulus 1.0 --prior 1.0
 
 # ── Perturbations (default) ───────────────────────────────────────────────────
 cardamomot step simulate_network_KOV -i my_project -s full

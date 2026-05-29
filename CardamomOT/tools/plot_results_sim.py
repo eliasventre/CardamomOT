@@ -139,7 +139,7 @@ def _joint_umap(adatas, names, norm=True, log=True):
 # Public API
 # ---------------------------------------------------------------------------
 
-def plot_results_rna_mixture(split, p, project_on_full=False, normtransform=True, logtransform=True):
+def plot_results_rna_mixture(split, p, project_on_full=False, normtransform=False, logtransform=True):
     """Compare observed data to the NB mixture fit (UMAP by time and cell type).
 
     Parameters
@@ -188,8 +188,8 @@ def plot_results_rna_mixture(split, p, project_on_full=False, normtransform=True
     _plot_celltype_panel(adatas, names, class_order)
 
 
-def plot_results_rna_clean(split, p, stim=1.0, prior=1.0, project_on_full=False,
-                           normtransform=True, logtransform=True):
+def plot_results_rna_clean(p, stim=1.0, prior=1.0, project_on_full=False,
+                           normtransform=False, logtransform=True):
     """Compare inferred RNA trajectories across all pipeline stages (UMAP).
 
     Loads reference (NB mixture), network modes, RNA trajectories, and
@@ -240,7 +240,7 @@ def plot_results_rna_clean(split, p, stim=1.0, prior=1.0, project_on_full=False,
     _plot_celltype_panel(adatas, names, class_order)
 
 
-def plot_results_prot(p, stim=1.0, prior=1.0, project_on_full=False):
+def plot_results_prot(p, stim=1.0, prior=1.0, project_on_full=True):
     """Compare protein trajectories and simulations (UMAP colored by time).
 
     Parameters

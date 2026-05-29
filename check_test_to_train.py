@@ -7,18 +7,18 @@ Loads the AnnData objects produced by infer_test.py and generates distribution
 comparison plots between real test data and the inferred/simulated trajectories.
 
 Usage:
-    python check_test_to_train.py -i <project_path> -s <split> [-t <stim>] [-p <prior>]
+    python check_test_to_train.py -i <project_path> -s <split> [-t <stimulus>] [-p <prior>]
 
 Required input files (produced by infer_test.py):
     - Data/data_<split>.h5ad: observed test data
-    - cardamomOT/adata_beta_test_stim*_prior*.h5ad
-    - cardamomOT/adata_theta_test_stim*_prior*.h5ad
-    - cardamomOT/adata_sim_test_stim*_prior*.h5ad
-    - cardamomOT/adata_rna_traj_test_stim*_prior*.h5ad
+    - cardamomOT/adata_beta_test_stim<s>_prior<p>.h5ad
+    - cardamomOT/adata_theta_test_stim<s>_prior<p>.h5ad
+    - cardamomOT/adata_sim_test_stim<s>_prior<p>.h5ad
+    - cardamomOT/adata_rna_traj_test_stim<s>_prior<p>.h5ad
 
 Output files:
-    - Check/test_to_train/: distribution comparison plots
-    - Check/altogether_test/: UMAP comparison plots
+    - Check/test_to_train_stim<s>_prior<p>/: distribution comparison plots
+    - Check/altogether_test_stim<s>_prior<p>/: UMAP comparison plots
 """
 import numpy as np
 import sys
@@ -44,11 +44,11 @@ def main(argv):
     stim = 1.0
     prior = 1.0
     try:
-        opts, args = getopt.getopt(argv, "hi:s:t:p:", ["input=", "split=", "stim=", "prior="])
+        opts, args = getopt.getopt(argv, "hi:s:t:p:", ["input=", "split=", "stimulus=", "prior="])
     except getopt.GetoptError:
         print("[check_test_to_train] Error: Invalid command-line arguments")
         print("[check_test_to_train] Usage: python check_test_to_train.py -i <project_path>"
-              " -s <split> [-t <stim>] [-p <prior>]")
+              " -s <split> [-t <stimulus>] [-p <prior>]")
         sys.exit(2)
 
     for opt, arg in opts:
@@ -56,7 +56,7 @@ def main(argv):
             inputfile = arg
         elif opt in ("-s", "--split"):
             split = '{}'.format(arg)
-        elif opt in ("-t", "--stim"):
+        elif opt in ("-t", "--stimulus"):
             stim = float(arg)
         elif opt in ("-p", "--prior"):
             prior = float(arg)
@@ -147,14 +147,16 @@ def main(argv):
     print(f"[check_test_to_train] Simulation timepoints: {t_simul}")
 
     # ─── GENERATE PLOTS ──────────────────────────────────────────────────
-    print(f"[check_test_to_train] Generating validation plots...")
+    tag = f'stim{stim}_prior{prior}'
+    print(f"[check_test_to_train] Generating validation plots (stim={stim}, prior={prior})...")
     try:
         plot_data_distrib(data_real, data_sim, t_data, t_simul, names,
-                          inputfile, 'Check', 'test_to_train')
+                          inputfile, 'Check', f'test_to_train_{tag}')
         plot_data_umap_altogether(data_real, data_ref, data_beta, data_netw_theta,
-                                  data_sim, t_data, t_simul, inputfile, 'Check', 'altogether_test',
+                                  data_sim, t_data, t_simul, inputfile, 'Check',
+                                  f'altogether_test_{tag}',
                                   cell_rd=cell_rd)
-        print(f"[check_test_to_train] Generated comparison plots")
+        print(f"[check_test_to_train] Generated comparison plots in Check/test_to_train_{tag}/")
     except Exception as e:
         print(f"[check_test_to_train] Warning: Error generating plots: {e}")
 

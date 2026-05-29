@@ -136,7 +136,7 @@ def _plot_celltype_panel(adatas, names, class_order=None):
 # Public API
 # ---------------------------------------------------------------------------
 
-def plot_results_sim_kov(p, combo, stim=1.0, prior=1.0, project_on_full=False, normlog=True):
+def plot_results_sim_kov(p, combo, stim=1.0, prior=1.0, project_on_full=False, normtransform=False, logtransform=True):
     """Compare wild-type simulation to a KO/OV perturbation (UMAP).
 
     Parameters
@@ -175,9 +175,9 @@ def plot_results_sim_kov(p, combo, stim=1.0, prior=1.0, project_on_full=False, n
         A.obs["source"] = name
 
     if project_on_full:
-        _fit_umap(adatas, names, reference_idx=0, norm=normlog, log=normlog)
+        _fit_umap(adatas, names, reference_idx=0, norm=normtransform, log=logtransform)
     else:
-        _joint_umap(adatas, names, norm=normlog, log=normlog)
+        _joint_umap(adatas, names, norm=normtransform, log=logtransform)
 
     _plot_time_panel(adatas, names)
     _plot_celltype_panel(adatas, names, class_order)

@@ -200,7 +200,7 @@ def _pipeline(args: argparse.Namespace) -> None:
     if args.test:
         _run_script('infer_test.py',
                     ['-i', inp, '--stimulus', stim, '--prior', prior, '--force-basins', fb, '--temporal-basins', tb])
-        _run_script('check_test_to_train.py', ['-i', inp, '-s', sp])
+        _run_script('check_test_to_train.py', ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior])
 
     if not args.no_kov:
         _run_script('simulate_network_KOV.py', ['-i', inp, '-s', sp])
