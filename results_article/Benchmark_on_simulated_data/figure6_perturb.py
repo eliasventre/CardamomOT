@@ -250,11 +250,9 @@ def draw_celltype_timeline(ax, adata_beta, adata_sim, title,
 def compute_umap_beta_sim(adata_beta, adata_sim,
                            umap_min_dist=0.7, umap_random_state=42):
     """
-    Compute UMAP for adata_beta and adata_sim:
-      1. normalize_total each dataset independently (on a copy)
-      2. concatenate
-      3. log1p the concatenation
-      4. fit_transform (no projection — all cells fit together)
+    Compute UMAP for adata_beta and adata_sim by concatenating raw counts and
+    fitting jointly. No re-normalisation: data is already normalised upstream
+    on the full gene set; re-normalising on ~100 genes is incorrect.
 
     Returns:
         beta_2d   – UMAP coords for adata_beta cells
@@ -265,18 +263,9 @@ def compute_umap_beta_sim(adata_beta, adata_sim,
     t_beta = np.array(adata_beta.obs['time'])
     t_sim  = np.array(adata_sim.obs['time'])
 
-    # Step 1: normalize_total each dataset independently (copy to avoid side effects)
-    ab = ad.AnnData(_to_dense(adata_beta.X).copy())
-    sc.pp.normalize_total(ab, target_sum=1e4)
-
-    as_ = ad.AnnData(_to_dense(adata_sim.X).copy())
-    sc.pp.normalize_total(as_, target_sum=1e4)
-
-    # Step 2+3: concatenate then log1p
-    n_beta = ab.n_obs
-    combined = ad.AnnData(np.vstack([_to_dense(ab.X), _to_dense(as_.X)]))
-    sc.pp.log1p(combined)
-    combined_norm = _to_dense(combined.X)
+    # No re-normalisation; log1p on raw counts before UMAP
+    n_beta = adata_beta.n_obs
+    combined_norm = np.log1p(np.vstack([_to_dense(adata_beta.X), _to_dense(adata_sim.X)]))
 
     # Step 4: fit_transform on the full concatenation
     umap_model = UMAP(n_components=2, random_state=umap_random_state,

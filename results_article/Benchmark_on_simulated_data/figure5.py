@@ -593,18 +593,12 @@ def load_schiebinger():
     mask[np.arange(n_rows)[:, None], topk_idx] = True
     delta_rna_carda = np.where(mask, delta_rna_carda, 0.0)
 
-    # Normalisation log1p pour l'UMAP RNA (identique au notebook, cellule 22)
+    # No re-normalisation; log1p on raw counts before UMAP
     rna_endpoints  = np.maximum(rna_traj     + delta_rna_carda,  0)
     prot_endpoints = np.maximum(prot_traj + delta_prot_carda, 0)
 
-    rna_ad    = ad.AnnData(X=rna_traj.copy())
-    rna_ep_ad = ad.AnnData(X=rna_endpoints.copy())
-    sc.pp.normalize_total(rna_ad,    target_sum=1e4)
-    sc.pp.normalize_total(rna_ep_ad, target_sum=1e4)
-    sc.pp.log1p(rna_ad)
-    sc.pp.log1p(rna_ep_ad)
-    rna_norm    = rna_ad.X.copy()
-    rna_ep_norm = rna_ep_ad.X.copy()
+    rna_norm    = np.log1p(rna_traj)
+    rna_ep_norm = np.log1p(rna_endpoints)
 
     umap_rna  = UMAP(n_components=2, random_state=42, min_dist=0.7)
     umap_prot = UMAP(n_components=2, random_state=42, min_dist=0.7)

@@ -149,11 +149,9 @@ def draw_phate(ax, coords, time_vals, title, s=5, show_colorbar=False, xlim=None
 def compute_phate_beta_sim(adata_beta, adata_sim,
                             phate_random_state=42):
     """
-    Compute PHATE for adata_beta and adata_sim:
-      1. normalize_total each dataset independently (on a copy)
-      2. concatenate
-      3. log1p the concatenation
-      4. fit_transform (no projection — all cells fit together)
+    Compute PHATE for adata_beta and adata_sim by concatenating raw counts.
+    No re-normalisation: data is already normalised upstream on the full gene
+    set; re-normalising on ~100 genes is incorrect.
 
     Returns:
         beta_2d   – PHATE coords for adata_beta cells
@@ -164,17 +162,9 @@ def compute_phate_beta_sim(adata_beta, adata_sim,
     t_beta = np.array(adata_beta.obs['time'])
     t_sim  = np.array(adata_sim.obs['time'])
 
-    # Step 1: normalize_total each dataset independently (copy to avoid side effects)
-    ab = ad.AnnData(_to_dense(adata_beta.X).copy())
-    sc.pp.normalize_total(ab, target_sum=1e4)
-
-    as_ = ad.AnnData(_to_dense(adata_sim.X).copy())
-    sc.pp.normalize_total(as_, target_sum=1e4)
-
-    # Step 2+3: concatenate then sqrt (PHATE's default is sqrt(counts), not log1p)
-    n_beta = ab.n_obs
-    combined = ad.AnnData(np.vstack([_to_dense(ab.X), _to_dense(as_.X)]))
-    combined_norm = np.sqrt(combined.X)
+    # No re-normalisation; log1p on raw counts before PHATE
+    n_beta = adata_beta.n_obs
+    combined_norm = np.log1p(np.vstack([_to_dense(adata_beta.X), _to_dense(adata_sim.X)]))
 
     # Step 4: fit_transform on the full concatenation
     phate_op = phate.PHATE(n_components=2, random_state=phate_random_state)

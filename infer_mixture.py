@@ -55,7 +55,7 @@ def main(argv):
         if opt in ("-m", "--mean-forcing"):
             mean_forcing = float(arg)
         if opt in ("-f", "--force-basins"):
-            force_basins = int(arg)
+            force_basins = float(arg)
         if opt in ("-b", "--temporal-basins"):
             temporal_basins = int(arg)
 

@@ -179,7 +179,8 @@ def _pipeline(args: argparse.Namespace) -> None:
         _run_script('infer_rd.py', ['-i', inp])
 
     _run_script('select_DEgenes_and_split.py',
-                ['-i', inp, '-s', sp, '-c', args.change, '-r', args.rate, '-m', args.mean])
+                ['-i', inp, '-s', sp, '-c', args.change, '-r', args.rate,
+                 '-m', args.mean, '--force-basins', fb, '--temporal-basins', tb])
 
     if args.ref:
         _run_script('prepare_reference_network.py', ['-i', inp, '-d', '4'])

@@ -36,13 +36,15 @@ Clone the repository and install in editable mode:
 ```bash
 git clone https://github.com/eliasventre/CardamomOT.git
 cd CardamomOT
+pip install -e .
 ```
 
-| Install variant | Command | When to use |
+The `cardamomot` command and all dependencies (including visualization tools) are installed by default. Optional extras:
+
+| Extra | Command | Adds |
 |---|---|---|
-| **Minimal** | `pip install -e .` | Core inference only |
-| **Full** | `pip install -e ".[cli]"` | Interactive CLI (`cardamomot run`) |
-| **Development** | `pip install -e ".[cli,dev,notebooks]"` | Testing + Jupyter notebooks |
+| `dev` | `pip install -e ".[dev]"` | pytest, black, flake8 |
+| `notebooks` | `pip install -e ".[notebooks]"` | Jupyter, scVelo |
 
 ## Step 3 — Verify
 
@@ -55,10 +57,27 @@ You should see the three sub-commands: `run`, `pipeline`, and `step`.
 ## Troubleshooting
 
 **`command not found: cardamomot`**
-: The entry-point was not placed on your PATH. Re-install with `pip install -e .` inside the activated environment.
+: The `cardamomot` script is installed into your environment's `bin/` directory. Make sure the environment is **activated** before running it.
+
+  ```bash
+  # With conda — always activate first:
+  conda activate cardamom_env
+  cardamomot --help
+
+  # Verify where the script was installed:
+  python -c "import sys; print(sys.prefix + '/bin/cardamomot')"
+
+  # Fallback that always works regardless of PATH:
+  python -m CardamomOT.cli --help
+  ```
+
+  On HPC clusters, if `~/.local/bin` is not in your `PATH`, add it:
+  ```bash
+  export PATH="$HOME/.local/bin:$PATH"
+  ```
 
 **`No threading layer could be loaded` (Numba)**
 : Install Numba from conda-forge as described in the Apple Silicon note above.
 
-**`ModuleNotFoundError: questionary`**
-: The interactive CLI needs the `cli` extra: `pip install -e ".[cli]"`. The tool falls back to plain `y/n` prompts if the library is absent.
+**`ModuleNotFoundError: No module named 'scanpy'`**
+: Run `pip install -e .` again — `scanpy` is a core dependency and should be installed automatically. If the error persists, install it explicitly: `pip install scanpy`.

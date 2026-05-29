@@ -236,8 +236,9 @@ Controls how strongly the **stimulus** regulates genes in the reference network 
 # In run.sh (6th positional argument — omit to use model default)
 ./run.sh experimental_datasets/Kameneva full 0 0.7 0.5 0.0   # disable stimulus
 
-# Or on a single script
-python infer_network_simul.py -i my_project -s full --stimulus 0.0
+# Pass to both inference and simulation scripts:
+python infer_network_structure.py -i my_project -s full --stimulus 0.0
+python infer_network_simul.py     -i my_project -s full --stimulus 0.0
 ```
 
 #### `--prior` (model default `1.0`)
@@ -250,12 +251,15 @@ Controls how strongly the **prior interaction graph** (`ref_network.csv`) penali
 | `0.0` | Edges absent from the prior are forbidden (`ref_network` acts as a hard sparsity mask) |
 | `0.5` | Soft penalization — absent edges are allowed but discouraged |
 
+> **Important:** `--prior` must be passed to **both** `infer_network_structure.py` (where it constrains which edges are *learned* during OT inference) and `infer_network_simul.py` (where it sets the *simulation* reference network). Using different values in the two scripts will produce inconsistent results. The `cardamomot pipeline --prior 0.5` command handles this automatically.
+
 ```bash
 # In run.sh (7th positional argument — omit to use model default)
 ./run.sh experimental_datasets/Kameneva full 0 0.7 0.5 1.0 0.5   # soft prior
 
-# Or on a single script
-python infer_network_simul.py -i my_project -s full --prior 0.5
+# Pass to both inference and simulation scripts:
+python infer_network_structure.py -i my_project -s full --prior 0.5
+python infer_network_simul.py     -i my_project -s full --prior 0.5
 ```
 
 #### `--force_basins` (model default `1.0`) and `--temporal_basins` (model default `1`)

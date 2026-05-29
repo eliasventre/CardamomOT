@@ -59,7 +59,7 @@ def main(argv):
         if opt in ("-p", "--prior"):
             prior = float(arg)
         if opt in ("-f", "--force-basins"):
-            force_basins = int(arg)
+            force_basins = float(arg)
         if opt in ("-b", "--temporal-basins"):
             temporal_basins = int(arg)
 

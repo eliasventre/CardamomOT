@@ -39,8 +39,12 @@ def main(argv):
     rate = ''
     split = ''
     mean_forcing = -1
+    force_basins = -1
+    temporal_basins = -1
     try:
-        opts, args = getopt.getopt(argv, "hi:c:r:s:m:", ["input=", "change=", "rate=", "split=", "mean-forcing="])
+        opts, args = getopt.getopt(argv, "hi:c:r:s:m:f:b:",
+                                   ["input=", "change=", "rate=", "split=",
+                                    "mean-forcing=", "force-basins=", "temporal-basins="])
     except getopt.GetoptError:
         print("[select_DEgenes_and_split] Error: Invalid command-line arguments")
         sys.exit(2)
@@ -56,6 +60,10 @@ def main(argv):
             split = '{}'.format(arg)
         elif opt in ("-m", "--mean-forcing"):
             mean_forcing = float(arg)
+        elif opt in ("-f", "--force-basins"):
+            force_basins = float(arg)
+        elif opt in ("-b", "--temporal-basins"):
+            temporal_basins = int(arg)
         elif opt == "-h":
             print(__doc__)
             sys.exit(0)
@@ -94,6 +102,16 @@ def main(argv):
         print(f"[select_DEgenes_and_split] Error: {e}")
         sys.exit(1)
 
+    def _make_model(n_genes):
+        m = NetworkModel_beta(n_genes)
+        if mean_forcing >= 0:
+            m.mean_forcing_em = mean_forcing
+        if force_basins >= 0:
+            m.force_basins = force_basins
+        if temporal_basins >= 0:
+            m.temporal_basins = temporal_basins
+        return m
+
     vect_samples_id = np.zeros(adata.n_obs)
     vect_celltype_id = adata.obs['cell_type'].values if 'cell_type' in adata.obs else np.zeros(adata.n_obs)
 
@@ -104,9 +122,7 @@ def main(argv):
         print(f"[select_DEgenes_and_split] Performing gene selection with change parameter: {change}")
         print("[select_DEgenes_and_split] Fitting mixture model for gene selection")
 
-        model = NetworkModel_beta(adata.shape[1])
-        if mean_forcing >= 0:
-            model.mean_forcing_em = mean_forcing
+        model = _make_model(adata.shape[1])
 
         # Subsample cells if dataset is too large
         cells_to_use = []
@@ -166,9 +182,7 @@ def main(argv):
     vect_samples_id = adata.obs['dataset_id'].values if 'dataset_id' in adata.obs else np.zeros(adata.n_obs)
     vect_celltype_id = adata.obs['cell_type'].values if 'cell_type' in adata.obs else np.zeros(adata.n_obs)
 
-    model = NetworkModel_beta(adata.shape[1])
-    if mean_forcing >= 0:
-        model.mean_forcing_em = mean_forcing
+    model = _make_model(adata.shape[1])
 
     try:
         model.fit_mixture(adata, gene_names=list(adata.var_names),
@@ -241,9 +255,7 @@ def main(argv):
             vect_samples_id_train = adata.obs['dataset_id'].values if 'dataset_id' in adata.obs else np.zeros(adata.n_obs)
             vect_celltype_id_train = adata.obs['cell_type'].values if 'cell_type' in adata.obs else np.zeros(adata.n_obs)
 
-            model = NetworkModel_beta(adata.shape[1])
-            if mean_forcing >= 0:
-                model.mean_forcing_em = mean_forcing
+            model = _make_model(adata.shape[1])
 
             try:
                 model.fit_mixture(adata, gene_names=list(adata.var_names),

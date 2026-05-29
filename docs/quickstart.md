@@ -93,7 +93,7 @@ cardamomot step infer_rd -i my_project
 
 # ── Gene selection and cell split ─────────────────────────────────────────────
 cardamomot step select_DEgenes_and_split \
-    -i my_project -s full -c 0 -r 1 --mean-forcing 0.5
+    -i my_project -s full -c 0 -r 1 --mean-forcing 0.5 --force-basins 1.0 --temporal-basins 1
 
 # ── Optional: prior network (run after gene selection) ────────────────────────
 cardamomot step prepare_reference_network -i my_project -d 4
@@ -107,6 +107,9 @@ cardamomot step infer_mixture \
 cardamomot step check_mixture_to_data -i my_project -s full
 
 # ── Network inference ─────────────────────────────────────────────────────────
+# --stimulus and --prior must be identical in both commands:
+#   infer_network_structure uses them to constrain what edges are *learned*
+#   infer_network_simul     uses them to build the *simulation* reference network
 cardamomot step infer_network_structure \
     -i my_project -s full --stimulus 1.0 --prior 1.0 --force-basins 1.0 --temporal-basins 1
 cardamomot step infer_network_simul \

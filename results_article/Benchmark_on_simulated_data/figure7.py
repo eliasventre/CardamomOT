@@ -326,10 +326,12 @@ def draw_barplot(ax, prop_df, color_map, show_xlabels='none'):
 # Utilitaires UMAP  –  project_on_full = False (v2)
 # ──────────────────────────────────────────────────────────────
 
-def compute_umaps(adata_full, adata_sim, adata_perturb, normlog=True):
+def compute_umaps(adata_full, adata_sim, adata_perturb):
     """
     Apprend l'UMAP sur la concaténation des 3 datasets puis répartit.
-    project_on_full = False
+    project_on_full = False.
+    Pas de re-normalisation (faite en amont sur l'ensemble des gènes) ;
+    log1p appliqué sur les counts bruts avant UMAP.
     """
     adatas = [adata_full, adata_sim, adata_perturb]
     names  = ['Reference', 'Sim WT', 'Sim perturb']
@@ -338,10 +340,9 @@ def compute_umaps(adata_full, adata_sim, adata_perturb, normlog=True):
         A.obs_names = [f"{name}_{i}" for i in range(A.n_obs)]
         A.obs['source'] = name
 
-    if normlog:
-        for adata in adatas:
-            sc.pp.normalize_total(adata, target_sum=1e4)
-            sc.pp.log1p(adata)
+    # No re-normalisation; log1p on raw counts
+    for adata in adatas:
+        sc.pp.log1p(adata)
 
     adata_all = ad.concat(adatas, join='inner', label='source', keys=names)
 

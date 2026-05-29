@@ -577,17 +577,11 @@ def load_schiebinger():
     dp_plot    = delta_prot_all[mask_plot]
     time_plot  = time_sub[mask_plot].astype(float)
  
-    # ---- Normalisation RNA : normalize_total + log1p (identique à la version ODE) ----
+    # No re-normalisation; log1p on raw counts before UMAP
     rna_endpoints = np.maximum(rna_plot + dr_plot, 0)
- 
-    rna_ad    = ad.AnnData(X=rna_plot.copy())
-    rna_ep_ad = ad.AnnData(X=rna_endpoints.copy())
-    sc.pp.normalize_total(rna_ad,    target_sum=1e4)
-    sc.pp.normalize_total(rna_ep_ad, target_sum=1e4)
-    sc.pp.log1p(rna_ad)
-    sc.pp.log1p(rna_ep_ad)
-    rna_norm    = rna_ad.X.copy()
-    rna_ep_norm = rna_ep_ad.X.copy()
+
+    rna_norm    = np.log1p(rna_plot)
+    rna_ep_norm = np.log1p(rna_endpoints)
  
     # ---- UMAP : fitter sur les positions seules (identique à la version ODE) ----
     umap_rna  = UMAP(n_components=2, random_state=42, min_dist=0.7)

@@ -78,10 +78,12 @@ def format_ct(s):
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_dataset(base_path, n_per_time=100, lognorm=True):
+def load_dataset(base_path, n_per_time=100):
     """
     Load reference + CardamomOT-beta data, subsample uniformly across
     timepoints, and project both into a shared UMAP space.
+    No re-normalisation (already done upstream on full gene set); log1p is
+    applied on raw counts before UMAP.
     """
     is_schie   = 'Schiebinger' in base_path
     train_file = (f'{base_path}/Data/data_train.h5ad' if is_schie
@@ -103,11 +105,9 @@ def load_dataset(base_path, n_per_time=100, lognorm=True):
     obs_rna  = adata_train.obs.iloc[idx_rna]
     obs_beta = adata_beta.obs.iloc[idx_beta]
 
-    # Shared normalisation → shared UMAP
+    # No re-normalisation; log1p on raw counts before UMAP
     combined = ad.AnnData(np.vstack([rna_sub, beta_sub]))
-    if lognorm:
-        sc.pp.normalize_total(combined, target_sum=1e4)
-        sc.pp.log1p(combined)
+    sc.pp.log1p(combined)
     X_combined = _to_dense(combined.X)
 
     umap_model = UMAP(n_components=2, random_state=42, min_dist=0.7)

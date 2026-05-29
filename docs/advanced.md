@@ -40,7 +40,7 @@ HAND2
 ```
 
 ```bash
-cardamomot step select_DEgenes_and_split -i my_project -s full -c 0
+cardamomot step select_DEgenes_and_split -i my_project -s full -c 0 --mean-forcing 0.5 --force-basins 1.0 --temporal-basins 1
 ```
 
 When `gene_list.txt` is present, those genes are **added** to the final selection — they are not a replacement. The full behaviour depends on the `-c` flag:
@@ -74,7 +74,7 @@ To bias network inference toward known biology, first build a prior network from
 cardamomot step prepare_reference_network -i my_project -d 4
 ```
 
-This generates `Data/ref_network.csv`, a gene × gene binary (or weighted) interaction matrix. The `--prior` parameter then controls how strongly edges absent from this prior are penalised during inference:
+This generates `Data/ref_network.csv`, a gene × gene binary (or weighted) interaction matrix. The `--prior` parameter then controls how strongly edges absent from this prior are penalised.
 
 | `--prior` value | Effect |
 |---|---|
@@ -82,8 +82,15 @@ This generates `Data/ref_network.csv`, a gene × gene binary (or weighted) inter
 | `0.5` | Soft penalisation — absent edges discouraged |
 | `0.0` | Hard mask — only edges present in the prior are allowed |
 
+**`--prior` must be passed to both steps** — it constrains *inference* in `infer_network_structure` and the *simulation reference network* in `infer_network_simul`. Always use the same value in both.
+
 ```bash
+# Easiest: let the pipeline handle it
+cardamomot pipeline -i my_project -s full --prior 0.5
+
+# Or step by step — pass --prior to both:
 cardamomot step infer_network_structure -i my_project -s full --prior 0.5
+cardamomot step infer_network_simul     -i my_project -s full --prior 0.5
 ```
 
 ---
