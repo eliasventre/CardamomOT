@@ -3,6 +3,7 @@
 # ============================================================================
 collaborations/
 results_article/Benchmark_on_simulated_data/*/REFERENCE_FITTING/pred_adata_*.h5ad
+results_article/Benchmark_on_simulated_data/figureS11/*
 
 # ============================================================================
 # IDE and Editor
