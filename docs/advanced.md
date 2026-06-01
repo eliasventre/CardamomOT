@@ -85,8 +85,11 @@ This generates `Data/ref_network.csv`, a gene × gene binary (or weighted) inter
 **`--prior` must be passed to both steps** — it constrains *inference* in `infer_network_structure` and the *simulation reference network* in `infer_network_simul`. Always use the same value in both.
 
 ```bash
-# Easiest: let the pipeline handle it
-cardamomot pipeline -i my_project -s full --prior 0.5
+# Easiest: let the pipeline handle it (prior network with default depth 3)
+cardamomot pipeline -i my_project -s full --ref --prior 0.5
+
+# With a shallower graph (faster):
+cardamomot pipeline -i my_project -s full --ref --ref-depth 1 --prior 0.5
 
 # Or step by step — pass --prior to both:
 cardamomot step infer_network_structure -i my_project -s full --prior 0.5

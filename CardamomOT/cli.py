@@ -183,7 +183,7 @@ def _pipeline(args: argparse.Namespace) -> None:
                  '-m', args.mean, '--force-basins', fb, '--temporal-basins', tb])
 
     if args.ref:
-        _run_script('prepare_reference_network.py', ['-i', inp, '-d', '4'])
+        _run_script('prepare_reference_network.py', ['-i', inp, '-d', str(args.ref_depth)])
 
     _run_script('get_kinetic_rates.py', ['-i', inp, '-s', sp])
     _run_script('infer_mixture.py',
@@ -250,6 +250,8 @@ def main() -> None:
                         help='run read-depth correction (default: off)')
     p_pipe.add_argument('--ref', action='store_true', default=False,
                         help='run prepare_reference_network (default: off)')
+    p_pipe.add_argument('--ref-depth', type=int, default=3, dest='ref_depth',
+                        help='path length for prepare_reference_network (default: 3)')
     p_pipe.add_argument('--test', action='store_true', default=False,
                         help='run test-set inference steps (default: off)')
     p_pipe.add_argument('--no-kov', action='store_true', default=False,

@@ -74,14 +74,15 @@ cardamomot pipeline \
     --temporal-basins 1             # enforce temporal mode consistency (0 or 1)
 ```
 
-**Optional-section flags** (add any combination):
+**Optional-section flags** — these are switches with no value; just add the flag to change the behaviour:
 
-| Flag | Effect | Default |
-|---|---|---|
-| `--rd` | Read-depth correction (`infer_rd`) | off |
-| `--ref` | Prior-network preparation (`prepare_reference_network`) | off |
-| `--test` | Test-set inference (`infer_test` + `check_test_to_train`) | off |
-| `--no-kov` | Skip perturbation steps (`simulate_network_KOV` + `check_KOV_to_sim`) | on |
+| Flag | Step(s) triggered | Behaviour without flag | Behaviour with flag |
+|---|---|---|---|
+| `--rd` | `infer_rd` | skipped | enabled |
+| `--ref` | `prepare_reference_network` | skipped | enabled |
+| `--ref-depth N` | *(used with `--ref`)* | `3` (default) | path length set to `N` |
+| `--test` | `infer_test` + `check_test_to_train` | skipped | enabled |
+| `--no-kov` | `simulate_network_KOV` + `check_KOV_to_sim` | enabled | skipped |
 
 ## Run individual steps
 
