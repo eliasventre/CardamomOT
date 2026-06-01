@@ -1,9 +1,10 @@
 # Kameneva et al. (2021) — Human sympathoadrenal development
 
-> **Dataset:** Kameneva P. et al., *Single-cell transcriptomics of human embryos identifies multiple sympathoblast lineages with potential implications for neuroblastoma origin*, Nat. Genet. 2021.  
+> **Dataset:** Kameneva P, Artemov AV, Kastriti ME, Faure L, Olsen TK, Otte J, et al. *Single-cell transcriptomics of human embryos identifies multiple sympathoblast lineages with potential implications for neuroblastoma origin.* Nature Genetics 2021; 53:694–706.  
+> **Preprocessing:** Gandrillon O. *Inferring and simulating a gene regulatory network for the sympathoadrenal differentiation from single-cell transcriptomics in human.* F1000 Research 2025; 14:910. This reference preprocessing selects 97 genes and orders cells by pseudo-timepoints.  
 > **Organism / tissue:** Human embryonic adrenal gland (sympathoadrenal progenitors).  
-> **Time points:** 4 developmental stages (Carnegie stages 15–21).  
-> **Genes analysed:** ~30 selected markers of neural crest and sympathoadrenal commitment.
+> **Time points:** 4 developmental stages (Carnegie stages 15–21), cells ordered by pseudo-timepoints.  
+> **Genes analysed:** 97 genes selected in the Gandrillon 2025 preprocessing.
 
 ## Biological context
 

@@ -1,9 +1,9 @@
 # Schiebinger et al. (2019) — iPSC reprogramming with stimulus schedule
 
-> **Dataset:** Schiebinger G. et al., *Optimal-Transport Analysis of Single-Cell Gene Expression Identifies Developmental Trajectories in Reprogramming*, Cell 2019.  
+> **Dataset:** Schiebinger G, Shu J, Tabaka M, Cleary B, Subramanian V, Solomon A, et al. *Optimal-transport analysis of single-cell gene expression identifies developmental trajectories in reprogramming.* Cell 2019; 176:928–43.  
 > **Organism / tissue:** Mouse embryonic fibroblasts (MEF) reprogrammed toward iPSC.  
 > **Time points:** 18 time points over 18 days (days 0–18) with varying cell densities.  
-> **Genes analysed:** ~20 selected pluripotency and mesenchymal markers.
+> **Genes analysed:** 108 genes selected by `select_DEgenes_and_split`, using a list of 60 reference genes identified in the original Schiebinger et al. (2019) article as a seed for differential expression selection.
 
 ## Biological context
 

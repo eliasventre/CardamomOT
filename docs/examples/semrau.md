@@ -1,9 +1,9 @@
 # Semrau et al. (2017) — Mouse ESC differentiation
 
-> **Dataset:** Semrau S. et al., *Identifying cellular trajectories with SCORPIUS*, Nat. Methods 2017.  
+> **Dataset:** Semrau S, Goldmann JE, Soumillon M, Mikkelsen TS, Jaenisch R, and van Oudenaarden A. *Dynamics of lineage commitment revealed by single-cell transcriptomics of differentiating embryonic stem cells.* Nat Commun 2017; 8:1–16.  
 > **Organism / tissue:** Mouse embryonic stem cells (ESC) differentiating toward epiblast (Epi) and primitive endoderm (PE).  
 > **Time points:** 5 consecutive days (days 0–4).  
-> **Genes analysed:** ~25 selected markers of the Epi/PE decision.
+> **Genes analysed:** Selected markers of the Epi/PE decision.
 
 ## Biological context
 
