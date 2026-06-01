@@ -16,8 +16,8 @@ The sympathoadrenal lineage arises from neural crest cells that migrate to the a
 cardamomot pipeline \
     -i experimental_datasets/Kameneva \
     -s full \
-    -c 0 \
     -r 0.7 \
+    -c 0 \
     --mean-forcing 0.5 \
     --stimulus 1.0 \
     --prior 1.0 \

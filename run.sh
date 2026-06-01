@@ -21,8 +21,8 @@ conda activate cardamom_light
 
 input_dir="$1"
 split="${2:-full}"
-change="${3:-0}"
-rate="${4:-1}"
+rate="${3:-1}"
+change="${4:-0}"
 mean_forcing="${5:--1}"
 stimulus="${6:--1}"
 prior="${7:--1}"
@@ -39,7 +39,7 @@ if [ "$rd" = "1" ]; then
 fi
 
 echo "Select DE genes and split cells"
-python select_DEgenes_and_split.py -i "${input_dir}" -c "${change}" -r "${rate}" -s "${split}" --mean-forcing "${mean_forcing}"
+python select_DEgenes_and_split.py -i "${input_dir}" -s "${split}" -r "${rate}" -c "${change}" --mean-forcing "${mean_forcing}"
 
 if [ "$ref" = "1" ]; then
     echo "Compute prior network"

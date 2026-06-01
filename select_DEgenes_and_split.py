@@ -4,7 +4,7 @@ select_DEgenes_and_split.py
 Select differentially expressed genes and split data into train/test sets.
 
 Usage:
-    python select_DEgenes_and_split.py -i <project_path> -c <change> -r <rate> -s <split> [-m <mean_forcing>]
+    python select_DEgenes_and_split.py -i <project_path> -s <split> -r <rate> -c <change> [-m <mean_forcing>]
 
 Required input files:
     - Data/data.h5ad: input count matrix with temporal information

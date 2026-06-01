@@ -21,8 +21,8 @@ The time schedule of reprogramming factor expression must be provided alongside 
 cardamomot pipeline \
     -i experimental_datasets/Schiebinger \
     -s train \
-    -c 0 \
     -r 0.3 \
+    -c 0 \
     --mean-forcing 0.5 \
     --stimulus 1.0 \
     --prior 1.0 \

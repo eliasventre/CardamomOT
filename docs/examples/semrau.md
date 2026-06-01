@@ -15,8 +15,8 @@ This dataset captures the earliest bifurcation in the mouse blastocyst inner cel
 cardamomot pipeline \
     -i experimental_datasets/Semrau \
     -s full \
-    -c 0 \
     -r 0.7 \
+    -c 0 \
     --mean-forcing 1.0 \
     --stimulus 1.0 \
     --prior 1.0 \

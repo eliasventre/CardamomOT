@@ -69,7 +69,7 @@ my_project/
 conda activate cardamom_env
 
 # Run the full pipeline
-python -m CardamomOT.cli pipeline -i my_project -s full -c 1 -r 0.6 -m 0.5
+python -m CardamomOT.cli pipeline -i my_project -s full -r 0.6 -c 1 -m 0.5
 ```
 
 **Parameters:**

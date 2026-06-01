@@ -13,7 +13,7 @@ Usage examples
 --------------
 
   # run the full analysis pipeline (identical to the old run.sh)
-  cardamomot pipeline -i data/myproject -s train -c 1 -r 0.6 -m 0.5
+  cardamomot pipeline -i data/myproject -s train -r 0.6 -c 1 -m 0.5
 
   # execute a single step with arbitrary options
   cardamomot step infer_mixture -i data/myproject -s train -m 1.0
@@ -179,7 +179,7 @@ def _pipeline(args: argparse.Namespace) -> None:
         _run_script('infer_rd.py', ['-i', inp])
 
     _run_script('select_DEgenes_and_split.py',
-                ['-i', inp, '-s', sp, '-c', args.change, '-r', args.rate,
+                ['-i', inp, '-s', sp, '-r', args.rate, '-c', args.change,
                  '-m', args.mean, '--force-basins', fb, '--temporal-basins', tb])
 
     if args.ref:
