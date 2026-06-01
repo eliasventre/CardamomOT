@@ -9,7 +9,8 @@
 #   test : infer_test + check_test       (default 0)
 #   kov  : simulate KOV + check KOV      (default 1)
 
-# ./run.sh experimentalxsdatasets/Kameneva  full  0 0.7 0.5 
+# ./run.sh experimental_datasets/Semrau  full  0 0.7 1.0
+# ./run.sh experimental_datasets/Kameneva  full  0 0.7 0.5 
 ./run.sh experimental_datasets/Schiebinger/ train 0 0.3 0 1 1 0 0 0 0 0 1
 
 #  ./run.sh collaborations/orga_Olivier full 0 1.0 0.5

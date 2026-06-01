@@ -96,7 +96,7 @@ cardamomot step select_DEgenes_and_split \
     -i my_project -s full -c 0 -r 1 --mean-forcing 0.5 --force-basins 1.0 --temporal-basins 1
 
 # ── Optional: prior network (run after gene selection) ────────────────────────
-cardamomot step prepare_reference_network -i my_project -d 4
+cardamomot step prepare_reference_network -i my_project -d 3
 
 # ── Kinetics ──────────────────────────────────────────────────────────────────
 cardamomot step get_kinetic_rates -i my_project -s full

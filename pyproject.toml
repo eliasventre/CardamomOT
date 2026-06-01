@@ -42,6 +42,8 @@ dependencies = [
     "torchdiffeq>=0.2",
     "joblib>=1.0",
     "pot>=0.9.6",
+    "neko>=0.0.9",
+    "omnipath>=1.0",
 ]
 
 [project.scripts]

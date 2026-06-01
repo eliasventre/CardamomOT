@@ -340,7 +340,7 @@ def subset_adj_by_genes(adj_matrix, node_index_list, gene_list, min_adj=0):
 
 def main(argv):
     inputfile = ''
-    depth = ''
+    depth = 3
     try:
         opts, args = getopt.getopt(argv, "hi:d:", ["input=", "depth="])
     except getopt.GetoptError:

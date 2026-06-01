@@ -40,6 +40,8 @@ pip install -e ".[dev]"
 
 # For Jupyter notebooks:
 pip install -e ".[notebooks]"
+
+# Note: neko and omnipath (used by prepare_reference_network) are included in the default install.
 ```
 
 ### 2. Prepare your data

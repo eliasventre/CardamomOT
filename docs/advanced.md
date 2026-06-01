@@ -71,7 +71,7 @@ This identifies Poisson-like genes (Chronocell method, Fang et al. 2024) and sto
 To bias network inference toward known biology, first build a prior network from public databases (OmniPath, etc.):
 
 ```bash
-cardamomot step prepare_reference_network -i my_project -d 4
+cardamomot step prepare_reference_network -i my_project -d 3
 ```
 
 This generates `Data/ref_network.csv`, a gene × gene binary (or weighted) interaction matrix. The `--prior` parameter then controls how strongly edges absent from this prior are penalised.
