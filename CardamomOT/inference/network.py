@@ -595,7 +595,7 @@ def main_loop_inference(g, y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_
     """
     n_networks_tmp: int = int(1 + np.argmax(ks[1:]))
 
-    l_pen1 = l_gen * np.size(y_prot, 0) / (n_networks_tmp * scale * (1 + np.sqrt(G)))
+    l_pen1 = l_gen * np.size(y_prot, 0) / (n_networks_tmp * scale * (1 + G**(1/2)))
     theta = core_inference(
         y_samples, y_proba[:, :n_networks_tmp + 1], y_prot, y_prot_mod, y_kon,
         theta_init[:, :n_networks_tmp],

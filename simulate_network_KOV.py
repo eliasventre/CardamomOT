@@ -28,6 +28,7 @@ import getopt
 import anndata as ad
 import os
 import copy
+import torch
 
 
 def _parse_gene_with_pct(token):
@@ -92,11 +93,13 @@ def main(argv):
     """
     inputfile = ''
     split = ''
+    simulate_with_proliferation = False
     try:
-        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split="])
+        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split=", "proliferation"])
     except getopt.GetoptError:
         print("[simulate_network_KOV] Error: Invalid command-line arguments")
-        print("[simulate_network_KOV] Usage: python simulate_network_KOV.py -i <project_path> -s <split>")
+        print("[simulate_network_KOV] Usage: python simulate_network_KOV.py -i <project_path> -s <split> "
+              "[--proliferation]")
         sys.exit(2)
 
     for opt, arg in opts:
@@ -104,6 +107,8 @@ def main(argv):
             inputfile = arg
         elif opt in ("-s", "--split"):
             split = '{}'.format(arg)
+        elif opt == "--proliferation":
+            simulate_with_proliferation = True
         elif opt == "-h":
             print(__doc__)
             sys.exit(0)
@@ -264,6 +269,22 @@ def main(argv):
 
     def _gene_label(gene, pct):
         return f"{gene}pct{int(pct)}" if pct is not None else gene
+
+    # Load proliferation network if requested
+    if simulate_with_proliferation:
+        prolif_path = os.path.join(p, 'cardamomOT', 'prolif_network.pt')
+        n_prot_path = os.path.join(p, 'cardamomOT', 'prolif_network_n_proteins.npy')
+        if os.path.exists(prolif_path) and os.path.exists(n_prot_path):
+            from CardamomOT.inference.proliferations import ProliferationMLP
+            n_proteins = int(np.load(n_prot_path)[0])
+            prolif_net = ProliferationMLP(n_proteins)
+            prolif_net.load_state_dict(torch.load(prolif_path, map_location='cpu', weights_only=True))
+            prolif_net.eval()
+            model.prolif_network = prolif_net
+            model.simulate_with_proliferation = True
+            print("[simulate_network_KOV] Loaded proliferation network — branching simulation enabled")
+        else:
+            print("[simulate_network_KOV] Warning: --proliferation requested but prolif_network.pt not found")
 
     # Simulate perturbations
     print(f"[simulate_network_KOV] Starting simulation of {len(combos)} perturbations...")

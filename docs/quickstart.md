@@ -83,6 +83,7 @@ cardamomot pipeline \
 | `--ref-depth N` | *(used with `--ref`)* | `3` (default) | path length set to `N` |
 | `--test` | `infer_test` + `check_test_to_train` | skipped | enabled |
 | `--no-kov` | `simulate_network_KOV` + `check_KOV_to_sim` | enabled | skipped |
+| `--proliferation` | `infer_network_simul` + `simulate_network` + `simulate_network_KOV` | standard simulation | learn R_opt MLP; simulate with proliferation/death resampling |
 
 ## Run individual steps
 
@@ -115,9 +116,13 @@ cardamomot step infer_network_structure \
     -i my_project -s full --stimulus 1.0 --prior 1.0 --force-basins 1.0 --temporal-basins 1
 cardamomot step infer_network_simul \
     -i my_project -s full --stimulus 1.0 --prior 1.0
+# Add --proliferation to learn a ProliferationMLP from the inferred R_opt values:
+#   cardamomot step infer_network_simul -i my_project -s full --stimulus 1.0 --prior 1.0 --proliferation
 
 # ── Simulation ────────────────────────────────────────────────────────────────
 cardamomot step simulate_network -i my_project -s full
+# Add --proliferation to resample trajectories according to the learned R(P) network:
+#   cardamomot step simulate_network -i my_project -s full --proliferation
 cardamomot step check_sim_to_data \
     -i my_project -s full --stimulus 1.0 --prior 1.0
 
@@ -129,6 +134,8 @@ cardamomot step check_test_to_train \
 
 # ── Perturbations (default) ───────────────────────────────────────────────────
 cardamomot step simulate_network_KOV -i my_project -s full
+# Add --proliferation to apply proliferation/death resampling to perturbation simulations too:
+#   cardamomot step simulate_network_KOV -i my_project -s full --proliferation
 cardamomot step check_KOV_to_sim \
     -i my_project -s full --stimulus 1.0 --prior 1.0
 ```

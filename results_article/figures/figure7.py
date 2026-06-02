@@ -272,42 +272,80 @@ def compute_proportions(adatas, labels, color_map):
 
 from scipy.stats import chi2_contingency
 
-def chi2_test_from_proportions(prop_df, n_cells=1000):
+def load_simulation_variance(perturb_id, data_dir='for_figure7_data'):
     """
-    Approxime un test du chi2 à partir de proportions en reconstruisant
-    des effectifs (n_cells arbitraire mais identique pour les deux conditions).
+    Charge les proportions pré-calculées par _for_figure7.py.
+    Retourne (props_wt, props_single, props_perturb) ou (None, None, None) si absent.
+    """
+    path = os.path.join(data_dir, f'{perturb_id}.npz')
+    if not os.path.exists(path):
+        return None, None, None
+    try:
+        data          = np.load(path, allow_pickle=True)
+        props_wt      = data['props_wt']
+        props_perturb = data['props_perturb']
+        props_single  = data['props_single'] if 'props_single' in data else None
+        return props_wt, props_single, props_perturb
+    except Exception:
+        return None, None, None
+
+
+def multi_run_chi2_test(props_single_sims, props_pert_sims, n_cells=1000):
+    """
+    Chi2 test sur les proportions poolées de N_SIMS runs.
+    Revient à concatener N_SIMS × n_cells observations par condition,
+    ce qui stabilise le test face à la variabilité stochastique.
+    Fallback : chi2 classique sur proportions moyennes si None.
     """
     try:
-        p_single = prop_df['Sim single'].values
-        p_pert   = prop_df['Sim perturb'].values
-
-        # reconstruire des comptes
-        counts_single = np.round(p_single * n_cells)
-        counts_pert   = np.round(p_pert * n_cells)
-
+        if props_single_sims is not None and props_pert_sims is not None:
+            # pooler les comptes de tous les runs
+            counts_single = np.round(props_single_sims * n_cells).sum(axis=0)
+            counts_pert   = np.round(props_pert_sims   * n_cells).sum(axis=0)
+        else:
+            return None, None
         table = np.vstack([counts_single, counts_pert])
-
         chi2, pval, _, _ = chi2_contingency(table)
         return chi2, pval
     except Exception:
         return None, None
-    
 
 
-def draw_barplot(ax, prop_df, color_map, show_xlabels='none'):
+def draw_barplot(ax, prop_df, color_map, show_xlabels='none', sim_stds=None):
     """
     Barplot empilé des proportions de types cellulaires.
     show_xlabels : 'top'  -> labels en haut de l'axe (première ligne uniquement)
                    'none' -> pas de labels (lignes suivantes)
+    sim_stds     : dict {col_name: {cell_type: std}} — barres d'erreur sur
+                   chaque colonne simulée. Ex :
+                   {'Sim WT': {...}, 'Sim single': {...}, 'Sim perturb': {...}}
     """
-    x      = np.arange(len(prop_df.columns))
-    bottom = np.zeros(len(prop_df.columns))
+    x        = np.arange(len(prop_df.columns))
+    bottom   = np.zeros(len(prop_df.columns))
+    cols_lst = list(prop_df.columns)
 
     for cat in prop_df.index:
         vals = prop_df.loc[cat].values
         ax.bar(x, vals, bottom=bottom,
                color=color_map.get(cat, '#CCCCCC'), label=cat, width=0.6,
                edgecolor='white', linewidth=0.4)
+
+        if sim_stds is not None:
+            for col_name, col_std_dict in sim_stds.items():
+                if col_name not in cols_lst:
+                    continue
+                col_idx = cols_lst.index(col_name)
+                std_val = col_std_dict.get(cat, 0.0)
+                seg_val = vals[col_idx]
+                if std_val > 0 and seg_val > 0.02:
+                    mid_y = bottom[col_idx] + seg_val / 2.0
+                    ax.errorbar(
+                        x[col_idx], mid_y,
+                        yerr=std_val,
+                        fmt='none', ecolor='#222222', elinewidth=0.9,
+                        capsize=2.5, capthick=0.9, zorder=6,
+                    )
+
         bottom += vals
 
     ax.set_xticks(x)
@@ -456,7 +494,39 @@ def load_perturbation_data(cfg):
         color_map,
     )
 
-    chi2_stat, chi2_pval = chi2_test_from_proportions(prop_df)
+    # Chi2 poolé + errorbars sur N_SIMS runs (pré-calculés par _for_figure7.py)
+    props_wt_sims, props_single_sims, props_pert_sims = load_simulation_variance(perturb_id)
+    chi2_stat, chi2_pval = multi_run_chi2_test(props_single_sims, props_pert_sims)
+
+    sim_stds = None
+    if props_pert_sims is not None:
+        def _stds_for(arr, ct_order):
+            if arr is None:
+                return None
+            s = arr.std(axis=0)
+            return {ct: float(s[i]) for i, ct in enumerate(ct_order)
+                    if ct in color_map}
+
+        # reconstruire l'ordre des cell_types depuis le npz
+        try:
+            _data    = np.load(os.path.join('for_figure7_data', f'{perturb_id}.npz'),
+                                allow_pickle=True)
+            ct_order = list(_data['cell_types'])
+        except Exception:
+            ct_order = list(color_map.keys())
+
+        sim_stds = {}
+        _w = _stds_for(props_wt_sims, ct_order)
+        if _w:
+            sim_stds['Sim WT'] = _w
+        _s = _stds_for(props_single_sims, ct_order)
+        if _s:
+            sim_stds['Sim single'] = _s
+        _p = _stds_for(props_pert_sims, ct_order)
+        if _p:
+            sim_stds['Sim perturb'] = _p
+        if not sim_stds:
+            sim_stds = None
 
     # UMAP joint sur 3 conditions
     af_umap, as_umap, ap_umap = compute_umaps(
@@ -464,19 +534,20 @@ def load_perturbation_data(cfg):
     )
 
     return dict(
-        gene      = gene,
-        rank      = rank,
-        G_net     = G_net,
-        max_int   = max_int,
-        color_map = color_map,
-        prop_df   = prop_df,
-        af_umap   = af_umap,
-        as_umap   = as_umap,
-        ap_umap   = ap_umap,
-        label     = cfg['label'],
-        mode      = cfg['mode'],
-        chi2_stat = chi2_stat,
-        chi2_pval = chi2_pval,
+        gene       = gene,
+        rank       = rank,
+        G_net      = G_net,
+        max_int    = max_int,
+        color_map  = color_map,
+        prop_df    = prop_df,
+        chi2_stat  = chi2_stat,
+        chi2_pval  = chi2_pval,
+        sim_stds   = sim_stds,
+        af_umap    = af_umap,
+        as_umap    = as_umap,
+        ap_umap    = ap_umap,
+        label      = cfg['label'],
+        mode       = cfg['mode'],
     )
 
 # ──────────────────────────────────────────────────────────────
@@ -562,9 +633,10 @@ def make_figure(perturbations=PERTURBATIONS, save_path='figure_7.pdf'):
 
         # Col 2 : barplot (labels en haut pour la 1ère ligne seulement)
         draw_barplot(axes_bar[row], data['prop_df'], data['color_map'],
-                     show_xlabels='top' if row == 0 else 'none')
-        
-        # --- Affichage test chi2 ---
+                     show_xlabels='top' if row == 0 else 'none',
+                     sim_stds=data.get('sim_stds'))
+
+        # --- Affichage test chi2 (poolé sur N_SIMS runs) ---
         if data.get('chi2_pval') is not None:
             pval = data['chi2_pval']
             txt = f"$\\chi^2$ p = {pval:.1e}"

@@ -221,9 +221,9 @@ def main(argv):
         adata_sim.obs['time'] = times_simulation
         adata_sim.write(os.path.join(cardamom_dir, f'adata_sim_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
 
-        adata_rna_traj = ad.AnnData(X=data_ref[1:, :].T)
+        adata_rna_traj = ad.AnnData(X=data_real[1:, :].T)
         adata_rna_traj.var = adata.var.copy()
-        adata_rna_traj.obs['time'] = data_ref[0, :]
+        adata_rna_traj.obs['time'] = data_real[0, :]
         adata_rna_traj.write(os.path.join(cardamom_dir, f'adata_rna_traj_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
 
         data_prot_traj = np.load(os.path.join(cardamom_dir, 'data_prot_forsimul.npy'))
@@ -245,8 +245,8 @@ def main(argv):
     if plot_in_script:
         print("[check_sim_to_data] Generating distribution comparison plots...")
         try:
-            plot_data_distrib(data_ref, data_sim, t_data, t_simul, names, inputfile, outputfile, complement1)
-            plot_data_umap_altogether(data_ref, data_ref, data_beta, data_netw_theta,
+            plot_data_distrib(data_real, data_sim, t_data, t_simul, names, inputfile, outputfile, complement1)
+            plot_data_umap_altogether(data_real, data_real, data_beta, data_netw_theta,
                                   data_sim, t_data, t_simul, inputfile, 'Check', 'altogether_sim',
                                   cell_rd=cell_rd)
             print("[check_sim_to_data] Plots successfully generated")

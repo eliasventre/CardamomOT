@@ -298,6 +298,8 @@ def main(argv):
         np.save(os.path.join(cardamom_dir, 'data_kon_beta_harissa'), model.kon_beta_harissa)
     np.save(os.path.join(cardamom_dir, 'alpha'), model.alpha)
     np.save(os.path.join(cardamom_dir, 'degradations'), model.d)
+    if model.R_opt is not None:
+        np.save(os.path.join(cardamom_dir, 'data_R_opt'), model.R_opt)
 
     print(f"[infer_network_structure] Successfully saved network inference results to {cardamom_dir}")
 

@@ -245,3 +245,68 @@ TypeC    ,  0.01, 0.05, 0.3
 ```
 
 Row/column names must match `adata.obs['cell_type']`. At each consecutive timepoint pair, transition probabilities are computed as `exp(rate × Δt)` and rescaled so that the mean weight per row equals 1 — transitions with weight > 1 become cheaper (preferred), weight < 1 become more expensive (penalised).
+
+---
+
+## Proliferation-aware simulation (`--proliferation`)
+
+CardamomOT can learn and simulate net proliferation rates (R = birth − death) directly from the inferred optimal-transport couplings, without requiring external annotations.
+
+### How it works
+
+**Learning R from the OT coupling.**  
+During trajectory inference (`infer_network_structure`), at each consecutive timepoint pair (t → t+1), the row marginals of the optimal coupling encode the effective mass transported out of each source cell. The optimal net growth rate per cell is recovered via the self-consistent zero-mean inversion of the WOT marginal formula:
+
+```
+m_n  =  (1/N) · exp(R_n · Δt/2) / C          (WOT: source marginal, normalised)
+
+R_n  =  (2/Δt) · (log(m_n) − mean_k(log(m_k)))
+```
+
+The factor `2/Δt` comes from the WOT convention where both the source **and** the target marginals are corrected by `exp(R · Δt/2)` each — the formula recovers the true net rate R from the source marginal alone. With balanced OT (default) all `m_n = 1/N` so `R_n = 0` exactly; with unbalanced OT (`model.unbalanced_reg > 0`) they vary and encode genuine differential growth. The resulting `R_opt` array (one value per cell per timepoint transition) is always saved to `cardamomOT/data_R_opt.npy`.
+
+**Training the ProliferationMLP.**  
+`infer_network_simul --proliferation` reads `data_R_opt.npy` and trains a lightweight two-hidden-layer MLP (64 units, Tanh activation, MSE loss):
+
+```
+R(P) : protein levels → net proliferation rate
+```
+
+The network is trained on `(prot[:, ns:], R_opt)` pairs *after* any recomputation of protein trajectories, so it captures the optimal R consistent with the final inferred network. The weights are saved to `cardamomOT/prolif_network.pt`.
+
+**Branching simulation.**  
+`simulate_network --proliferation` (and `simulate_network_KOV --proliferation`) loads the MLP and applies a **trapezoidal forward+backward resampling** after each simulated interval — mirroring the structure of the WOT correction used during inference (which corrects both source and target marginals):
+
+```
+log_weight_n  =  (R(P_start_n) + R(P_end_n)) / 2 · Δt
+```
+
+`P_start` and `P_end` are the protein states of cell n at the beginning and end of the interval. The N cells are then **resampled multinomially** (with replacement, weighted by `exp(log_weight_n)`). This avoids the catastrophic variance of Poisson sampling (which would kill ~37 % of cells per step even at R = 0) and is consistent with the inference-time coupling.
+
+### Pipeline usage
+
+```bash
+# Step 4 — adapt parameters and learn R
+cardamomot step infer_network_simul -i my_project -s full --proliferation
+
+# Step 5 — simulate with branching
+cardamomot step simulate_network -i my_project -s full --proliferation
+
+# KO/OV perturbations with branching
+cardamomot step simulate_network_KOV -i my_project -s full --proliferation
+```
+
+Or directly:
+
+```bash
+python infer_network_simul.py -i my_project -s full --proliferation
+python simulate_network.py    -i my_project -s full --proliferation
+```
+
+### Notes
+
+- `--proliferation` is **off by default**. `infer_network_structure` always computes and saves `R_opt` as a by-product regardless — enabling the flag later has no cost.
+- The flag must be passed to **both** `infer_network_simul` (trains the MLP) and `simulate_network` / `simulate_network_KOV` (uses it). Passing it only to the simulation scripts while `prolif_network.pt` is absent prints a warning and falls back to standard simulation.
+- Resampling is currently applied to the PDMP stochastic mode only; ODE mode ignores it silently.
+- For balanced OT the estimated R values are exactly zero for all cells; meaningful proliferation signals require unbalanced OT (`model.unbalanced_reg > 0`) or prior annotations via `adata.obs['prolif_rate']` / `adata.obs['death_rate']` (see section above).
+- The trapezoidal rule `(R_start + R_end)/2` naturally handles cells whose protein levels — and thus growth rate — change significantly within the interval.

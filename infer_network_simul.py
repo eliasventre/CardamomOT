@@ -46,13 +46,14 @@ def main(argv):
     split = ''
     stimulus = -1.0
     prior = -1.0
+    recompute_proliferations = False
     try:
         opts, args = getopt.getopt(argv, "hi:s:t:p:",
-                                   ["input=", "split=", "stimulus=", "prior="])
+                                   ["input=", "split=", "stimulus=", "prior=", "proliferation"])
     except getopt.GetoptError:
         print("[infer_network_simul] Error: Invalid command-line arguments")
         print("[infer_network_simul] Usage: python infer_network_simul.py -i <project_path> -s <split> "
-              "[--stimulus <float>] [--prior <float>]")
+              "[--stimulus <float>] [--prior <float>] [--proliferation]")
         sys.exit(2)
 
     for opt, arg in opts:
@@ -64,6 +65,8 @@ def main(argv):
             stimulus = float(arg)
         elif opt in ("-p", "--prior"):
             prior = float(arg)
+        elif opt == "--proliferation":
+            recompute_proliferations = True
         elif opt == "-h":
             print(__doc__)
             sys.exit(0)
@@ -127,6 +130,10 @@ def main(argv):
         if os.path.exists(kon_beta_h_path):
             model.kon_beta_harissa = np.load(kon_beta_h_path)
             print("[infer_network_simul] Loaded kon_beta_harissa for Harissa-mode network re-inference")
+        R_opt_path = os.path.join(p, 'cardamomOT', 'data_R_opt.npy')
+        if os.path.exists(R_opt_path):
+            model.R_opt = np.load(R_opt_path)
+            print("[infer_network_simul] Loaded R_opt for proliferation MLP training")
         print("[infer_network_simul] Successfully loaded all network parameters")
     except FileNotFoundError as e:
         print(f"[infer_network_simul] Error: Missing parameter file: {e}")
@@ -176,6 +183,7 @@ def main(argv):
 
     # Adapt parameters for simulation
     print("[infer_network_simul] Adapting parameters for simulation...")
+    model.recompute_proliferations = recompute_proliferations
     model.refine_network_degradations()
     print("[infer_network_simul] Parameter adaptation completed")
 
@@ -190,6 +198,12 @@ def main(argv):
         np.save(os.path.join(cardamom_dir, 'inter_t_simul'), model.inter_t)
         np.save(os.path.join(cardamom_dir, 'ratios'), model.ratios)
         np.save(os.path.join(cardamom_dir, 'degradations_temporal.npy'), model.d_t)
+        if model.prolif_network is not None:
+            torch.save(model.prolif_network.state_dict(),
+                       os.path.join(cardamom_dir, 'prolif_network.pt'))
+            np.save(os.path.join(cardamom_dir, 'prolif_network_n_proteins'),
+                    np.array([model.prolif_network.net[0].in_features]))
+            print("[infer_network_simul] Saved proliferation network to prolif_network.pt")
         print(f"[infer_network_simul] Successfully saved adapted parameters to {cardamom_dir}")
     except Exception as e:
         print(f"[infer_network_simul] Error saving parameters: {e}")

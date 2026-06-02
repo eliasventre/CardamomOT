@@ -211,15 +211,63 @@ class BurstyPDMP:
             else:
                 logger.debug("Exact simulation used no jump")
         return np.array(sim)
+
+    def simulation_with_growth(self, d1, ks, c, timepoints, scale, prolif_fn, ns=1, verb=False):
+        """
+        Same as simulation but also accumulates the growth log-weight:
+            log_weight = integral R(P(t)) dt   (forward Riemann sum over PDMP steps)
+
+        This is the forward-only estimate of the full growth log-weight R·Δt.
+        For a combined forward+backward correction (trapezoidal rule using both
+        start and end protein states), see the resampling step in
+        simulate_trajectories_unitary, which does not use this method.
+
+        prolif_fn : callable (1, n_proteins) -> (1,) array of net growth rates.
+        Returns (sim_array, log_weight).
+        """
+        G = self.basal.shape[0]
+        types: list[tuple[str, str]] = [('P', 'float64')]
+        sim = []
+        c0, c1 = 0, 0
+        T = 0
+        log_weight: float = 0.0
+        Told, state_old = T, self.state.copy()
+        for t in timepoints:
+            while T < t:
+                Told, state_old = T, self.state.copy()
+                U, jump = self.step(d1, ks, c, scale, ns)
+                T += U
+                # Accumulate R * U (full rate R, not divided by 2)
+                P_genes = self.state['P'][ns:].reshape(1, -1)
+                R = prolif_fn(P_genes)
+                log_weight += float(R[0]) * U
+                if jump:
+                    c1 += 1
+                else:
+                    c0 += 1
+            P = flow(t - Told, d1, state_old['P'], ns)
+            sim += [np.array([(P[i]) for i in range(1, G)], dtype=types)]
+        self.state['P'] = P
+        if verb:
+            ctot: int = c0 + c1
+            if ctot > 0:
+                logger.info(
+                    "Exact simulation (with growth) used %d jumps (%d phantom %.2f%%)",
+                    ctot, c0, 100 * c0 / ctot,
+                )
+            else:
+                logger.debug("Exact simulation (with growth) used no jump")
+        return np.array(sim), log_weight
     
 
 class Simulation:
     """
     Basic object to store simulations.
     """
-    def __init__(self, t, p) -> None:
-        self.t: Any = t # Time points
-        self.p: Any = p # Proteins
+    def __init__(self, t, p, log_weight: float = 0.0) -> None:
+        self.t: Any = t          # Time points
+        self.p: Any = p          # Proteins
+        self.log_weight: float = log_weight  # Accumulated integral of R(P) dt
 
 
 def simulate_next_prot_ode(d, a, basal, inter, t, scale, **kwargs) -> Simulation:
@@ -254,11 +302,17 @@ def simulate_next_prot_ode(d, a, basal, inter, t, scale, **kwargs) -> Simulation
 def simulate_next_prot_pdmp(d, a, c, basal, inter, t, scale, **kwargs) -> Simulation:
         """
         Perform simulation of the network model (PDMP version).
+
+        Optional kwargs:
+          prolif_fn : callable (1, n_proteins) -> (1,) or None.
+              When provided, the PDMP micro-steps are used to accumulate
+              log_weight = integral R(P(t)) dt stored in Simulation.log_weight.
         """
         p0 = kwargs.get('P0')
         ns = kwargs.get('ns', 1)
         stim_vals = kwargs.get('stim_vals', None)  # schedule values at current time ti
         verb = kwargs.get('verb', False)
+        prolif_fn = kwargs.get('prolif_fn', None)
         if np.size(t) == 1:
             t = np.array([t])
         if np.any(t != np.sort(t)):
@@ -275,6 +329,10 @@ def simulate_next_prot_pdmp(d, a, c, basal, inter, t, scale, **kwargs) -> Simula
             if p0 is not None:
                 network.state['P'][1:ns] = p0[1:ns]  # stim2..stimN from p0
             network.state['P'][0] = 1  # backward-compat: stim1 always active
+        if prolif_fn is not None:
+            sim_arr, log_weight = network.simulation_with_growth(d, a, c, t, scale, prolif_fn, ns=ns, verb=verb)
+            p = sim_arr['P']
+            return Simulation(t, p, log_weight=log_weight)
         sim = network.simulation(d, a, c, t, scale, ns=ns, verb=verb)
         p = sim['P']
         return Simulation(t, p)

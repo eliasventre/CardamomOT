@@ -110,10 +110,9 @@ def main(argv):
     # ─── LOAD PRE-BUILT ANNDATA OBJECTS ──────────────────────────────────
     tag = f'stim{stim}_prior{prior}'
     adata_files = {
-        'beta':     f'adata_beta_test_{tag}.h5ad',
-        'theta':    f'adata_theta_test_{tag}.h5ad',
-        'sim':      f'adata_sim_test_{tag}.h5ad',
-        'rna_traj': f'adata_rna_traj_test_{tag}.h5ad',
+        'beta':  f'adata_beta_test_{tag}.h5ad',
+        'theta': f'adata_theta_test_{tag}.h5ad',
+        'sim':   f'adata_sim_test_{tag}.h5ad',
     }
 
     adatas = {}
@@ -135,7 +134,7 @@ def main(argv):
         X = a.X.toarray() if scipy.sparse.issparse(a.X) else np.asarray(a.X)
         return np.vstack([a.obs['time'].values, X.T])
 
-    data_ref = _adata_to_array(adatas['rna_traj'])
+    data_ref = data_real  # use original observed data (not deconvolved trajectories)
     data_beta = _adata_to_array(adatas['beta'])
     data_netw_theta = _adata_to_array(adatas['theta'])
     data_sim = _adata_to_array(adatas['sim'])
