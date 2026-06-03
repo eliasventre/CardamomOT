@@ -715,6 +715,7 @@ class NetworkModel:
         compute_theta=True,
         initialize_alpha=True,
         kov_cell_mask=None,
+        hard_forcing_ref=False,
     ):
         """
         Alternating optimization of trajectories and network (theta).
@@ -860,7 +861,8 @@ class NetworkModel:
                     basal_ref=basal_ref, inter_ref=inter_ref,
                     proba=self.compute_with_proba, scale=self.scale_pen,
                     weight_prev=weight_prev, loss=self.loss_norm,
-                    final=0, constrain_basal_uniform=self.constrain_basal_uniform)
+                    final=0, constrain_basal_uniform=self.constrain_basal_uniform,
+                    hard_forcing_ref=hard_forcing_ref)
                 # basal is now (n_samples, G_tot, n_networks)
             error_2 = self._count_errors_per_sample(y_prot, y_kon, y_proba, ks, inter, basal,
                                                     samples_id=samples_id, samples_data=y_samples)
@@ -1070,6 +1072,7 @@ class NetworkModel:
         stimulus_schedule=None,
         transition_rates=None,
         time_key='time',
+        hard_forcing_ref=False,
     ):
         """
         Fit the gene regulatory network to the RNA expression data.
@@ -1245,6 +1248,7 @@ class NetworkModel:
             compute_theta=True,
             initialize_alpha=True,
             kov_cell_mask=kov_cell_mask,
+            hard_forcing_ref=hard_forcing_ref,
         )
 
 
