@@ -136,7 +136,7 @@ class NetworkModel:
         self.simulation_stochastic = True # 1 if we simulate Bursty-like proteins, 0 if deterministic limit for proteins
         self.finish_by_determinist = False # 1 if we simulate with deterministic limit for the last timepoint
         self.min_ratio = .05
-        self.max_ratio = 20
+        self.max_ratio = 50
         self.production_factor = None  # per-gene creation rate scaling; None = all ones
         self.simulate_full_with_harissa = False  # use Harissa PDMP to jointly simulate proteins+mRNAs
         self.kon_beta_harissa = None  # continuous adaptive_shrinkage burst-rate estimates (set by loop_trajectories)
@@ -1445,7 +1445,7 @@ class NetworkModel:
         if not self.simulate_full_with_harissa:
             y_prot_unitary, y_prot_prev_unitary = self.estimate_trajectories(self.prot, times, self.d[1, ns:], N=N_tot, kon_beta=self.kon_beta, s=self.scale_proteins)
             error = self._count_errors_per_sample(y_prot_unitary, self.kon_beta, self.proba_traj, ks,
-                                                inter, basal, samples_id)
+                                                inter, basal, samples_id=samples_id, samples_data=self.samples_data)
 
             # inference_network returns (n_samples, G_tot, n_networks) for basal
             basal_unitary, inter_unitary, _, _ = inference_network(
@@ -1459,8 +1459,12 @@ class NetworkModel:
                 constrain_basal_uniform=self.constrain_basal_uniform,
             )
 
+            ### filter_edges
+            if self.filter_network:
+                inter_unitary, _ = filter_network(len(times), N_tot, y_prot_unitary, ks, basal_unitary, inter_unitary, samples_data=self.samples_data)
+
             error_corrected = self._count_errors_per_sample(y_prot_unitary, self.kon_beta, self.proba_traj, ks,
-                                                            inter_unitary, basal_unitary, samples_id)
+                                                            inter_unitary, basal_unitary, samples_id=samples_id, samples_data=self.samples_data)
             if verb:
                 print("[refine_network_degradations] ratio errors", error, error_corrected)
 
@@ -1481,7 +1485,6 @@ class NetworkModel:
                 print("[refine_network_degradations] ProliferationMLP training done.")
 
         ### Adapt degradation rates
-
         self.ratios = np.tile(self.d[0, :] / self.d[1, :], (len(times)-1, 1))
         self.d_t = np.tile(self.d, (len(times)-1, 1, 1))
         # When basal is 3-D (n_samples, G, n_networks) keep per-sample structure:

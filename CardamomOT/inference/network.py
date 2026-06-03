@@ -666,6 +666,8 @@ def inference_network(y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, n_stimu
         mean for each gene. Samples whose basal is pinned by a non-zero basal_ref
         (KO/OV priors) are excluded from the penalty for that gene.
     """
+    if ref_constraint_pct < 0:
+        raise ValueError(f"ref_constraint_pct must be >= 0, got {ref_constraint_pct}")
     try:
         from joblib import Parallel, delayed
     except ImportError:

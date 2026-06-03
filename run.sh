@@ -75,11 +75,11 @@ python simulate_network.py -i "${input_dir}" -s "${split}" $prolif_flag
 echo "Check simulation"
 python check_sim_to_data.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}"
 
-if [ "$test" = "1" ]; then
-    echo "Infer and simulate test"
-    python infer_test.py -i "${input_dir}" --stimulus "${stimulus}" --prior "${prior}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"
-    python check_test_to_train.py -i "${input_dir}" -s "${split}"
-fi
+# if [ "$test" = "1" ]; then
+#     echo "Infer and simulate test"
+#     python infer_test.py -i "${input_dir}" --stimulus "${stimulus}" --prior "${prior}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"
+#     python check_test_to_train.py -i "${input_dir}" -s "${split}"
+# fi
 
 if [ "$kov" = "1" ]; then
     echo "Simulate KOV"
@@ -88,4 +88,4 @@ if [ "$kov" = "1" ]; then
     python check_KOV_to_sim.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}"
 fi
 
-echo "All scripts executed !"
+# echo "All scripts executed !"
