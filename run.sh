@@ -57,11 +57,11 @@ fi
 # echo "Get kinetic rates"
 # python get_kinetic_rates.py -i "${input_dir}" -s "${split}"
 
-# echo "Inference mixture"
-# python infer_mixture.py -i "${input_dir}" -s "${split}" --mean-forcing "${mean_forcing}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"
+echo "Inference mixture"
+python infer_mixture.py -i "${input_dir}" -s "${split}" --mean-forcing "${mean_forcing}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"
 
-# echo "Check mixture"
-# python check_mixture_to_data.py -i "${input_dir}" -s "${split}"
+echo "Check mixture"
+python check_mixture_to_data.py -i "${input_dir}" -s "${split}"
 
 echo "Infer network structure"
 python infer_network_structure.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"

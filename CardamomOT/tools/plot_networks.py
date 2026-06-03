@@ -198,8 +198,6 @@ def plot_network(p, seuil=0.3, network=0, train="full", ns=1):
     """
     adata = sc.read_h5ad(f'{p}Data/data_{train}.h5ad')
     grn_mat = np.load(f'{p}cardamomOT/inter_simul.npy')[ns:, ns:]
-    grn_mat = np.maximum(grn_mat, -5)
-    grn_mat = np.minimum(grn_mat, 5)
     genes_init = list(adata.var_names)
     grn_slice = grn_mat[:, :, network]
 

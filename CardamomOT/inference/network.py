@@ -450,7 +450,7 @@ def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, th
                    ref_network, ks, G, g, n_networks, n_samples, proba,
                    l_pen, weight_prev=.5, loss='CE', final=0,
                    constrain_basal_uniform=0.0, basal_free_mask=None, G_tol=None,
-                   hard_forcing_ref=False):
+                   hard_forcing_ref=False, ref_constraint_pct=0.1):
     """
     Joint L-BFGS-B optimisation of interactions + per-sample basals for one gene.
 
@@ -478,17 +478,17 @@ def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, th
             for idx in range(n_inter_flat):
                 v = theta_ref_flat[idx]
                 if v > 0:
-                    bounds[idx] = (0.9 * v, 1.1 * v)
+                    bounds[idx] = ((1 - ref_constraint_pct) * v, (1 + ref_constraint_pct) * v)
                 elif v < 0:
-                    bounds[idx] = (1.1 * v, 0.9 * v)
+                    bounds[idx] = ((1 + ref_constraint_pct) * v, (1 - ref_constraint_pct) * v)
                 else:
-                    bounds[idx] = (0.0, 0.0)
+                    bounds[idx] = (-ref_constraint_pct, ref_constraint_pct)
         else:
             # Only apply sign/reference constraints to interaction rows (first G rows of theta)
             for idx in range(n_inter_flat):
                 if theta_ref_flat[idx] != 0.0:
                     v = theta_ref_flat[idx]
-                    bounds[idx] = (v, max_bounds) if v > 0 else (-max_bounds, v)
+                    bounds[idx] = ((1 - ref_constraint_pct) * v, max((1 + ref_constraint_pct) * v, max_bounds)) if v > 0 else (min(-max_bounds, (1 + ref_constraint_pct) * v), (1 - ref_constraint_pct) * v)
                 elif ref_network_flat[idx] != 0.0:
                     v = ref_network_flat[idx]
                     if v < 1: bounds[idx] = (-max_bounds, 0)
@@ -528,7 +528,7 @@ def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, th
 def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal, theta_ref,
                      ks, G, g, n_networks, n_samples, proba,
                      l_pen, weight_prev=.5, loss='CE', correc_ref=0, final=0, G_tol=None,
-                     hard_forcing_ref=False):
+                     hard_forcing_ref=False, ref_constraint_pct=0.1):
     """
     Refinement step: optimise multiplicative correction factors over inter and per-sample basal.
 
@@ -556,12 +556,12 @@ def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal
     if not final:
         if hard_forcing_ref:
             for idx in range(n_inter_flat):
-                bounds[idx] = [(0.9, 1.1)] * len(X_flat)
+                bounds[idx] = (1 - ref_constraint_pct, 1 + ref_constraint_pct)
         else:
             # Tighten bounds for non-zero reference interactions only
             for idx in range(n_inter_flat):
                 if theta_ref_flat[idx] != 0.0:
-                    bounds[idx] = (1, max_bounds)
+                    bounds[idx] = (1 - ref_constraint_pct, max(1 + ref_constraint_pct, max_bounds))
 
     loss_fn = partial(objective_refinement,
                       correc_ref=correc_ref, inter=inter, basal=basal,
@@ -600,7 +600,7 @@ def main_loop_inference(g, y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_
                          inter_tmp, basal_tmp, inter, basal, ref_network,
                          weight_prev=.5, loss='CE', final=0,
                          constrain_basal_uniform=0.0, basal_free_mask=None, G_tol=None,
-                         hard_forcing_ref=False):
+                         hard_forcing_ref=False, ref_constraint_pct=0.1):
     """
     Joint inference (inter + per-sample basal) for a single gene g.
 
@@ -621,7 +621,7 @@ def main_loop_inference(g, y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_
         ks[:n_networks_tmp + 1], G, g, n_networks_tmp, n_samples, proba,
         l_pen1, weight_prev=weight_prev * (1 - final), loss=loss, final=final,
         constrain_basal_uniform=constrain_basal_uniform, basal_free_mask=basal_free_mask,
-        G_tol=G_tol, hard_forcing_ref=hard_forcing_ref,
+        G_tol=G_tol, hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
     )
     # theta shape: (G + n_samples, n_networks_tmp)
     inter[:, :n_networks_tmp]    = theta[:G, :]
@@ -637,7 +637,7 @@ def main_loop_inference(g, y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_
         theta_ref[:, :n_networks_tmp],
         ks[:n_networks_tmp + 1], G, g, n_networks_tmp, n_samples, proba,
         l_pen2, weight_prev=weight_prev * (1 - final), loss=loss,
-        correc_ref=final, final=final, G_tol=G_tol, hard_forcing_ref=hard_forcing_ref,
+        correc_ref=final, final=final, G_tol=G_tol, hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
     )
 
     if n_networks_tmp < n_networks:
@@ -654,7 +654,7 @@ def inference_network(y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, n_stimu
                       scale=100, weight_prev=.5, loss='CE', final=0,
                       samples_id=None,
                       constrain_basal_uniform=0.0,
-                      hard_forcing_ref=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+                      hard_forcing_ref=False, ref_constraint_pct=0.1) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Joint network inference: interactions shared across samples, basal per sample.
 
@@ -748,7 +748,7 @@ def inference_network(y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, n_stimu
                 weight_prev=weight_prev, loss=loss, final=final,
                 constrain_basal_uniform=constrain_basal_uniform,
                 basal_free_mask=free_mask_2d[:, g_tgt],
-                hard_forcing_ref=hard_forcing_ref,
+                hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
             )
 
         # Sparse path: sub-select to K_g active regulators
@@ -780,7 +780,7 @@ def inference_network(y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, n_stimu
             weight_prev=weight_prev, loss=loss, final=final,
             constrain_basal_uniform=constrain_basal_uniform,
             basal_free_mask=free_mask_2d[:, g_tgt],
-            G_tol=K_g, hard_forcing_ref=hard_forcing_ref,
+            G_tol=K_g, hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
         )
 
         # Expand interaction results back to full G-dimensional space

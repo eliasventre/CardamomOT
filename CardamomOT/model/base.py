@@ -115,6 +115,8 @@ class NetworkModel:
         self.stimulus = 1.0 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
         self.prior_network_pen = 1.0 # 1 if we don't use prior information. If not we can penalize the non-existing age in prior network with values between 1 and 0: 0 = impossible edge
         self.constrain_basal_uniform = 0.0 # >= 0 penalty strength that pushes per-sample basals to be equal (ignores samples pinned by KO/OV basal_ref)
+        self.hard_forcing_ref = False # if True, constrain all network params to ±ref_constraint_pct around inter_ref
+        self.ref_constraint_pct = 0.1 # fractional tolerance around inter_ref values for bounds (used when hard_forcing_ref=True)
         self.lambda_scale  = 1e-3  # L2 penalty on scale[ns:] around 1 (large = scale stays ~1; 0 = free)
         self.lambda_deg0   = 1     # L2 penalty on d around d_init (0 = free; large = stays close to prior)
         self.lambda_deg1   = 1e-3  # L2 penalty on d_t around 0 (0 = free; large = stays close to non-temporal)
@@ -716,6 +718,7 @@ class NetworkModel:
         initialize_alpha=True,
         kov_cell_mask=None,
         hard_forcing_ref=False,
+        ref_constraint_pct=0.1,
     ):
         """
         Alternating optimization of trajectories and network (theta).
@@ -862,7 +865,7 @@ class NetworkModel:
                     proba=self.compute_with_proba, scale=self.scale_pen,
                     weight_prev=weight_prev, loss=self.loss_norm,
                     final=0, constrain_basal_uniform=self.constrain_basal_uniform,
-                    hard_forcing_ref=hard_forcing_ref)
+                    hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct)
                 # basal is now (n_samples, G_tot, n_networks)
             error_2 = self._count_errors_per_sample(y_prot, y_kon, y_proba, ks, inter, basal,
                                                     samples_id=samples_id, samples_data=y_samples)
@@ -1072,7 +1075,8 @@ class NetworkModel:
         stimulus_schedule=None,
         transition_rates=None,
         time_key='time',
-        hard_forcing_ref=False,
+        hard_forcing_ref=None,
+        ref_constraint_pct=None,
     ):
         """
         Fit the gene regulatory network to the RNA expression data.
@@ -1248,7 +1252,8 @@ class NetworkModel:
             compute_theta=True,
             initialize_alpha=True,
             kov_cell_mask=kov_cell_mask,
-            hard_forcing_ref=hard_forcing_ref,
+            hard_forcing_ref=hard_forcing_ref if hard_forcing_ref is not None else self.hard_forcing_ref,
+            ref_constraint_pct=ref_constraint_pct if ref_constraint_pct is not None else self.ref_constraint_pct,
         )
 
 
@@ -1631,7 +1636,6 @@ class NetworkModel:
 
             # prior_d1d0 = d1/d0 from the literature (initial self.ratios)
             prior_d1d0 = self.d[1, :] / self.d[0, :]   # shape (G,)
-            print(prior_d1d0)
 
             if self.simulate_full_with_harissa:
                 # ── Branch A: Harissa / MLP ───────────────────────────────────
@@ -1694,11 +1698,6 @@ class NetworkModel:
                     self.ratios[:, g] = (1 - strength) * orig + strength * gaussian_filter1d(orig, sigma=_sigma)
                 self.ratios[:, ns_s:] = np.clip(
                     self.ratios[:, ns_s:], self.min_ratio, self.max_ratio)
-
-            if verb:
-                for cnt in range(0, len(times)-1):
-                    print('[refine_network_degradations]  degradations_rates mrns', self.d_t[cnt, 1] * self.ratios[cnt], self.d[0, :])
-                    print('[refine_network_degradations]  degradations_rates prot', self.d_t[cnt, 1], self.d[1, :])
 
         self.basal, self.inter = basal, inter
         self.basal_t, self.inter_t = basal_t, inter_t
