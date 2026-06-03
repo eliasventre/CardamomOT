@@ -243,14 +243,12 @@ def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init
 
 
 def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
-                   seuil_intensity=5e-2, seuil_variations=.01, n_order=10, samples_data=None):
+                   seuil_intensity=5e-2, seuil_variations=5e-2, n_order=10, samples_data=None):
 
     if basal_ref.ndim == 3:
         n_samples, G, n_networks = basal_ref.shape
-        basal_2d = basal_ref.mean(axis=0)  # only for shape/intensity checks
     else:
         G, n_networks = basal_ref.shape
-        basal_2d = basal_ref
 
     kon_vector = _kon_per_sample(prot_traj, ks, inter_ref, basal_ref, samples_data=samples_data)
 
@@ -272,7 +270,7 @@ def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
                         variations[n, g1, g2, 1:] = np.abs(np.diff(variations_ref[n, g1, g2, :]))
                         variations[n, g1, g2, 0] = abs(variations_ref[n, g1, g2, 0])
                         max_val = np.max(variations[n, g1, g2, :])
-                        if max_val >= seuil_variations:
+                        if max_val >= seuil_variations/G:
                             tmax: int = np.argmax(variations[n, g1, g2, :])
                             inter_t[tmax:, g1, g2, n] = inter_ref[g1, g2, n]
                             inter_tmp[g1, g2, n] = inter_ref[g1, g2, n]

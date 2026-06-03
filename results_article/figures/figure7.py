@@ -292,18 +292,22 @@ def load_simulation_variance(perturb_id, data_dir='for_figure7_data'):
 
 def multi_run_chi2_test(props_single_sims, props_pert_sims, n_cells=1000):
     """
-    Chi2 test sur les proportions poolées de N_SIMS runs.
-    Revient à concatener N_SIMS × n_cells observations par condition,
-    ce qui stabilise le test face à la variabilité stochastique.
-    Fallback : chi2 classique sur proportions moyennes si None.
+    Chi2 test sur les proportions MOYENNES de N_SIMS runs.
+
+    On utilise la moyenne inter-runs pour stabiliser l'estimation, mais
+    on garde n_cells=1000 (identique à l'ancien test sur un seul run) afin
+    d'éviter l'inflation de p-valeur qui surviendrait en poolant N_SIMS × 1000
+    observations (trop de puissance → toute différence devient significative).
+
+    Résultat : test stable et comparable à l'original, sans artefact de taille.
     """
     try:
-        if props_single_sims is not None and props_pert_sims is not None:
-            # pooler les comptes de tous les runs
-            counts_single = np.round(props_single_sims * n_cells).sum(axis=0)
-            counts_pert   = np.round(props_pert_sims   * n_cells).sum(axis=0)
-        else:
+        if props_single_sims is None or props_pert_sims is None:
             return None, None
+        p_single = props_single_sims.mean(axis=0)
+        p_pert   = props_pert_sims.mean(axis=0)
+        counts_single = np.round(p_single * n_cells)
+        counts_pert   = np.round(p_pert   * n_cells)
         table = np.vstack([counts_single, counts_pert])
         chi2, pval, _, _ = chi2_contingency(table)
         return chi2, pval
@@ -442,7 +446,7 @@ def load_perturbation_data(cfg):
     perturb_id = cfg['perturb_id']
 
     # GRN
-    ns = 2 if cfg['dataset_group'] == 'Schiebinger' else 1
+    ns = 1 if cfg['dataset_group'] == 'Schiebinger' else 1
     grn_matrix, gene_names = load_grn_matrix(p, ns)
     rank  = get_regulator_rank(grn_matrix, gene_names, gene)
     if gene == "Col4a2":

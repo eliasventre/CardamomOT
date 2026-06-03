@@ -93,7 +93,7 @@ class NetworkModel:
         # Loop for the inference
         self.n_loops = 10 # minimal number of iterations in inference loops
         self.count_max = 5 # Stopping criteria
-        self.max_iter = 35 # max iteration for main loop
+        self.max_iter = 40 # max iteration for main loop
         # Trajectory inference with OT
         self.stopThr_init = 1e-7 # initial tolerance for sinkhorn algorithm
         self.batch_size = 5096 # Maximum number of cells used per time point per sample for solving EOT problems in the inference.
@@ -103,7 +103,6 @@ class NetworkModel:
         # General parameters to calibrate protein reconstruction
         self.scale_proteins = 1 # Eventually rescale protein values when switching to simple=1 (recommended:1)
         self.fact_simple = 2 # slight transformation for constrative modes in learning phase
-        self.s1 = None  # per-gene protein scale = fact_simple * bet / kmax (set by loop_trajectories)
         # Network inference with scipy
         self.loss_norm = 'CE'
         self.scale_pen = 20 # Error that is expected = 1/scale_pen
@@ -122,7 +121,7 @@ class NetworkModel:
         self.lambda_mlp    = .5  # Mix weight for training-data ratios vs MLP in simulate_full_with_harissa:
                                   # 1 = pure linear interpolation of observed g, 0 = pure MLP g(P, kon(P))
         # Filtering
-        self.filter_network = 0 # Do we filter the network ? It also builds a temporal network using the filter criterium
+        self.filter_network = 1 # Do we filter the network ? It also builds a temporal network using the filter criterium
 
         ## Compute degradations after inference
         self.recompute_degradations = 1 # Do we want to recompute degradation rates for simulations ?
@@ -1004,9 +1003,9 @@ class NetworkModel:
 
         # --- Updating the networks ---
         if compute_theta:
+            self.basal = basal
             if self.filter_network:
                 inter, self.inter_t = filter_network(len(times), N_tot, y_prot, ks, basal, inter, samples_data=y_samples)
-            self.basal = basal       # (n_samples, G_tot, n_networks)
             self.inter = inter
             self.basal_tmp = basal_tmp
             self.inter_tmp = inter_tmp
@@ -1019,9 +1018,6 @@ class NetworkModel:
         self.proba_traj = y_proba
         self.samples_data = y_samples
         self.times_data = vect_t_sim
-
-        # Store per-gene protein scale used in find_next_prot (needed by estimate_trajectories)
-        self.s1 = s1.copy()
 
         # Harissa: continuous adaptive_shrinkage burst-rate estimates, used in
         # refine_network_degradations in place of discrete mode assignments (kon_beta).
@@ -1275,8 +1271,8 @@ class NetworkModel:
             Pre-computed burst frequencies. If None, uses ``self.kon_beta``.
         s : float or array of shape (G_genes,), optional
             Per-gene protein scale. Defaults to ``self.scale_proteins``.
-            Must match the s1 used in my_otdistance when building y_prot; pass
-            ``self.s1`` to reproduce protein trajectories exactly.
+            Must match the s used in my_otdistance when building y_prot; pass
+            ``s`` to reproduce protein trajectories exactly.
         """
         if kon_beta is None:
             kon_beta = self.kon_beta
@@ -1816,7 +1812,7 @@ class NetworkModel:
 
             degradations = self.d_t[cnt].copy()
             if self.simulation_stochastic:
-                degradations[0, :] = degradations[1, :] * self.ratios[cnt] * (1 + np.sqrt(cnt))
+                degradations[0, :] = degradations[1, :] * self.ratios[cnt] # * (1 + np.sqrt(cnt))
                 degradations[0, :] = np.clip(degradations[0, :], degradations[1, :] * self.min_ratio, degradations[1, :] * self.max_ratio)
 
             if self.finish_by_determinist:
@@ -2012,7 +2008,7 @@ class NetworkModel:
             basal_h_cnt = basal_t[cnt].mean(axis=0).mean(axis=-1) if basal_t.ndim == 4 else basal_t[cnt].mean(axis=-1)
             inter_h_cnt = inter_t[cnt].mean(axis=-1)   # (G_tot, G_tot)
             h_model.d = self.d_t[cnt].copy()
-            h_model.d[0, ns:] = h_model.d[1, ns:] * self.ratios[cnt, ns:] * (1 + np.sqrt(cnt)) 
+            h_model.d[0, ns:] = h_model.d[1, ns:] * self.ratios[cnt, ns:] # * (1 + np.sqrt(cnt)) 
             h_model.d[0, :] = np.clip(h_model.d[0, :], h_model.d[1, :] * self.min_ratio, h_model.d[1, :] * self.max_ratio)
             h_model.basal  = basal_h_cnt
             h_model.inter  = inter_h_cnt

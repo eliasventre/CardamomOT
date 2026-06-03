@@ -179,7 +179,7 @@ def main(argv):
 
     model.ref_network = np.maximum(model.prior_network_pen, model.ref_network)
     model.ref_network[:ns, :] = model.stimulus
-    # model.ref_network *= (np.abs(model.inter) > 1e-2)
+    model.ref_network *= (np.abs(model.inter) > 0)
 
     # Adapt parameters for simulation
     print("[infer_network_simul] Adapting parameters for simulation...")

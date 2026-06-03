@@ -469,19 +469,19 @@ def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, th
     theta_ref_flat = theta_ref_.ravel(order='C')
     ref_network_flat = ref_network_.ravel(order='C')
 
-    bounds = [(None, None)] * len(X_flat)
-    n_inter_flat = G * n_networks
-    # Only apply sign/reference constraints to interaction rows (first G rows of theta)
-    for idx in range(n_inter_flat):
-        if theta_ref_flat[idx] != 0.0:
-            v = theta_ref_flat[idx]
-            bounds[idx] = (v, None) if v > 0 else (None, v)
-        elif ref_network_flat[idx] != 0.0:
-            v = ref_network_flat[idx]
-            if v < 1: bounds[idx] = (None, 0)
-            elif v > 1: bounds[idx] = (0, None)
-            else: bounds[idx] = (None, None)
-    # Basal rows (G..G+n_samples-1): unconstrained — leave as (None, None)
+    max_bounds = max(np.sqrt(G), 10)
+    bounds = [(-max_bounds, max_bounds)] * len(X_flat)
+    if not final:
+        n_inter_flat = G * n_networks
+        # Only apply sign/reference constraints to interaction rows (first G rows of theta)
+        for idx in range(n_inter_flat):
+            if theta_ref_flat[idx] != 0.0:
+                v = theta_ref_flat[idx]
+                bounds[idx] = (v, max_bounds) if v > 0 else (-max_bounds, v)
+            elif ref_network_flat[idx] != 0.0:
+                v = ref_network_flat[idx]
+                if v < 1: bounds[idx] = (-max_bounds, 0)
+                elif v > 1: bounds[idx] = (0, max_bounds)
 
     loss_fn = partial(objective, weights_samples=weights_samples, ys=y_samples,
                       ypr=y_proba, yp=y_prot, ypm=y_prot_mod, yk=y_kon,
@@ -538,14 +538,14 @@ def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal
     X_flat = correc_init_.ravel(order='C')
     theta_ref_flat = theta_ref_.ravel(order='C')
 
-    bounds = [(0, None)] * len(X_flat)
-    n_inter_flat = G * n_networks
+    max_bounds = 10
+    bounds = [(0, max_bounds)] * len(X_flat)
     if not final:
+        n_inter_flat = G * n_networks
         # Tighten bounds for non-zero reference interactions only
         for idx in range(n_inter_flat):
             if theta_ref_flat[idx] != 0.0:
-                bounds[idx] = (1, None)
-    # Basal correction rows start at n_inter_flat; keep (0, None)
+                bounds[idx] = (1, max_bounds)
 
     loss_fn = partial(objective_refinement,
                       correc_ref=correc_ref, inter=inter, basal=basal,

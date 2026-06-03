@@ -63,11 +63,11 @@ fi
 # echo "Check mixture"
 # python check_mixture_to_data.py -i "${input_dir}" -s "${split}"
 
-# echo "Infer network structure"
-# python infer_network_structure.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"
+echo "Infer network structure"
+python infer_network_structure.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"
 
-# echo "Adapt network to simulate and degradation rates"
-# python infer_network_simul.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}" $prolif_flag
+echo "Adapt network to simulate and degradation rates"
+python infer_network_simul.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}" $prolif_flag
 
 echo "Simulate network"
 python simulate_network.py -i "${input_dir}" -s "${split}" $prolif_flag

@@ -46,14 +46,12 @@ STIM  = 1.0
 PRIOR = 1.0
 
 # Définition des 5 perturbations (identique à figure7.py)
-# `gene` = gène principal pour la condition "Sim single" (même que figure7.py)
 PERTURBATIONS = [
     dict(
         path          = './../../experimental_datasets/Semrau',
         perturb_id    = 'KO_none_OV_Dnmt3a',
         KO            = [],
         OV            = ['Dnmt3a'],
-        gene          = 'Dnmt3a',
         dataset_group = 'Semrau',
         split         = 'full',
     ),
@@ -62,7 +60,6 @@ PERTURBATIONS = [
         perturb_id    = 'KO_CHGA_OV_none',
         KO            = ['CHGA'],
         OV            = [],
-        gene          = 'CHGA',
         dataset_group = 'Kameneva',
         split         = 'full',
     ),
@@ -71,7 +68,6 @@ PERTURBATIONS = [
         perturb_id    = 'KO_CHGA_OV_STMN2',
         KO            = ['CHGA'],
         OV            = ['STMN2'],
-        gene          = 'STMN2',
         dataset_group = 'Kameneva',
         split         = 'full',
     ),
@@ -80,7 +76,6 @@ PERTURBATIONS = [
         perturb_id    = 'KO_none_OV_Zfp42',
         KO            = [],
         OV            = ['Zfp42'],
-        gene          = 'Zfp42',
         dataset_group = 'Schiebinger',
         split         = 'train',
     ),
@@ -89,7 +84,6 @@ PERTURBATIONS = [
         perturb_id    = 'KO_none_OV_Obox6',
         KO            = [],
         OV            = ['Obox6'],
-        gene          = 'Obox6',
         dataset_group = 'Schiebinger',
         split         = 'train',
     ),
@@ -263,15 +257,15 @@ def _prot_to_adata(model_c, adata_ref, ns, sim_times):
     # On y accède via un attribut stocké lors du chargement
     pi_zinb = getattr(model_c, '_pi_zinb', None)
 
-    # NB paramétrique — np.max(kz, 0) réduit sur axe 0 → shape (G_tot,)
-    kz_max       = np.max(kz, 0)                              # (G_tot,)
-    lambda_genes = (kz_max[ns:] * model_c.kon_theta[:, ns:]) # (N_tot, G)
-    c_genes      = (c / (c + 1 + 1e-16))[ns:]                # (G,)
+    # NB paramétrique
+    lambda_ = np.maximum(kz, 0) * model_c.kon_theta      # (N_tot, G_tot)
+    lambda_genes = lambda_[:, ns:]                         # (N_tot, G)
+    c_genes  = (c / (c + 1 + 1e-16))[ns:].reshape(1, G)  # (1, G)
 
     rna_sim = np.random.negative_binomial(
-        np.maximum(lambda_genes.T, 1e-8),   # (G, N_tot)
-        c_genes.reshape(-1, 1),             # (G, 1)
-    ).T.astype(float)                       # (N_tot, G)
+        np.maximum(lambda_genes.T, 1e-8),                  # (G, N_tot)
+        c_genes.T,                                          # (G, 1)
+    ).T.astype(float)                                       # (N_tot, G)
 
     if pi_zinb is not None:
         mask = np.random.uniform(0, 1, rna_sim.shape) < pi_zinb.reshape(1, G)
@@ -332,42 +326,6 @@ def compute_proportions_from_adatas(adatas, clf, color_map):
                   for ct in cell_types}
         total  = sum(counts.values()) or 1
         props.append([counts[ct] / total for ct in cell_types])
-    return np.array(props)  # (n_sims, n_celltypes)
-
-
-def compute_single_proportions(adatas_wt, adatas_pert, gene, adata_ref, clf, color_map):
-    """
-    Condition "Sim single" : pour chaque run k, prend la sim WT[k] et
-    remplace l'expression du gène perturbé par la moyenne de la sim perturb[k].
-    Même logique que figure7.py → load_perturbation_data.
-    Retourne array (n_sims, n_celltypes) ou None si gène absent.
-    """
-    cell_types = list(color_map.keys())
-    var_names  = list(adata_ref.var_names)
-    if gene not in var_names:
-        print(f"  Warning: gène '{gene}' absent — props_single non calculé")
-        return None
-    idx_gene = var_names.index(gene)
-
-    props = []
-    for adata_wt, adata_pert in zip(adatas_wt, adatas_pert):
-        # moyenne du gène perturbé dans la simulation perturbée correspondante
-        X_pert = (adata_pert.X.toarray()
-                  if scipy.sparse.issparse(adata_pert.X)
-                  else np.asarray(adata_pert.X))
-        mean_gene_pert = float(X_pert[:, idx_gene].mean())
-
-        a_single = adata_wt.copy()
-        if scipy.sparse.issparse(a_single.X):
-            a_single.X = a_single.X.toarray()
-        a_single.X[:, idx_gene] = mean_gene_pert
-
-        a_pred = predict_cell_types(a_single, clf, label_key=LABEL)
-        counts = {ct: (a_pred.obs[LABEL].astype(str) == ct).sum()
-                  for ct in cell_types}
-        total  = sum(counts.values()) or 1
-        props.append([counts[ct] / total for ct in cell_types])
-
     return np.array(props)  # (n_sims, n_celltypes)
 
 
@@ -432,19 +390,11 @@ def process_perturbation(cfg, n_sims=N_SIMS):
                              perturb_cfg=cfg, cardamom_dir=cardamom_dir)
     props_pert  = compute_proportions_from_adatas(adatas_pert, clf, color_map)
 
-    # ── Sim single (gène unique remplacé dans WT) ─────────────────────────────
-    gene = cfg.get('gene', '')
-    print(f"  Sim single ({n_sims} runs) — gène : {gene}…")
-    props_single = compute_single_proportions(
-        adatas_wt, adatas_pert, gene, adata, clf, color_map
-    )
-
     stab_score = float(np.mean(props_pert.std(axis=0)))
     print(f"  σ̄ (stabilité perturbée) = {stab_score:.4f}")
 
     return dict(
         props_wt      = props_wt,
-        props_single  = props_single,
         props_perturb = props_pert,
         cell_types    = np.array(cats, dtype=str),
         stab_score    = stab_score,
@@ -468,15 +418,13 @@ def main(n_sims=N_SIMS, out_dir='for_figure7_data', perturbations=PERTURBATIONS)
 
         try:
             result = process_perturbation(cfg, n_sims=n_sims)
-            save_kwargs = dict(
+            np.savez(
+                out_path,
                 props_wt      = result['props_wt'],
                 props_perturb = result['props_perturb'],
                 cell_types    = result['cell_types'],
                 stab_score    = np.array([result['stab_score']]),
             )
-            if result['props_single'] is not None:
-                save_kwargs['props_single'] = result['props_single']
-            np.savez(out_path, **save_kwargs)
             print(f"  → sauvegardé : {out_path}")
         except Exception as e:
             print(f"  ERREUR pour {perturb_id} : {e}")
