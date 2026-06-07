@@ -5,8 +5,8 @@ Variabilité des réseaux GRN inférés par CardamomOT sur 3 jeux de données.
 
 Pour chaque dataset (Semrau, Kameneva, Schiebinger), la pipeline d'inférence
 (fit_mixture → fit_network → refine_network_degradations) est exécutée N_RUNS
-fois indépendamment. Les matrices inter_simul[ns:, ns:, 0] (bloc gène×gène)
-sont comparées à la référence (run_00 = inter_simul.npy de la pipeline).
+fois indépendamment. Toutes les C(N_RUNS, 2) paires sont comparées symétriquement
+(aucun run n'est pris comme référence fixe).
 
 Résultats mis en cache dans for_figureS9/<dataset>/.
 
@@ -17,10 +17,13 @@ Paramètres par dataset depuis run_pipeline.sh :
                force_basins=0.0, temporal_basins=0
 
 Figure (A4 paysage, 2 lignes × 3 colonnes) :
-  Panneau A : cosine similarity pairwise — violin + stripplot par dataset
-  Panneau B : AUPR vs réseau de référence (run_00) pour les top-k gènes
+  Panneau A : cosine similarity pairwise (toutes les C(N,2) paires) —
+              violin + stripplot par dataset
+  Panneau B : AUPR pairwise moyen ± σ pour les top-k gènes
               (k = 10, 20, 30, 40, 50 ; capé à G si G < 50)
-              Gènes classés par degré L1 pondéré (|arêtes sortantes| + |entrantes|)
+              Gènes classés par degré L1 moyen sur tous les runs
+              Pour chaque paire (i,j) : moyenne des deux directions
+              (prédire i depuis j et j depuis i)
 """
 
 import sys
@@ -155,10 +158,10 @@ def run_single_fit(cfg):
             print(f"  Warning: ref_network.csv non chargé ({e})")
 
     # ── Étape 3 : réseau ──────────────────────────────────────────────────────
-    model.fit_network(adata, intensity_prior=100, verb=True)
+    model.fit_network(adata, intensity_prior=100, verb=True, stimulus_schedule=stim_sched)
 
     # ── Étape 4 : raffinement des dégradations ────────────────────────────────
-    model.refine_network_degradations()
+    model.refine_network_degradations(stimulus_schedule=stim_sched)
 
     return model.inter.copy()
 
@@ -173,12 +176,12 @@ def get_inter_list(cfg, n_runs=N_RUNS, cache_root='for_figureS9'):
     ou les calcule si absentes.
 
     Structure du cache :
-      for_figureS9/<dataset>/inter_run_00.npy  ← copie de inter_simul.npy (référence)
-      for_figureS9/<dataset>/inter_run_01.npy  ← re-fit 1
-      for_figureS9/<dataset>/inter_run_02.npy  ← re-fit 2
+      for_figureS9/<dataset>/inter_run_00.npy  ← fit indépendant 0
+      for_figureS9/<dataset>/inter_run_01.npy  ← fit indépendant 1
       …
 
-    Si les fichiers existent déjà, l'inférence est sautée.
+    Tous les runs sont des inférences indépendantes (aucun run de référence
+    extérieur). Si les fichiers existent déjà, l'inférence est sautée.
     Retourne (liste de matrices inter, n_stimuli).
     """
     p       = cfg['path']
@@ -186,21 +189,7 @@ def get_inter_list(cfg, n_runs=N_RUNS, cache_root='for_figureS9'):
     os.makedirs(var_dir, exist_ok=True)
 
     inters = []
-
-    # Run 00 = référence depuis experimental_datasets (inter_simul.npy)
-    reference = os.path.join(p, 'cardamomOT', 'inter_simul.npy')
-    cache_0   = os.path.join(var_dir, 'inter_run_00.npy')
-    if os.path.exists(reference) and not os.path.exists(cache_0):
-        np.save(cache_0, np.load(reference))
-        print(f"  [{cfg['name']}] Run 00 : référence copiée depuis inter_simul.npy")
-    if os.path.exists(cache_0):
-        inters.append(np.load(cache_0))
-        start = 1
-    else:
-        print(f"  [{cfg['name']}] Warning: inter_simul.npy introuvable, run 00 ignoré")
-        start = 0
-
-    for i in range(start, n_runs):
+    for i in range(n_runs):
         cache_i = os.path.join(var_dir, f'inter_run_{i:02d}.npy')
         if os.path.exists(cache_i):
             print(f"  [{cfg['name']}] Run {i:02d} : chargé depuis le cache ({cache_i})")
@@ -212,8 +201,7 @@ def get_inter_list(cfg, n_runs=N_RUNS, cache_root='for_figureS9'):
             print(f"  [{cfg['name']}] Run {i:02d} : sauvegardé → {cache_i}")
             inters.append(inter)
 
-    stim_sched = _load_stimulus_schedule(p)
-    ns = _detect_n_stimuli(stim_sched)
+    ns = 1
     return inters, ns
 
 
@@ -259,44 +247,45 @@ def _l1_degree(block):
     return np.abs(block).sum(axis=1) + np.abs(block).sum(axis=0)
 
 
-EDGE_THRESHOLD = 1.0   # seuil pour binariser la référence (|inter| > 1 → arête)
+EDGE_THRESHOLD = 0.5   # seuil pour binariser la référence (|inter| > 1 → arête)
 
 
-def compute_aupr_vs_topk(inters, ns, k_values=None):
+def compute_aupr_pairwise(inters, ns, k_values=None):
     """
-    Pour chaque re-run r (runs 1..N) vs la référence (run 0) :
-      1. Sélectionner les top-k gènes par degré L1 dans la référence.
-      2. Extraire le sous-bloc k×k de la référence et du re-run.
-      3. Vérité terrain binaire : |ref[i,j]| > EDGE_THRESHOLD (défaut 1.0).
-         Le seuil 1 correspond à "une arrête existe ou non" dans le réseau
-         de référence continu.
-      4. Scores : |re-run[i,j]|.
-      5. AUPR = average_precision_score.
+    Pour toutes les C(N, 2) paires (i, j) avec i < j :
+      1. Sélectionner les top-k gènes par degré L1 moyen sur tous les runs.
+      2. Extraire les sous-blocs k×k des deux runs.
+      3. Calculer AUPR dans les deux directions :
+           - binariser run_i (|val| > EDGE_THRESHOLD) → prédire avec |run_j|
+           - binariser run_j (|val| > EDGE_THRESHOLD) → prédire avec |run_i|
+         Puis faire la moyenne des deux valeurs valides.
+      4. Collecter toutes les C(N,2) valeurs d'AUPR par k.
 
-    La baseline aléatoire = sparsité réelle du sous-bloc de référence
-    (fraction d'arêtes à 1), qui varie avec k et le dataset.
+    La baseline = sparsité moyenne sur tous les runs par k.
 
     Retourne :
-        k_eff      : list[int]   — k effectifs (capés à G)
-        aupr_mat   : (n_reruns, len(k_eff)) array, NaN si non défini
-        baseline   : (len(k_eff),) array  — AUPR random = sparsité par k
+        k_eff       : list[int]
+        aupr_pairs  : (C(N,2), len(k_eff)) array, NaN si non défini
+        baseline    : (len(k_eff),) array
     """
     try:
         from sklearn.metrics import average_precision_score as aps
     except ImportError:
         print("  Warning: sklearn non disponible — AUPR ignoré")
-        return [], np.zeros((0, 0))
+        return [], np.zeros((0, 0)), np.zeros(0)
 
     if k_values is None:
         k_values = K_VALUES
-    if len(inters) < 2:
+    n = len(inters)
+    if n < 2:
         return [], np.zeros((0, len(k_values))), np.zeros(len(k_values))
 
-    ref = _gene_block(inters[0], ns)
-    G   = ref.shape[0]
+    blocks = [_gene_block(inter, ns) for inter in inters]
+    G      = blocks[0].shape[0]
 
-    # Classement des gènes par degré L1 dans la référence
-    order = np.argsort(_l1_degree(ref))[::-1]
+    # Classement des gènes par degré L1 moyen (pas de run favori)
+    avg_degree = np.mean([_l1_degree(b) for b in blocks], axis=0)
+    order = np.argsort(avg_degree)[::-1]
 
     # k effectifs (dédupliqués, capés à G)
     k_eff = []
@@ -305,27 +294,35 @@ def compute_aupr_vs_topk(inters, ns, k_values=None):
         if ke not in k_eff:
             k_eff.append(ke)
 
-    aupr_mat = np.full((len(inters) - 1, len(k_eff)), np.nan)
-    baseline = np.full(len(k_eff), np.nan)   # sparsité réelle par k
+    n_pairs    = n * (n - 1) // 2
+    aupr_pairs = np.full((n_pairs, len(k_eff)), np.nan)
+    baseline   = np.full(len(k_eff), np.nan)
 
     for ki, k in enumerate(k_eff):
-        idx     = order[:k]
-        ref_sub = ref[np.ix_(idx, idx)].flatten()
-        y_true  = (np.abs(ref_sub) > EDGE_THRESHOLD).astype(int)
-        # baseline aléatoire = proportion d'arêtes présentes dans la référence
-        if y_true.sum() > 0 and y_true.sum() < len(y_true):
-            baseline[ki] = y_true.mean()
+        idx = order[:k]
+        # baseline = sparsité moyenne sur tous les runs
+        sparsities = [(np.abs(b[np.ix_(idx, idx)].flatten()) > EDGE_THRESHOLD).mean()
+                      for b in blocks]
+        baseline[ki] = float(np.mean(sparsities))
 
-        for r, inter in enumerate(inters[1:]):
-            blk     = _gene_block(inter, ns)
-            run_sub = blk[np.ix_(idx, idx)].flatten()
-            y_score = np.abs(run_sub)
+        pair = 0
+        for i in range(n):
+            for j in range(i + 1, n):
+                bi = blocks[i][np.ix_(idx, idx)].flatten()
+                bj = blocks[j][np.ix_(idx, idx)].flatten()
+                yi = (np.abs(bi) > EDGE_THRESHOLD).astype(int)
+                yj = (np.abs(bj) > EDGE_THRESHOLD).astype(int)
 
-            if y_true.sum() == 0 or y_true.sum() == len(y_true):
-                continue
-            aupr_mat[r, ki] = aps(y_true, y_score)
+                vals = []
+                if 0 < yi.sum() < len(yi):
+                    vals.append(aps(yi, np.abs(bj)))
+                if 0 < yj.sum() < len(yj):
+                    vals.append(aps(yj, np.abs(bi)))
+                if vals:
+                    aupr_pairs[pair, ki] = float(np.mean(vals))
+                pair += 1
 
-    return k_eff, aupr_mat, baseline
+    return k_eff, aupr_pairs, baseline
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -369,7 +366,7 @@ def make_figure(datasets=DATASETS, n_runs=N_RUNS, k_values=None,
         all_cos[cfg['name']] = cos
         print(f"  cosine : {np.mean(cos):.4f} ± {np.std(cos):.4f}  ({len(inters)} runs)")
 
-        k_eff, aupr_mat, baseline = compute_aupr_vs_topk(inters, ns, k_values)
+        k_eff, aupr_mat, baseline = compute_aupr_pairwise(inters, ns, k_values)
         all_aupr[cfg['name']] = (k_eff, aupr_mat, baseline)
         if len(k_eff):
             mu = np.nanmean(aupr_mat, axis=0)
@@ -406,7 +403,7 @@ def make_figure(datasets=DATASETS, n_runs=N_RUNS, k_values=None,
         mu, sd = np.mean(vals), np.std(vals)
         ax.set_xlim(-0.5, 0.5)
         ax.set_xticks([])
-        ax.set_ylim(0.75, 1.0)
+        ax.set_ylim(0.6, 1.0)
         ax.set_title(cfg['name'], fontsize=9, fontweight='bold', pad=3)
         ax.set_xlabel(f'μ={mu:.3f}  σ={sd:.3f}', fontsize=6.5, color='#444444')
         ax.set_ylabel('Cosine similarity' if i == 0 else '', fontsize=7)
@@ -456,7 +453,7 @@ def make_figure(datasets=DATASETS, n_runs=N_RUNS, k_values=None,
         ax.set_xticks(x)
         ax.set_xticklabels([str(k) for k in k_eff], fontsize=7)
         ax.set_xlabel('Top-k gènes (degré L1)', fontsize=7)
-        ax.set_ylabel('AUPR vs référence' if i == 0 else '', fontsize=7)
+        ax.set_ylabel('AUPR' if i == 0 else '', fontsize=7)
         ax.set_ylim(0.0, 1.0)
         ax.set_title(cfg['name'], fontsize=9, fontweight='bold', pad=3)
         ax.tick_params(axis='y', labelsize=6.5)

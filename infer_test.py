@@ -4,8 +4,10 @@ infer_test.py
 Infer trajectories and simulate on test set using pre-learned model parameters.
 
 Classifies test cells into mixture modes with fixed kinetic parameters, then
-infers protein trajectories with a fixed regulatory network, simulates expression
-dynamics, and builds AnnData output objects equivalent to the training pipeline.
+infers protein trajectories with the core inferred network (inter.npy/basal.npy),
+runs a restricted post-processing step (estimate_trajectories + kon_theta only)
+using the simul network, simulates expression dynamics, and builds AnnData output
+objects equivalent to the training pipeline.
 
 Usage:
     python infer_test.py -i <project_path>
@@ -14,6 +16,7 @@ Required input files (from training pipeline):
     - Data/data_test.h5ad: test count matrix with temporal information
     - cardamomOT/mixture_parameters.npy, n_networks.npy: mixture model parameters
     - cardamomOT/pi_zinb.npy: zero-inflation parameters
+    - cardamomOT/inter.npy, basal.npy: core inferred network (used for infer_test)
     - cardamomOT/basal_simul.npy, inter_simul.npy: adapted network parameters
     - cardamomOT/basal_t_simul.npy, inter_t_simul.npy: temporal network parameters
     - cardamomOT/ratios.npy, degradations.npy, degradations_temporal.npy: kinetics
@@ -153,7 +156,21 @@ def main(argv):
         print(f"[infer_test] Error: Missing mixture parameter file: {e}")
         sys.exit(1)
 
-    # Load the unitary-scale network (from infer_network_simul.py)
+    # ─── LOAD CORE NETWORK (raw CardamomOT infer_network output) ────────────
+    # inter.npy / basal.npy are the main result of CardamomOT inference and
+    # are used for trajectory coupling on test cells.  The "simul" variants are
+    # post-processed versions adapted for simulation and are loaded separately.
+    try:
+        inter_core = np.load(os.path.join(cardamom_dir, 'inter.npy'))
+        basal_core = np.load(os.path.join(cardamom_dir, 'basal.npy'))
+        print(f"[infer_test] Loaded core inferred network (inter.npy, basal.npy)")
+    except FileNotFoundError:
+        print(f"[infer_test] Warning: core network files (inter.npy / basal.npy) not found; "
+              f"falling back to simul parameters for trajectory inference")
+        inter_core = None
+        basal_core = None
+
+    # ─── LOAD POST-PROCESSING SIMULATION PARAMETERS ─────────────────────────
     try:
         basal_simul = np.load(os.path.join(cardamom_dir, 'basal_simul.npy'))
         inter_simul = np.load(os.path.join(cardamom_dir, 'inter_simul.npy'))
@@ -161,20 +178,29 @@ def main(argv):
         inter_t_simul = np.load(os.path.join(cardamom_dir, 'inter_t_simul.npy'))
         ratios = np.load(os.path.join(cardamom_dir, 'ratios.npy'))
         d_t = np.load(os.path.join(cardamom_dir, 'degradations_temporal.npy'))
-        print(f"[infer_test] Loaded unitary-scale simulation parameters")
+        print(f"[infer_test] Loaded post-processing simulation parameters")
     except FileNotFoundError as e:
         print(f"[infer_test] Error: Missing simulation parameter file: {e}")
         sys.exit(1)
 
-    # Use mean basal over training samples for test trajectory inference
-    # (avoids sample-count mismatch between training and test sets)
-    if basal_simul.ndim == 3:
-        model.basal = basal_simul.mean(axis=0)   # (G_tot, n_networks)
+    # ─── SET CORE NETWORK FOR TRAJECTORY INFERENCE ──────────────────────────
+    # infer_test uses the raw inferred network (inter/basal), not the simul ones.
+    # Mean over training samples avoids sample-count mismatch with test cells.
+    if inter_core is not None and basal_core is not None:
+        if basal_core.ndim == 3:
+            model.basal = basal_core.mean(axis=0)   # (G_tot, n_networks)
+        else:
+            model.basal = basal_core
+        model.inter = inter_core
     else:
-        model.basal = basal_simul
-    model.inter = inter_simul
-    model.basal_t = basal_t_simul
-    model.inter_t = inter_t_simul
+        # Fallback: use simul parameters (same as before)
+        if basal_simul.ndim == 3:
+            model.basal = basal_simul.mean(axis=0)
+        else:
+            model.basal = basal_simul
+        model.inter = inter_simul
+
+    # d_t and ratios are needed by estimate_trajectories inside infer_test
     model.ratios = ratios
     model.d_t = d_t
 
@@ -241,17 +267,44 @@ def main(argv):
         print(f"[infer_test] Loaded transition rates from {tr_path} shape={transition_rates_test.shape}")
 
     # ─── TRAJECTORY INFERENCE ON TEST SET ────────────────────────────────
-    # Classifies cells into modes (fixed kz/c) then infers trajectories with
-    # the pre-learned network (compute_theta=False, update_modes=True).
+    # Classifies cells into modes (fixed kz/c) then infers OT couplings with
+    # the core inferred network (compute_theta=False, update_modes=True).
     print(f"[infer_test] Running mixture classification and trajectory inference...")
     try:
-        model.infer_test(adata, verb=1, stimulus_schedule=None,
+        model.infer_test(adata, verb=1, stimulus_schedule=stim_sched,
                          basal_ref=basal_ref_test,
                          transition_rates=transition_rates_test)  # schedule already built
         print(f"[infer_test] Test trajectory inference completed")
     except Exception as e:
         import traceback; traceback.print_exc()
         print(f"[infer_test] Error during inference: {e}")
+        sys.exit(1)
+
+    # ─── RESTORE SIMUL NETWORK FOR POST-PROCESSING ───────────────────────
+    # Trajectory couplings were inferred with the core network; now load the
+    # post-processed simul parameters so that estimate_trajectories and
+    # kon_theta are computed with the correct unitary-scale network.
+    if basal_simul.ndim == 3:
+        model.basal = basal_simul.mean(axis=0)   # (G_tot, n_networks)
+    else:
+        model.basal = basal_simul
+    model.inter = inter_simul
+    model.basal_t = basal_t_simul
+    model.inter_t = inter_t_simul
+    model.ratios = ratios
+    model.d_t = d_t
+
+    # ─── RESTRICTED POST-PROCESSING: ESTIMATE TRAJECTORIES + KON_THETA ──
+    # Runs only the estimate_trajectories step (updates protein paths along the
+    # inferred OT couplings) and recomputes kon_theta with the simul network.
+    # No network inference, MLP training, or degradation update is performed.
+    print(f"[infer_test] Running restricted post-processing (estimate_trajectories + kon_theta)...")
+    try:
+        model.refine_network_degradations(test=True, stimulus_schedule=stim_sched)
+        print(f"[infer_test] Restricted post-processing completed")
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        print(f"[infer_test] Error during restricted post-processing: {e}")
         sys.exit(1)
 
     # ─── SAVE TRAJECTORY OUTPUTS ─────────────────────────────────────────

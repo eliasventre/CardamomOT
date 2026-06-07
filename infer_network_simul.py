@@ -142,10 +142,6 @@ def main(argv):
         print(f"[infer_network_simul] Error loading parameters: {e}")
         sys.exit(1)
 
-    # Build stimulus schedule on model
-    times_unique = np.sort(np.unique(model.times_data))
-    model._stim_schedule = model._build_stimulus_schedule(times_unique, stim_sched)
-
     # Load reference network if available
     G_tot = model.inter.shape[0]
     ns = model.n_stimuli
@@ -183,7 +179,7 @@ def main(argv):
     # Adapt parameters for simulation
     print("[infer_network_simul] Adapting parameters for simulation...")
     model.recompute_proliferations = recompute_proliferations
-    model.refine_network_degradations()
+    model.refine_network_degradations(stimulus_schedule=stim_sched)
     print("[infer_network_simul] Parameter adaptation completed")
 
     # Save adapted parameters

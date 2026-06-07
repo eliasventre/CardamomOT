@@ -596,7 +596,7 @@ def infer_ratio_d0_d1_unitary(
     d_learned_temporal = np.asarray(d_learned_temporal, dtype=np.float32)
     ks_np    = np.asarray(ks,      dtype=np.float32)   # (n_modes, G)
 
-    unique_times = np.unique(times)
+    unique_times = np.sort(np.unique(times))
     T: int   = len(unique_times)
     ns: int  = int(n_stimuli)
     G: int   = X_prot.shape[1]
@@ -644,6 +644,7 @@ def infer_ratio_d0_d1_unitary(
 
         stim0 = np.asarray(stim_schedule[t0] if stim_schedule else np.ones(ns), dtype=np.float32)
         stim1 = np.asarray(stim_schedule[t1] if stim_schedule else np.ones(ns), dtype=np.float32)
+        stim0, stim1 = stim0*scale, stim1*scale
 
         # ── Select per-interval bias / theta ─────────────────────────────────
         bias_np  = np.asarray(bias,         dtype=np.float32)
@@ -773,10 +774,6 @@ def infer_ratio_d0_d1_unitary(
     eps_global = np.clip(eps_global_raw, eps_min, eps_max).astype(np.float32)
     eps_global[:ns] = 0.2
 
-    if verbose:
-        logger.info("Global  ε = d1/d0 per gene : %s", eps_global[ns:])
-        logger.info("Temporal ε (mean)  per gene : %s", eps_temporal[:, ns:].mean(axis=0))
-
     return eps_temporal, eps_global
 
 
@@ -790,6 +787,7 @@ def inference_degradation_prot(
     rtol=1e-6, atol=1e-8, print_every=50,
     batch_size=None, verbose=True,
     n_stimuli=1, stim_schedule=None,
+    scale_proteins=1.0,
     samples_data=None,
     kon_mlp=None,
     lambda_scale=1e3,
@@ -831,7 +829,12 @@ def inference_degradation_prot(
         unique_s = np.unique(samples_data_arr)
 
         # Create one ODE module per sample
-        stim_first = np.ones(ns, dtype=np.float32)
+        all_unique_times = np.sort(np.unique(times))
+        if stim_schedule and len(all_unique_times) >= 2:
+            t1_first = float(all_unique_times[1])
+            stim_first = np.asarray(stim_schedule[t1_first], dtype=np.float32) * scale_proteins
+        else:
+            stim_first = np.ones(ns, dtype=np.float32) * scale_proteins
         ode_funcs = [
             GeneRegulatoryODE_softmax(
                 G, d_init, ks, theta_inter, bias[s_idx],
@@ -854,13 +857,14 @@ def inference_degradation_prot(
             mask_s = (samples_data_arr == s)
             X_s  = X_prot[mask_s]
             t_s  = times[mask_s]
-            unique_t = np.unique(t_s)
+            unique_t = np.sort(np.unique(t_s))
             for ti in range(len(unique_t) - 1):
                 t0, t1 = float(unique_t[ti]), float(unique_t[ti + 1])
                 X0_np = X_s[t_s == unique_t[ti]]
                 X1_np = X_s[t_s == unique_t[ti + 1]]
-                stim0 = stim_schedule[t1] if stim_schedule else np.ones(ns, dtype=np.float32)
+                stim0 = stim_schedule[t0] if stim_schedule else np.ones(ns, dtype=np.float32)
                 stim1 = stim_schedule[t1] if stim_schedule else np.ones(ns, dtype=np.float32)
+                stim0, stim1 = stim0*scale_proteins, stim1*scale_proteins
                 n_p = min(len(X0_np), len(X1_np))
                 if n_p > 0:
                     all_pairs.append((s_idx, t0, t1, X0_np[:n_p], X1_np[:n_p], stim0, stim1))
@@ -883,7 +887,6 @@ def inference_degradation_prot(
                     ratio_obs_persample[(s_idx_pre, float(t_val))] = np.mean(g_sp[mask_t], axis=0)
 
         old_loss  = 1e16
-        final_loss = None
 
         for epoch in range(1, n_epochs + 1):
             optimizer.zero_grad()
@@ -938,19 +941,20 @@ def inference_degradation_prot(
         return d_learned, scale_learned
 
     # ── Single-bias mode (original behaviour) ────────────────────────────
-    unique_times = np.unique(times)
+    unique_times = np.sort(np.unique(times))
     pairs = []
     for idx in range(len(unique_times) - 1):
-        t0, t1 = unique_times[idx], unique_times[idx + 1]
+        t0, t1 = float(unique_times[idx]), float(unique_times[idx + 1])
         mask0, mask1 = (times == t0), (times == t1)
         X0_np, X1_np = X_prot[mask0], X_prot[mask1]
-        stim0 = stim_schedule[float(t0)] if stim_schedule else np.ones(ns, dtype=np.float32)
-        stim1 = stim_schedule[float(t1)] if stim_schedule else np.ones(ns, dtype=np.float32)
+        stim0 = stim_schedule[t0] if stim_schedule else np.ones(ns, dtype=np.float32)
+        stim1 = stim_schedule[t1] if stim_schedule else np.ones(ns, dtype=np.float32)
+        stim0, stim1 = stim0*scale_proteins, stim1*scale_proteins
         n_pairs: int = min(len(X0_np), len(X1_np))
         if n_pairs > 0:
             pairs.append((float(t0), float(t1), X0_np[:n_pairs], X1_np[:n_pairs], stim0, stim1))
 
-    stim_first = pairs[0][4] if pairs else np.ones(ns, dtype=np.float32)
+    stim_first = pairs[0][-1] if pairs else np.ones(ns, dtype=np.float32) * scale_proteins
     ode_func: GeneRegulatoryODE_softmax = GeneRegulatoryODE_softmax(
         G, d_init, ks, theta_inter, bias,
         n_stimuli=ns, stim_vals=stim_first, device=device,
@@ -1187,7 +1191,7 @@ def infer_ratio_d0_d1_full(
     G       = X_prot.shape[1]
     G_genes = G - ns
 
-    unique_times = np.unique(times)
+    unique_times = np.sort(np.unique(times))
     T = len(unique_times)
 
     ks_t    = torch.tensor(np.asarray(ks, dtype=np.float32))
@@ -1419,10 +1423,6 @@ def infer_ratio_d0_d1_full(
     ratios_global = np.clip(r_g, clip_lo, clip_hi).astype(np.float32)
     ratios_global[:ns] = 0.2   # stimuli: neutral
 
-    if verbose:
-        logger.info("Global  d1/d0 per gene : %s", ratios_global[ns:])
-        logger.info("Temporal d1/d0 (mean)  : %s", ratios_temporal[:, ns:].mean(axis=0))
-
     return ratios_temporal, ratios_global
 
 
@@ -1473,7 +1473,7 @@ def compare_trajectories_umap(ode_func, X_prot, times, method="dopri5"):
 
     X_prot = np.asarray(X_prot, dtype=np.float32)
     times = np.asarray(times, dtype=np.float32)
-    unique_times = np.unique(times)
+    unique_times = np.sort(np.unique(times))
 
     X_pred_full, time_pred_full = [], []
     for i, t in enumerate(unique_times[:-1]):

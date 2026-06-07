@@ -181,29 +181,33 @@ def main(argv):
     times = adata.obs['time'].values if 'time' in adata.obs else np.zeros(adata.n_obs)
     vect_samples_id = adata.obs['dataset_id'].values if 'dataset_id' in adata.obs else np.zeros(adata.n_obs)
     vect_celltype_id = adata.obs['cell_type'].values if 'cell_type' in adata.obs else np.zeros(adata.n_obs)
-
-    model = _make_model(adata.shape[1])
-
-    try:
-        model.fit_mixture(adata, gene_names=list(adata.var_names),
-                          min_components=2, max_components=2,
-                          refilter=.001, max_iter_kinetics=0)
-        print("[select_DEgenes_and_split] Re-fitted mixture model for final gene filtering")
-
-        genes_tokeep_final, temporal_variations, cell_type_variations, df_report = select_DEgenes(
-                times, vect_samples_id, vect_celltype_id,
-                model.proba, adata.var_names,
-                n_genes_tokeep_celltype=[100000], n_genes_tokeep_temporal=[100000], limit_min=.001)
-
-        print(f"[select_DEgenes_and_split] Final filtering retained {len(genes_tokeep_final)} genes")
-
-    except Exception as e:
-        print(f"[select_DEgenes_and_split] Error during final gene filtering: {e}")
-        sys.exit(1)
-
-    genes_list_init = list(adata.var_names)
+    genes_list_init = list(adata.var_names.values)
     genes_list_init.sort()
-    adata = adata[:, [g for g in genes_list_init if g in genes_tokeep_final]]
+    genes_tokeep_final = list(adata.var_names.values)
+
+    if int(change):
+        model = _make_model(adata.shape[1])
+
+        try:
+            model.fit_mixture(adata, gene_names=list(adata.var_names),
+                            min_components=2, max_components=2,
+                            refilter=.001, max_iter_kinetics=0)
+            print("[select_DEgenes_and_split] Re-fitted mixture model for final gene filtering")
+
+            genes_tokeep_final, temporal_variations, cell_type_variations, df_report = select_DEgenes(
+                    times, vect_samples_id, vect_celltype_id,
+                    model.proba, adata.var_names,
+                    n_genes_tokeep_celltype=[100000], n_genes_tokeep_temporal=[100000], limit_min=.001)
+
+            print(f"[select_DEgenes_and_split] Final filtering retained {len(genes_tokeep_final)} genes")
+
+        except Exception as e:
+            print(f"[select_DEgenes_and_split] Error during final gene filtering: {e}")
+            sys.exit(1)
+
+    genes_list_final = [g for g in genes_list_init if g in genes_tokeep_final]
+
+    adata = adata[:, genes_list_final]
 
     try:
         adata.write(os.path.join(p, 'Data', 'data_full.h5ad'))
@@ -239,7 +243,8 @@ def main(argv):
                 var_bool = (times == t) & (samples_id == i)
                 indices = adata.obs[var_bool].index.values
                 np.random.shuffle(indices)
-                split_point = int(len(indices) * float(rate))
+                split_point = int(len(indices) * float(rate)) 
+                split_point = max(min(100, len(indices)), int(len(indices) * float(rate)))
                 train_idx.extend(indices[:split_point])
                 test_idx.extend(indices[split_point:])
 
@@ -247,32 +252,7 @@ def main(argv):
 
         adata_test = adata[test_idx].copy()
         adata = adata[train_idx]
-        genes_list_tokeep = genes_list_init.copy()
 
-        if not ('copycat' in p or 'Schiebinger' in p):
-            print("[select_DEgenes_and_split] Re-filtering genes on training set")
-            times_train = adata.obs['time'].values if 'time' in adata.obs else np.zeros(adata.n_obs)
-            vect_samples_id_train = adata.obs['dataset_id'].values if 'dataset_id' in adata.obs else np.zeros(adata.n_obs)
-            vect_celltype_id_train = adata.obs['cell_type'].values if 'cell_type' in adata.obs else np.zeros(adata.n_obs)
-
-            model = _make_model(adata.shape[1])
-
-            try:
-                model.fit_mixture(adata, gene_names=list(adata.var_names),
-                                  min_components=2, max_components=2,
-                                  max_iter_kinetics=0, refilter=.001)
-                genes_list_tokeep, temporal_variations, cell_type_variations, df_report = select_DEgenes(
-                        times_train, vect_samples_id_train, vect_celltype_id_train,
-                        model.proba, adata.var_names,
-                        n_genes_tokeep_celltype=[10000], n_genes_tokeep_temporal=[10000], limit_min=.001)
-                print(f"[select_DEgenes_and_split] Training set filtering retained {len(genes_list_tokeep)} genes")
-
-            except Exception as e:
-                print(f"[select_DEgenes_and_split] Error during training set gene filtering: {e}")
-                sys.exit(1)
-
-        genes_list_init.sort()
-        genes_list_final = [g for g in genes_list_init if g in genes_list_tokeep]
         adata = adata[:, genes_list_final]
         adata_test = adata_test[:, genes_list_final]
 

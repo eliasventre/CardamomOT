@@ -276,6 +276,7 @@ def load_simulation_variance(perturb_id, data_dir='for_figure7_data'):
     """
     Charge les proportions pré-calculées par _for_figure7.py.
     Retourne (props_wt, props_single, props_perturb) ou (None, None, None) si absent.
+    Utilisé uniquement pour les barres d'erreur (σ inter-runs).
     """
     path = os.path.join(data_dir, f'{perturb_id}.npz')
     if not os.path.exists(path):
@@ -288,31 +289,6 @@ def load_simulation_variance(perturb_id, data_dir='for_figure7_data'):
         return props_wt, props_single, props_perturb
     except Exception:
         return None, None, None
-
-
-def multi_run_chi2_test(props_single_sims, props_pert_sims, n_cells=1000):
-    """
-    Chi2 test sur les proportions MOYENNES de N_SIMS runs.
-
-    On utilise la moyenne inter-runs pour stabiliser l'estimation, mais
-    on garde n_cells=1000 (identique à l'ancien test sur un seul run) afin
-    d'éviter l'inflation de p-valeur qui surviendrait en poolant N_SIMS × 1000
-    observations (trop de puissance → toute différence devient significative).
-
-    Résultat : test stable et comparable à l'original, sans artefact de taille.
-    """
-    try:
-        if props_single_sims is None or props_pert_sims is None:
-            return None, None
-        p_single = props_single_sims.mean(axis=0)
-        p_pert   = props_pert_sims.mean(axis=0)
-        counts_single = np.round(p_single * n_cells)
-        counts_pert   = np.round(p_pert   * n_cells)
-        table = np.vstack([counts_single, counts_pert])
-        chi2, pval, _, _ = chi2_contingency(table)
-        return chi2, pval
-    except Exception:
-        return None, None
 
 
 def draw_barplot(ax, prop_df, color_map, show_xlabels='none', sim_stds=None):
@@ -446,7 +422,7 @@ def load_perturbation_data(cfg):
     perturb_id = cfg['perturb_id']
 
     # GRN
-    ns = 1 if cfg['dataset_group'] == 'Schiebinger' else 1
+    ns = 2 if cfg['dataset_group'] == 'Schiebinger' else 1
     grn_matrix, gene_names = load_grn_matrix(p, ns)
     rank  = get_regulator_rank(grn_matrix, gene_names, gene)
     if gene == "Col4a2":
@@ -482,7 +458,7 @@ def load_perturbation_data(cfg):
     adata_sim_wt = predict_cell_types(adata_sim_raw.copy(), clf, label_key=LABEL)
     adata_traj_wt = predict_cell_types(adata_traj_raw.copy(), clf, label_key=LABEL)
 
-    # Sim single-gene
+    # Sim single-gene : substituer le gène cible dans la simulation WT
     adata_sim_single = adata_sim_raw.copy()
     if gene in adata_full.var_names:
         idx_gene = np.where(adata_full.var_names == gene)[0][0]
@@ -491,46 +467,85 @@ def load_perturbation_data(cfg):
 
     adata_perturb_pred = predict_cell_types(adata_perturb.copy(), clf, label_key=LABEL)
 
-    # Proportions (4 conditions)
+    # Proportions (4 conditions) — run unique comme fallback
     prop_df = compute_proportions(
         [adata_traj_wt, adata_sim_wt, adata_sim_single, adata_perturb_pred],
         ['Reference', 'Sim WT', 'Sim single', 'Sim perturb'],
         color_map,
     )
 
-    # Chi2 poolé + errorbars sur N_SIMS runs (pré-calculés par _for_figure7.py)
+    # Chi2 sur les proportions affichées (Sim WT vs Sim perturb, run unique .h5ad)
+    # n_cells=1000 fixe : p-values comparables entre datasets, pas d'inflation
+    try:
+        n_cells = 100 * len(prop_df.index)
+        p_wt   = prop_df['Sim WT'].values.astype(float)
+        p_pert = prop_df['Sim perturb'].values.astype(float)
+        table  = np.vstack([
+            np.round(p_wt   * n_cells).astype(int),
+            np.round(p_pert * n_cells).astype(int),
+        ])
+        chi2_stat, chi2_pval = chi2_contingency(table)[:2]
+    except Exception:
+        chi2_stat, chi2_pval = None, None
+
+    # Errorbars inter-runs uniquement (pré-calculées par _for_figure7.py)
     props_wt_sims, props_single_sims, props_pert_sims = load_simulation_variance(perturb_id)
-    chi2_stat, chi2_pval = multi_run_chi2_test(props_single_sims, props_pert_sims)
 
-    sim_stds = None
-    if props_pert_sims is not None:
-        def _stds_for(arr, ct_order):
-            if arr is None:
-                return None
-            s = arr.std(axis=0)
-            return {ct: float(s[i]) for i, ct in enumerate(ct_order)
-                    if ct in color_map}
+    # Fallback Sim single : si props_single absent du npz, découper adata_sim_raw
+    # en N_SPLITS tranches non-chevauchantes et appliquer la substitution sur chacune.
+    ct_order_single = None
+    if props_single_sims is None and gene in adata_full.var_names:
+        N_SPLITS  = 10
+        all_cats  = list(color_map.keys())
+        idx_gene  = int(np.where(adata_full.var_names == gene)[0][0])
+        mean_val  = float(adata_perturb.X[:, idx_gene].mean()
+                          if not scipy.sparse.issparse(adata_perturb.X)
+                          else adata_perturb.X[:, idx_gene].toarray().mean())
+        n_raw     = adata_sim_raw.n_obs
+        chunk     = max(1, n_raw // N_SPLITS)
+        idx_perm  = np.random.default_rng(42).permutation(n_raw)
+        split_props = []
+        for k in range(N_SPLITS):
+            sl = idx_perm[k * chunk : (k + 1) * chunk]
+            if len(sl) == 0:
+                break
+            a_k = adata_sim_raw[sl].copy()
+            if scipy.sparse.issparse(a_k.X):
+                _X = a_k.X.toarray(); _X[:, idx_gene] = mean_val
+                a_k = ad.AnnData(X=_X, var=a_k.var.copy(), obs=a_k.obs.copy())
+            else:
+                a_k.X = np.array(a_k.X); a_k.X[:, idx_gene] = mean_val
+            a_k = predict_cell_types(a_k, clf, label_key=LABEL)
+            counts = a_k.obs[LABEL].astype(str).value_counts()
+            total  = counts.sum() or 1
+            split_props.append([counts.get(ct, 0) / total for ct in all_cats])
+        if split_props:
+            props_single_sims = np.array(split_props)
+            ct_order_single   = all_cats
 
-        # reconstruire l'ordre des cell_types depuis le npz
-        try:
-            _data    = np.load(os.path.join('for_figure7_data', f'{perturb_id}.npz'),
-                                allow_pickle=True)
-            ct_order = list(_data['cell_types'])
-        except Exception:
-            ct_order = list(color_map.keys())
+    def _stds_for(arr, ct_order):
+        if arr is None or ct_order is None:
+            return None
+        s = arr.std(axis=0)
+        return {ct: float(s[i]) for i, ct in enumerate(ct_order) if ct in color_map}
 
-        sim_stds = {}
-        _w = _stds_for(props_wt_sims, ct_order)
-        if _w:
-            sim_stds['Sim WT'] = _w
-        _s = _stds_for(props_single_sims, ct_order)
-        if _s:
-            sim_stds['Sim single'] = _s
-        _p = _stds_for(props_pert_sims, ct_order)
-        if _p:
-            sim_stds['Sim perturb'] = _p
-        if not sim_stds:
-            sim_stds = None
+    try:
+        _npz_data = np.load(os.path.join('for_figure7_data', f'{perturb_id}.npz'),
+                             allow_pickle=True)
+        ct_order  = list(_npz_data['cell_types'])
+    except Exception:
+        ct_order  = list(color_map.keys())
+
+    sim_stds = {}
+    _w = _stds_for(props_wt_sims,     ct_order)
+    if _w: sim_stds['Sim WT']     = _w
+    _s = _stds_for(props_single_sims, ct_order_single or ct_order)
+    if _s: sim_stds['Sim single'] = _s
+    _p = _stds_for(props_pert_sims,   ct_order)
+    if _p: sim_stds['Sim perturb'] = _p
+
+    if not sim_stds:
+        sim_stds = None
 
     # UMAP joint sur 3 conditions
     af_umap, as_umap, ap_umap = compute_umaps(

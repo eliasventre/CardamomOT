@@ -8,10 +8,11 @@
 #   ref  : prepare_reference_network     (default 0)
 #   test : infer_test + check_test       (default 0)
 #   kov  : simulate KOV + check KOV      (default 1)
+#   proliferation  : simulate with proliferation      (default 0)
 
-./run.sh experimental_datasets/Semrau  full  0.7 0 1.0 1 1
-./run.sh experimental_datasets/Kameneva  full  0.7 0 0.5 0.2 1
-./run.sh experimental_datasets/Schiebinger/ train 0.3 0 0 1 1 0 0 0 0 0 1
+./run.sh experimental_datasets/Semrau  full  0.7 0 1.0 1 1 1 1 0 0 0 1 0
+./run.sh experimental_datasets/Kameneva  full  0.7 0 0.5 0.2 1 1 1 0 0 0 1 0
+./run.sh experimental_datasets/Schiebinger/ train 0.1 0 0.0 1 1 0 0 0 0 0 1 0
 
 #  ./run.sh collaborations/orga_Olivier full 0 1.0 0.5
 # ./run.sh collaborations/copycat/RMS2V3 train 1 0.6 0.5

@@ -41,13 +41,14 @@ if [ "$proliferation" = "1" ]; then
     prolif_flag="--proliferation"
 fi
 
-# if [ "$rd" = "1" ]; then
-#     echo "Inference rd"
-#     python infer_rd.py -i "${input_dir}"
-# fi
+if [ "$rd" = "1" ]; then
+    echo "Inference rd"
+    python infer_rd.py -i "${input_dir}"
+fi
 
 # echo "Select DE genes and split cells"
 # python select_DEgenes_and_split.py -i "${input_dir}" -s "${split}" -r "${rate}" -c "${change}" --mean-forcing "${mean_forcing}"
+
 
 # if [ "$ref" = "1" ]; then
 #     echo "Compute prior network"
@@ -75,11 +76,11 @@ python simulate_network.py -i "${input_dir}" -s "${split}" $prolif_flag
 echo "Check simulation"
 python check_sim_to_data.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}"
 
-# if [ "$test" = "1" ]; then
-#     echo "Infer and simulate test"
-#     python infer_test.py -i "${input_dir}" --stimulus "${stimulus}" --prior "${prior}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"
-#     python check_test_to_train.py -i "${input_dir}" -s "${split}"
-# fi
+if [ "$test" = "1" ]; then
+    echo "Infer and simulate test"
+    python infer_test.py -i "${input_dir}" --stimulus "${stimulus}" --prior "${prior}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"
+    python check_test_to_train.py -i "${input_dir}" -s "${split}"
+fi
 
 if [ "$kov" = "1" ]; then
     echo "Simulate KOV"
@@ -88,4 +89,4 @@ if [ "$kov" = "1" ]; then
     python check_KOV_to_sim.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}"
 fi
 
-# echo "All scripts executed !"
+echo "All scripts executed !"

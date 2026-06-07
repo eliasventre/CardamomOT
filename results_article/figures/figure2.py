@@ -91,6 +91,7 @@ def load_dataset(base_path, n_per_time=100):
 
     adata_train = sc.read(train_file)
     adata_beta  = sc.read(f'{base_path}/cardamomOT/adata_beta.h5ad')
+    print(adata_beta)
 
     rna_full   = _to_dense(adata_train.X)
     beta_full  = _to_dense(adata_beta.X)
