@@ -146,8 +146,6 @@ def main(argv):
     G_tot = model.inter.shape[0]
     ns = model.n_stimuli
     genes_only = [g.upper() for g in adata.var_names]   # no stimulus prefix
-    stim_labels = ['S{}'.format(i) for i in range(ns)]
-    genes_list = stim_labels + genes_only
     model.ref_network = np.ones((G_tot, G_tot, model.n_networks))
     ref_path = os.path.join(p, 'cardamomOT', 'ref_network.csv')
     if os.path.exists(ref_path):
@@ -177,62 +175,6 @@ def main(argv):
 
     model.ref_network = np.maximum(model.prior_network_pen, model.ref_network)
     model.ref_network[:ns, :] = model.stimulus
-
-    # ─── LOAD OPTIONAL INTER_REF ARRAY ──────────────────────────────────
-    def _load_gene_mat(fname):
-        """Load a (G_tot, G_tot) inter matrix from npy or csv.
-
-        If the CSV index contains gene names, values are remapped to adata gene order.
-        Otherwise (pure value table), values are assumed to already be in adata gene order.
-        """
-        npy = os.path.join(p, 'Data', fname + '.npy')
-        csv_path = os.path.join(p, 'Data', fname + '.csv')
-        if os.path.exists(npy):
-            arr = np.load(npy)
-            print(f"[infer_network_simul] Loaded {fname} from {npy} shape={arr.shape}")
-            return arr
-        if os.path.exists(csv_path):
-            df = pd.read_csv(csv_path, index_col=0)
-            df.columns = df.columns.astype(str)
-            df.index = df.index.astype(str)
-            common = [g for g in df.index if g in genes_list]
-            if common:
-                arr = np.zeros((G_tot, G_tot))
-                for row_g in common:
-                    for col_g in [c for c in df.columns if c in genes_list]:
-                        arr[genes_list.index(row_g), genes_list.index(col_g)] = df.loc[row_g, col_g]
-                print(f"[infer_network_simul] Loaded {fname} from {csv_path} (gene-named) shape={arr.shape}")
-                return arr
-            # No gene names: assume values are already in adata gene order
-            def _is_float(s):
-                try:
-                    float(str(s).strip())
-                    return True
-                except ValueError:
-                    return False
-            raw = pd.read_csv(csv_path, header=None, dtype=str)
-            data = raw.values
-            r0 = [str(v).strip() for v in data[0]]
-            has_header = (not r0[0]) or not all(_is_float(v) for v in r0 if v)
-            sr = 1 if has_header else 0
-            if has_header and not r0[0]:
-                has_idx = True
-            else:
-                c0 = [str(v).strip() for v in data[sr:, 0]]
-                has_idx = not all(_is_float(v) for v in c0 if v)
-            sc = 1 if has_idx else 0
-            vals = data[sr:, sc:].astype(float)
-            arr = np.zeros((G_tot, G_tot))
-            r, c = min(vals.shape[0], G_tot), min(vals.shape[1], G_tot)
-            arr[:r, :c] = vals[:r, :c]
-            print(f"[infer_network_simul] Loaded {fname} from {csv_path} (positional, adata gene order) shape={arr.shape}")
-            return arr
-        return None
-
-    inter_ref = _load_gene_mat('inter_ref')
-    if inter_ref is not None:
-        model.inter_ref_simul = inter_ref
-        print("[infer_network_simul] inter_ref loaded — refine_network_degradations will use final=0")
 
     # Adapt parameters for simulation
     print("[infer_network_simul] Adapting parameters for simulation...")

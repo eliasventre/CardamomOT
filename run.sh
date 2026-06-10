@@ -46,17 +46,17 @@ if [ "$rd" = "1" ]; then
     python infer_rd.py -i "${input_dir}"
 fi
 
-# echo "Select DE genes and split cells"
-# python select_DEgenes_and_split.py -i "${input_dir}" -s "${split}" -r "${rate}" -c "${change}" --mean-forcing "${mean_forcing}"
+echo "Select DE genes and split cells"
+python select_DEgenes_and_split.py -i "${input_dir}" -s "${split}" -r "${rate}" -c "${change}" --mean-forcing "${mean_forcing}"
 
 
-# if [ "$ref" = "1" ]; then
-#     echo "Compute prior network"
-#     python prepare_reference_network.py -i "${input_dir}" -d 4
-# fi
+if [ "$ref" = "1" ]; then
+    echo "Compute prior network"
+    python prepare_reference_network.py -i "${input_dir}" -d 4
+fi
 
-# echo "Get kinetic rates"
-# python get_kinetic_rates.py -i "${input_dir}" -s "${split}"
+echo "Get kinetic rates"
+python get_kinetic_rates.py -i "${input_dir}" -s "${split}"
 
 echo "Inference mixture"
 python infer_mixture.py -i "${input_dir}" -s "${split}" --mean-forcing "${mean_forcing}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"

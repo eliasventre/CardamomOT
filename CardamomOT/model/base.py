@@ -116,7 +116,7 @@ class NetworkModel:
         # Penalization/prior information
         self.stimulus = 1.0 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
         self.prior_network_pen = 1.0 # 1 if we don't use prior information. If not we can penalize the non-existing age in prior network with values between 1 and 0: 0 = impossible edge
-        self.constrain_basal_uniform = 0.0 # >= 0 penalty strength that pushes per-sample basals to be equal (ignores samples pinned by KO/OV basal_ref)
+        self.constrain_basal_uniform = 1.0 # >= 0 penalty strength that pushes per-sample basals to be equal (ignores samples pinned by KO/OV basal_ref)
         self.hard_forcing_ref = False # if True, constrain all network params to ±ref_constraint_pct around inter_ref
         self.ref_constraint_pct = 0.1 # fractional tolerance around inter_ref values for bounds (used when hard_forcing_ref=True)
         self.lambda_scale  = 1e-3  # L2 penalty on scale[ns:] around 1 (large = scale stays ~1; 0 = free)
@@ -149,7 +149,6 @@ class NetworkModel:
         self.simulate_with_proliferation = False # apply branching process in simulate_trajectories_unitary
         self.prolif_network = None               # ProliferationMLP trained in refine_network_degradations
         self.R_opt = None                        # per-cell optimal proliferation rates from OT coupling marginals
-        self.inter_ref_simul = None              # external inter_ref loaded from Data/inter_ref.{npy,csv} in infer_network_simul
 
         if n_genes is not None:
             G = n_genes + n_stimuli
@@ -1490,17 +1489,17 @@ class NetworkModel:
                                                 inter, basal, samples_id=samples_id, samples_data=self.samples_data)
 
         # inference_network returns (n_samples, G_tot, n_networks) for basal
-        _inter_ref_call = inter_ref if self.inter_ref_simul is None else self.inter_ref_simul
-        _final_call = 1 if self.inter_ref_simul is None else 0
+        _final_call = 0 if self.hard_forcing_ref else 1
         basal, inter, _, _ = inference_network(
             self.samples_data, self.kon_beta, self.proba_traj,
             y_prot, y_prot_prev, ks, n_stimuli=ns, proba=self.compute_with_proba,
             ref_network=self.ref_network, basal_init=basal_ref, inter_init=inter_ref,
-            basal_ref=basal_ref, inter_ref=_inter_ref_call,
+            basal_ref=basal_ref, inter_ref=inter_ref,
             scale=self.scale_pen * 2, # # slightly stronger regularization for network
             weight_prev=self.weight_prev, loss=self.loss_norm, final=_final_call,
             samples_id=samples_id,
             constrain_basal_uniform=self.constrain_basal_uniform,
+            hard_forcing_ref=self.hard_forcing_ref, ref_constraint_pct=self.ref_constraint_pct,
         )
 
         ### filter_edges
