@@ -184,7 +184,11 @@ def main(argv):
         return None
 
     def _load_gene_mat(fname):
-        """Load a (G_tot, G_tot) or (G_tot, G_tot, n_networks) inter matrix from npy or csv."""
+        """Load a (G_tot, G_tot) or (G_tot, G_tot, n_networks) inter matrix from npy or csv.
+
+        If the CSV index contains gene names, values are remapped to adata gene order.
+        Otherwise (pure value table), values are assumed to already be in adata gene order.
+        """
         npy = os.path.join(p, 'Data', fname + '.npy')
         csv = os.path.join(p, 'Data', fname + '.csv')
         if os.path.exists(npy):
@@ -196,11 +200,39 @@ def main(argv):
             df.columns = df.columns.astype(str)
             df.index = df.index.astype(str)
             common = [g for g in df.index if g in genes_list]
+            if common:
+                # Gene-named: reorder to match adata gene order
+                arr = np.zeros((G_tot, G_tot))
+                for row_g in common:
+                    for col_g in [c for c in df.columns if c in genes_list]:
+                        arr[genes_list.index(row_g), genes_list.index(col_g)] = df.loc[row_g, col_g]
+                print(f"[infer_network_structure] Loaded {fname} from {csv} (gene-named) shape={arr.shape}")
+                return arr
+            # No gene names: assume values are already in adata gene order
+            def _is_float(s):
+                try:
+                    float(str(s).strip())
+                    return True
+                except ValueError:
+                    return False
+            raw = pd.read_csv(csv, header=None, dtype=str)
+            data = raw.values
+            r0 = [str(v).strip() for v in data[0]]
+            # Header row: first cell empty (pandas default export) or first row non-numeric
+            has_header = (not r0[0]) or not all(_is_float(v) for v in r0 if v)
+            sr = 1 if has_header else 0
+            # Index column: empty corner cell (pandas default) or first col non-numeric
+            if has_header and not r0[0]:
+                has_idx = True
+            else:
+                c0 = [str(v).strip() for v in data[sr:, 0]]
+                has_idx = not all(_is_float(v) for v in c0 if v)
+            sc = 1 if has_idx else 0
+            vals = data[sr:, sc:].astype(float)
             arr = np.zeros((G_tot, G_tot))
-            for row_g in common:
-                for col_g in [c for c in df.columns if c in genes_list]:
-                    arr[genes_list.index(row_g), genes_list.index(col_g)] = df.loc[row_g, col_g]
-            print(f"[infer_network_structure] Loaded {fname} from {csv} shape={arr.shape}")
+            r, c = min(vals.shape[0], G_tot), min(vals.shape[1], G_tot)
+            arr[:r, :c] = vals[:r, :c]
+            print(f"[infer_network_structure] Loaded {fname} from {csv} (positional, adata gene order) shape={arr.shape}")
             return arr
         return None
 
