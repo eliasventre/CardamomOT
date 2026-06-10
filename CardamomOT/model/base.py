@@ -149,6 +149,7 @@ class NetworkModel:
         self.simulate_with_proliferation = False # apply branching process in simulate_trajectories_unitary
         self.prolif_network = None               # ProliferationMLP trained in refine_network_degradations
         self.R_opt = None                        # per-cell optimal proliferation rates from OT coupling marginals
+        self.inter_ref_simul = None              # external inter_ref loaded from Data/inter_ref.{npy,csv} in infer_network_simul
 
         if n_genes is not None:
             G = n_genes + n_stimuli
@@ -1489,13 +1490,15 @@ class NetworkModel:
                                                 inter, basal, samples_id=samples_id, samples_data=self.samples_data)
 
         # inference_network returns (n_samples, G_tot, n_networks) for basal
+        _inter_ref_call = inter_ref if self.inter_ref_simul is None else self.inter_ref_simul
+        _final_call = 1 if self.inter_ref_simul is None else 0
         basal, inter, _, _ = inference_network(
             self.samples_data, self.kon_beta, self.proba_traj,
             y_prot, y_prot_prev, ks, n_stimuli=ns, proba=self.compute_with_proba,
             ref_network=self.ref_network, basal_init=basal_ref, inter_init=inter_ref,
-            basal_ref=basal_ref, inter_ref=inter_ref,
+            basal_ref=basal_ref, inter_ref=_inter_ref_call,
             scale=self.scale_pen * 2, # # slightly stronger regularization for network
-            weight_prev=self.weight_prev, loss=self.loss_norm, final=1,
+            weight_prev=self.weight_prev, loss=self.loss_norm, final=_final_call,
             samples_id=samples_id,
             constrain_basal_uniform=self.constrain_basal_uniform,
         )
