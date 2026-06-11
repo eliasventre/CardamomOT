@@ -109,7 +109,7 @@ class NetworkModel:
         self.scale_pen = 20 # Error that is expected = 1/scale_pen
         self.compute_with_proba = 0 # Determine if compute with proba or kon values in network inference (recommended:1)
         self.weight_prev = .4 # max = .5 to not withdrawn the inference on timepoints, allows the calibration to incorporate some "flow-matching" method
-        self.batch_size_network = 2048 # Maximum number of cells used for network calibration in the inference.
+        self.batch_size_network = 1024 # Maximum number of cells used for network calibration in the inference.
         # Inference of alpha = switch moment between each timepoint and modes
         self.update_modes = 1
         self.alpha_threshold= .4 # max = .5 to update alpha at least for important transition
