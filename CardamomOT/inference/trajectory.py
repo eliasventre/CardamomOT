@@ -10,6 +10,7 @@ from joblib import Parallel, delayed
 from .network import main_loss
 from .simulations import simulate_next_prot_ode
 
+EPS = 1e-16
 
 def minimal_repetition_choice(N, M, seed=None):
     if seed is not None:
@@ -205,36 +206,30 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
 
 def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init, y_rna_init,
                     y_kon_end_true, y_kon_end, y_prot_end, y_rna_end, mode_init, mode_end,
-                    basal, inter, ks, delta_t, tol=.5, n_pas=25, samples_data=None, stim_vals=np.ones(1), scale_proteins=1):
+                    basal, inter, ks, delta_t, tol=1.0, n_pas=25, samples_data=None, stim_vals=np.ones(1), scale_proteins=1):
     
-    G = y_prot_init.shape[1]
-    ns = G - alpha_init.shape[1]  # n_stimuli derived from shapes
-    alpha = alpha_init.copy()
-    cnt = np.zeros_like(alpha_init)
-    t = 1 / n_pas
     ns = len(stim_vals)
-
     y_prot = np.ones_like(y_rna_end)
     y_prot[:, :ns] = stim_vals * scale_proteins
+    diff_kon = np.abs(y_kon_end_true[:, ns:] - y_kon_init_true[:, ns:]) / max(tol, EPS)
+    weights = np.minimum(diff_kon ** (1/tol), 1)
 
-    ### We don't modify alphas that are not characterizing an enough important difference or for which the inference was bad
-    diff_kon = (np.abs(y_kon_end_true[:, ns:] - y_kon_init_true[:, ns:]) < tol)
-    cnt[diff_kon] = 1
+    alpha = alpha_init.copy()
+    cnt = np.zeros_like(alpha_init, dtype=int)
+    t = 1 / n_pas
 
     while t < 1 and np.min(cnt) < 1:
-        alpha_tmp = alpha.copy() / t
-        alpha_tmp = np.minimum(alpha_tmp, 1.0)  # shape (N, G)
-
-        y_prot[:, ns:] = find_next_prot(d1, y_prot_init[:, ns:], y_rna_init[:, ns:] * scale_proteins, y_rna_end[:, ns:] * scale_proteins, mode_init, mode_end, alpha_tmp, s1, t * delta_t)
-
+        y_prot[:, ns:] = find_next_prot(d1, y_prot_init[:, ns:], y_rna_init[:, ns:] * scale_proteins, 
+                    y_rna_end[:, ns:] * scale_proteins, mode_init, mode_end, 
+                    np.minimum(alpha / t, 1.0), s1, t * delta_t)
         kon_new = _kon_per_sample(y_prot, ks, inter, basal, samples_data=samples_data)  # shape (N, G)
 
         # Condition: if abs(kon_new[i] - y_kon_init[i]) > abs(kon_new[i] - y_kon_end[i])
         # Only apply where cnt < 1
         diff_init = np.abs(kon_new[:, ns:] - y_kon_init[:, ns:])
         diff_end = np.abs(kon_new[:, ns:] - y_kon_end[:, ns:])
-        bool_var = (cnt < 1) & (diff_init > diff_end)
-        alpha[bool_var] = t
+        bool_var = (cnt == 0) & (diff_init > diff_end)
+        alpha[bool_var] = alpha[bool_var] * (1 - weights[bool_var]) + t * weights[bool_var]
         cnt[bool_var] = 1
 
         t += 1 / n_pas

@@ -7,7 +7,7 @@ from .trajectory import filter_network, minimal_repetition_choice, inference_alp
 from .mixture import NegativeBinomialMixtureEM, predict_resp
 from .simulations import simulate_next_prot_ode, simulate_next_prot_pdmp
 from .pretreatment import select_DEgenes, extract_degradation_rates
-from .degradations import compare_trajectories_umap, train_kon_correction_mlp, infer_ratio_d0_d1_full, infer_ratio_d0_d1_unitary, inference_degradation_prot
+from .degradations import compare_trajectories_umap, train_kon_correction_mlp, infer_ratio_d0_d1_full, infer_ratio_d0_d1_unitary, inference_degradation_prot, fit_scale_theta
 from .proliferations import train_proliferation_mlp
 
 
@@ -18,4 +18,4 @@ __all__ = ['inference_network',  'inference_network_pytorch', 'filter_network',
            'select_DEgenes', 'extract_degradation_rates',
            'inference_degradation_prot', 'compare_trajectories_umap',
            'train_kon_correction_mlp', 'infer_ratio_d0_d1_full', 'infer_ratio_d0_d1_unitary',
-           'train_proliferation_mlp']
+           'train_proliferation_mlp', 'fit_scale_theta']

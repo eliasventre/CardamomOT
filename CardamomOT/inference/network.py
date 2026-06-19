@@ -450,7 +450,7 @@ def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, th
                    ref_network, ks, G, g, n_networks, n_samples, proba,
                    l_pen, weight_prev=.5, loss='CE', final=0,
                    constrain_basal_uniform=0.0, basal_free_mask=None, G_tol=None,
-                   hard_forcing_ref=False, ref_constraint_pct=0.1):
+                   hard_forcing_ref=False, ref_constraint_pct=0.1, seuil_min_network=1e-2):
     """
     Joint L-BFGS-B optimisation of interactions + per-sample basals for one gene.
 
@@ -473,26 +473,31 @@ def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, th
     max_bounds = max(G, 10)
     bounds = [(-max_bounds, max_bounds)] * len(X_flat)
     if not final:
+        r_plus = 1 + ref_constraint_pct / max(EPS, (1 - ref_constraint_pct))
+        r_minus = 1 - ref_constraint_pct
         n_inter_flat = G * n_networks
         if hard_forcing_ref:
             for idx in range(n_inter_flat):
                 v = theta_ref_flat[idx]
-                if v > 0:
-                    bounds[idx] = ((1 - ref_constraint_pct) * v, (1 + ref_constraint_pct) * v)
-                elif v < 0:
-                    bounds[idx] = ((1 + ref_constraint_pct) * v, (1 - ref_constraint_pct) * v)
+                if v > seuil_min_network:
+                    bounds[idx] = (r_minus * v, min(r_plus * v, max_bounds))
+                elif v < -seuil_min_network:
+                    bounds[idx] = (max(-max_bounds, r_plus * v), r_minus * v)
                 else:
-                    bounds[idx] = (-ref_constraint_pct, ref_constraint_pct)
+                    bounds[idx] = (-seuil_min_network, seuil_min_network)
         else:
             # Only apply sign/reference constraints to interaction rows (first G rows of theta)
             for idx in range(n_inter_flat):
                 if theta_ref_flat[idx] != 0.0:
                     v = theta_ref_flat[idx]
-                    bounds[idx] = ((1 - ref_constraint_pct) * v, max((1 + ref_constraint_pct) * v, max_bounds)) if v > 0 else (min(-max_bounds, (1 + ref_constraint_pct) * v), (1 - ref_constraint_pct) * v)
+                    if v > seuil_min_network:
+                        bounds[idx] = (r_minus * v, max_bounds)
+                    elif v < -seuil_min_network:
+                        bounds[idx] =  (-max_bounds, r_minus * v)
                 elif ref_network_flat[idx] != 0.0:
                     v = ref_network_flat[idx]
-                    if v < 1: bounds[idx] = (-max_bounds, 0)
-                    elif v > 1: bounds[idx] = (0, max_bounds)
+                    if v < -1: bounds[idx] = (-max_bounds, -seuil_min_network)
+                    elif v > 1: bounds[idx] = (seuil_min_network, max_bounds)
 
     loss_fn = partial(objective, weights_samples=weights_samples, ys=y_samples,
                       ypr=y_proba, yp=y_prot, ypm=y_prot_mod, yk=y_kon,
@@ -554,14 +559,16 @@ def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal
     bounds = [(0, max_bounds)] * len(X_flat)
     n_inter_flat = G * n_networks
     if not final:
+        r_plus = min(max_bounds, 1 + ref_constraint_pct / max(EPS, (1 - ref_constraint_pct)))
+        r_minus = 1 - ref_constraint_pct
         if hard_forcing_ref:
             for idx in range(n_inter_flat):
-                bounds[idx] = (1 - ref_constraint_pct, 1 + ref_constraint_pct)
+                bounds[idx] = (r_minus, r_plus)
         else:
             # Tighten bounds for non-zero reference interactions only
             for idx in range(n_inter_flat):
                 if theta_ref_flat[idx] != 0.0:
-                    bounds[idx] = (1 - ref_constraint_pct, max(1 + ref_constraint_pct, max_bounds))
+                    bounds[idx] = (r_minus, r_plus)
 
     loss_fn = partial(objective_refinement,
                       correc_ref=correc_ref, inter=inter, basal=basal,
@@ -600,7 +607,7 @@ def main_loop_inference(g, y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_
                          inter_tmp, basal_tmp, inter, basal, ref_network,
                          weight_prev=.5, loss='CE', final=0,
                          constrain_basal_uniform=0.0, basal_free_mask=None, G_tol=None,
-                         hard_forcing_ref=False, ref_constraint_pct=0.1):
+                         hard_forcing_ref=False, ref_constraint_pct=0.1, seuil_min_network=1e-2):
     """
     Joint inference (inter + per-sample basal) for a single gene g.
 
@@ -622,6 +629,7 @@ def main_loop_inference(g, y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_
         l_pen1, weight_prev=weight_prev * (1 - final), loss=loss, final=final,
         constrain_basal_uniform=constrain_basal_uniform, basal_free_mask=basal_free_mask,
         G_tol=G_tol, hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
+        seuil_min_network=seuil_min_network,
     )
     # theta shape: (G + n_samples, n_networks_tmp)
     inter[:, :n_networks_tmp]    = theta[:G, :]
@@ -654,7 +662,8 @@ def inference_network(y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, n_stimu
                       scale=100, weight_prev=.5, loss='CE', final=0,
                       samples_id=None,
                       constrain_basal_uniform=0.0,
-                      hard_forcing_ref=False, ref_constraint_pct=0.1) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+                      hard_forcing_ref=False, ref_constraint_pct=0.1,
+                      seuil_min_network=1e-2) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Joint network inference: interactions shared across samples, basal per sample.
 
@@ -712,6 +721,15 @@ def inference_network(y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, n_stimu
     if ref_network is None:
         ref_network = np.ones((G, G, n_networks))
 
+    # When hard_forcing_ref, the inter_ref matrix defines the allowed structure in addition
+    # to ref_network: interactions specified by inter_ref must not be zeroed out by the
+    # structural prior mask at the end of core_inference.
+    if hard_forcing_ref and inter_ref is not None:
+        ref_network = np.maximum(
+            ref_network,
+            (np.asarray(inter_ref, dtype=float) != 0).astype(float)
+        )
+
     # ── Compute free-sample mask from basal_ref ─────────────────────────────
     # free_mask[s, g] = True  iff sample s is NOT pinned for gene g
     # (i.e. basal_ref[s, g, :] is all-zero → no KO/OV prior)
@@ -751,6 +769,7 @@ def inference_network(y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, n_stimu
                 constrain_basal_uniform=constrain_basal_uniform,
                 basal_free_mask=free_mask_2d[:, g_tgt],
                 hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
+                seuil_min_network=seuil_min_network,
             )
 
         # Sparse path: sub-select to K_g active regulators
@@ -783,6 +802,7 @@ def inference_network(y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, n_stimu
             constrain_basal_uniform=constrain_basal_uniform,
             basal_free_mask=free_mask_2d[:, g_tgt],
             G_tol=K_g, hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
+            seuil_min_network=seuil_min_network,
         )
 
         # Expand interaction results back to full G-dimensional space

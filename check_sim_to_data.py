@@ -135,7 +135,7 @@ def main(argv):
         pi_zinb = np.load(os.path.join(p, 'cardamomOT', 'pi_zinb.npy'))
         
         vect_kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta.npy')) + 1e-6
-        vect_kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta.npy')) + 1e-6
+        vect_kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_forsimul.npy')) + 1e-6
         vect_kon_sim = np.load(os.path.join(p, 'cardamomOT', 'data_kon_simul.npy')) + 1e-6
         times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
         times_simulation = np.load(os.path.join(p, 'cardamomOT', 'simulation_times.npy'))

@@ -2,6 +2,8 @@
 
 [![Documentation](https://readthedocs.org/projects/cardamomot/badge/?version=latest)](https://cardamomot.readthedocs.io/en/latest/)
 
+**Documentation:** [https://cardamomot.readthedocs.io/en/latest/](https://cardamomot.readthedocs.io/en/latest/)
+
 CARDAMOM is an executable gene regulatory network (GRN) inference method, adapted to time-course scRNA-seq datasets. The algorithm consists in calibrating the parameters of a mechanistic model of gene expression: the calibrated model can then be simulated, which allows to reproduce the dataset used for inference. The first inference method has been introduced in [[1](#Ventre2021)]. It has been benchmarked along with other GRN inference tools and applied to a real dataset in [[2](#Ventre2023)]. The second version is presented in [[3](#Mauge2026)] and combines GRN and trajectory inference method and shows a strong improvement over the first version.  The simulation part is based on the [Harissa](https://github.com/ulysseherbach/harissa) package.
 
 ## 🚀 Quick Start

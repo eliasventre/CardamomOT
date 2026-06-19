@@ -176,6 +176,90 @@ def main(argv):
     model.ref_network = np.maximum(model.prior_network_pen, model.ref_network)
     model.ref_network[:ns, :] = model.stimulus
 
+    # ─── LOAD INTER_SIMUL_REF (optional) ────────────────────────────────
+    # Data/inter_simul_ref.npy or .csv — used as inter_ref in
+    # refine_network_degradations (with final=0) instead of self.inter.
+    # CSV: gene names in index/columns → named mapping; no gene names → positional
+    # (assumes same gene order as adata.var_names, emits a warning).
+    stim_labels = ['Stimulus'] if ns == 1 else [f'Stimulus_{i}' for i in range(ns)]
+    genes_list = stim_labels + genes_only
+    n_genes = G_tot - ns
+
+    _sr_npy = os.path.join(p, 'Data', 'inter_simul_ref.npy')
+    _sr_csv = os.path.join(p, 'Data', 'inter_simul_ref.csv')
+
+    if os.path.exists(_sr_npy):
+        arr_sr = np.load(_sr_npy)
+        model.inter_simul_ref = arr_sr
+        print(f"[infer_network_simul] Loaded inter_simul_ref from {_sr_npy} shape={arr_sr.shape} "
+              f"— will be used as inter_ref with final=0")
+    elif os.path.exists(_sr_csv):
+        try:
+            df_sr = pd.read_csv(_sr_csv, index_col=0)
+            df_sr.columns = df_sr.columns.astype(str).str.upper()
+            df_sr.index = df_sr.index.astype(str).str.upper()
+            common_sr = [g for g in df_sr.index if g in genes_list]
+            if common_sr:
+                arr_sr = np.zeros((G_tot, G_tot))
+                for row_g in common_sr:
+                    for col_g in [c for c in df_sr.columns if c in genes_list]:
+                        arr_sr[genes_list.index(row_g), genes_list.index(col_g)] = df_sr.loc[row_g, col_g]
+                model.inter_simul_ref = arr_sr
+                print(f"[infer_network_simul] Loaded inter_simul_ref from {_sr_csv} "
+                      f"({len(common_sr)} genes matched) — will be used as inter_ref with final=0")
+            else:
+                # Positional fallback: no gene names recognised
+                def _is_float(s):
+                    try:
+                        float(str(s).strip())
+                        return True
+                    except ValueError:
+                        return False
+                raw = pd.read_csv(_sr_csv, header=None, dtype=str)
+                data = raw.values
+                r0 = [str(v).strip() for v in data[0]]
+                has_header = (not r0[0]) or not all(_is_float(v) for v in r0 if v)
+                sr = 1 if has_header else 0
+                if has_header and not r0[0]:
+                    has_idx = True
+                else:
+                    c0 = [str(v).strip() for v in data[sr:, 0]]
+                    has_idx = not all(_is_float(v) for v in c0 if v)
+                sc = 1 if has_idx else 0
+                vals = data[sr:, sc:].astype(float)
+                if vals.shape == (G_tot, G_tot):
+                    arr_sr = vals
+                elif vals.shape == (n_genes, n_genes):
+                    arr_sr = np.zeros((G_tot, G_tot))
+                    arr_sr[ns:ns + n_genes, ns:ns + n_genes] = vals
+                else:
+                    print(
+                        f"[infer_network_simul] ERROR: Data/inter_simul_ref.csv has no recognisable "
+                        f"gene names and its shape {vals.shape} is inconsistent with {n_genes} genes "
+                        f"(expected {n_genes}×{n_genes} without stimulus or {G_tot}×{G_tot} with "
+                        f"stimulus). Add gene names as row/column headers or provide a matrix of the "
+                        f"correct size."
+                    )
+                    arr_sr = None
+                if arr_sr is not None:
+                    import warnings as _warnings
+                    _warnings.warn(
+                        "Data/inter_simul_ref.csv has no gene names — assuming positional order "
+                        "matches adata.var_names.",
+                        UserWarning, stacklevel=2
+                    )
+                    print(
+                        f"[infer_network_simul] WARNING: Data/inter_simul_ref.csv has no gene names "
+                        f"— assuming gene order matches adata.var_names."
+                    )
+                    model.inter_simul_ref = arr_sr
+                    print(f"[infer_network_simul] Loaded inter_simul_ref (positional) shape={arr_sr.shape} "
+                          f"— will be used as inter_ref with final=0")
+        except Exception as e:
+            print(f"[infer_network_simul] Warning: could not load inter_simul_ref.csv: {e}")
+    else:
+        print("[infer_network_simul] No inter_simul_ref found in Data/, using inferred inter as reference")
+
     # Adapt parameters for simulation
     print("[infer_network_simul] Adapting parameters for simulation...")
     model.recompute_proliferations = recompute_proliferations

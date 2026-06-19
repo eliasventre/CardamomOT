@@ -158,6 +158,55 @@ def main(argv):
             # stimulus rows/cols are left at 1.0 and will be overridden by model.stimulus
             # inside fit_network (self.ref_network[:ns, :] = self.stimulus)
 
+    # ─── LOAD USER-PROVIDED reference_network.csv FROM Data/ ─────────────
+    # Users can place Data/reference_network.csv to override or supplement the
+    # structural prior without running prepare_reference_network.py.
+    data_ref_path = os.path.join(p, 'Data', 'reference_network.csv')
+    if os.path.exists(data_ref_path):
+        _ref_df = pd.read_csv(data_ref_path, index_col=0)
+        _ref_df.columns = _ref_df.columns.astype(str).str.upper()
+        _ref_df.index = _ref_df.index.astype(str).str.upper()
+        _common_ref = [g for g in genes_only if g in _ref_df.index]
+        if _common_ref:
+            _sub = _ref_df.loc[_common_ref, [c for c in _common_ref if c in _ref_df.columns]]
+            _ref_mat = np.abs(_sub.to_numpy())
+            _row_idxs = [ns + genes_only.index(g) for g in _sub.index]
+            _col_idxs = [ns + genes_only.index(g) for g in _sub.columns]
+            for _n in range(model.n_networks):
+                for _ii, _ri in enumerate(_row_idxs):
+                    model.ref_network[_ri, _col_idxs, _n] = _ref_mat[_ii, :]
+            print(f"[infer_network_structure] Loaded structural prior from {data_ref_path} "
+                  f"({len(_common_ref)}/{len(genes_only)} genes matched).")
+        else:
+            # No gene names recognised — validate size then assume positional order
+            _n_genes = len(genes_only)
+            _r, _c = _ref_df.shape
+            if (_r, _c) != (_n_genes, _n_genes) and (_r, _c) != (G_tot, G_tot):
+                print(
+                    f"[infer_network_structure] ERROR: Data/reference_network.csv has no "
+                    f"recognisable gene names and its shape {(_r, _c)} is inconsistent with "
+                    f"{_n_genes} genes (expected {_n_genes}×{_n_genes} or {G_tot}×{G_tot} "
+                    f"including stimulus). Add gene names as row/column headers or provide a "
+                    f"matrix of the correct size."
+                )
+                raise SystemExit(1)
+            import warnings as _warnings
+            _warnings.warn(
+                f"Data/reference_network.csv has no gene names — assuming positional order "
+                f"matches adata.var_names.",
+                UserWarning, stacklevel=2
+            )
+            _vals = _ref_df.to_numpy().astype(float)
+            if _vals.shape[0] == G_tot:
+                # Full matrix including stimulus provided
+                _block = np.abs(_vals)
+            else:
+                # Gene-only matrix: embed into gene block
+                _block = np.zeros((G_tot, G_tot))
+                _block[ns:ns + _n_genes, ns:ns + _n_genes] = np.abs(_vals)
+            for _n in range(model.n_networks):
+                model.ref_network[:, :, _n] = _block
+
     # Infer network
     model.d = np.ones((2, G_tot))
     model.d[1, model.n_stimuli:], model.d[0, model.n_stimuli:] = adata.var['d1'].values, adata.var['d0'].values
@@ -173,7 +222,7 @@ def main(argv):
             return arr
         if os.path.exists(csv):
             df = pd.read_csv(csv, index_col=0)
-            df.index = df.index.astype(str)
+            df.index = df.index.astype(str).str.upper()
             common = [g for g in df.index if g in genes_list]
             arr = np.zeros((G_tot, df.shape[1]))
             for row_g in common:
@@ -186,9 +235,12 @@ def main(argv):
     def _load_gene_mat(fname):
         """Load a (G_tot, G_tot) or (G_tot, G_tot, n_networks) inter matrix from npy or csv.
 
-        If the CSV index contains gene names, values are remapped to adata gene order.
-        Otherwise (pure value table), values are assumed to already be in adata gene order.
+        If the CSV index contains gene names (case-insensitive), values are remapped to adata
+        gene order. Otherwise the file is treated as positional: a warning is emitted and the
+        pipeline stops with an error if the matrix dimensions are inconsistent with the data.
         """
+        import warnings as _warnings
+
         npy = os.path.join(p, 'Data', fname + '.npy')
         csv = os.path.join(p, 'Data', fname + '.csv')
         if os.path.exists(npy):
@@ -197,18 +249,21 @@ def main(argv):
             return arr
         if os.path.exists(csv):
             df = pd.read_csv(csv, index_col=0)
-            df.columns = df.columns.astype(str)
-            df.index = df.index.astype(str)
+            # Normalise to uppercase so lowercase gene names in the CSV still match.
+            # Convert to str first in case the index/columns are numeric (float).
+            df.columns = df.columns.astype(str).str.upper()
+            df.index = df.index.astype(str).str.upper()
             common = [g for g in df.index if g in genes_list]
             if common:
-                # Gene-named: reorder to match adata gene order
+                # Gene-named path: reorder to match adata gene order
                 arr = np.zeros((G_tot, G_tot))
                 for row_g in common:
                     for col_g in [c for c in df.columns if c in genes_list]:
                         arr[genes_list.index(row_g), genes_list.index(col_g)] = df.loc[row_g, col_g]
                 print(f"[infer_network_structure] Loaded {fname} from {csv} (gene-named) shape={arr.shape}")
                 return arr
-            # No gene names: assume values are already in adata gene order
+
+            # ── Positional fallback: no gene names recognised ────────────────
             def _is_float(s):
                 try:
                     float(str(s).strip())
@@ -218,10 +273,10 @@ def main(argv):
             raw = pd.read_csv(csv, header=None, dtype=str)
             data = raw.values
             r0 = [str(v).strip() for v in data[0]]
-            # Header row: first cell empty (pandas default export) or first row non-numeric
+            # Detect header row (first cell empty OR first row non-numeric)
             has_header = (not r0[0]) or not all(_is_float(v) for v in r0 if v)
             sr = 1 if has_header else 0
-            # Index column: empty corner cell (pandas default) or first col non-numeric
+            # Detect index column (empty corner cell OR first col non-numeric)
             if has_header and not r0[0]:
                 has_idx = True
             else:
@@ -229,17 +284,53 @@ def main(argv):
                 has_idx = not all(_is_float(v) for v in c0 if v)
             sc = 1 if has_idx else 0
             vals = data[sr:, sc:].astype(float)
+
+            # ── Size validation ──────────────────────────────────────────────
+            n_genes = G_tot - ns   # expected number of gene rows/cols (no stimulus)
+            if vals.shape[0] == G_tot and vals.shape[1] == G_tot:
+                # Full matrix (genes + stimulus) provided positionally
+                _is_full = True
+            elif vals.shape[0] == n_genes and vals.shape[1] == n_genes:
+                # Gene-only matrix
+                _is_full = False
+            else:
+                print(
+                    f"[infer_network_structure] ERROR: Data/{fname}.csv has no recognisable "
+                    f"gene names and its shape {vals.shape} is inconsistent with {n_genes} genes "
+                    f"(expected {n_genes}×{n_genes} without stimulus or {G_tot}×{G_tot} with "
+                    f"stimulus). Add gene names as row/column headers or provide a matrix of the "
+                    f"correct size."
+                )
+                raise SystemExit(1)
+
+            _warnings.warn(
+                f"Data/{fname}.csv has no gene names — assuming positional order matches "
+                f"adata.var_names.",
+                UserWarning, stacklevel=2
+            )
+            print(
+                f"[infer_network_structure] WARNING: Data/{fname}.csv has no gene names — "
+                f"assuming gene order matches adata.var_names."
+            )
+
             arr = np.zeros((G_tot, G_tot))
-            r, c = min(vals.shape[0], G_tot), min(vals.shape[1], G_tot)
-            arr[:r, :c] = vals[:r, :c]
-            print(f"[infer_network_structure] Loaded {fname} from {csv} (positional, adata gene order) shape={arr.shape}")
+            if _is_full:
+                arr[:, :] = vals[:G_tot, :G_tot]
+            else:
+                # Gene-only: place at gene rows/cols (offset by ns stimulus indices)
+                arr[ns:ns + n_genes, ns:ns + n_genes] = vals[:n_genes, :n_genes]
+            print(f"[infer_network_structure] Loaded {fname} from {csv} (positional, assumed adata gene order) shape={arr.shape}")
             return arr
         return None
 
     basal_init = _load_gene_vec('basal_init')
     inter_init = _load_gene_mat('inter_init')
     basal_ref  = _load_gene_vec('basal_ref')
-    inter_ref  = _load_gene_mat('inter_ref')
+    inter_ref  = _load_gene_mat('inter_ref') 
+    if inter_ref is not None:
+        inter_ref *= 4
+    if basal_ref is not None:
+        basal_ref *= 4
 
     # ─── PER-SAMPLE KOV PRIOR (overrides basal_ref if present) ──────────
     # Data/KO_OV_inference.txt : TSV with columns  sample_id | KO | OV

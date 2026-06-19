@@ -30,6 +30,7 @@ import os
 import ot
 
 plot_in_script = 0
+compute_ot = 0
 
 def main(argv):
     """
@@ -159,15 +160,16 @@ def main(argv):
     adata_beta.write(os.path.join(p, 'cardamomOT', 'adata_beta.h5ad'))
     print(f"[check_mixture_to_data] Saved synthetic data to {os.path.join(p, 'cardamomOT', 'adata_beta.h5ad')}")
 
-    # Compute optimal transport distance (Wasserstein)
-    print("[check_mixture_to_data] Computing optimal transport distance...")
-    N_cells = len(times_data)
-    try:
-        ot_distance = ot.emd2(np.ones(N_cells)/N_cells, np.ones(N_cells)/N_cells, 
-                              ot.dist(data_beta[1:].T, data_real[1:].T), numItermax=100000)
-        print(f"[check_mixture_to_data] Optimal transport distance (Wasserstein): {ot_distance:.6f}")
-    except Exception as e:
-        print(f"[check_mixture_to_data] Error computing OT distance: {e}")
+    if compute_ot:
+        # Compute optimal transport distance (Wasserstein)
+        print("[check_mixture_to_data] Computing optimal transport distance...")
+        N_cells = len(times_data)
+        try:
+            ot_distance = ot.emd2(np.ones(N_cells)/N_cells, np.ones(N_cells)/N_cells, 
+                                ot.dist(data_beta[1:].T, data_real[1:].T), numItermax=100000)
+            print(f"[check_mixture_to_data] Optimal transport distance (Wasserstein): {ot_distance:.6f}")
+        except Exception as e:
+            print(f"[check_mixture_to_data] Error computing OT distance: {e}")
 
     if plot_in_script:
         print("[check_mixture_to_data] Generating comparison plots...")

@@ -508,6 +508,95 @@ class GeneRegulatoryODE_softmax(nn.Module):
 
 
 # ---------------------------
+# fit_scale_theta
+# ---------------------------
+
+def fit_scale_theta(X_prot, kon_beta, bias, theta_inter, ks, ns, samples_data=None):
+    """Compute per-gene scale factors by fitting kon^theta directly to kon_beta
+    without any ODE integration.
+
+    For each gene g, finds scale_g > 0 minimising the MSE between the softmax-based
+    predicted kon and the observed kon_beta across the supplied cells.
+
+    Args:
+        X_prot      : ``(N, G)`` protein levels.
+        kon_beta    : ``(N, G)`` mixture-inferred kon values.
+        bias        : ``(G, n_modes-1)`` or ``(n_samples, G, n_modes-1)`` GRN basal.
+        theta_inter : ``(G, G, n_modes-1)`` GRN interaction tensor.
+        ks          : ``(n_modes, G)`` softmax burst-rate amplitudes.
+        ns          : number of stimulus columns.
+        samples_data: ``(N,)`` per-cell sample index when bias is 3-D, else None.
+
+    Returns:
+        scale_theta : ``(G,)`` per-gene scale factors (1.0 for stimuli columns).
+    """
+    from scipy.optimize import minimize_scalar
+
+    X_prot      = np.asarray(X_prot,    dtype=np.float64)
+    kon_beta    = np.asarray(kon_beta,  dtype=np.float64)
+    bias        = np.asarray(bias,      dtype=np.float64)
+    theta_inter = np.asarray(theta_inter, dtype=np.float64)
+    ks          = np.asarray(ks,        dtype=np.float64)
+
+    G       = X_prot.shape[1]
+    n_modes = ks.shape[0]
+    scale_theta = np.ones(G, dtype=np.float32)
+
+    per_sample = (bias.ndim == 3 and samples_data is not None)
+    if per_sample:
+        sd = np.asarray(samples_data)
+        unique_s = np.sort(np.unique(sd))
+
+    for g in range(ns, G):
+        target = kon_beta[:, g]   # (N,)
+        ks_g   = ks[:, g]         # (n_modes,)
+
+        if per_sample:
+            # Pre-compute (mask, A_g_s) for each sample; captured in closure below.
+            sample_data_g = []
+            for s_idx, s_label in enumerate(unique_s):
+                mask_s = (sd == s_label)
+                if not np.any(mask_s):
+                    continue
+                bias_s = bias[min(s_idx, bias.shape[0] - 1)]   # (G, n_modes-1)
+                # (N_s, n_modes-1): pre-synaptic input to gene g for sample s
+                A_g_s = X_prot[mask_s] @ theta_inter[:, g, :] + bias_s[g, :]
+                sample_data_g.append((mask_s, A_g_s))
+
+            def _loss(log_s,
+                      _target=target, _ks_g=ks_g, _sd=sample_data_g, _N=len(X_prot)):
+                s    = np.exp(log_s)
+                pred = np.zeros(_N)
+                for mask_s_, A_g_s_ in _sd:
+                    N_s = int(mask_s_.sum())
+                    Z   = np.zeros((N_s, n_modes))
+                    Z[:, 1:] = s * A_g_s_
+                    Z -= Z.max(axis=1, keepdims=True)
+                    exp_Z = np.exp(Z)
+                    sigma = exp_Z / exp_Z.sum(axis=1, keepdims=True)
+                    pred[mask_s_] = (sigma * _ks_g).sum(axis=1)
+                return np.mean((pred - _target) ** 2)
+        else:
+            # (N, n_modes-1): pre-synaptic input to gene g
+            A_g = X_prot @ theta_inter[:, g, :] + bias[g, :]
+
+            def _loss(log_s,
+                      _target=target, _ks_g=ks_g, _A_g=A_g, _N=len(X_prot)):
+                s = np.exp(log_s)
+                Z = np.zeros((_N, n_modes))
+                Z[:, 1:] = s * _A_g
+                Z -= Z.max(axis=1, keepdims=True)
+                exp_Z = np.exp(Z)
+                sigma = exp_Z / exp_Z.sum(axis=1, keepdims=True)
+                return np.mean(((sigma * _ks_g).sum(axis=1) - _target) ** 2)
+
+        res = minimize_scalar(_loss, bounds=(-5, 5), method='bounded')
+        scale_theta[g] = float(np.exp(res.x))
+
+    return scale_theta
+
+
+# ---------------------------
 # infer_ratio_d0_d1_unitary
 # ---------------------------
 
@@ -794,7 +883,7 @@ def inference_degradation_prot(
     lambda_deg=0.0,
     lambda_mlp=0.0,
     g_obs_train=None,
-) -> tuple[np.ndarray, np.ndarray, float, "GeneRegulatoryODE_softmax"]:
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Estimate degradation rates and scaling factors from protein time-course data.
 
@@ -1542,11 +1631,9 @@ if __name__ == "__main__":
 
     d_init = np.ones(G, dtype=np.float32) * 0.5
 
-    d_learned, final_loss, ode_func = inference_degradation_prot(
+    d_learned, scale_learned = inference_degradation_prot(
         X_prot, times, bias, theta_inter, ks, d=d_init, n_epochs=10, print_every=5
     )
 
     logger.info("Learned degradation rates = %s", d_learned)
-    logger.info("Final loss = %s", final_loss)
-
-    embedding, labels, times_comb = compare_trajectories_umap(ode_func, X_prot, times)
+    logger.info("Learned scale = %s", scale_learned)

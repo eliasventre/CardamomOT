@@ -31,7 +31,7 @@ from CardamomOT.logging import get_logger
 # module-level logger
 logger = get_logger(__name__)
 
-EPS = 1e-12
+EPS = 1e-16
 
 # ---------------------------
 # Original utility functions (retained for initialization)
@@ -1258,7 +1258,8 @@ class NegativeBinomialMixtureEM:
         return K + 1 + (K - 1) + zi_p
     
 
-    def fit(self, x, vect_t=None, vect_celltypes=None, quant_init=None, seuil=0.001, s=None):
+    def fit(self, x, vect_t=None, vect_celltypes=None, quant_init=None, seuil=0.001, s=None,
+            batch_size_mixture=None):
         """
         Fit the NB mixture model to data ``x``.
 
@@ -1270,8 +1271,36 @@ class NegativeBinomialMixtureEM:
                If ``None`` all factors are set to 1 (original behavior).
                If provided (e.g. from ``adata.obs['rd']``), the model
                accounts for scaling: X_i|k ~ NB(ks_k, c/s_i).
+        batch_size_mixture : int or None
+               If set, parameter learning is done on a random sub-sample of at
+               most ``batch_size_mixture`` cells per timepoint; responsibilities
+               (resp) and basin assignments are then recomputed on ALL cells
+               with the learned parameters.
         """
-        x: np.ndarray[Any, np.dtype[Any]] = np.asarray(x).astype(int)
+        # ── Keep full-data references for the final resp computation ────────
+        x_all: np.ndarray[Any, np.dtype[Any]] = np.asarray(x).astype(int)
+        N_all: int = x_all.size
+        s_all = s
+        vect_t_all = vect_t
+
+        # ── Optional mini-batch sub-sampling for parameter learning ─────────
+        if batch_size_mixture is not None:
+            if vect_t_all is not None:
+                idx_list = []
+                for time in np.unique(vect_t_all):
+                    idx_t = np.where(vect_t_all == time)[0]
+                    n_sel = min(batch_size_mixture, len(idx_t))
+                    idx_list.append(np.random.choice(idx_t, n_sel, replace=False))
+                cells_to_use = np.concatenate(idx_list)
+            else:
+                n_sel = min(batch_size_mixture, N_all)
+                cells_to_use = np.random.choice(N_all, n_sel, replace=False)
+        else:
+            cells_to_use = np.arange(N_all)
+
+        x: np.ndarray[Any, np.dtype[Any]] = x_all[cells_to_use]
+        vect_t   = vect_t_all[cells_to_use]   if vect_t_all is not None else None
+        s        = s_all[cells_to_use]         if s_all      is not None else None
         N: int = x.size
 
         # ── Read depth handling ─────────────────────────────────────────
@@ -1435,12 +1464,13 @@ class NegativeBinomialMixtureEM:
                 logger.info("Final: K=%d, loglik=%.3f, AIC=%.3f", K_final, loglik_final, aic_final)
 
             if aic_final < best_aic:
+                # Recompute resp and basins on ALL cells (not just the mini-batch)
                 resp_final, _ = predict_resp(
-                    x, ks_final, c_final, s=s,
+                    x_all, ks_final, c_final, s=s_all,
                     pi_zero=pi_zero_final, zi=self.zi, pi=pi_final, forcing=self.mean_forcing_em
                 )
                 basins, pi_final = _assign_basins(
-                    resp_final, x, ks_final, c_final, vect_t,
+                    resp_final, x_all, ks_final, c_final, vect_t_all,
                     self.preserve_mean_values, len(ks_final),
                     self.mean_forcing_em, final=True
                 )
