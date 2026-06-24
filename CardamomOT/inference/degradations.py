@@ -512,11 +512,7 @@ class GeneRegulatoryODE_softmax(nn.Module):
 # ---------------------------
 
 def fit_scale_theta(X_prot, kon_beta, bias, theta_inter, ks, ns, samples_data=None):
-    """Compute per-gene scale factors by fitting kon^theta directly to kon_beta
-    without any ODE integration.
-
-    For each gene g, finds scale_g > 0 minimising the MSE between the softmax-based
-    predicted kon and the observed kon_beta across the supplied cells.
+    """Find a single scale factor minimising the total MSE across all genes jointly.
 
     Args:
         X_prot      : ``(N, G)`` protein levels.
@@ -528,7 +524,7 @@ def fit_scale_theta(X_prot, kon_beta, bias, theta_inter, ks, ns, samples_data=No
         samples_data: ``(N,)`` per-cell sample index when bias is 3-D, else None.
 
     Returns:
-        scale_theta : ``(G,)`` per-gene scale factors (1.0 for stimuli columns).
+        scale_theta : float, the jointly optimal scale (same for all genes).
     """
     from scipy.optimize import minimize_scalar
 
@@ -539,61 +535,63 @@ def fit_scale_theta(X_prot, kon_beta, bias, theta_inter, ks, ns, samples_data=No
     ks          = np.asarray(ks,        dtype=np.float64)
 
     G       = X_prot.shape[1]
+    N       = X_prot.shape[0]
     n_modes = ks.shape[0]
-    scale_theta = np.ones(G, dtype=np.float32)
 
     per_sample = (bias.ndim == 3 and samples_data is not None)
+
+    # Pre-compute all per-gene inputs before optimisation.
     if per_sample:
         sd = np.asarray(samples_data)
         unique_s = np.sort(np.unique(sd))
-
-    for g in range(ns, G):
-        target = kon_beta[:, g]   # (N,)
-        ks_g   = ks[:, g]         # (n_modes,)
-
-        if per_sample:
-            # Pre-compute (mask, A_g_s) for each sample; captured in closure below.
+        gene_data = []
+        for g in range(ns, G):
             sample_data_g = []
             for s_idx, s_label in enumerate(unique_s):
                 mask_s = (sd == s_label)
                 if not np.any(mask_s):
                     continue
-                bias_s = bias[min(s_idx, bias.shape[0] - 1)]   # (G, n_modes-1)
-                # (N_s, n_modes-1): pre-synaptic input to gene g for sample s
-                A_g_s = X_prot[mask_s] @ theta_inter[:, g, :] + bias_s[g, :]
+                bias_s = bias[min(s_idx, bias.shape[0] - 1)]
+                A_g_s  = X_prot[mask_s] @ theta_inter[:, g, :] + bias_s[g, :]
                 sample_data_g.append((mask_s, A_g_s))
+            gene_data.append((kon_beta[:, g], ks[:, g], sample_data_g))
 
-            def _loss(log_s,
-                      _target=target, _ks_g=ks_g, _sd=sample_data_g, _N=len(X_prot)):
-                s    = np.exp(log_s)
-                pred = np.zeros(_N)
-                for mask_s_, A_g_s_ in _sd:
+        def _total_loss(log_s):
+            s = np.exp(log_s)
+            total = 0.0
+            for target, ks_g, sample_data_g in gene_data:
+                pred = np.zeros(N)
+                for mask_s_, A_g_s_ in sample_data_g:
                     N_s = int(mask_s_.sum())
                     Z   = np.zeros((N_s, n_modes))
                     Z[:, 1:] = s * A_g_s_
                     Z -= Z.max(axis=1, keepdims=True)
                     exp_Z = np.exp(Z)
                     sigma = exp_Z / exp_Z.sum(axis=1, keepdims=True)
-                    pred[mask_s_] = (sigma * _ks_g).sum(axis=1)
-                return np.mean((pred - _target) ** 2)
-        else:
-            # (N, n_modes-1): pre-synaptic input to gene g
-            A_g = X_prot @ theta_inter[:, g, :] + bias[g, :]
+                    pred[mask_s_] = (sigma * ks_g).sum(axis=1)
+                total += np.mean((pred - target) ** 2)
+            return total
+    else:
+        gene_data = [
+            (kon_beta[:, g], ks[:, g],
+             X_prot @ theta_inter[:, g, :] + bias[g, :])
+            for g in range(ns, G)
+        ]
 
-            def _loss(log_s,
-                      _target=target, _ks_g=ks_g, _A_g=A_g, _N=len(X_prot)):
-                s = np.exp(log_s)
-                Z = np.zeros((_N, n_modes))
-                Z[:, 1:] = s * _A_g
+        def _total_loss(log_s):
+            s = np.exp(log_s)
+            total = 0.0
+            for target, ks_g, A_g in gene_data:
+                Z = np.zeros((N, n_modes))
+                Z[:, 1:] = s * A_g
                 Z -= Z.max(axis=1, keepdims=True)
                 exp_Z = np.exp(Z)
                 sigma = exp_Z / exp_Z.sum(axis=1, keepdims=True)
-                return np.mean(((sigma * _ks_g).sum(axis=1) - _target) ** 2)
+                total += np.mean(((sigma * ks_g).sum(axis=1) - target) ** 2)
+            return total
 
-        res = minimize_scalar(_loss, bounds=(-5, 5), method='bounded')
-        scale_theta[g] = float(np.exp(res.x))
-
-    return scale_theta
+    res = minimize_scalar(_total_loss, bounds=(-5, 5), method='bounded')
+    return float(np.exp(res.x))
 
 
 # ---------------------------

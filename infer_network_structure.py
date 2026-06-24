@@ -328,9 +328,9 @@ def main(argv):
     basal_ref  = _load_gene_vec('basal_ref')
     inter_ref  = _load_gene_mat('inter_ref') 
     if inter_ref is not None:
-        inter_ref *= 4
+        inter_ref *= 3
     if basal_ref is not None:
-        basal_ref *= 4
+        basal_ref *= 3
 
     # ─── PER-SAMPLE KOV PRIOR (overrides basal_ref if present) ──────────
     # Data/KO_OV_inference.txt : TSV with columns  sample_id | KO | OV

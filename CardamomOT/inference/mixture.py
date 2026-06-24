@@ -187,7 +187,7 @@ def infer_kinetics_temporal_scaled(x, s, times, a_init=np.ones(100), b_init=1,
     b_old = b
     b = np.clip(b, seuil, 1/seuil)
     a *= b / (b_old + EPS)
-    a: np.ndarray[Any, np.dtype[Any]]  = np.maximum(a, np.minimum(b/2, np.max(a)/100))
+    a = np.maximum(a, np.minimum(b/2, np.max(a)/100))
     return a, b
 
 
@@ -387,7 +387,8 @@ def predict_resp(x, ks, c, s=None, pi=None, pi_zero=None, zi=None, forcing=1.0) 
         if pi is None:
             pi = np.ones(n_components) / n_components
         else:
-            pi = pi * forcing + (np.ones(n_components) / n_components) * (1 - forcing)
+            if forcing < 1:
+                pi = pi * forcing + (np.ones(n_components) / n_components) * (1 - forcing)
             pi = pi / (pi.sum() + EPS)
 
         if zi is None:
@@ -676,7 +677,7 @@ def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_component
                             p_components=c/(1 + c),
                             nu_init=nu_init
                             )
-    stat_KS: Any | float = ks_statistic(data_t, nu_star, ks , c / (1 + c))
+    stat_KS = ks_statistic(data_t, nu_star, ks , c / (1 + c))
     if mean_forcing > 0: alpha_reg = np.clip(stat_KS / mean_forcing, 0.0, 1.0)
     else: alpha_reg = 1.0
 
@@ -1100,16 +1101,21 @@ def compute_aic_for_params(x, ks, c, pi, pi_zero, zi_mode) -> tuple[Any, floatin
 class NegativeBinomialMixtureEM:
     def __init__(self, min_components=1, max_components=3, zi=None, refilter=0.0, hard_em=1, mean_forcing_em=1.0,
                  tol=1e-5, max_iter_em=200, verbose=False, preserve_mean_values=0,
-                 compare_init_aic=True, damping=1.0) -> None:
+                 compare_init_aic=True, damping=1.0, use_scBoolSeq=False) -> None:
         """
         NB/ZINB mixture with optimal analytical M-step.
-        
+
         New parameters:
         ---------------
         compare_init_aic : bool
             If True, compare the AIC of the initialization with the AIC after EM
         damping : float (0, 1]
             Damping factor for Newton-Raphson (0.5-0.8 = stable, 1.0 = fast)
+        use_scBoolSeq : bool
+            If True and scboolseq_labels is passed to fit(), skip EM entirely:
+            call infer_kinetics_temporal_scaled once on labeled (non-NaN) cells,
+            compute pi from label proportions, compute resp via predict_resp,
+            and return. Always uses K=2 components.
         """
         assert min_components >= 1 and max_components >= min_components
         self.min_components: int = min_components
@@ -1124,6 +1130,7 @@ class NegativeBinomialMixtureEM:
         self.verbose: bool = verbose
         self.compare_init_aic: bool = compare_init_aic
         self.damping: float = damping
+        self.use_scBoolSeq: bool = use_scBoolSeq
         self.best_model = None
 
 
@@ -1258,8 +1265,105 @@ class NegativeBinomialMixtureEM:
         return K + 1 + (K - 1) + zi_p
     
 
+    def _fit_with_scboolseq(self, x_all, vect_t_all, labels_all, seuil, s_all=None,
+                             dropout=None):
+        """
+        Fast path when scBoolSeq binary labels (0/1/NaN) are available for each cell.
+
+        Calls infer_kinetics_temporal_scaled once on the labeled (non-NaN) cells,
+        derives pi from label proportions (ignoring NaN), computes soft responsibilities
+        via predict_resp on *all* cells, and returns immediately — no EM loop.
+        K is always 2.
+
+        Parameters
+        ----------
+        dropout : float or None
+            Per-gene structural-zero probability estimated by scBoolSeq
+            (``criteria_['DropOutRate']``).  Stored as ``pi_zero`` in the
+            returned model dict so it propagates to ``self.pi_zinb``.
+        """
+        K = 2
+        N_all = x_all.size
+        use_scaling = s_all is not None
+        s_full: np.ndarray = (
+            np.clip(np.asarray(s_all, dtype=float).reshape(-1), 1e-8, 1e8)
+            if use_scaling else np.ones(N_all, dtype=float)
+        )
+        labels_all = np.asarray(labels_all, dtype=float)
+        pi_zero = dropout * np.zeros(2) if dropout is not None else np.zeros(2)
+
+        valid = ~np.isnan(labels_all)
+        n_valid = int(valid.sum())
+        labels_valid_uniq = np.unique(labels_all[valid]) if n_valid > 0 else np.array([])
+
+        if n_valid < 2 or len(labels_valid_uniq) < 2:
+            # Fallback: moment-based init
+            print(labels_valid_uniq)
+            mean_val = float(np.mean(x_all.astype(float) / s_full))
+            c = max(seuil, 1.0)
+            ks = np.array([max(seuil, mean_val * c * 0.1), max(seuil, mean_val * c)])
+            pi = np.array([0.5, 0.5])
+        else:
+            x_valid = x_all[valid].astype(float)
+            s_valid = s_full[valid]
+            labels_valid = labels_all[valid].astype(int)
+
+            ks, c = infer_kinetics_temporal_scaled(
+                x_valid, s_valid, labels_valid,
+                seuil=seuil, max_iter=int(1e5), tol=1e-6
+            )
+            ks = np.sort(ks)  # ensure low → high ordering
+
+            pi = np.array(
+                [(labels_valid == k).sum() / n_valid for k in range(K)], dtype=float
+            )
+            pi = np.clip(pi, EPS, 1.0)
+            pi /= pi.sum()
+
+        resp, _ = predict_resp(
+            x_all, ks, c,
+            s=s_full if use_scaling else None,
+            pi_zero=pi_zero, 
+            pi=pi, forcing=self.mean_forcing_em) 
+
+        basins, pi_final = _assign_basins(
+            resp, x_all, ks, c, vect_t_all,
+            self.preserve_mean_values, K, self.mean_forcing_em
+        )
+
+        resp_final, _ = predict_resp(
+            x_all, ks, c,
+            s=s_full if use_scaling else None,
+            pi_zero=pi_zero, 
+            pi=pi_final, forcing=self.mean_forcing_em) 
+        
+        basins, pi_final = _assign_basins(
+            resp, x_all, ks, c, vect_t_all,
+            self.preserve_mean_values, K, self.mean_forcing_em, final=True
+        )
+        
+        if use_scaling:
+            aic, loglik = compute_aic_for_params_scaled(x_all, s_full, ks, c, pi, 0, None)
+        else:
+            aic, loglik = compute_aic_for_params(x_all, ks, c, pi, 0, None)
+
+        best_model = {
+            'ks':              ks,
+            'c':               c,
+            'pi':              pi_final,
+            'pi_zero':         pi_zero,
+            'basins':          basins,
+            'resp':            resp_final,
+            'loglik':          float(loglik),
+            'n_components':    K,
+            'aic':             float(aic),
+            'initial_K_tried': K,
+        }
+        self.best_model = best_model
+        return best_model
+
     def fit(self, x, vect_t=None, vect_celltypes=None, quant_init=None, seuil=0.001, s=None,
-            batch_size_mixture=None):
+            batch_size_mixture=None, scboolseq_labels=None, scboolseq_dropout=None):
         """
         Fit the NB mixture model to data ``x``.
 
@@ -1282,6 +1386,13 @@ class NegativeBinomialMixtureEM:
         N_all: int = x_all.size
         s_all = s
         vect_t_all = vect_t
+
+        # ── scBoolSeq fast path: skip EM, use pre-computed binary labels ────
+        if self.use_scBoolSeq and scboolseq_labels is not None:
+            return self._fit_with_scboolseq(
+                x_all, vect_t_all, scboolseq_labels, seuil,
+                s_all=s_all, dropout=scboolseq_dropout
+            )
 
         # ── Optional mini-batch sub-sampling for parameter learning ─────────
         if batch_size_mixture is not None:

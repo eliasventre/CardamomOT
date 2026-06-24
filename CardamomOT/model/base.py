@@ -18,6 +18,9 @@ import ot
 import seaborn as sns
 import multiprocessing as mp
 from joblib import Parallel, delayed
+from sklearn.model_selection import GridSearchCV, LeaveOneOut
+from sklearn.neighbors import KernelDensity
+from scipy.ndimage import gaussian_filter1d
 from ..inference import (inference_network, filter_network,
                         minimal_repetition_choice, find_next_prot, my_otdistance, count_errors, kon_ref_vector, inference_alpha,
                         NegativeBinomialMixtureEM, predict_resp,
@@ -87,6 +90,10 @@ class NetworkModel:
         self.transform_proba = 0 # Do we want to force probas to be steep for compatibility with sigmoid model?
         self.seuil = 1e-2 # minimum for beta mixture parameters (second parameters)
         self.batch_size_mixture = 512 # Maximum number of cells per time used for mixture calibration in the inference.
+        self.use_scBoolSeq = False # If True, initialize NB mixture with scBoolSeq binarization instead of hard EM
+        self.scboolseq_confidence = 0.6 # GMM posterior probability threshold for cell label assignment (lower → fewer NaN)
+        self.scboolseq_min_cells_per_label = 10 # min cells per label (0 and 1) required to use scBoolSeq path; otherwise falls back to normal EM
+        self.scboolseq_dropout = False
 
         ## Infer network
         self.n_networks = 1
@@ -113,29 +120,29 @@ class NetworkModel:
         self.batch_size_network = 2048 # Maximum number of cells used for network calibration in the inference.
         # Inference of alpha = switch moment between each timepoint and modes
         self.update_modes = 1
-        self.alpha_threshold = .5 # max = 1, thershold for important transition to update alpha full
+        self.alpha_threshold = .6 # max = 1, thershold for important transition to update alpha full
         self.n_pas = 25 # number of timesteps between timepoints for inference of alpha
         # Penalization/prior information
         self.stimulus = 1.0 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
         self.prior_network_pen = 1.0 # 1 if we don't use prior information. If not we can penalize the non-existing age in prior network with values between 1 and 0: 0 = impossible edge
         self.constrain_basal_uniform = 1.0 # >= 0 penalty strength that pushes per-sample basals to be equal (ignores samples pinned by KO/OV basal_ref)
-        self.hard_forcing_ref = False # if True, constrain all network params to ±ref_constraint_pct around inter_ref
-        self.ref_constraint_pct = 0.3 # fractional tolerance around inter_ref values for bounds (used when hard_forcing_ref=True)
-        self.lambda_scale  = 1e-3  # L2 penalty on scale[ns:] around 1 (large = scale stays ~1; 0 = free)
-        self.lambda_deg0   = 1     # L2 penalty on d around d_init (0 = free; large = stays close to prior)
-        self.lambda_deg1   = 1e-3  # L2 penalty on d_t around 0 (0 = free; large = stays close to non-temporal)
+        self.hard_forcing_ref = True # if True, constrain all network params to ±ref_constraint_pct around inter_ref
+        self.ref_constraint_pct = 0 # fractional tolerance around inter_ref values for bounds (used when hard_forcing_ref=True)
         self.lambda_mlp    = .5  # Mix weight for training-data ratios vs MLP in simulate_full_with_harissa:
                                   # 1 = pure linear interpolation of observed g, 0 = pure MLP g(P, kon(P))
         # Filtering
         self.filter_network = 0 # Do we filter the network ? It also builds a temporal network using the filter criterium
-        self.seuil_min_network = 1e-2 # minimum absolute value for network interaction bounds and filtering
+        self.seuil_min_network = 1e-3 # minimum absolute value for network interaction bounds and filtering
 
         ## Compute degradations after inference
         self.recompute_degradations = 1 # Do we want to recompute degradation rates for simulations ?
         self.batch_size_degradations = 256 # number of trajectories to take to make the inference (slow without gpu)
         self.use_temporal_degradations = 1 # If so, compute temporal degradation rates for simulations ?
+        self.lambda_scale  = 1e-3  # L2 penalty on scale[ns:] around 1 (large = scale stays ~1; 0 = free)
+        self.lambda_deg0   = 1     # L2 penalty on d around d_init (0 = free; large = stays close to prior)
+        self.lambda_deg1   = 1e-3  # L2 penalty on d_t around 0 (0 = free; large = stays close to non-temporal)
         self.smooth_degradations_sigma = None  # None=auto KDE+CV, 0=off, float>0=fixed sigma (in time-step units)
-        self.smooth_degradations_strength = 0.5  # blend weight in [0,1]: 0=no smoothing, 1=full smoothing
+        self.smooth_degradations_strength = 0  # blend weight in [0,1]: 0=no smoothing, 1=full smoothing
 
         ## Simulations
         self.simulation_stochastic = True # 1 if we simulate Bursty-like proteins, 0 if deterministic limit for proteins
@@ -224,7 +231,52 @@ class NetworkModel:
             )
         return {t: stim[i] for i, t in enumerate(times_unique)}
 
-    def core_binarization(self, data_rna, gene_names, vect_t, G_tot, min_components=1, max_components=5, refilter=0, max_iter_kinetics=100, cell_rd=None, verb=True, kov_cell_mask=None):
+
+    def _compute_scboolseq_matrix(self, data_rna, gene_names, G_tot):
+        """
+        Log-transform raw counts and run scBoolSeq to obtain:
+          - a binarization matrix  (N_cells, n_genes) with values 0.0 / 1.0 / NaN
+          - a dropout-rate vector  (n_genes,) with per-gene structural-zero probability
+
+        The dropout rate is read from ``scbs.criteria_['DropOutRate']`` — the
+        fraction of log-expression values that are essentially zero, which maps
+        directly to the ``pi_zero`` parameter of the ZINB mixture model.
+        """
+        try:
+            import pandas as pd
+            from scboolseq import scBoolSeq
+        except ImportError:
+            raise ImportError(
+                "scBoolSeq is required when use_scBoolSeq=True. "
+                "Install it with:  conda install -c conda-forge -c colomoto scboolseq"
+            )
+        ns = self.n_stimuli
+        gene_expr = data_rna[:, ns:].astype(float)
+        log_expr  = np.log1p(gene_expr)
+        n_genes   = log_expr.shape[1]
+        col_names = [str(gn) for gn in (gene_names[:n_genes] if len(gene_names) >= n_genes
+                                        else range(n_genes))]
+        log_df = pd.DataFrame(log_expr, columns=col_names)
+
+        scbs = scBoolSeq(confidence=self.scboolseq_confidence)
+        scbs.fit(log_df)
+        binarized = scbs.binarize(log_df)
+
+        # Extract per-gene dropout rate from scBoolSeq criteria
+        dropout_rates = None
+        if self.scboolseq_dropout and hasattr(scbs, 'criteria_') and 'DropOutRate' in scbs.criteria_.columns:
+            dropout_rates = np.zeros(n_genes, dtype=float)
+            for j, col in enumerate(col_names):
+                if col in scbs.criteria_.index:
+                    dropout_rates[j] = float(
+                        np.clip(scbs.criteria_.loc[col, 'DropOutRate'], 0.0, 0.95)
+                    )
+
+        return binarized.to_numpy().astype(float), dropout_rates
+
+
+    def core_binarization(self, data_rna, gene_names, vect_t, G_tot, min_components=1, max_components=5, refilter=0, max_iter_kinetics=100, 
+                          cell_rd=None, verb=True, kov_cell_mask=None, scboolseq_matrix=None, scboolseq_dropouts=None):
         """
         Parameters
         ----------
@@ -251,18 +303,30 @@ class NetworkModel:
         c = np.ones(G_tot)
         pi_zeros = np.ones(G_tot - ns)
         n_components = 0
-        kinetics = NegativeBinomialMixtureEM(min_components=min_components, 
-                                                 max_components=max_components, zi=None, 
+        kinetics = NegativeBinomialMixtureEM(min_components=min_components,
+                                                 max_components=max_components, zi=None,
                                                  max_iter_em=max_iter_kinetics,
-                                                 refilter=refilter, hard_em=self.hard_em, 
-                                                 preserve_mean_values=self.preserve_mean_values, mean_forcing_em=self.mean_forcing_em)
-        
+                                                 refilter=refilter, hard_em=self.hard_em,
+                                                 preserve_mean_values=self.preserve_mean_values, mean_forcing_em=self.mean_forcing_em,
+                                                 use_scBoolSeq=(scboolseq_matrix is not None))
+
         def run_main_loop_for_gene(g):
             if verb: print("Calibrating gene", g)
             x = data_rna[:, g]
+            scbs_labels   = scboolseq_matrix[:, g - ns]  if scboolseq_matrix  is not None else None
+            scbs_dropout  = scboolseq_dropouts[g - ns]   if scboolseq_dropouts is not None else None
+            if scbs_labels is not None:
+                _min_n = self.scboolseq_min_cells_per_label
+                _valid = ~np.isnan(scbs_labels.astype(float))
+                if (np.sum(_valid & (scbs_labels == 0)) < _min_n or
+                        np.sum(_valid & (scbs_labels == 1)) < _min_n):
+                    scbs_labels = None
+                    scbs_dropout = None
             model = kinetics.fit(x, vect_t=vect_t, seuil=self.seuil,
-                                 s=cell_rd if cell_rd is not None else None,
-                                 batch_size_mixture=self.batch_size_mixture)
+                                 s=cell_rd,
+                                 batch_size_mixture=self.batch_size_mixture,
+                                 scboolseq_labels=scbs_labels,
+                                 scboolseq_dropout=scbs_dropout)
             ks, c, pi0, proba, pi = np.sort(model['ks']), model['c'], np.mean(np.asarray(model['pi_zero'])), model['resp'], model['pi']
             ## Transform proba to be steepers
             tmp = proba.copy()
@@ -414,6 +478,14 @@ class NetworkModel:
                 f"cell_rd a {len(cell_rd)} entrées mais data a {N_cells} cellules."
             )
 
+        # ── scBoolSeq pre-computation (once for all genes) ──────────────────
+        scboolseq_matrix  = None
+        scboolseq_dropouts = None
+        if self.use_scBoolSeq:
+            scboolseq_matrix, scboolseq_dropouts = self._compute_scboolseq_matrix(
+                data_rna, gene_names, G_tot
+            )
+
         frequency_modes_smooth, frequency_proba_init, frequency_proba_modif, pi_zeros = self.core_binarization(
                                         data_rna, gene_names, vect_t, G_tot,
                                         min_components=min_components,
@@ -422,7 +494,9 @@ class NetworkModel:
                                         max_iter_kinetics=max_iter_kinetics,
                                         cell_rd=cell_rd,
                                         verb=verb,
-                                        kov_cell_mask=kov_cell_mask)
+                                        kov_cell_mask=kov_cell_mask,
+                                        scboolseq_matrix=scboolseq_matrix,
+                                        scboolseq_dropouts=scboolseq_dropouts)
 
         self.pi_zinb = pi_zeros
         self.modes = frequency_modes_smooth
@@ -1546,11 +1620,8 @@ class NetworkModel:
             y_prot, self.kon_beta, basal, inter,
             ks.T * self.scale_proteins, ns, samples_data=self.samples_data,
         )
-        if basal.ndim == 3:
-            basal *= scale_theta_pre[None, :, None]   # (n_samples, G, n_networks)
-        else:
-            basal *= scale_theta_pre[:, None]         # (G, n_networks)
-        inter *= scale_theta_pre[None, :, None]       # (G, G, n_networks)
+        basal *= scale_theta_pre       
+        inter *= scale_theta_pre  
 
         print(np.mean(scale_theta_pre))
 
@@ -1667,12 +1738,9 @@ class NetworkModel:
 
                 # ── Phase 2: compute sigma; smooth d1 and scale_theta ─────────
                 if n_intervals > 2 and self.smooth_degradations_sigma != 0:
-                    from scipy.ndimage import gaussian_filter1d
                     ns_s = self.n_stimuli
                     strength = float(np.clip(self.smooth_degradations_strength, 0.0, 1.0))
                     if self.smooth_degradations_sigma is None:
-                        from sklearn.model_selection import GridSearchCV, LeaveOneOut
-                        from sklearn.neighbors import KernelDensity
                         t_idx = np.arange(n_intervals, dtype=float).reshape(-1, 1)
                         bw_grid = np.logspace(-1, np.log10(n_intervals / 2.0 + 0.1), 30)
                         cv = LeaveOneOut() if n_intervals <= 5 else 5
@@ -1777,8 +1845,7 @@ class NetworkModel:
                     self.ratios[:] = (1.0 / ratios_global)[None, :]
 
             # ── Smooth ratios after d0/d1 computation ────────────────────────
-            if self.use_temporal_degradations:
-                from scipy.ndimage import gaussian_filter1d
+            if self.use_temporal_degradations and n_intervals > 2 and self.smooth_degradations_sigma != 0:
                 ns_s = self.n_stimuli
                 for g in range(ns_s, self.ratios.shape[1]):
                     orig = self.ratios[:, g].copy()
