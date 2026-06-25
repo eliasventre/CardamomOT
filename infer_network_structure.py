@@ -332,6 +332,8 @@ def main(argv):
     if basal_ref is not None:
         basal_ref *= 3
 
+    
+
     # ─── PER-SAMPLE KOV PRIOR (overrides basal_ref if present) ──────────
     # Data/KO_OV_inference.txt : TSV with columns  sample_id | KO | OV
     # sample_id values must match adata.obs['dataset_id'].
@@ -404,6 +406,10 @@ def main(argv):
 
     # Save inferred network structure parameters
     cardamom_dir = os.path.join(p, 'cardamomOT')
+    if inter_ref is not None:
+        np.save(os.path.join(cardamom_dir, 'inter_ref'), inter_ref)
+    if basal_ref is not None:
+        np.save(os.path.join(cardamom_dir, 'basal_ref'), basal_ref)
     np.save(os.path.join(cardamom_dir, 'basal'), model.basal)
     np.save(os.path.join(cardamom_dir, 'inter'), model.inter)
     np.save(os.path.join(cardamom_dir, 'inter_t'), model.inter_t)

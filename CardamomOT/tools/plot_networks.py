@@ -174,10 +174,10 @@ def reseau_top_regulateurs(matrix, gene_names=None,
     return G
 
 
-def plot_network(p, seuil=0.3, network=0, train="full", ns=1):
+def plot_network(p, seuil=0.3, net_toplot='inter_simul', net_index=0, train="full", ns=1):
     """Visualise the inferred GRN for a project directory.
 
-    Loads ``inter_simul.npy`` and plots the top regulators using
+    Loads ``net_toplot.npy`` and plots the top regulators using
     :func:`analyse_reseau` and :func:`reseau_top_regulateurs`.
 
     Parameters
@@ -187,19 +187,22 @@ def plot_network(p, seuil=0.3, network=0, train="full", ns=1):
     seuil : float
         Edge-weight threshold passed as ``leaf_threshold`` to
         :func:`reseau_top_regulateurs` (fraction of max weight).
-    network : int
-        Index along the third axis of ``inter_simul.npy`` to visualise
+    net_index : int
+        Index along the third axis of ``net_toplot.npy`` to visualise
         (default 0).
     train : str
         Data split used to recover gene names (``"full"`` or ``"train"``).
     ns : int
-        Number of leading rows/columns to skip in ``inter_simul.npy``
+        Number of leading rows/columns to skip in ``net_toplot.npy``
         (default 1, which drops the basal/stimulus node).
     """
     adata = sc.read_h5ad(f'{p}Data/data_{train}.h5ad')
-    grn_mat = np.load(f'{p}cardamomOT/inter_simul.npy')[ns:, ns:]
+    grn_mat = np.load(f'{p}cardamomOT/{net_toplot}.npy')[ns:, ns:]
     genes_init = list(adata.var_names)
-    grn_slice = grn_mat[:, :, network]
+    if grn_mat.ndim < 3: 
+        grn_slice = grn_mat
+    else:
+        grn_slice = grn_mat[:, :, net_index]
 
     analyse_reseau(grn_slice, genes_init, top_regulateurs=1000)
     reseau_top_regulateurs(
