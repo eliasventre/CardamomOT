@@ -283,7 +283,7 @@ def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
         inter_t_run = core_filter(inter_ref, kon_vector, genes_list)
         return inter_t_run
 
-    n_order = min(n_order, G)
+    n_order = max(n_order, G)
     results = Parallel(n_jobs=-1)(delayed(single_run)(i) for i in range(n_order))
 
     # Agregation

@@ -131,8 +131,8 @@ class NetworkModel:
         self.lambda_mlp    = .5  # Mix weight for training-data ratios vs MLP in simulate_full_with_harissa:
                                   # 1 = pure linear interpolation of observed g, 0 = pure MLP g(P, kon(P))
         # Filtering
-        self.filter_network = 0 # Do we filter the network ? It also builds a temporal network using the filter criterium
-        self.seuil_min_network = 1e-3 # minimum absolute value for network interaction bounds and filtering
+        self.filter_network = 1 # Do we filter the network ? It also builds a temporal network using the filter criterium
+        self.seuil_min_network = 1e-1 # minimum absolute value for network interaction bounds and filtering
 
         ## Compute degradations after inference
         self.recompute_degradations = 1 # Do we want to recompute degradation rates for simulations ?
