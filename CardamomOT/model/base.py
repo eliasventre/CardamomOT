@@ -127,7 +127,7 @@ class NetworkModel:
         self.prior_network_pen = 1.0 # 1 if we don't use prior information. If not we can penalize the non-existing age in prior network with values between 1 and 0: 0 = impossible edge
         self.constrain_basal_uniform = 1.0 # >= 0 penalty strength that pushes per-sample basals to be equal (ignores samples pinned by KO/OV basal_ref)
         self.hard_forcing_ref = False # if True, constrain all network params to ±ref_constraint_pct around inter_ref
-        self.ref_constraint_pct = 0 # fractional tolerance around inter_ref values for bounds (used when hard_forcing_ref=True)
+        self.ref_constraint_pct = 0.1 # fractional tolerance around inter_ref values for bounds (used when hard_forcing_ref=True)
         self.lambda_mlp    = .5  # Mix weight for training-data ratios vs MLP in simulate_full_with_harissa:
                                   # 1 = pure linear interpolation of observed g, 0 = pure MLP g(P, kon(P))
         # Filtering
@@ -139,7 +139,7 @@ class NetworkModel:
         self.batch_size_degradations = 256 # number of trajectories to take to make the inference (slow without gpu)
         self.use_temporal_degradations = 1 # If so, compute temporal degradation rates for simulations ?
         self.lambda_scale  = 1e-3  # L2 penalty on scale[ns:] around 1 (large = scale stays ~1; 0 = free)
-        self.lambda_deg0   = 0     # L2 penalty on d around d_init (0 = free; large = stays close to prior)
+        self.lambda_deg0   = 1     # L2 penalty on d around d_init (0 = free; large = stays close to prior)
         self.lambda_deg1   = 1e-3  # L2 penalty on d_t around 0 (0 = free; large = stays close to non-temporal)
         self.smooth_degradations_sigma = None  # None=auto KDE+CV, 0=off, float>0=fixed sigma (in time-step units)
         self.smooth_degradations_strength = 0  # blend weight in [0,1]: 0=no smoothing, 1=full smoothing
