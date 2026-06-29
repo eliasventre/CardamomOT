@@ -206,7 +206,7 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
 
 def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init, y_rna_init,
                     y_kon_end_true, y_kon_end, y_prot_end, y_rna_end, mode_init, mode_end,
-                    basal, inter, ks, delta_t, tol=1.0, n_pas=25, samples_data=None, stim_vals=np.ones(1), scale_proteins=1):
+                    basal, inter, ks, delta_t, tol=0.6, n_pas=25, samples_data=None, stim_vals=np.ones(1), scale_proteins=1):
     
     ns = len(stim_vals)
     y_prot = np.ones_like(y_rna_end)
@@ -228,7 +228,7 @@ def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init
         # Only apply where cnt < 1
         diff_init = np.abs(kon_new[:, ns:] - y_kon_init[:, ns:])
         diff_end = np.abs(kon_new[:, ns:] - y_kon_end[:, ns:])
-        bool_var = (cnt == 0) & (diff_init > diff_end)
+        bool_var = (cnt == 0) & (diff_init >= diff_end)
         alpha[bool_var] = alpha[bool_var] * (1 - weights[bool_var]) + t * weights[bool_var]
         cnt[bool_var] = 1
 
