@@ -480,9 +480,9 @@ def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, th
             for idx in range(n_inter_flat):
                 v = theta_ref_flat[idx]
                 if v > seuil_min_network:
-                    bounds[idx] = (r_minus * v, min(r_plus * v, max_bounds))
+                    bounds[idx] = (r_minus * v, max(r_minus * v, min(r_plus * v, max_bounds)))
                 elif v < -seuil_min_network:
-                    bounds[idx] = (max(-max_bounds, r_plus * v), r_minus * v)
+                    bounds[idx] = (min(r_minus * v, max(-max_bounds, r_plus * v)), r_minus * v)
                 else:
                     bounds[idx] = (-seuil_min_network, seuil_min_network)
         else:
@@ -491,9 +491,9 @@ def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, th
                 if theta_ref_flat[idx] != 0.0:
                     v = theta_ref_flat[idx]
                     if v > seuil_min_network:
-                        bounds[idx] = (r_minus * v, max_bounds)
+                        bounds[idx] = (r_minus * v, max(r_minus * v, max_bounds))
                     elif v < -seuil_min_network:
-                        bounds[idx] =  (-max_bounds, r_minus * v)
+                        bounds[idx] =  (min(-max_bounds, r_minus * v), r_minus * v)
                 elif ref_network_flat[idx] != 0.0:
                     v = ref_network_flat[idx]
                     if v < -1: bounds[idx] = (-max_bounds, -seuil_min_network)
@@ -563,12 +563,12 @@ def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal
         r_minus = 1 - ref_constraint_pct
         if hard_forcing_ref:
             for idx in range(n_inter_flat):
-                bounds[idx] = (r_minus, r_plus)
+                bounds[idx] = (r_minus, max(r_minus, r_plus))
         else:
             # Tighten bounds for non-zero reference interactions only
             for idx in range(n_inter_flat):
                 if theta_ref_flat[idx] != 0.0:
-                    bounds[idx] = (r_minus, r_plus)
+                    bounds[idx] = (r_minus, max(r_minus, r_plus))
 
     loss_fn = partial(objective_refinement,
                       correc_ref=correc_ref, inter=inter, basal=basal,
