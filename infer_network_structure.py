@@ -325,8 +325,8 @@ def main(argv):
 
     basal_init = _load_gene_vec('basal_init')
     inter_init = _load_gene_mat('inter_init')
-    basal_ref  = _load_gene_vec('basal_ref')
-    inter_ref  = _load_gene_mat('inter_ref') 
+    basal_ref  = _load_gene_vec('basal_ref') 
+    inter_ref  = _load_gene_mat('inter_ref') * 3
 
     # ─── PER-SAMPLE KOV PRIOR (overrides basal_ref if present) ──────────
     # Data/KO_OV_inference.txt : TSV with columns  sample_id | KO | OV
