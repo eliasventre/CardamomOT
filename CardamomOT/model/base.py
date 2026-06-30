@@ -128,11 +128,12 @@ class NetworkModel:
         self.constrain_basal_uniform = 1.0 # >= 0 penalty strength that pushes per-sample basals to be equal (ignores samples pinned by KO/OV basal_ref)
         self.hard_forcing_ref = False # if True, constrain all network params to ±ref_constraint_pct around inter_ref
         self.ref_constraint_pct = 0.1 # fractional tolerance around inter_ref values for bounds (used when hard_forcing_ref=True)
+        self.seuil_min_network = 1e-2 # minimum absolute value for network interaction bounds and filtering
         self.lambda_mlp    = .5  # Mix weight for training-data ratios vs MLP in simulate_full_with_harissa:
                                   # 1 = pure linear interpolation of observed g, 0 = pure MLP g(P, kon(P))
         # Filtering
         self.filter_network = 1 # Do we filter the network ? It also builds a temporal network using the filter criterium
-        self.seuil_min_network = 1e-1 # minimum absolute value for network interaction bounds and filtering
+        self.seuil_min_network_filter = 1e-1 # minimum absolute value for network interaction bounds and filtering
 
         ## Compute degradations after inference
         self.recompute_degradations = 1 # Do we want to recompute degradation rates for simulations ?
@@ -1606,7 +1607,8 @@ class NetworkModel:
         ### filter_edges
         if self.filter_network:
             inter, _ = filter_network(len(times), N_tot, y_prot, ks, basal, inter, 
-                                      samples_data=self.samples_data, seuil_variations=self.seuil_min_network)
+                                      samples_data=self.samples_data, 
+                                      seuil_intensity=self.seuil_min_network ,seuil_variations=self.seuil_min_network_filter)
 
         error_corrected = self._count_errors_per_sample(y_prot, self.kon_beta, self.proba_traj, ks,
                                                         inter, basal, samples_id=samples_id, samples_data=self.samples_data)

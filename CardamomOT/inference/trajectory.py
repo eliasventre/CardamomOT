@@ -238,7 +238,7 @@ def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init
 
 
 def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
-                   seuil_intensity=5e-2, seuil_variations=1e-2, n_order=10, samples_data=None):
+                   seuil_intensity=1e-2, seuil_variations=1e-2, n_order=10, samples_data=None):
 
     if basal_ref.ndim == 3:
         n_samples, G, n_networks = basal_ref.shape
