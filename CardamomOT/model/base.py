@@ -126,9 +126,9 @@ class NetworkModel:
         self.stimulus = 1.0 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
         self.prior_network_pen = 1.0 # 1 if we don't use prior information. If not we can penalize the non-existing age in prior network with values between 1 and 0: 0 = impossible edge
         self.constrain_basal_uniform = 1.0 # >= 0 penalty strength that pushes per-sample basals to be equal (ignores samples pinned by KO/OV basal_ref)
-        self.hard_forcing_ref = True # if True, constrain all network params to ±ref_constraint_pct around inter_ref
+        self.hard_forcing_ref = False # if True, constrain all network params to ±ref_constraint_pct around inter_ref
         self.ref_constraint_pct = 0.01 # fractional tolerance around inter_ref values for bounds (used when hard_forcing_ref=True)
-        self.seuil_min_network = 5e-2 # minimum absolute value for network interaction bounds and filtering
+        self.seuil_min_network = 1e-2 # minimum absolute value for network interaction bounds and filtering
         self.lambda_mlp    = .5  # Mix weight for training-data ratios vs MLP in simulate_full_with_harissa:
                                   # 1 = pure linear interpolation of observed g, 0 = pure MLP g(P, kon(P))
         # Filtering
