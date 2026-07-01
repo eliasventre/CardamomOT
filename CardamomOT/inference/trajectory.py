@@ -240,6 +240,10 @@ def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init
 def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
                    seuil_intensity=1e-2, seuil_variations=1e-2, n_order=10, samples_data=None):
 
+    if seuil_variations <= 0:
+        inter = inter_ref * (np.abs(inter_ref) >= seuil_intensity)
+        return inter, np.tile(inter, (T,) + (1,) * inter.ndim)
+    
     if basal_ref.ndim == 3:
         n_samples, G, n_networks = basal_ref.shape
     else:
@@ -248,28 +252,29 @@ def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
     kon_vector = _kon_per_sample(prot_traj, ks, inter_ref, basal_ref, samples_data=samples_data)
 
     def core_filter(inter_ref, kon_vector, genes_list):
-        inter_t = np.zeros((T, G, G, n_networks))
-        variations = np.zeros((n_networks, G, G, T))
-        variations_ref = np.zeros((n_networks, G, G, T))
-        inter_tmp = inter_ref.copy()
-        for g1 in genes_list:
-            for n in range(n_networks):
-                inter_tmp[g1, :, n] = 0
-                kon_vector_nog1 = _kon_per_sample(prot_traj, ks, inter_tmp, basal_ref, samples_data=samples_data)
-                for g2 in range(0, G):
-                    val = abs(inter_ref[g1, g2, n])
-                    if val >= seuil_intensity:
-                        diff = (kon_vector_nog1.reshape(T, N_traj, G) - 
-                                            kon_vector.reshape(T, N_traj, G))**2
-                        variations_ref[n, g1, g2, :] = diff[:, :, g2].max(axis=1)
-                        variations[n, g1, g2, 1:] = np.abs(np.diff(variations_ref[n, g1, g2, :]))
-                        variations[n, g1, g2, 0] = abs(variations_ref[n, g1, g2, 0])
-                        max_val = np.max(variations[n, g1, g2, :])
-                        if max_val >= seuil_variations/np.sqrt(G):
-                            tmax: int = np.argmax(variations[n, g1, g2, :])
-                            inter_t[tmax:, g1, g2, n] = inter_ref[g1, g2, n]
-                            inter_tmp[g1, g2, n] = inter_ref[g1, g2, n]
-        return inter_t
+
+            inter_t = np.zeros((T, G, G, n_networks))
+            variations = np.zeros((n_networks, G, G, T))
+            variations_ref = np.zeros((n_networks, G, G, T))
+            inter_tmp = inter_ref.copy()
+            for g1 in genes_list:
+                for n in range(n_networks):
+                    inter_tmp[g1, :, n] = 0
+                    kon_vector_nog1 = _kon_per_sample(prot_traj, ks, inter_tmp, basal_ref, samples_data=samples_data)
+                    for g2 in range(0, G):
+                        val = abs(inter_ref[g1, g2, n])
+                        if val >= seuil_intensity:
+                            diff = (kon_vector_nog1.reshape(T, N_traj, G) - 
+                                                kon_vector.reshape(T, N_traj, G))**2
+                            variations_ref[n, g1, g2, :] = diff[:, :, g2].max(axis=1)
+                            variations[n, g1, g2, 1:] = np.abs(np.diff(variations_ref[n, g1, g2, :]))
+                            variations[n, g1, g2, 0] = abs(variations_ref[n, g1, g2, 0])
+                            max_val = np.max(variations[n, g1, g2, :])
+                            if max_val >= seuil_variations/np.sqrt(G):
+                                tmax: int = np.argmax(variations[n, g1, g2, :])
+                                inter_t[tmax:, g1, g2, n] = inter_ref[g1, g2, n]
+                                inter_tmp[g1, g2, n] = inter_ref[g1, g2, n]
+            return inter_t
 
     try:
         from joblib import Parallel, delayed

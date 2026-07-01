@@ -204,6 +204,10 @@ def plot_network(p, seuil=0.3, net_toplot='inter_simul', net_index=0, train="ful
     else:
         grn_slice = grn_mat[:, :, net_index]
 
+    grn = np.genfromtxt(f'{p}cardamomOT/{net_toplot}.csv', delimiter=",")[ns:, ns:]
+    print(np.sum(grn - grn_slice)**2)
+    print(grn[:10, :10])
+
     analyse_reseau(grn_slice, genes_init, top_regulateurs=1000)
     reseau_top_regulateurs(
         grn_slice,
@@ -212,3 +216,48 @@ def plot_network(p, seuil=0.3, net_toplot='inter_simul', net_index=0, train="ful
         leaf_threshold=seuil,
         width_scale=5,
     )
+
+    print(net_toplot)
+
+    import seaborn as sns
+
+    # Sommes par gène
+    row_sums = grn_slice.sum(axis=1)  # sortant (out)
+    col_sums = grn_slice.sum(axis=0)  # entrant (in)
+
+    # DataFrame long
+    df = pd.DataFrame({
+        "value": np.concatenate([row_sums, col_sums]),
+        "Type": (["Row_sums"] * len(row_sums)) + (["Col_sums"] * len(col_sums))
+    })
+
+    plt.figure(figsize=(5, 5))
+
+    sns.violinplot(
+        data=df,
+        x="Type",
+        y="value",
+        inner=None,          # pas de box interne
+        color="lightgrey"    # contour gris clair comme base
+    )
+
+    sns.stripplot(
+        data=df,
+        x="Type",
+        y="value",
+        hue="Type",
+        dodge=False,
+        palette={
+            "Row_sums": "deepskyblue",   # bleu ciel
+            "Col_sums": "violet"         # violet
+        },
+        size=4,
+        alpha=0.8
+    )
+
+    plt.xlabel("")
+    plt.ylabel("Sum of GRN weights")
+
+    plt.legend(title="Type")
+    plt.tight_layout()
+    plt.show()
