@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gs
 from sklearn.metrics import precision_recall_curve, auc
 
-algoD = ['CardamomOT', 'CARDAMOM', 'Reference Fitting', 'GENIE3', 'SINCERITIES']
+algoD = ['CardamomOT', 'Reference Fitting', 'GENIE3', 'SINCERITIES']
 
 # Map display names to folder names on disk
 algo_file = {'CardamomOT': 'CARDAMOM2', 'CARDAMOM': 'CARDAMOM1', 'Reference Fitting': 'REFERENCE_FITTING'}
@@ -35,7 +35,6 @@ MODE_PANELS = [
     ('library_size', 'Library size', 2),
 ]
 INFERENCE_SCRIPTS = [
-    'infer_CARDAMOM1.py',
     'infer_CARDAMOM2.py',
     'infer_reference_fitting.py',
     'infer_GENIE3.py',
@@ -49,6 +48,9 @@ def copy_benchmark_data(src_benchmark, dst_benchmark):
     dst_benchmark.mkdir(parents=True, exist_ok=True)
     for subdir in ['Data', 'True']:
         shutil.copytree(src_benchmark / subdir, dst_benchmark / subdir)
+    # Create algorithm output directories so np.save doesn't fail.
+    for algo in algoD:
+        (dst_benchmark / file_name(algo)).mkdir(parents=True, exist_ok=True)
 
 
 def ensure_helper_scripts(mode_root):
@@ -234,8 +236,8 @@ for n, benchmark in enumerate(benchmarks):
                             fontweight='bold', **opt)
                 ax.annotate(mode_title, xytext=(x+14,y), **opt)
             b = np.mean(auprD['Random'])
-            ax.plot([0,5],[b,b], color='lightgray', ls='--', lw=0.8, zorder=0)
-            ax.set_xlim(0.8, 5.5)
+            ax.plot([0,4],[b,b], color='lightgray', ls='--', lw=0.8, zorder=0)
+            ax.set_xlim(0.8, 4.5)
             for i, algo in enumerate(algoD):
                 box = ax.boxplot([auprD[algo]], positions=[i+1], **opt_box)
                 configure_box(box, c[algo])
