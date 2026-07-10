@@ -59,7 +59,7 @@ def temporary_cwd(path):
 
 def copy_benchmark_data(src_benchmark, dst_benchmark):
     """Copy Data/ and True/ folders to the dropout directory.
-    Preserves any existing CARDAMOM2/ scores to avoid recomputation."""
+    Preserves any existing CARDAMOM2/ scores inside dst_benchmark to avoid recomputation."""
     # Remove Data/ and True/ subdirectories if they exist, but keep CARDAMOM2/
     for subdir in ['Data', 'True']:
         subpath = dst_benchmark / subdir
@@ -68,7 +68,7 @@ def copy_benchmark_data(src_benchmark, dst_benchmark):
     dst_benchmark.mkdir(parents=True, exist_ok=True)
     for subdir in ['Data', 'True']:
         shutil.copytree(src_benchmark / subdir, dst_benchmark / subdir)
-    # Create CARDAMOM2 output directory for scores (if not already present)
+    # Create CARDAMOM2 output directory for scores inside the level folder
     (dst_benchmark / 'CARDAMOM2').mkdir(parents=True, exist_ok=True)
 
 
@@ -89,64 +89,49 @@ def prepare_dropout_data():
     """Create figure4_dropout/ with dropout copies of the 4 directed benchmarks
     at 7 dropout levels (5%, 10%, 20%, 35%, 50%, 70%, 90%).
     Level 0 = real (original data, no dropout).
-    Skips entirely if all output scores already exist."""
+    Skips per (benchmark, level) if all scores already exist."""
     do_dir = FIGURE4_DROPOUT_DIR
-    # Check if all scores already exist — if so, skip everything
-    all_done = True
-    for bench in benchmarks:
-        for li, level in enumerate(DROPOUT_LEVELS):
-            for r in range(1, N + 1):
-                if not (do_dir / bench / 'CARDAMOM2' / f'score_l{li}_r{r}.npy').exists():
-                    all_done = False
-                    break
-            if not all_done:
-                break
-        if not all_done:
-            break
-    if all_done:
-        print('Dropout data already prepared, skipping.')
-        return
-
     rng = np.random.default_rng(42)
+    any_work_done = False
     for bench in benchmarks:
         src = BASE_DIR / bench
         for li, level in enumerate(DROPOUT_LEVELS):
+            # Check if all scores for this (bench, level) already exist
+            all_scores_exist = all(
+                (do_dir / bench / f'level_{li}' / 'CARDAMOM2' / f'score_{r}.npy').exists()
+                for r in range(1, N + 1)
+            )
+            if all_scores_exist:
+                continue
+            any_work_done = True
             dst = do_dir / bench / f'level_{li}'
             copy_benchmark_data(src, dst)
             if level > 0:
                 for data_file in sorted((dst / 'Data').glob('data_*.txt')):
                     apply_dropout(data_file, rng, level)
+    if not any_work_done:
+        print('Dropout data already prepared, skipping.')
 
 
 def run_dropout_inference():
-    """Run CARDAMOM2 inference on dropout benchmarks (skips if already done)."""
+    """Run CARDAMOM2 inference on dropout benchmarks (resumes per replicate)."""
     do_dir = FIGURE4_DROPOUT_DIR
-    # Check whether scores already exist
-    all_done = True
-    for bench in benchmarks:
-        for li in range(len(DROPOUT_LEVELS)):
-            for r in range(1, N + 1):
-                if not (do_dir / bench / 'CARDAMOM2' / f'score_l{li}_r{r}.npy').exists():
-                    all_done = False
-                    break
-            if not all_done:
-                break
-        if not all_done:
-            break
-    if all_done:
-        print('Dropout inference already complete, skipping.')
-        return
 
     sys.path.insert(0, str(REPO_ROOT))
     from CardamomOT import NetworkModel
 
-    n_repet = 4   # number of initial couplings (matching infer_CARDAMOM2.py)
+    n_repet = 2   # number of initial couplings (matching infer_CARDAMOM2.py)
     verb = 1
+    any_work_done = False
 
     with temporary_cwd(do_dir):
         for bench in benchmarks:
             for li in range(len(DROPOUT_LEVELS)):
                 for r in range(1, N + 1):
+                    score_path = Path(f'{bench}/level_{li}/CARDAMOM2/score_{r}.npy')
+                    if score_path.exists():
+                        continue
+                    any_work_done = True
                     print(f'  Dropout inference: {bench} level {DROPOUT_LABELS[li]} run {r}/{N}')
                     fname = f'{bench}/level_{li}/Data/data_{r}.txt'
                     data = np.loadtxt(fname, dtype=int, delimiter='\t')[1:, 1:]
@@ -167,8 +152,9 @@ def run_dropout_inference():
                             dtype=float, delimiter='\t').T
                         model.fit(x, verb=verb)
                         score += model.inter
-                    os.makedirs(f'{bench}/CARDAMOM2', exist_ok=True)
-                    np.save(f'{bench}/CARDAMOM2/score_l{li}_r{r}', score)
+                    np.save(f'{bench}/level_{li}/CARDAMOM2/score_{r}', score)
+    if not any_work_done:
+        print('Dropout inference already complete, skipping.')
 
 
 # ============================================================
@@ -180,7 +166,7 @@ def prepare_timescale_data():
     Simulate each of the 4 benchmarks with harissa at varying levels
     of timepoint jitter (sigma). 8 sigma levels × N replicates each.
     Saves data in figure4_timescale/BENCHMARK/.
-    Skips entirely if all output scores already exist.
+    Resumes per (benchmark, sigma, replicate) if score already exists.
     """
     from harissa import NetworkModel as HarissaNetworkModel
 
@@ -188,22 +174,6 @@ def prepare_timescale_data():
     n_sigmas = len(TIMESCALE_SIGMAS)
     n_reps = N
     C = 1000  # total cells per simulation
-
-    # Check if all scores already exist — if so, skip everything
-    all_done = True
-    for bench in benchmarks:
-        for si in range(n_sigmas):
-            for r in range(1, n_reps + 1):
-                if not (ts_dir / bench / 'CARDAMOM2' / f'score_s{si}_r{r}.npy').exists():
-                    all_done = False
-                    break
-            if not all_done:
-                break
-        if not all_done:
-            break
-    if all_done:
-        print('Timescale data already prepared, skipping.')
-        return
 
     # ---- Harissa model builders for each benchmark ----
     def _make_BN8():
@@ -256,13 +226,10 @@ def prepare_timescale_data():
     master_rng = np.random.default_rng(42)
     all_seeds = master_rng.integers(0, 2**31, size=(len(benchmarks), n_sigmas, n_reps))
 
+    any_work_done = False
     for bi, bench in enumerate(benchmarks):
         dst = ts_dir / bench
-        # Remove Data/ and True/ subdirectories; preserve CARDAMOM2/ scores
-        for sub in ['Data', 'True']:
-            subpath = dst / sub
-            if subpath.exists():
-                shutil.rmtree(subpath)
+        # Ensure directories exist (do not remove existing data)
         for sub in ['Data', 'True', 'CARDAMOM2', 'Data/Rates']:
             (dst / sub).mkdir(parents=True, exist_ok=True)
 
@@ -289,6 +256,10 @@ def prepare_timescale_data():
 
         for si, sigma in enumerate(TIMESCALE_SIGMAS):
             for r in range(1, n_reps + 1):
+                # Skip if score already exists for this (bench, sigma, replicate)
+                if (dst / 'CARDAMOM2' / f'score_s{si}_r{r}.npy').exists():
+                    continue
+                any_work_done = True
                 print(f'  Timescale simulation: {bench} sigma={sigma} rep {r}/{n_reps}')
                 rep_rng = np.random.default_rng(all_seeds[bi, si, r - 1])
 
@@ -323,35 +294,22 @@ def prepare_timescale_data():
                 # Save data
                 np.savetxt(dst / 'Data' / f'data_s{si}_r{r}.txt',
                            data.T, fmt='%d', delimiter='\t')
+    if not any_work_done:
+        print('Timescale data already prepared, skipping.')
 
 
 def run_timescale_inference():
-    """Run CARDAMOM2 inference on timescale-perturbed benchmarks (skips if done)."""
+    """Run CARDAMOM2 inference on timescale-perturbed benchmarks (resumes per replicate)."""
     ts_dir = FIGURE4_TIMESCALE_DIR
     n_sigmas = len(TIMESCALE_SIGMAS)
     n_reps = N
 
-    # Check if all scores exist
-    all_done = True
-    for bench in benchmarks:
-        for si in range(n_sigmas):
-            for r in range(1, n_reps + 1):
-                if not (ts_dir / bench / 'CARDAMOM2' / f'score_s{si}_r{r}.npy').exists():
-                    all_done = False
-                    break
-            if not all_done:
-                break
-        if not all_done:
-            break
-    if all_done:
-        print('Timescale inference already complete, skipping.')
-        return
-
     sys.path.insert(0, str(REPO_ROOT))
     from CardamomOT import NetworkModel
 
-    n_repet = 4
+    n_repet = 2
     verb = 1
+    any_work_done = False
 
     with temporary_cwd(ts_dir):
         for bench in benchmarks:
@@ -360,6 +318,10 @@ def run_timescale_inference():
                            dtype=float, delimiter='\t').T
             for si in range(n_sigmas):
                 for r in range(1, n_reps + 1):
+                    score_path = Path(f'{bench}/CARDAMOM2/score_s{si}_r{r}.npy')
+                    if score_path.exists():
+                        continue
+                    any_work_done = True
                     print(f'  Timescale inference: {bench} sigma={TIMESCALE_SIGMAS[si]} '
                           f'rep {r}/{n_reps}')
                     fname = f'{bench}/Data/data_s{si}_r{r}.txt'
@@ -385,6 +347,8 @@ def run_timescale_inference():
                         model.fit(x, verb=verb)
                         score += model.inter
                     np.save(f'{bench}/CARDAMOM2/score_s{si}_r{r}', score)
+    if not any_work_done:
+        print('Timescale inference already complete, skipping.')
 
 
 # ---- Prepare data and run inference ----
@@ -399,16 +363,11 @@ n_do_levels = len(DROPOUT_LEVELS)
 dropout_aupr = {li: [] for li in range(n_do_levels)}
 for bench in benchmarks:
     for r in range(1, N + 1):
-        inter_real = abs(np.load(f'{path}{bench}/True/inter_{r}.npy'))
-        G = inter_real.shape[0]
-        edges = [(i, j) for i in range(G) for j in set(range(1, G)) - {i}]
         for li in range(n_do_levels):
-            if li == 0:
-                inter = inter_real
-                score = abs(np.load(f'{path}{bench}/CARDAMOM2/score_{r}.npy'))
-            else:
-                inter = abs(np.load(do_dir / bench / f'level_{li}' / 'True' / f'inter_{r}.npy'))
-                score = abs(np.load(do_dir / bench / 'CARDAMOM2' / f'score_l{li}_r{r}.npy'))
+            inter = abs(np.load(do_dir / bench / f'level_{li}' / 'True' / f'inter_{r}.npy'))
+            score = abs(np.load(do_dir / bench / f'level_{li}' / 'CARDAMOM2' / f'score_{r}.npy'))
+            G = inter.shape[0]
+            edges = [(i, j) for i in range(G) for j in set(range(1, G)) - {i}]
             y0 = np.array([inter[i, j] for i, j in edges])
             y1 = np.array([score[i, j] for i, j in edges])
             p, rcl, _ = precision_recall_curve(y0, y1)
@@ -434,7 +393,7 @@ for bench in benchmarks:
 ts_aupr_random = []
 for bench in benchmarks:
     for r in range(1, N + 1):
-        inter = abs(np.load(f'{path}{bench}/True/inter_{r}.npy'))
+        inter = abs(np.load(ts_dir / bench / 'True' / f'inter_{r}.npy'))
         G = inter.shape[0]
         edges = [(i, j) for i in range(G) for j in set(range(1, G)) - {i}]
         ts_aupr_random.append(np.mean([inter[i, j] for i, j in edges]))

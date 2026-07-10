@@ -77,5 +77,5 @@ pypath_log/
 # Sphinx autoapi — generated at build time, never commit
 docs/autoapi/
 
-results_article/figures/figure4_beta/*
+results_article/figures/figure4_timescale/*
 results_article/figures/figure4_dropout/*
