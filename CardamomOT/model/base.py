@@ -105,9 +105,10 @@ class NetworkModel:
         # Trajectory inference with OT
         self.stopThr_init = 1e-7 # initial tolerance for sinkhorn algorithm
         self.batch_size_traj = 512 # Maximum number of cells used per time point per sample for solving EOT problems in the inference.
+        self.batch_size_traj_exp = 512 # Target size of the real (experimental) cell batches matched against each reconstruction batch; decoupled from batch_size_traj so the OT target pool can stay well-sized even when batch_size_traj is kept small for cost.
         self.unbalanced_reg = 5 # Unbalanced regularization parameter for UOT if > 0, OT if 0
         self.init_entropic_noise = 1.5 # Initial entropic penalization for OT
-        self.quant_samples = .8 # Quantile of cells number per sample to use for inference
+        self.quant_samples = .95 # Quantile of cells number per sample to use for inference
         # General parameters to calibrate protein reconstruction
         self.scale_proteins = 1 # Eventually rescale protein values (recommended:1-2)
         self.scale_mrnas = 100 # Eventually rescale mRNA values (recommended:100)
@@ -141,10 +142,10 @@ class NetworkModel:
         self.batch_size_degradations = 256 # number of trajectories to take to make the inference (slow without gpu)
         self.use_temporal_degradations = 1 # If so, compute temporal degradation rates for simulations ?
         self.lambda_scale  = 1e-3  # L2 penalty on scale[ns:] around 1 (large = scale stays ~1; 0 = free)
-        self.lambda_deg0   = 1     # L2 penalty on d around d_init (0 = free; large = stays close to prior)
-        self.lambda_deg1   = 1e-3  # L2 penalty on d_t around 0 (0 = free; large = stays close to non-temporal)
+        self.lambda_deg0   = 1  # L2 penalty on d0 around d_init (0 = free; large = stays close to prior)
+        self.lambda_deg1   = 1e-3  # L2 penalty on d1 around 0 (0 = free; large = stays close to non-temporal)
         self.smooth_degradations_sigma = None  # None=auto KDE+CV, 0=off, float>0=fixed sigma (in time-step units)
-        self.smooth_degradations_strength = 0  # blend weight in [0,1]: 0=no smoothing, 1=full smoothing
+        self.smooth_degradations_strength = 0.5  # blend weight in [0,1]: 0=no smoothing, 1=full smoothing
 
         ## Simulations
         self.simulation_stochastic = True # 1 if we simulate Bursty-like proteins, 0 if deterministic limit for proteins
@@ -277,12 +278,11 @@ class NetworkModel:
         return binarized.to_numpy().astype(float), dropout_rates
 
 
-    def core_binarization(self, data_rna, gene_names, vect_t, G_tot, min_components=1, max_components=5, refilter=0, max_iter_kinetics=100, 
-                          cell_rd=None, verb=True, kov_cell_mask=None, scboolseq_matrix=None, scboolseq_dropouts=None):
+    def core_binarization(self, data_rna, gene_names, vect_t, G_tot, min_components=1, max_components=5, refilter=0, max_iter_kinetics=100,
+                          verb=True, kov_cell_mask=None, scboolseq_matrix=None, scboolseq_dropouts=None):
         """
         Parameters
         ----------
-        cell_rd : (N_cells,) array or None
         kov_cell_mask : (N_cells, G_tot) int8 array or None
             Per-cell KO/OV constraints derived from KO_OV_inference.
 
@@ -325,7 +325,6 @@ class NetworkModel:
                     scbs_labels = None
                     scbs_dropout = None
             model = kinetics.fit(x, vect_t=vect_t, seuil=self.seuil,
-                                 s=cell_rd,
                                  batch_size_mixture=self.batch_size_mixture,
                                  scboolseq_labels=scbs_labels,
                                  scboolseq_dropout=scbs_dropout)
@@ -443,42 +442,14 @@ class NetworkModel:
 
 
 
-    def fit_mixture(self, data, refilter=0, gene_names=np.arange(1, 50000), min_components=2, max_components=2, max_iter_kinetics=0, cell_rd=None, verb=True, stimulus_schedule=None, time_key='time', kov_cell_mask=None):
+    def fit_mixture(self, data, refilter=0, gene_names=np.arange(1, 50000), min_components=2, max_components=2, max_iter_kinetics=0, verb=True, stimulus_schedule=None, time_key='time', kov_cell_mask=None):
         """
         Fit the mixture model parameters to the data.
-
-        Parameters
-        ----------
-        cell_rd : (N_cells,) array, pd.Series, ou None
-            Facteurs de read depth par cellule, typiquement issus de
-            adata.obs['rd'] (calculés par infer_rd.py).
-            Si None, le modèle NB classique sans correction est utilisé.
-
-        Exemple d'appel avec correction de read depth::
-
-            rd = np.asarray(adata.obs['rd'])
-            model.fit_mixture(data_rna, ..., cell_rd=rd)
         """
         data_rna = self._parse_input(data, time_key)
         N_cells, G_tot = data_rna.shape
         vect_t = data_rna[:, 0]
         self._stim_schedule = self._build_stimulus_schedule(np.sort(np.unique(vect_t)), stimulus_schedule)
-
-        # Auto-extract cell_rd from AnnData if not provided
-        try:
-            import anndata
-            if isinstance(data, anndata.AnnData) and cell_rd is None and 'rd' in data.obs:
-                cell_rd = np.asarray(data.obs['rd'].values, dtype=float)
-                cell_rd = cell_rd / (np.mean(cell_rd) + 1e-16)
-        except ImportError:
-            pass
-
-        # Conversion propre du read depth (supporte pd.Series et np.array)
-        if cell_rd is not None:
-            cell_rd = np.asarray(cell_rd, dtype=float).reshape(-1)
-            assert len(cell_rd) == N_cells, (
-                f"cell_rd a {len(cell_rd)} entrées mais data a {N_cells} cellules."
-            )
 
         # ── scBoolSeq pre-computation (once for all genes) ──────────────────
         scboolseq_matrix  = None
@@ -494,7 +465,6 @@ class NetworkModel:
                                         max_components=max_components,
                                         refilter=refilter,
                                         max_iter_kinetics=max_iter_kinetics,
-                                        cell_rd=cell_rd,
                                         verb=verb,
                                         kov_cell_mask=kov_cell_mask,
                                         scboolseq_matrix=scboolseq_matrix,
@@ -550,10 +520,17 @@ class NetworkModel:
     def estimate_trajectories_given_model(self, vect_t, times, vect_samples_id,
                                       samples_id, vect_rna, y_prot_old, prot_formodes, y_kon_old, y_rna_old, y_proba_old,
                                       alpha_old, vect_samples_id_modified,
-                                      basal, inter, s1, ks, nb_cells, init_cells, R_opt_traj, to_keep_for_update, offset_init=[0],
-                                      n_iter=1, N_full=[100], N_samples=[100], intensity_prior=10):
+                                      basal, inter, s1, ks, init_cells, R_opt_traj, to_keep_for_update, offset_init=[0],
+                                      n_iter=1, N_full=[100], N_samples=[100], intensity_prior=10,
+                                      real_cell_batches=None, batch_idx=None):
         """
         Infer the protein trajectories when d1 is known and theta is not.
+
+        real_cell_batches[s_idx][t_idx] : list of index arrays partitioning the real
+            cells available at times[t_idx + 1] for sample s_idx into batches, so that
+            each batch of the reconstruction ensemble only targets its corresponding
+            batch of real cells instead of the full experimental set.
+        batch_idx : current batch index per sample (into real_cell_batches[s_idx]).
         """
 
         G = vect_rna.shape[1]
@@ -583,7 +560,7 @@ class NetworkModel:
         # Fill initial state (t = 0) and initialize sim_real_idx for those cells
         offset = 0
         for s, sample in enumerate(samples_id):
-            cell_indices = (vect_samples_id == sample)
+            cell_indices = (vect_t == times[0]) & (vect_samples_id == sample)
             global_cell_idx = np.flatnonzero(cell_indices)
             selected_init = init_cells[s]
 
@@ -603,18 +580,18 @@ class NetworkModel:
         for t_idx, time in enumerate(times[:-1]):
             offset = 0
             for s_idx, sample in enumerate(samples_id):
-                start_next = (vect_t == times[t_idx + 1]) & (vect_samples_id == sample)
+                cell_idx = real_cell_batches[s_idx][t_idx][batch_idx[s_idx]]
                 offset_init_s = offset + offset_init[s_idx]
                 start_index = N_total * t_idx + offset_init_s
                 next_index = N_total * (t_idx + 1) + offset_init_s
                 N_sample = N_samples[s_idx]
-                N_cells = nb_cells[s_idx, t_idx + 1]
+                N_cells = len(cell_idx)
                 start_index_full = N_total * (t_idx + 1) + offset
                 next_index_full = N_total * (t_idx + 1) + offset + N_full[s_idx]
 
                 vect_samples_id_modified[N_total * t_idx + offset:N_total * t_idx + offset + N_full[s_idx]] = s_idx
 
-                if N_sample:
+                if N_sample and N_cells:
 
                     # Snapshot minimal des anciennes valeurs pour le bloc alpha
                     if prot_old_is_nonzero and time != times[-2]:
@@ -627,14 +604,14 @@ class NetworkModel:
                     current_indices = np.arange(start_index, start_index + N_sample)
                     alpha_indices = np.arange(offset_init_s, offset_init_s + N_sample)
                     mode_init = self.adaptive_shrinkage(rna_modified[current_indices, ns:] * s1, kon_modified[current_indices, ns:]) / s1
-                    mode_end = self.adaptive_shrinkage(vect_rna[start_next, ns:] * s1, self.modes[start_next, ns:]) / s1
+                    mode_end = self.adaptive_shrinkage(vect_rna[cell_idx, ns:] * s1, self.modes[cell_idx, ns:]) / s1
 
                     basal_s = basal[min(s_idx, basal.shape[0] - 1)] if basal.ndim == 3 else basal
                     pairwise_dist, next_prot = my_otdistance(
-                        kon_modified[current_indices, ns:], self.modes[start_next, ns:],
+                        kon_modified[current_indices, ns:], self.modes[cell_idx, ns:],
                         prot_modified[current_indices, ns:],
-                        rna_modified[current_indices, ns:], vect_rna[start_next, ns:],
-                        proba_modified[current_indices, ns:], self.proba[start_next, ns:, :],
+                        rna_modified[current_indices, ns:], vect_rna[cell_idx, ns:],
+                        proba_modified[current_indices, ns:], self.proba[cell_idx, ns:, :],
                         mode_init, mode_end,
                         alpha_modified[t_idx, alpha_indices],
                         s1, ks, self.d[1, ns:], times[t_idx + 1] - time, basal_s, inter, loss=self.loss_norm,
@@ -644,7 +621,6 @@ class NetworkModel:
                         scale_proteins=self.scale_proteins
                     )
 
-                    cell_idx = np.flatnonzero(start_next)
                     delta_t = times[t_idx + 1] - time
                     src_real = sim_real_idx[current_indices]
 
@@ -671,15 +647,14 @@ class NetworkModel:
                         pairwise_dist = pairwise_dist / np.maximum(tr_w, 1e-10)
 
                     # --- Growth-weighted OT marginals ---
-                    _pr = getattr(self, '_prolif_rate', None)
-                    _dr = getattr(self, '_death_rate', None)
-                    _has_growth = _pr is not None or _dr is not None
-                    if _has_growth:
-                        _p = _pr if _pr is not None else np.zeros(len(vect_t))
-                        _d = _dr if _dr is not None else np.zeros(len(vect_t))
-                        mu = np.exp((_p[src_real] - _d[src_real]) * delta_t / 2)
+                    # WOT convention (Schiebinger et al. 2019): both the source AND
+                    # target marginals are corrected by exp(±R·Δt/2), not just the
+                    # source by exp(R·Δt) — see docs/advanced.md#net-proliferation-rate--default-behaviour.
+                    _r = getattr(self, '_prolif_net_rate', None)
+                    if _r is not None:
+                        mu = np.exp(_r[src_real] * delta_t / 2)
+                        nu = np.exp(-_r[cell_idx] * delta_t / 2)
                         mu /= mu.sum()
-                        nu = np.exp((_d[cell_idx] - _p[cell_idx]) * delta_t / 2)
                         nu /= nu.sum()
                     else:
                         mu = np.ones(N_sample) / N_sample
@@ -727,10 +702,6 @@ class NetworkModel:
                         R_n = (2.0 / delta_t) * (log_m - log_m.mean())
                     R_opt_traj[start_index:start_index + N_sample] = R_n
 
-                    # coupling /= coupling.sum(axis=0, keepdims=True)
-                    # row_marginals = coupling.sum(axis=1)
-                    # col_marginals = coupling.sum(axis=0)
-                    # coupling = ot.emd(row_marginals, col_marginals, -np.log(coupling + EPS))
                     coupling_norm = coupling / coupling.sum(axis=1, keepdims=True)
                     for n in range(N_sample):
                         m = np.random.choice(N_cells, p=coupling_norm[n])
@@ -770,7 +741,6 @@ class NetworkModel:
         ks,
         s1,
         init_cells_full,
-        nb_cells,
         N_full,
         N_samples,
         G_tot,
@@ -854,23 +824,31 @@ class NetworkModel:
         y_samples = np.zeros(len(vect_t_sim), dtype=int)
         R_opt_traj = np.zeros(len(vect_t_sim))
 
+        # Number of reconstruction batches per sample (ceil(N_full[s] / N_samples[s])) —
+        # this also fixes the number of real-cell batches built below, so that batch b of
+        # the reconstruction ensemble always targets batch b of the real cells.
+        n_batches_per_sample = [
+            int(np.ceil(N_full[s] / N_samples[s])) if N_samples[s] > 0 else 1
+            for s in range(n_samples_local)
+        ]
+
         # === Main loop ===
         while count_end <= count_max:
 
             if count_end == count_max or n_iter > self.max_iter:
-                if N_tot * len(times) > self.batch_size_network:
-                    basal, inter, basal_tmp, inter_tmp = inference_network(
-                        y_samples, y_kon, y_proba, y_prot, y_prot_prev,
-                        ks, n_stimuli=ns, samples_id=samples_id,
-                        ref_network=self.ref_network, basal_init=basal, inter_init=inter,
-                        basal_ref=basal_ref, inter_ref=inter_ref,
-                        proba=self.compute_with_proba, scale=self.scale_pen,
-                        weight_prev=weight_prev, loss=self.loss_norm,
-                        final=0, constrain_basal_uniform=self.constrain_basal_uniform,
-                        hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
-                        seuil_min_network=self.seuil_min_network)
-                    # --- Update kon_theta for alpha ---
-                    kon_vector[:, ns:] = self._kon_ref_per_sample(y_prot, ks, inter, basal, samples_id=samples_id, samples_data=y_samples)[:, ns:]
+                # if N_tot * len(times) > self.batch_size_network:
+                #     basal, inter, basal_tmp, inter_tmp = inference_network(
+                #         y_samples, y_kon, y_proba, y_prot, y_prot_prev,
+                #         ks, n_stimuli=ns, samples_id=samples_id,
+                #         ref_network=self.ref_network, basal_init=basal, inter_init=inter,
+                #         basal_ref=basal_ref, inter_ref=inter_ref,
+                #         proba=self.compute_with_proba, scale=self.scale_pen,
+                #         weight_prev=weight_prev, loss=self.loss_norm,
+                #         final=0, constrain_basal_uniform=self.constrain_basal_uniform,
+                #         hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
+                #         seuil_min_network=self.seuil_min_network)
+                #     # --- Update kon_theta for alpha ---
+                #     kon_vector[:, ns:] = self._kon_ref_per_sample(y_prot, ks, inter, basal, samples_id=samples_id, samples_data=y_samples)[:, ns:]
                 break
             
             weight_prev = self.weight_prev * min(1, (n_iter-1)/min_n_loops) # Flow matching from second iteration and small at early ones
@@ -900,6 +878,38 @@ class NetworkModel:
             else:
                 indices_shuffled = [np.arange(N_full[s]) for s in range(len(samples_id))]
 
+            # --- Redraw per-sample, per-time batches of real (experimental) cells ---
+            # Redrawn every outer iteration (fresh randomness, same cadence as the
+            # reconstruction-batch reshuffle above) to maximize mixing over the run.
+            # For sample s at time times[t_idx + 1], with K_nom = batch_size_traj_exp the
+            # target real-cell batch size (decoupled from N_samples[s], which only sizes
+            # the reconstruction/departure batches) and B_s = n_batches_per_sample[s] the
+            # number of batches to build, each batch gets size K = min(N_real, max(K_nom, ceil(N_real / B_s))):
+            #   - N_real <= K_nom (few real cells): K == N_real, so every batch is simply
+            #     the full real-cell set (no split at all);
+            #   - N_real >= B_s * K_nom (as many/more real cells than B_s * batch_size_traj_exp):
+            #     K == ceil(N_real / B_s), a plain partition with ~zero redundancy;
+            #   - in between: batches are pinned to K_nom, which requires some random
+            #     redundancy to still cover all real cells via their union — achieved by
+            #     concatenating independent shuffles of the real cells and slicing
+            #     consecutive chunks, which spreads the redundancy as evenly as possible
+            #     while guaranteeing full coverage.
+            real_cell_batches = [[None] * (len(times) - 1) for _ in range(n_samples_local)]
+            for s_idx, sample in enumerate(samples_id):
+                K_nom = max(self.batch_size_traj_exp, N_samples[s_idx])
+                B_s = n_batches_per_sample[s_idx]
+                for t_idx in range(len(times) - 1):
+                    idx = np.flatnonzero((vect_t == times[t_idx + 1]) & (vect_samples_id == sample))
+                    N_real = len(idx)
+                    if N_real == 0:
+                        real_cell_batches[s_idx][t_idx] = [idx for _ in range(B_s)]
+                        continue
+                    K = min(N_real, max(K_nom, int(np.ceil(N_real / B_s))))
+                    L = B_s * K
+                    reps = int(np.ceil(L / N_real))
+                    tiled = np.concatenate([np.random.permutation(idx) for _ in range(reps)])[:L]
+                    real_cell_batches[s_idx][t_idx] = [tiled[b * K:(b + 1) * K] for b in range(B_s)]
+
             offset_init = [0] * len(samples_id)
             to_keep_for_update = np.zeros(len(vect_t), dtype=bool)
             to_keep_for_update[vect_t == times[0]] = True
@@ -907,16 +917,21 @@ class NetworkModel:
             while not np.array_equal(offset_init, N_full):
                 N_tmp = [min(N_samples[s], N_full[s] - offset_init[s]) for s in range(len(samples_id))]
                 init_cells = [init_cells_full[s][offset_init[s]:offset_init[s] + N_tmp[s]] for s in range(len(samples_id))]
+                batch_idx = [
+                    min(offset_init[s] // N_samples[s], n_batches_per_sample[s] - 1) if N_samples[s] > 0 else 0
+                    for s in range(len(samples_id))
+                ]
                 y_prot, y_prot_formodes, y_rna, y_kon, y_proba, y_alpha, y_samples, R_opt_traj, to_keep_for_update = \
                     self.estimate_trajectories_given_model(
                         vect_t, times, vect_samples_id, samples_id,
                         data_rna, y_prot, y_prot_formodes, y_kon, y_rna, y_proba, y_alpha, y_samples,
-                        basal, inter, s1, ks, nb_cells, init_cells,
+                        basal, inter, s1, ks, init_cells,
                         R_opt_traj, to_keep_for_update,
                         offset_init=offset_init,
                         N_full=N_full, N_samples=N_tmp,
                         n_iter=n_iter + min_n_loops * min(1, 1 - compute_theta + hard_forcing_ref),
-                        intensity_prior=intensity_prior * compute_theta * (1 - hard_forcing_ref)
+                        intensity_prior=intensity_prior * compute_theta * (1 - hard_forcing_ref),
+                        real_cell_batches=real_cell_batches, batch_idx=batch_idx
                     )
 
                 offset_init = [offset_init[s] + N_tmp[s] for s in range(len(samples_id))]
@@ -1244,18 +1259,15 @@ class NetworkModel:
             pass
 
         # --- Load per-cell growth rates and cell types from AnnData ---
-        self._prolif_rate = None
-        self._death_rate = None
+        self._prolif_net_rate = None
         self._cell_types = None
         self._transition_rates = None
         self._transition_type_labels = None
         try:
             import anndata as _ad
             if isinstance(data, _ad.AnnData):
-                if 'prolif_rate' in data.obs:
-                    self._prolif_rate = data.obs['prolif_rate'].values.astype(float)
-                if 'death_rate' in data.obs:
-                    self._death_rate = data.obs['death_rate'].values.astype(float)
+                if 'proliferation_net_rate' in data.obs:
+                    self._prolif_net_rate = data.obs['proliferation_net_rate'].values.astype(float)
                 for _ct_col in ('cell_type', 'cell_types', 'celltype'):
                     if _ct_col in data.obs:
                         self._cell_types = data.obs[_ct_col].values.astype(str)
@@ -1348,7 +1360,6 @@ class NetworkModel:
             ks=ks,
             s1=s1,
             init_cells_full=init_cells_full,
-            nb_cells=nb_cells,
             N_full=N_full,
             N_samples=N_samples,
             G_tot=G_tot,
@@ -2374,18 +2385,15 @@ class NetworkModel:
             vect_samples_id = np.zeros_like(vect_t)
 
         # --- Load per-cell growth rates and cell types from AnnData ---
-        self._prolif_rate = None
-        self._death_rate = None
+        self._prolif_net_rate = None
         self._cell_types = None
         self._transition_rates = None
         self._transition_type_labels = None
         try:
             import anndata as _ad
             if isinstance(data, _ad.AnnData):
-                if 'prolif_rate' in data.obs:
-                    self._prolif_rate = data.obs['prolif_rate'].values.astype(float)
-                if 'death_rate' in data.obs:
-                    self._death_rate = data.obs['death_rate'].values.astype(float)
+                if 'proliferation_net_rate' in data.obs:
+                    self._prolif_net_rate = data.obs['proliferation_net_rate'].values.astype(float)
                 for _ct_col in ('cell_type', 'cell_types', 'celltype'):
                     if _ct_col in data.obs:
                         self._cell_types = data.obs[_ct_col].values.astype(str)
@@ -2482,7 +2490,6 @@ class NetworkModel:
             ks=ks,
             s1=s1,
             init_cells_full=init_cells_full,
-            nb_cells=nb_cells,
             N_full=N_full,
             N_samples=N_samples,
             G_tot=G_tot,

@@ -204,10 +204,6 @@ def plot_network(p, seuil=0.3, net_toplot='inter_simul', net_index=0, train="ful
     else:
         grn_slice = grn_mat[:, :, net_index]
 
-    grn = np.genfromtxt(f'{p}cardamomOT/{net_toplot}.csv', delimiter=",")[ns:, ns:]
-    print(np.sum(grn - grn_slice)**2)
-    print(grn[:10, :10])
-
     analyse_reseau(grn_slice, genes_init, top_regulateurs=1000)
     reseau_top_regulateurs(
         grn_slice,

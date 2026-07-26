@@ -85,21 +85,12 @@ def main(argv):
         print(f"[check_mixture_to_data] Please ensure Data/data_{split}.h5ad exists in {p}")
         sys.exit(1)
     
-    # Read depth normalization: divide data_real in memory, never touch adata
-    if 'rd' in adata.obs.columns:
-        cell_rd = np.clip(np.asarray(adata.obs['rd'].values, dtype=float), 1e-6, None)
-        print(f"[check_mixture_to_data] Read depth correction loaded from adata.obs['rd']")
-    else:
-        cell_rd = np.ones(adata.shape[0], dtype=float)
-        print("[check_mixture_to_data] No read depth info found, assuming uniform depth")
-
-    # Extract count matrix and normalize to unit read depth (in memory only)
+    # Extract count matrix
     if scipy.sparse.issparse(adata.X):
         data_rna_extracted = adata.X.T.toarray().astype(float)
     else:
         data_rna_extracted = np.asarray(adata.X.T, dtype=float)
-    data_rna_extracted /= cell_rd[np.newaxis, :]   # (G, N) / (1, N)
-    
+
     # Validate temporal information
     try:
         times = adata.obs['time'].values 
@@ -174,7 +165,7 @@ def main(argv):
     if plot_in_script:
         print("[check_mixture_to_data] Generating comparison plots...")
         plot_data_distrib(data_real, data_beta, t_data, t_data, names, inputfile, outputfile, complement1)
-        plot_data_umap_toref(data_real, data_beta, t_data, inputfile, 'Check', 'umap_mixture', cell_rd=cell_rd)
+        plot_data_umap_toref(data_real, data_beta, t_data, inputfile, 'Check', 'umap_mixture')
         print("[check_mixture_to_data] Plots saved")
 
 if __name__ == "__main__":

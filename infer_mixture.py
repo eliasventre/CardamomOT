@@ -4,17 +4,10 @@ infer_mixture.py
 Main CARDAMOM mixture model inference pipeline.
 
 This script infers the burst kinetics parameters (mixture model) from temporal
-scRNA-seq data. When adata.obs contains a 'rd' column (computed by infer_rd.py),
-it is automatically used as a cell-level read-depth correction factor in the
-negative binomial inference, addressing the bias from variable sequencing depth
-across cells (see Fang, Gorin & Pachter 2024).
+scRNA-seq data.
 
 Usage:
     python infer_mixture.py -i <project_path> -s <split> [-m <mean_threshold>]
-
-Recommended workflow:
-    1) python infer_rd.py      -i <project_path> -s <split>  # estimate read depth
-    2) python infer_mixture.py -i <project_path> -s <split>  # uses read depth
 """
 
 import sys

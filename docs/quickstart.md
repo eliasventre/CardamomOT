@@ -32,10 +32,10 @@ Steps (checked by default unless marked *optional*):
 
 | Step | Description | Default |
 |---|---|---|
-| Read-depth correction | Compute per-cell read-depth factors | optional |
+| **Proliferation rates** | Estimate net proliferation rate per cell from literature gene signatures (runs first, on the full gene set) | ✓ |
 | **Gene selection** | Filter DE genes; split cells into train/test | ✓ |
 | Network constraint | Build prior network from databases | optional |
-| **Kinetics** | Estimate mRNA degradation and synthesis rates | ✓ |
+| **Kinetics** | Estimate mRNA degradation/synthesis rates | ✓ |
 | **Mixture model** | Fit negative-binomial burst parameters per gene | ✓ |
 | Check mixture | Validate mixture against data | ✓ |
 | **Network inference** | Learn regulatory interactions via optimal transport | ✓ |
@@ -51,6 +51,23 @@ To run all steps with default parameters without any prompt:
 
 ```bash
 cardamomot run my_project/ --default
+```
+
+```{note}
+The **Proliferation rates** step needs no configuration to run: it scores each cell
+against built-in human proliferation/death marker genes and writes
+`adata.obs['proliferation_net_rate']`, which the network-inference step then uses to
+correct the optimal-transport marginals for cell growth/death. It runs on the full,
+unfiltered dataset — *before* gene selection — so that DE gene filtering doesn't
+discard the literature marker genes needed to score the signature. It always
+(re)computes and overwrites `adata.obs['proliferation_net_rate']`, even if that
+column is already present. To keep your own values (e.g. from an external
+measurement such as EdU staining) instead, skip the step entirely — uncheck
+**Proliferation rates** in `cardamomot run`, or pass `--no-use-proliferation` to
+`cardamomot pipeline` / `use_proliferation=0` to `run.sh`. See
+[Advanced Features](advanced.md#refining-proliferation-rates) to use mouse gene
+sets, supply your own marker genes, or anchor the estimate to a known
+population-level rate.
 ```
 
 ## Run in batch mode
@@ -71,27 +88,31 @@ cardamomot pipeline \
     --stimulus 1.0 \                # stimulus-edge penalisation in [0,1]
     --prior 1.0 \                   # prior-network weighting in [0,1]
     --force-basins 1.0 \            # preserve NB mode means in [0,1]
-    --temporal-basins 1             # enforce temporal mode consistency (0 or 1)
+    --temporal-basins 1 \           # enforce temporal mode consistency (0 or 1)
+    --species human                 # organism for proliferation/death gene signatures  (default: human)
 ```
 
 **Optional-section flags** — these are switches with no value; just add the flag to change the behaviour:
 
 | Flag | Step(s) triggered | Behaviour without flag | Behaviour with flag |
 |---|---|---|---|
-| `--rd` | `infer_rd` | skipped | enabled |
 | `--ref` | `prepare_reference_network` | skipped | enabled |
 | `--ref-depth N` | *(used with `--ref`)* | `3` (default) | path length set to `N` |
 | `--test` | `infer_test` + `check_test_to_train` | skipped | enabled |
 | `--no-kov` | `simulate_network_KOV` + `check_KOV_to_sim` | enabled | skipped |
-| `--proliferation` | `infer_network_simul` + `simulate_network` + `simulate_network_KOV` | standard simulation | learn R_opt MLP; simulate with proliferation/death resampling |
+| `--compute-proliferation` | `infer_network_simul` + `simulate_network` + `simulate_network_KOV` | standard simulation | learn R_opt MLP; simulate with proliferation/death resampling |
+| `--no-use-proliferation` | `get_proliferation_rates` | enabled — (re)estimates `obs['proliferation_net_rate']` | skipped — keeps whatever is already in `obs['proliferation_net_rate']` |
 
 ## Run individual steps
 
 Each step can be run independently with `cardamomot step <script_name> [args]`, using the exact same arguments as in `run.sh`. The script name is the filename without `.py`:
 
 ```bash
-# ── Optional: read-depth correction (run before gene selection) ───────────────
-cardamomot step infer_rd -i my_project
+# ── Proliferation rates (run first, on the full unfiltered gene set) ─────────
+# Always (re)writes obs['proliferation_net_rate'] (human gene signatures by default);
+# add --species mouse for mouse data (see Advanced Features for further refinements).
+# Skip this step entirely to keep your own obs['proliferation_net_rate'] values.
+cardamomot step get_proliferation_rates -i my_project --species human
 
 # ── Gene selection and cell split ─────────────────────────────────────────────
 cardamomot step select_DEgenes_and_split \
@@ -101,7 +122,7 @@ cardamomot step select_DEgenes_and_split \
 cardamomot step prepare_reference_network -i my_project -d 3
 
 # ── Kinetics ──────────────────────────────────────────────────────────────────
-cardamomot step get_kinetic_rates -i my_project -s full
+cardamomot step get_degradation_rates -i my_project -s full
 
 # ── Mixture model ─────────────────────────────────────────────────────────────
 cardamomot step infer_mixture \
@@ -116,13 +137,13 @@ cardamomot step infer_network_structure \
     -i my_project -s full --stimulus 1.0 --prior 1.0 --force-basins 1.0 --temporal-basins 1
 cardamomot step infer_network_simul \
     -i my_project -s full --stimulus 1.0 --prior 1.0
-# Add --proliferation to learn a ProliferationMLP from the inferred R_opt values:
-#   cardamomot step infer_network_simul -i my_project -s full --stimulus 1.0 --prior 1.0 --proliferation
+# Add --compute-proliferation to learn a ProliferationMLP from the inferred R_opt values:
+#   cardamomot step infer_network_simul -i my_project -s full --stimulus 1.0 --prior 1.0 --compute-proliferation
 
 # ── Simulation ────────────────────────────────────────────────────────────────
 cardamomot step simulate_network -i my_project -s full
-# Add --proliferation to resample trajectories according to the learned R(P) network:
-#   cardamomot step simulate_network -i my_project -s full --proliferation
+# Add --compute-proliferation to resample trajectories according to the learned R(P) network:
+#   cardamomot step simulate_network -i my_project -s full --compute-proliferation
 cardamomot step check_sim_to_data \
     -i my_project -s full --stimulus 1.0 --prior 1.0
 
@@ -134,8 +155,8 @@ cardamomot step check_test_to_train \
 
 # ── Perturbations (default) ───────────────────────────────────────────────────
 cardamomot step simulate_network_KOV -i my_project -s full
-# Add --proliferation to apply proliferation/death resampling to perturbation simulations too:
-#   cardamomot step simulate_network_KOV -i my_project -s full --proliferation
+# Add --compute-proliferation to apply proliferation/death resampling to perturbation simulations too:
+#   cardamomot step simulate_network_KOV -i my_project -s full --compute-proliferation
 cardamomot step check_KOV_to_sim \
     -i my_project -s full --stimulus 1.0 --prior 1.0
 ```

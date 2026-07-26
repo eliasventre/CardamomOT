@@ -68,7 +68,15 @@ def select_DEgenes(vect_t, vect_samples_id, vect_celltype_id, proba,
         n_genes_tokeep_celltype = np.ones(len(celltype_id), dtype=int) * int(np.mean(n_genes_tokeep_celltype))
 
 
-    proba_class = np.argmax(proba[:, 1:], axis=-1)
+    # Soft posterior per real gene (drops the leading time pseudo-column at
+    # index 0): proba_genes[cell, g, i] is the posterior probability of
+    # component i for gene g. Comparing mean soft posteriors between two
+    # groups (rather than mean hard argmax-class assignments) keeps the
+    # variation score low for genes whose mixture components are not well
+    # separated — a poorly-separated forced 2-component fit has posteriors
+    # hovering near a fixed split regardless of condition, so hard argmax
+    # counts can flip on sampling noise alone while the soft mean does not.
+    proba_genes = proba[:, 1:, :]
     temporal_variations = np.zeros((G, len(times), len(samples_id)))
     celltype_variations = np.zeros((G, len(celltype_id), len(samples_id))) if len(celltype_id) > 1 else None
 
@@ -80,12 +88,9 @@ def select_DEgenes(vect_t, vect_samples_id, vect_celltype_id, proba,
             idx_end  = (vect_t == times_full[t_i+1]) & (vect_samples_id == s)
             if np.sum(idx_init) == 0 or np.sum(idx_end) == 0:
                 continue
-            for g in range(G):
-                diff = np.sum([abs(
-                    np.mean(proba_class[idx_end, g] == i) -
-                    np.mean(proba_class[idx_init, g] == i)
-                ) for i in range(proba.shape[-1])])
-                temporal_variations[g, t_i, s_i] = diff
+            temporal_variations[:, t_i, s_i] = np.abs(
+                proba_genes[idx_end].mean(axis=0) - proba_genes[idx_init].mean(axis=0)
+            ).sum(axis=-1)
 
     list_genes_tokeep_temporal = []
     for t_i, t in enumerate(times):
@@ -108,12 +113,9 @@ def select_DEgenes(vect_t, vect_samples_id, vect_celltype_id, proba,
                 idx_end  = (vect_celltype_id != c) & (vect_samples_id == s)
                 if np.sum(idx_init) == 0 or np.sum(idx_end) == 0:
                     continue
-                for g in range(G):
-                    diff = np.sum([abs(
-                            np.mean(proba_class[idx_end, g] == i) -
-                            np.mean(proba_class[idx_init, g] == i)
-                        ) for i in range(proba.shape[-1])])
-                    celltype_variations[g, c_i, s_i] = diff
+                celltype_variations[:, c_i, s_i] = np.abs(
+                    proba_genes[idx_end].mean(axis=0) - proba_genes[idx_init].mean(axis=0)
+                ).sum(axis=-1)
 
         for c_i, c in enumerate(celltype_id):
             variations_max = celltype_variations[:, c_i, :].sum(axis=1)

@@ -21,7 +21,7 @@ Output files:
 """
 import sys; sys.path += ['../']
 import numpy as np
-from CardamomOT import NetworkModel as NetworkModel_beta
+from CardamomOT import NetworkModel as NetworkModel_beta, find_data_file
 import getopt
 import anndata as ad
 import pandas as pd
@@ -385,9 +385,9 @@ def main(argv):
 
     # ─── LOAD TRANSITION RATES (optional) ───────────────────────────────────
     transition_rates = None
-    tr_path = os.path.join(p, 'Data', 'transition_rates.csv')
-    if os.path.exists(tr_path):
-        transition_rates = pd.read_csv(tr_path, index_col=0)
+    tr_path = find_data_file(os.path.join(p, 'Data'), 'transition_rates')
+    if tr_path is not None:
+        transition_rates = pd.read_csv(tr_path, sep=None, engine='python', index_col=0)
         transition_rates.index = transition_rates.index.astype(str)
         transition_rates.columns = transition_rates.columns.astype(str)
         print(f"[infer_network_structure] Loaded transition rates from {tr_path} "

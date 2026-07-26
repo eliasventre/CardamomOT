@@ -50,22 +50,6 @@ When `gene_list.txt` is present, those genes are **added** to the final selectio
 
 ---
 
-## Read-depth correction (`infer_rd`)
-
-When cells have heterogeneous sequencing depths, run this optional step **before** gene selection:
-
-```bash
-cardamomot step infer_rd -i my_project
-```
-
-This identifies Poisson-like genes (Chronocell method, Fang et al. 2024) and stores a per-cell read-depth factor in `adata.obs['rd']`. Subsequent steps (`infer_mixture`, `infer_network_structure`) use it automatically when the column is present.
-
-**Key parameters:** `--var_threshold 1.2` (Poisson variance threshold), `--min_mean 0.1`.
-
-> Requires at least 1 000 genes. Below this threshold the step is silently skipped.
-
----
-
 ## Prior interaction network (`prepare_reference_network`)
 
 To bias network inference toward known biology, first build a prior network from public databases (OmniPath, etc.):
@@ -223,16 +207,162 @@ plot_results_sim_kov(p, "KO_CHGA_OV_none", stim=stim, prior=prior)
 
 ## Population dynamics: proliferation, death, and transition rates
 
-### Per-cell proliferation/death (`adata.obs`)
+### Net proliferation rate — default behaviour
+
+CardamomOT only ever uses the *net* rate (birth − death), never the two terms separately, stored as:
 
 ```python
-adata.obs['prolif_rate'] = ...   # net proliferation rate per cell
-adata.obs['death_rate']  = ...   # net death rate per cell
+adata.obs['proliferation_net_rate']   # net proliferation rate per cell (birth − death)
 ```
 
-When both columns are present, the OT marginals are corrected so that faster-growing cells carry proportionally more weight as trajectory sources. This implements demographically corrected OT (as in Waddington OT, Schiebinger et al. 2019).
+**This is populated automatically, with no configuration needed.** Every run of
+`get_proliferation_rates.py` (step "Proliferation rates" in the standard pipeline — the *first*
+step, run before gene selection) estimates it from literature proliferation/death gene
+signatures, following moscot's / Waddington-OT's approach (Schiebinger et al. 2019) — see
+`CardamomOT/tools/estimate_proliferation.py`. It runs directly on `Data/data.h5ad` (all genes)
+rather than after DE gene selection, since that filtering could otherwise discard many of the
+literature marker genes needed to score the signature; because the rate lives in `adata.obs`
+(per-cell), it is unaffected by the later gene-subsetting and train/test splitting done by
+`select_DEgenes_and_split.py`.
 
-### Cell-type transition rates (`Data/transition_rates.csv`)
+1. Each cell is scored against a proliferation gene set and a death gene set using
+   `scanpy.tl.score_genes` (control-gene-bin corrected mean expression), on an internal
+   total-count-normalised + log1p-transformed **copy** of the data — `score_genes` assumes that
+   scale (moscot's own tutorials normalise/log-transform before scoring; moscot itself does not do
+   it internally, it's left to the caller). The transformation is never applied to, or saved on,
+   `adata` itself: CardamomOT's inference requires raw counts throughout, so only the resulting
+   per-cell scores are kept — `adata.X` is read back unchanged afterwards.
+2. Each score is mapped to a rate via the same shifted-logistic curve moscot uses:
+   `rate(score) = rate_min + (rate_max - rate_min) / (1 + exp(-4/width · (score - center)))`,
+   with moscot's own published defaults (verified against its source):
+   `beta_max=1.7, beta_min=0.3, beta_center=0.25, beta_width=0.5` for birth, and
+   `delta_max=1.7, delta_min=0.3, delta_center=0.1, delta_width=0.2` for death.
+3. The net rate `beta(score_prolif) - delta(score_death)` is a **per-day** rate — like moscot/WOT
+   themselves, whose `TemporalProblem` computes elapsed time from a `day` obs field and raises the
+   per-timepoint growth score to that many days (`broadinstitute/wot`'s `OTModel.compute_transport_map`:
+   `G = cell_growth_rate ** (t1 - t0)`, with `t0`/`t1` in days). CardamomOT instead expresses
+   `adata.obs['time']` and every internal kinetic rate in **hours** (e.g. `NetworkModel`'s default
+   degradation rates correspond to a 9h mRNA / 46h protein half-life), so it is divided by 24
+   (`hours_per_day` in `estimate_growth_rates`) before being written to `obs['proliferation_net_rate']`
+   — this makes it directly usable as `Δt` in hours in the OT-marginal correction below, with no
+   further rescaling needed. Pass `hours_per_day=1` to `estimate_growth_rates` to recover the raw
+   moscot-equivalent day⁻¹ rate if your own `adata.obs['time']` happens to be in days instead.
+
+By default this uses **human** marker gene lists, copied verbatim from moscot's shipped defaults
+(`moscot.utils.data.proliferation_markers`/`apoptosis_markers`): Tirosh et al. 2016 cell-cycle genes
+for proliferation, MSigDB Hallmark Apoptosis for human death markers (MSigDB Hallmark P53 Pathway
+for mouse — moscot does not use a symmetric death gene set across species).
+
+`get_proliferation_rates.py` always (re)computes and overwrites `adata.obs['proliferation_net_rate']`,
+even if that column is already present. If you have your own values (e.g. supplied from an external
+measurement, such as EdU staining or a growth-curve-derived estimate) and want to keep them, skip the
+step entirely instead: uncheck **Proliferation rates** in `cardamomot run`, pass
+`--no-use-proliferation` to `cardamomot pipeline`, or set `use_proliferation=0` on `run.sh`.
+
+Once populated, the OT marginals between consecutive timepoints t₁ and t₂ are modified:
+- **Source marginal** µᵢ ∝ exp(+netᵢ · Δt/2) — cells with higher net growth carry more weight as trajectory sources
+- **Target marginal** νⱼ ∝ exp(−netⱼ · Δt/2) — fast-growing cells at t₂ are down-weighted (they represent fewer distinct lineages)
+
+### Refining proliferation rates
+
+Five optional levers, from least to most involved:
+
+**1. Species** — switch the built-in marker gene lists:
+
+```bash
+python get_proliferation_rates.py -i my_project --species mouse
+```
+
+`--species` (`human` or `mouse`, default `human`) is also exposed as `cardamomot pipeline --species`
+and as a trailing `--species` flag on `run.sh` (can appear anywhere in the argument list).
+
+**2. Score on the unfiltered gene set** — if `Data/data.h5ad` was already prepared with a
+pre-filtered gene set (e.g. by an upstream pipeline), the literature marker genes may be missing
+from it entirely. Place the unfiltered dataset alongside it as `Data/data_complete.h5ad`:
+
+```
+my_project/Data/
+├── data.h5ad            # gene-filtered — this is what gets updated
+└── data_complete.h5ad   # full gene set — used only to score the signature, never modified
+```
+
+`get_proliferation_rates.py` detects `data_complete.h5ad` automatically and scores the
+proliferation/death signatures on it instead of `data.h5ad`. The resulting per-cell rates are then
+mapped onto the matching cells of `data.h5ad` by cell name (`adata.obs_names`) — every cell in
+`data.h5ad` is assumed to also be present in `data_complete.h5ad` (the converse need not hold,
+e.g. if `data_complete.h5ad` also contains cells later excluded by QC). `data_complete.h5ad` is
+read-only from this script's perspective: only `Data/data.h5ad` is ever written to, and
+`select_DEgenes_and_split.py` (the next pipeline step) only ever reads `Data/data.h5ad` — it is
+not aware of `data_complete.h5ad`. If `data_complete.h5ad` is absent, `data.h5ad` is used directly
+for both scoring and output, as in the default behaviour above.
+
+**3. Custom marker genes** — override the built-in lists entirely, e.g. for a disease- or
+lineage-specific signature not well captured by the generic defaults (cell-cycle/apoptosis genes
+are fairly conserved across contexts, but a cancer model with an altered p53 pathway, or a
+lineage-specific death program, may warrant its own signature). Place in `Data/`:
+
+```
+# proliferation_signatures.csv (or .txt) — one gene per line, or comma-separated
+MKI67, TOP2A, CCNB2
+...
+```
+```
+# death_signatures.csv (or .txt) — same format
+BAX, CASP3, FAS
+...
+```
+
+Both file formats accept either one gene per line or a comma-separated list — they are simply
+tokenised on whitespace/commas.
+
+**4. Anchor to a known rate** — if you have a trusted population-level growth rate per cell type
+(e.g. measured from a growth curve on sorted populations), place in `Data/`. Grouping uses
+`adata.obs['cell_type_proliferation']` if present, else falls back to `adata.obs['cell_type']` —
+add `cell_type_proliferation` during preprocessing if you want a coarser or finer grouping for
+this task specifically, without touching `cell_type` itself:
+
+```
+# proliferation_rates.csv (or .txt) — two columns, no header
+# rate is per HOUR, matching adata.obs['time'] -- NOT moscot/WOT's day^-1
+# convention (see "Net proliferation rate -- default behaviour" above);
+# divide a day^-1 growth-curve rate by 24 before writing it here.
+TypeA   0.10
+TypeB  -0.02
+```
+
+No unit conversion is applied when reading this file: the values are added directly to the
+(already hour⁻¹) literature estimate via `combine_growth_rates_with_reference`, so a day⁻¹ value
+left unconverted would be 24× too strong or too weak.
+
+The literature-based per-cell estimate is then recentred, within each cell type present in this
+file, so its mean matches the reference value exactly — while keeping the per-cell heterogeneity
+coming from the gene signature. Cell types absent from the file keep their raw (unanchored)
+literature estimate, and a warning is printed listing which ones. Concretely, for a cell type `g`
+with reference rate `r_g`:
+
+```
+final_rate[cell] = lit_rate[cell] - mean(lit_rate[g]) + r_g      for cell in g
+```
+
+**5. Full manual override** — set `adata.obs['proliferation_net_rate']` yourself and skip the
+`get_proliferation_rates` step entirely (`--no-use-proliferation` / `use_proliferation=0`, see
+default behaviour above); the step no longer detects and preserves pre-existing values on its own,
+it always overwrites them when run.
+
+All of the underlying functions (`score_gene_sets`, `estimate_growth_rates`,
+`combine_growth_rates_with_reference`) are also available as a public API for use outside the
+CLI pipeline, e.g. in a preprocessing notebook:
+
+```python
+from CardamomOT import estimate_growth_rates, combine_growth_rates_with_reference
+
+net = estimate_growth_rates(adata, species="mouse")
+adata.obs['proliferation_net_rate'] = combine_growth_rates_with_reference(
+    net, adata.obs['cell_type'].values, {"TypeA": 2.3, "TypeB": -0.1}
+)
+```
+
+### Cell-type transition rates (`Data/transition_rates.csv`) — opt-in
 
 To bias the OT cost toward biologically plausible transitions:
 
@@ -248,7 +378,7 @@ Row/column names must match `adata.obs['cell_type']`. At each consecutive timepo
 
 ---
 
-## Proliferation-aware simulation (`--proliferation`)
+## Proliferation-aware simulation (`--compute-proliferation`)
 
 CardamomOT can learn and simulate net proliferation rates (R = birth − death) directly from the inferred optimal-transport couplings, without requiring external annotations.
 
@@ -266,7 +396,7 @@ R_n  =  (2/Δt) · (log(m_n) − mean_k(log(m_k)))
 The factor `2/Δt` comes from the WOT convention where both the source **and** the target marginals are corrected by `exp(R · Δt/2)` each — the formula recovers the true net rate R from the source marginal alone. With balanced OT (default) all `m_n = 1/N` so `R_n = 0` exactly; with unbalanced OT (`model.unbalanced_reg > 0`) they vary and encode genuine differential growth. The resulting `R_opt` array (one value per cell per timepoint transition) is always saved to `cardamomOT/data_R_opt.npy`.
 
 **Training the ProliferationMLP.**  
-`infer_network_simul --proliferation` reads `data_R_opt.npy` and trains a lightweight two-hidden-layer MLP (64 units, Tanh activation, MSE loss):
+`infer_network_simul --compute-proliferation` reads `data_R_opt.npy` and trains a lightweight two-hidden-layer MLP (64 units, Tanh activation, MSE loss):
 
 ```
 R(P) : protein levels → net proliferation rate
@@ -275,7 +405,7 @@ R(P) : protein levels → net proliferation rate
 The network is trained on `(prot[:, ns:], R_opt)` pairs *after* any recomputation of protein trajectories, so it captures the optimal R consistent with the final inferred network. The weights are saved to `cardamomOT/prolif_network.pt`.
 
 **Branching simulation.**  
-`simulate_network --proliferation` (and `simulate_network_KOV --proliferation`) loads the MLP and applies a **trapezoidal forward+backward resampling** after each simulated interval — mirroring the structure of the WOT correction used during inference (which corrects both source and target marginals):
+`simulate_network --compute-proliferation` (and `simulate_network_KOV --compute-proliferation`) loads the MLP and applies a **trapezoidal forward+backward resampling** after each simulated interval — mirroring the structure of the WOT correction used during inference (which corrects both source and target marginals):
 
 ```
 log_weight_n  =  (R(P_start_n) + R(P_end_n)) / 2 · Δt
@@ -287,26 +417,37 @@ log_weight_n  =  (R(P_start_n) + R(P_end_n)) / 2 · Δt
 
 ```bash
 # Step 4 — adapt parameters and learn R
-cardamomot step infer_network_simul -i my_project -s full --proliferation
+cardamomot step infer_network_simul -i my_project -s full --compute-proliferation
 
 # Step 5 — simulate with branching
-cardamomot step simulate_network -i my_project -s full --proliferation
+cardamomot step simulate_network -i my_project -s full --compute-proliferation
 
 # KO/OV perturbations with branching
-cardamomot step simulate_network_KOV -i my_project -s full --proliferation
+cardamomot step simulate_network_KOV -i my_project -s full --compute-proliferation
 ```
 
 Or directly:
 
 ```bash
-python infer_network_simul.py -i my_project -s full --proliferation
-python simulate_network.py    -i my_project -s full --proliferation
+python infer_network_simul.py -i my_project -s full --compute-proliferation
+python simulate_network.py    -i my_project -s full --compute-proliferation
 ```
+
+Batch entry points forward a single on/off choice to all three steps automatically:
+`cardamomot pipeline --compute-proliferation`, or `compute_proliferation=1` as the 13th
+positional argument to `run.sh`.
+
+In the interactive `cardamomot run`, this is a single prompt (*"Enable proliferation-aware
+simulation (`--compute-proliferation`)?"*, default: no) shown once — right before steps start
+executing — if any of **Network adaptation**, **Simulation**, or **Perturb — KO/OV simulation**
+is selected; the same yes/no answer is then forwarded to all three, since passing the flag to
+only some of them would leave the MLP untrained or unused for the others. `cardamomot run
+--default` keeps it off, matching the other entry points.
 
 ### Notes
 
-- `--proliferation` is **off by default**. `infer_network_structure` always computes and saves `R_opt` as a by-product regardless — enabling the flag later has no cost.
+- `--compute-proliferation` is **off by default**. `infer_network_structure` always computes and saves `R_opt` as a by-product regardless — enabling the flag later has no cost.
 - The flag must be passed to **both** `infer_network_simul` (trains the MLP) and `simulate_network` / `simulate_network_KOV` (uses it). Passing it only to the simulation scripts while `prolif_network.pt` is absent prints a warning and falls back to standard simulation.
 - Resampling is currently applied to the PDMP stochastic mode only; ODE mode ignores it silently.
-- For balanced OT the estimated R values are exactly zero for all cells; meaningful proliferation signals require unbalanced OT (`model.unbalanced_reg > 0`) or prior annotations via `adata.obs['prolif_rate']` / `adata.obs['death_rate']` (see section above).
+- For balanced OT the estimated R values are exactly zero for all cells; meaningful proliferation signals require unbalanced OT (`model.unbalanced_reg > 0`) or prior annotations via `adata.obs['proliferation_net_rate']` (see section above).
 - The trapezoidal rule `(R_start + R_end)/2` naturally handles cells whose protein levels — and thus growth rate — change significantly within the interval.

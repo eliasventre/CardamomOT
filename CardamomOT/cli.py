@@ -1,7 +1,7 @@
 """Command-line helpers and high-level CLI for CardamomOT.
 
 The repository previously contained a collection of standalone scripts
-(e.g. ``infer_rd.py``, ``infer_mixture.py``) invoked via shell wrappers.  In
+(e.g. ``infer_mixture.py``) invoked via shell wrappers.  In
 Tier‑3 these have been consolidated behind a single console command named
 ``cardamomot``.  Each original script still exists for backwards compatibility
 but they now import common argument parsing utilities from this module.
@@ -175,8 +175,8 @@ def _pipeline(args: argparse.Namespace) -> None:
     fb = args.force_basins
     tb = args.temporal_basins
 
-    if args.rd:
-        _run_script('infer_rd.py', ['-i', inp])
+    if args.use_proliferation:
+        _run_script('get_proliferation_rates.py', ['-i', inp, '--species', args.species])
 
     _run_script('select_DEgenes_and_split.py',
                 ['-i', inp, '-s', sp, '-r', args.rate, '-c', args.change,
@@ -185,15 +185,17 @@ def _pipeline(args: argparse.Namespace) -> None:
     if args.ref:
         _run_script('prepare_reference_network.py', ['-i', inp, '-d', str(args.ref_depth)])
 
-    _run_script('get_kinetic_rates.py', ['-i', inp, '-s', sp])
+    prolif_flag = ['--compute-proliferation'] if args.compute_proliferation else []
+
+    _run_script('get_degradation_rates.py', ['-i', inp, '-s', sp])
     _run_script('infer_mixture.py',
                 ['-i', inp, '-s', sp, '--mean-forcing', args.mean, '--force-basins', fb, '--temporal-basins', tb])
     _run_script('check_mixture_to_data.py', ['-i', inp, '-s', sp])
     _run_script('infer_network_structure.py',
                 ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior, '--force-basins', fb, '--temporal-basins', tb])
     _run_script('infer_network_simul.py',
-                ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior])
-    _run_script('simulate_network.py', ['-i', inp, '-s', sp])
+                ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior] + prolif_flag)
+    _run_script('simulate_network.py', ['-i', inp, '-s', sp] + prolif_flag)
     _run_script('check_sim_to_data.py',
                 ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior])
 
@@ -203,7 +205,7 @@ def _pipeline(args: argparse.Namespace) -> None:
         _run_script('check_test_to_train.py', ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior])
 
     if not args.no_kov:
-        _run_script('simulate_network_KOV.py', ['-i', inp, '-s', sp])
+        _run_script('simulate_network_KOV.py', ['-i', inp, '-s', sp] + prolif_flag)
         _run_script('check_KOV_to_sim.py',
                     ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior])
 
@@ -238,6 +240,9 @@ def main() -> None:
     p_pipe.add_argument('-r', '--rate', default='1', help='cell-selection split rate (default: 1)')
     p_pipe.add_argument('-m', '--mean-forcing', default='0.5', dest='mean',
                         help='mean-forcing intensity for NB mixture (model default: 0.5)')
+    p_pipe.add_argument('--species', default='human', choices=['human', 'mouse'],
+                        help='organism for literature proliferation/death gene signatures '
+                             '(default: human)')
     p_pipe.add_argument('--stimulus', default='-1',
                         help='stimulus-edge penalisation in [0,1] (-1=model default)')
     p_pipe.add_argument('--prior', default='-1',
@@ -246,8 +251,6 @@ def main() -> None:
                         help='preserve NB mode means in [0,1] (-1=model default)')
     p_pipe.add_argument('--temporal-basins', default='-1', dest='temporal_basins',
                         help='enforce temporal mode consistency (0 or 1)')
-    p_pipe.add_argument('--rd', action='store_true', default=False,
-                        help='run read-depth correction (default: off)')
     p_pipe.add_argument('--ref', action='store_true', default=False,
                         help='run prepare_reference_network (default: off)')
     p_pipe.add_argument('--ref-depth', type=int, default=3, dest='ref_depth',
@@ -256,6 +259,15 @@ def main() -> None:
                         help='run test-set inference steps (default: off)')
     p_pipe.add_argument('--no-kov', action='store_true', default=False,
                         help='skip KO/OV perturbation steps (default: run them)')
+    p_pipe.add_argument('--compute-proliferation', action='store_true', default=False,
+                        dest='compute_proliferation',
+                        help='learn R_opt MLP and simulate with branching PDMP trajectories '
+                             '(forwarded as --compute-proliferation to infer_network_simul, '
+                             'simulate_network, simulate_network_KOV; default: off)')
+    p_pipe.add_argument('--no-use-proliferation', action='store_false', default=True,
+                        dest='use_proliferation',
+                        help="skip get_proliferation_rates (obs['proliferation_net_rate'] "
+                             'literature estimation, default: run it)')
     p_pipe.set_defaults(func=_pipeline)
 
     p_step = subparsers.add_parser('step', help='run individual step')

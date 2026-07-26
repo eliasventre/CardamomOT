@@ -35,11 +35,11 @@ def main(argv):
     split = ''
     simulate_with_proliferation = False
     try:
-        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split=", "proliferation"])
+        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split=", "compute-proliferation"])
     except getopt.GetoptError:
         print("[simulate_network] Error: Invalid command-line arguments")
         print("[simulate_network] Usage: python simulate_network.py -i <project_path> -s <split> "
-              "[--proliferation]")
+              "[--compute-proliferation]")
         sys.exit(2)
 
     for opt, arg in opts:
@@ -47,7 +47,7 @@ def main(argv):
             inputfile = arg
         elif opt in ("-s", "--split"):
             split = '{}'.format(arg)
-        elif opt == "--proliferation":
+        elif opt == "--compute-proliferation":
             simulate_with_proliferation = True
         elif opt == "-h":
             print(__doc__)
@@ -157,8 +157,8 @@ def main(argv):
             model.simulate_with_proliferation = True
             print("[simulate_network] Loaded proliferation network — branching simulation enabled")
         else:
-            print("[simulate_network] Warning: --proliferation requested but prolif_network.pt not found; "
-                  "run infer_network_simul.py --proliferation first")
+            print("[simulate_network] Warning: --compute-proliferation requested but prolif_network.pt not found; "
+                  "run infer_network_simul.py --compute-proliferation first")
 
     # Simulate network dynamics
     print("[simulate_network] Starting network simulation...")

@@ -35,6 +35,9 @@ from .logging import configure_logging, get_logger
 from .config import (
     get_project_directories,
     get_default_parameters,
+    find_data_file,
+    read_gene_list,
+    resolve_cell_type_obs,
     DEFAULT_DATA_FOLDER,
     DEFAULT_CARDAMOM_FOLDER,
 )
@@ -82,6 +85,9 @@ from .tools import (
     analyse_reseau,
     reseau_top_regulateurs,
     plot_network,
+    score_gene_sets,
+    estimate_growth_rates,
+    combine_growth_rates_with_reference,
 )
 
 # ============================================================================
@@ -94,6 +100,9 @@ __all__ = [
     # Configuration
     "get_project_directories",
     "get_default_parameters",
+    "find_data_file",
+    "read_gene_list",
+    "resolve_cell_type_obs",
     "DEFAULT_DATA_FOLDER",
     "DEFAULT_CARDAMOM_FOLDER",
     # Inference functions
@@ -126,6 +135,10 @@ __all__ = [
     "analyse_reseau",
     "reseau_top_regulateurs",
     "plot_network",
+    # Literature-based proliferation rate estimation
+    "score_gene_sets",
+    "estimate_growth_rates",
+    "combine_growth_rates_with_reference",
 ]
 
 logger.debug(f"CARDAMOM {__version__} loaded successfully")

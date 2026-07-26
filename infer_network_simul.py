@@ -49,11 +49,11 @@ def main(argv):
     recompute_proliferations = False
     try:
         opts, args = getopt.getopt(argv, "hi:s:t:p:",
-                                   ["input=", "split=", "stimulus=", "prior=", "proliferation"])
+                                   ["input=", "split=", "stimulus=", "prior=", "compute-proliferation"])
     except getopt.GetoptError:
         print("[infer_network_simul] Error: Invalid command-line arguments")
         print("[infer_network_simul] Usage: python infer_network_simul.py -i <project_path> -s <split> "
-              "[--stimulus <float>] [--prior <float>] [--proliferation]")
+              "[--stimulus <float>] [--prior <float>] [--compute-proliferation]")
         sys.exit(2)
 
     for opt, arg in opts:
@@ -65,7 +65,7 @@ def main(argv):
             stimulus = float(arg)
         elif opt in ("-p", "--prior"):
             prior = float(arg)
-        elif opt == "--proliferation":
+        elif opt == "--compute-proliferation":
             recompute_proliferations = True
         elif opt == "-h":
             print(__doc__)

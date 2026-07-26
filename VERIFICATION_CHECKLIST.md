@@ -98,7 +98,7 @@ print(f'Project valid: {is_valid}')
 cd /path/to/my_project/
 
 # Run in interactive mode
-# When prompted, select ONLY ONE step (e.g., infer_rd)
+# When prompted, select ONLY ONE step (e.g., select_DEgenes)
 # Press Enter to use default parameters
 cardamomot run .
 ```

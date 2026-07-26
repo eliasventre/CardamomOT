@@ -151,7 +151,7 @@ Complete reference to all documentation available in this package.
 **Sections:**
 - Project metadata (name, description)
 - Data settings (input file, split)
-- Per-step hyperparameters (read depth, mixture, selection, network, simulation, logging)
+- Per-step hyperparameters (mixture, selection, network, simulation, logging)
 
 **How to use:**
 1. Copy to your project: `cp config_template.yaml ~/my_project/config.yaml`
@@ -280,8 +280,7 @@ CardamomOT/
 ├── pyproject.toml                ← Modern Python project config
 │
 └── scripts/
-    ├── infer_rd.py               ← Individual pipeline scripts
-    ├── infer_mixture.py
+    ├── infer_mixture.py          ← Individual pipeline scripts
     ├── select_DEgenes_and_split.py
     ├── infer_network_structure.py
     ├── infer_network_simul.py

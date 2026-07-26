@@ -90,19 +90,11 @@ def main(argv):
         print(f"[check_sim_to_data] Error: {e}")
         sys.exit(1)
     
-    # Read depth normalization: divide data_real in memory, never touch adata
-    if 'rd' in adata.obs.columns:
-        cell_rd = np.clip(np.asarray(adata.obs['rd'].values, dtype=float), 1e-6, None)
-        print(f"[check_sim_to_data] Read depth correction loaded from adata.obs['rd']")
-    else:
-        cell_rd = np.ones(adata.shape[0], dtype=float)
-
-    # Extract count matrix and normalize to unit read depth (in memory only)
+    # Extract count matrix
     if scipy.sparse.issparse(adata.X):
         data_rna_extracted = adata.X.T.toarray().astype(float)
     else:
         data_rna_extracted = np.asarray(adata.X.T, dtype=float)
-    data_rna_extracted /= cell_rd[np.newaxis, :]   # (G, N) / (1, N)
 
     # Validate temporal information
     try:
@@ -247,8 +239,7 @@ def main(argv):
         try:
             plot_data_distrib(data_real, data_sim, t_data, t_simul, names, inputfile, outputfile, complement1)
             plot_data_umap_altogether(data_real, data_real, data_beta, data_netw_theta,
-                                  data_sim, t_data, t_simul, inputfile, 'Check', 'altogether_sim',
-                                  cell_rd=cell_rd)
+                                  data_sim, t_data, t_simul, inputfile, 'Check', 'altogether_sim')
             print("[check_sim_to_data] Plots successfully generated")
         except Exception as e:
             print(f"[check_sim_to_data] Warning: Could not generate plots: {e}")

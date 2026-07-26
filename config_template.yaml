@@ -13,10 +13,6 @@ data:
 
 # Pipeline hyperparameters
 
-# Read depth correction
-read_depth:
-  enabled: true
-
 # Mixture model inference
 mixture:
   enabled: true

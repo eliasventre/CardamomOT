@@ -42,7 +42,7 @@ cardamomot step infer_mixture -i /path/to/project
 ```
 - Run a single analysis step
 - Useful for debugging or re-running specific steps
-- Available steps: `infer_rd`, `infer_mixture`, `select_DEgenes_and_split`, `infer_network_structure`, etc.
+- Available steps: `infer_mixture`, `select_DEgenes_and_split`, `infer_network_structure`, etc.
 
 ## Common Workflows
 

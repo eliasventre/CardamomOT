@@ -9,6 +9,11 @@ Usage:
 Required input files:
     - Data/data.h5ad: input count matrix with temporal information
 
+Cell-type grouping for gene selection uses `adata.obs['cell_type_selection']`
+if present, else falls back to `adata.obs['cell_type']`; add
+`cell_type_selection` during preprocessing to use a coarser/finer grouping
+for this task without touching `cell_type` itself.
+
 Output files:
     - Data/data_full.h5ad: filtered dataset with selected genes
     - Data/data_train.h5ad, data_test.h5ad: train/test split (if split="train")
@@ -19,13 +24,14 @@ import os
 import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta
 from CardamomOT import select_DEgenes
+from CardamomOT import resolve_cell_type_obs
 import anndata as ad
 import getopt
 import scipy as scp
 import pandas as pd
 
-n_genes_tokeep_temporal = [5]
-n_genes_tokeep_celltype = [3]
+n_genes_tokeep_temporal = [7]
+n_genes_tokeep_celltype = [7]
 
 def main(argv):
     """
@@ -113,7 +119,8 @@ def main(argv):
         return m
 
     vect_samples_id = np.zeros(adata.n_obs)
-    vect_celltype_id = adata.obs['cell_type'].values if 'cell_type' in adata.obs else np.zeros(adata.n_obs)
+    celltype_col = resolve_cell_type_obs(adata, 'cell_type_selection')
+    vect_celltype_id = adata.obs[celltype_col].values if celltype_col is not None else np.zeros(adata.n_obs)
 
     genes_list_init = list(adata.var_names.values)
     genes_to_keep = []
@@ -123,6 +130,7 @@ def main(argv):
         print("[select_DEgenes_and_split] Fitting mixture model for gene selection")
 
         model = _make_model(adata.shape[1])
+        model.hard_em = 0
 
         # Subsample cells if dataset is too large
         cells_to_use = []
@@ -136,7 +144,6 @@ def main(argv):
                 if len(idx) > 0:
                     cells_to_use.extend(np.random.choice(idx, n_select, replace=False))
 
-        model.hard_em = 0
         try:
             model.fit_mixture(adata[cells_to_use], gene_names=genes_list_init,
                               min_components=2, max_components=2,
@@ -180,7 +187,8 @@ def main(argv):
     # Refresh metadata after potential gene filtering
     times = adata.obs['time'].values if 'time' in adata.obs else np.zeros(adata.n_obs)
     vect_samples_id = adata.obs['dataset_id'].values if 'dataset_id' in adata.obs else np.zeros(adata.n_obs)
-    vect_celltype_id = adata.obs['cell_type'].values if 'cell_type' in adata.obs else np.zeros(adata.n_obs)
+    celltype_col = resolve_cell_type_obs(adata, 'cell_type_selection')
+    vect_celltype_id = adata.obs[celltype_col].values if celltype_col is not None else np.zeros(adata.n_obs)
     genes_list_init = list(adata.var_names.values)
     genes_list_init.sort()
     genes_tokeep_final = list(adata.var_names.values)

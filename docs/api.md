@@ -47,5 +47,12 @@ from CardamomOT import (
     analyse_reseau,
     reseau_top_regulateurs,
     plot_network,
+    # --- literature-based proliferation rate estimation ---
+    score_gene_sets,
+    estimate_growth_rates,
+    combine_growth_rates_with_reference,
+    # --- data file helpers ---
+    find_data_file,
+    read_gene_list,
 )
 ```

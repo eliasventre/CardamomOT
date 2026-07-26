@@ -27,11 +27,12 @@ except ImportError:
 # "default": False → unchecked by default (optional step)
 PIPELINE_STEPS = [
     {
-        "id": "infer_rd",
-        "name": "Read-depth correction (optional)",
-        "script": "infer_rd.py",
-        "description": "Compute per-cell read depth factors",
-        "default": False,
+        "id": "get_proliferation_rates",
+        "name": "Proliferation rates",
+        "script": "get_proliferation_rates.py",
+        "description": "Estimate net proliferation rate per cell from literature gene "
+                        "signatures (runs on the full gene set, before gene selection)",
+        "default": True,
     },
     {
         "id": "select_DEgenes",
@@ -48,9 +49,9 @@ PIPELINE_STEPS = [
         "default": False,
     },
     {
-        "id": "get_kinetic_rates",
+        "id": "get_degradation_rates",
         "name": "Kinetics",
-        "script": "get_kinetic_rates.py",
+        "script": "get_degradation_rates.py",
         "description": "Estimate mRNA degradation and synthesis rates",
         "default": True,
     },
@@ -79,7 +80,8 @@ PIPELINE_STEPS = [
         "id": "infer_network_simul",
         "name": "Network adaptation",
         "script": "infer_network_simul.py",
-        "description": "Prepare network parameters for forward simulation",
+        "description": "Prepare network parameters for forward simulation "
+                        "(optionally learns a proliferation-rate MLP)",
         "default": True,
     },
     {
@@ -128,8 +130,9 @@ PIPELINE_STEPS = [
 
 # Default hyperparameters
 DEFAULT_PARAMS = {
-    "infer_rd": {
+    "get_proliferation_rates": {
         "-i": "input project path",
+        "--species": "organism for proliferation/death gene signatures, human or mouse (default: 'human')",
     },
     "select_DEgenes": {
         "-i": "input project path",
@@ -142,7 +145,7 @@ DEFAULT_PARAMS = {
         "-i": "input project path",
         "-d": "network depth to query (default: 3)",
     },
-    "get_kinetic_rates": {
+    "get_degradation_rates": {
         "-i": "input project path",
         "-s": "split name (default: 'train')",
     },
@@ -275,7 +278,32 @@ def simple_step_selection() -> List[str]:
     return selected
 
 
-def interactive_parameter_input(step_id: str, project_path: str) -> Dict[str, str]:
+
+# Steps that consume the branching-simulation MLP (train it, or apply it).
+# --compute-proliferation must be passed consistently to all three, or not
+# at all -- see docs/advanced.md#proliferation-aware-simulation---compute-proliferation.
+STEPS_WITH_COMPUTE_PROLIFERATION = ["infer_network_simul", "simulate_network", "simulate_network_KOV"]
+
+
+def prompt_compute_proliferation() -> bool:
+    """
+    Ask once, up front, whether to enable proliferation-aware simulation
+    (--compute-proliferation) for this run. Off by default, matching
+    run.sh / cardamomot pipeline.
+    """
+    print("\n" + "=" * 60)
+    print("PROLIFERATION-AWARE SIMULATION (optional)")
+    print("=" * 60)
+    print("  Learns a small MLP mapping protein levels -> net proliferation rate")
+    print("  from the inferred optimal-transport couplings, and simulates with")
+    print("  branching (birth/death) resampling instead of a fixed cell number.")
+    print("  See Advanced Features -> Proliferation-aware simulation for details.")
+    response = input("  Enable proliferation-aware simulation (--compute-proliferation)? [y/N]: ").strip().lower()
+    return response == "y"
+
+
+def interactive_parameter_input(step_id: str, project_path: str,
+                                 compute_proliferation: bool = False) -> Dict[str, str]:
     """
     Prompt user for parameter values for a given step.
     Returns dictionary of parameters to pass to the script.
@@ -284,16 +312,22 @@ def interactive_parameter_input(step_id: str, project_path: str) -> Dict[str, st
 
     # Add -i to all steps
     params["-i"] = project_path
-    
-    # Add -s only to steps that use it (not infer_rd or prepare_reference_network or infer_test)
+
+    # Add -s only to steps that use it (not get_proliferation_rates,
+    # prepare_reference_network, or infer_test)
     steps_with_split = [
-        "select_DEgenes", "get_kinetic_rates", "infer_mixture", 
-        "check_mixture_to_data", "infer_network_structure", 
+        "select_DEgenes", "get_degradation_rates", "infer_mixture",
+        "check_mixture_to_data", "infer_network_structure",
         "infer_network_simul", "simulate_network", "check_sim_to_data",
         "simulate_network_KOV", "check_KOV_to_sim", "check_test_to_train"
     ]
     if step_id in steps_with_split:
         params["-s"] = "train"  # Default split
+
+    # Flag-only parameter (no value) -- forwarded consistently to all three
+    # steps that need it, decided once via prompt_compute_proliferation().
+    if step_id in STEPS_WITH_COMPUTE_PROLIFERATION and compute_proliferation:
+        params["--compute-proliferation"] = ""
 
     # Step-specific parameters
     if step_id == "select_DEgenes":
@@ -339,6 +373,22 @@ def interactive_parameter_input(step_id: str, project_path: str) -> Dict[str, st
             
             mean = input("Mean constraint [1.0]: ").strip() or "1.0"
             params["-m"] = mean
+
+    elif step_id == "get_proliferation_rates":
+        print("\n" + "=" * 60)
+        print("PROLIFERATION RATES - Parameters")
+        print("=" * 60)
+
+        if HAS_QUESTIONARY:
+            species = questionary.select(
+                "Organism for proliferation/death gene signatures:",
+                choices=["human", "mouse"],
+                default="human",
+            ).ask()
+            params["--species"] = species or "human"
+        else:
+            species = input("Organism for proliferation/death gene signatures (human/mouse) [human]: ").strip().lower() or "human"
+            params["--species"] = species
 
     elif step_id == "prepare_reference_network":
         print("\n" + "=" * 60)
@@ -427,7 +477,10 @@ def run_step(script_name: str, params: Dict[str, str], repo_root: str) -> bool:
 
     cmd = ["python", str(script_path)]
     for key, value in params.items():
-        cmd.extend([key, value])
+        if value == "":
+            cmd.append(key)  # flag-only parameter, e.g. --compute-proliferation
+        else:
+            cmd.extend([key, value])
 
     print(f"\n{'=' * 60}")
     print(f"▶️  Running: {script_name}")
@@ -480,6 +533,16 @@ def run_pipeline_interactive(project_path: str, use_defaults: bool = False):
             print("❌ Pipeline cancelled.")
             sys.exit(0)
 
+    # 3.5. Proliferation-aware simulation is opt-in and shared across three steps
+    # (infer_network_simul, simulate_network, simulate_network_KOV) -- ask once,
+    # up front, rather than per-step, so the same choice is applied consistently.
+    selected_ids = {step["id"] for step in PIPELINE_STEPS if step["script"] in selected_scripts}
+    compute_proliferation = False
+    if selected_ids & set(STEPS_WITH_COMPUTE_PROLIFERATION):
+        compute_proliferation = prompt_compute_proliferation() if not use_defaults else False
+        if compute_proliferation:
+            print("✓ Proliferation-aware simulation enabled (--compute-proliferation)")
+
     # 4. Execute each step
     failed_steps = []
     for i, script in enumerate(selected_scripts, 1):
@@ -487,7 +550,8 @@ def run_pipeline_interactive(project_path: str, use_defaults: bool = False):
 
         print(f"\n[{i}/{len(selected_scripts)}] {step['name']}")
 
-        params = interactive_parameter_input(step["id"], project_path)
+        params = interactive_parameter_input(step["id"], project_path,
+                                              compute_proliferation=compute_proliferation)
 
         if not run_step(script, params, repo_root):
             failed_steps.append(script)

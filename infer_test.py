@@ -37,7 +37,7 @@ import pickle
 import numpy as np
 import anndata as ad
 import pandas as pd
-from CardamomOT import NetworkModel as NetworkModel_beta
+from CardamomOT import NetworkModel as NetworkModel_beta, find_data_file
 import getopt
 
 
@@ -259,9 +259,9 @@ def main(argv):
 
     # ─── LOAD OPTIONAL TRANSITION RATES ─────────────────────────────────
     transition_rates_test = None
-    tr_path = os.path.join(p, 'Data', 'transition_rates.csv')
-    if os.path.exists(tr_path):
-        transition_rates_test = pd.read_csv(tr_path, index_col=0)
+    tr_path = find_data_file(os.path.join(p, 'Data'), 'transition_rates')
+    if tr_path is not None:
+        transition_rates_test = pd.read_csv(tr_path, sep=None, engine='python', index_col=0)
         transition_rates_test.index = transition_rates_test.index.astype(str)
         transition_rates_test.columns = transition_rates_test.columns.astype(str)
         print(f"[infer_test] Loaded transition rates from {tr_path} shape={transition_rates_test.shape}")

@@ -23,7 +23,7 @@ The CardamomOT interactive pipeline system consists of three main components:
                    ▼
 ┌─────────────────────────────────────────────────┐
 │     Individual Pipeline Scripts                 │
-│  (infer_rd.py, infer_mixture.py, etc.)         │
+│  (infer_mixture.py, etc.)                       │
 │  Executed as subprocess calls                   │
 └─────────────────────────────────────────────────┘
 ```
@@ -67,9 +67,9 @@ entry_points={
 ```python
 PIPELINE_STEPS = [
     {
-        "id": "infer_rd",
-        "name": "Estimate read depth correction",
-        "script": "infer_rd.py",
+        "id": "select_DEgenes",
+        "name": "Gene selection",
+        "script": "select_DEgenes_and_split.py",
         "description": "...",
     },
     # ... more steps

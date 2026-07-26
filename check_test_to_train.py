@@ -83,18 +83,10 @@ def main(argv):
         print(f"[check_test_to_train] Error: {e}")
         sys.exit(1)
 
-    # Read depth normalization: divide data_real in memory, never touch adata
-    if 'rd' in adata.obs.columns:
-        cell_rd = np.clip(np.asarray(adata.obs['rd'].values, dtype=float), 1e-6, None)
-        print(f"[check_test_to_train] Read depth correction loaded from adata.obs['rd']")
-    else:
-        cell_rd = np.ones(adata.shape[0], dtype=float)
-
     if scipy.sparse.issparse(adata.X):
         data_rna_extracted = adata.X.T.toarray().astype(float)
     else:
         data_rna_extracted = np.asarray(adata.X.T, dtype=float)
-    data_rna_extracted /= cell_rd[np.newaxis, :]   # (G, N) / (1, N)
 
     try:
         times = adata.obs['time'].values
@@ -153,8 +145,7 @@ def main(argv):
                           inputfile, 'Check', f'test_to_train_{tag}')
         plot_data_umap_altogether(data_real, data_ref, data_beta, data_netw_theta,
                                   data_sim, t_data, t_simul, inputfile, 'Check',
-                                  f'altogether_test_{tag}',
-                                  cell_rd=cell_rd)
+                                  f'altogether_test_{tag}')
         print(f"[check_test_to_train] Generated comparison plots in Check/test_to_train_{tag}/")
     except Exception as e:
         print(f"[check_test_to_train] Warning: Error generating plots: {e}")

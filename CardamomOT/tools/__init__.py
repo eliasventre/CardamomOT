@@ -16,6 +16,10 @@ from .plot_results_kov import (
 from .plot_networks import (
     analyse_reseau, reseau_top_regulateurs, plot_network,
 )
+from .estimate_proliferation import (
+    score_gene_sets, scores_to_rates, estimate_growth_rates,
+    combine_growth_rates_with_reference,
+)
 
 
 __all__ = [
@@ -26,4 +30,6 @@ __all__ = [
     'plot_results_rna_mixture', 'plot_results_rna_clean', 'plot_results_prot',
     'plot_results_sim_kov', 'compare_cell_types',
     'analyse_reseau', 'reseau_top_regulateurs', 'plot_network',
+    'score_gene_sets', 'scores_to_rates', 'estimate_growth_rates',
+    'combine_growth_rates_with_reference',
 ]
