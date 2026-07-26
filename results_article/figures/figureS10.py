@@ -1,17 +1,15 @@
 """
-figure_6.py
+figure_S10.py
 -----------
-CardamomOT — model fit quality on three experimental datasets
+CardamomOT — model fit quality on three experimental datasets using trajectory-preserving PHATE embeddings.
 (Semrau, Kameneva, Schiebinger).
 
 Layout  (A4 portrait, 8.27 × 11.69 in)
 -----------------------------------------
 Row A–F : PHATE embeddings (Reference | CardamomOT) × 3 datasets, coloured by time
-Row G–I : Cell-type composition timeline (stacked bar) × 3 datasets
-Row J–O : Mean ± SD gene expression × 3 datasets (1–3 genes each)
 
 Usage:
-    python figure_6.py
+    python figure_S10.py
 """
 
 import sys
@@ -206,7 +204,7 @@ def main():
 
     axes = [fig.add_subplot(gs[r, c]) for r in range(3) for c in range(2)]
 
-    # Panel labels A–O
+    # Panel labels A–F
     for ax, lbl in zip(axes, "ABCDEF"):
         ax.text(-0.15, 1.05, lbl, transform=ax.transAxes,
                 ha='left', va='bottom', fontsize=8, fontweight='bold', clip_on=False)
