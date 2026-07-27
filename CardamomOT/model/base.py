@@ -631,20 +631,53 @@ class NetworkModel:
                         _labels = getattr(self, '_transition_type_labels', None)
                         if _labels is not None:
                             _lbl_to_i = {l: i for i, l in enumerate(_labels)}
-                            src_ti = np.array([_lbl_to_i.get(str(_ct[r]), 0) for r in src_real])
-                            tgt_ti = np.array([_lbl_to_i.get(str(_ct[j]), 0) for j in cell_idx])
                         else:
-                            _uniq = np.unique(_ct)
-                            _ct_to_i = {c: i for i, c in enumerate(_uniq)}
-                            src_ti = np.array([_ct_to_i.get(_ct[r], 0) for r in src_real])
-                            tgt_ti = np.array([_ct_to_i.get(_ct[j], 0) for j in cell_idx])
-                        n_types_tr = _tr.shape[0]
-                        src_ti = np.clip(src_ti, 0, n_types_tr - 1)
-                        tgt_ti = np.clip(tgt_ti, 0, n_types_tr - 1)
+                            _lbl_to_i = {c: i for i, c in enumerate(np.unique(_ct))}
+                        # Unmapped cell types (not in the transition_rates matrix) get -1,
+                        # never a real index — they must stay cost-neutral, not silently
+                        # inherit row/col 0's transition profile.
+                        src_ti = np.array([_lbl_to_i.get(str(_ct[r]), -1) for r in src_real])
+                        tgt_ti = np.array([_lbl_to_i.get(str(_ct[j]), -1) for j in cell_idx])
+
+                        n_src_types, n_tgt_types = _tr.shape
+                        valid_src = (src_ti >= 0) & (src_ti < n_src_types)
+                        valid_tgt = (tgt_ti >= 0) & (tgt_ti < n_tgt_types)
+                        if not (valid_src.all() and valid_tgt.all()) and not getattr(self, '_warned_unmapped_cell_types', False):
+                            _unmapped = sorted(set(str(_ct[r]) for r in src_real[~valid_src]) |
+                                                set(str(_ct[j]) for j in cell_idx[~valid_tgt]))
+                            print(f"Warning: cell type(s) {_unmapped} not found in transition_rates "
+                                  f"matrix; no OT cost adjustment applied for these cells.")
+                            self._warned_unmapped_cell_types = True
+
                         tr_prob = np.exp(_tr * delta_t)
-                        tr_prob = tr_prob / tr_prob.sum(axis=1, keepdims=True) * _tr.shape[1]
-                        tr_w = tr_prob[np.ix_(src_ti, tgt_ti)]
+                        tr_prob = tr_prob / tr_prob.sum(axis=1, keepdims=True) * n_tgt_types
+                        tr_w = np.ones((len(src_ti), len(tgt_ti)))
+                        valid_pair = valid_src[:, None] & valid_tgt[None, :]
+                        _rows = np.clip(src_ti, 0, n_src_types - 1)
+                        _cols = np.clip(tgt_ti, 0, n_tgt_types - 1)
+                        tr_w_full = tr_prob[np.ix_(_rows, _cols)]
+                        tr_w[valid_pair] = tr_w_full[valid_pair]
                         pairwise_dist = pairwise_dist / np.maximum(tr_w, 1e-10)
+
+                    # --- Lineage constraint ---
+                    # Cells sharing a clonal lineage barcode at t must map to a cell of
+                    # the same lineage at t+1. Cells with no known lineage (NaN/empty)
+                    # are left unconstrained. Cross-lineage pairs get a very large but
+                    # finite penalty rather than np.inf, so Sinkhorn stays numerically
+                    # stable even if a batch happens to contain no same-lineage target
+                    # (real_cell_batches sub-samples the target cells per batch) —
+                    # the constraint degrades gracefully instead of breaking convergence.
+                    _lin = getattr(self, '_lineage', None)
+                    _lin_known = getattr(self, '_lineage_known', None)
+                    if _lin is not None:
+                        lin_src = _lin[src_real]
+                        lin_tgt = _lin[cell_idx]
+                        known_src = _lin_known[src_real]
+                        known_tgt = _lin_known[cell_idx]
+                        mismatch = (lin_src[:, None] != lin_tgt[None, :]) & known_src[:, None] & known_tgt[None, :]
+                        if mismatch.any():
+                            penalty = pairwise_dist.max() * 1e3 + 1e6
+                            pairwise_dist = np.where(mismatch, pairwise_dist + penalty, pairwise_dist)
 
                     # --- Growth-weighted OT marginals ---
                     # WOT convention (Schiebinger et al. 2019): both the source AND
@@ -1263,15 +1296,23 @@ class NetworkModel:
         self._cell_types = None
         self._transition_rates = None
         self._transition_type_labels = None
+        self._lineage = None
+        self._lineage_known = None
         try:
             import anndata as _ad
             if isinstance(data, _ad.AnnData):
                 if 'proliferation_net_rate' in data.obs:
                     self._prolif_net_rate = data.obs['proliferation_net_rate'].values.astype(float)
-                for _ct_col in ('cell_type', 'cell_types', 'celltype'):
+                # Prefer the same task-specific grouping used for proliferation rates
+                # (cell_type_proliferation), falling back to the generic cell_type
+                # column when it isn't present — see docs/advanced.md.
+                for _ct_col in ('cell_type_proliferation', 'cell_type', 'cell_types', 'celltype'):
                     if _ct_col in data.obs:
                         self._cell_types = data.obs[_ct_col].values.astype(str)
                         break
+                if 'lineage' in data.obs:
+                    self._lineage_known = data.obs['lineage'].notna().values
+                    self._lineage = data.obs['lineage'].astype(str).values
         except ImportError:
             pass
 
@@ -2389,15 +2430,23 @@ class NetworkModel:
         self._cell_types = None
         self._transition_rates = None
         self._transition_type_labels = None
+        self._lineage = None
+        self._lineage_known = None
         try:
             import anndata as _ad
             if isinstance(data, _ad.AnnData):
                 if 'proliferation_net_rate' in data.obs:
                     self._prolif_net_rate = data.obs['proliferation_net_rate'].values.astype(float)
-                for _ct_col in ('cell_type', 'cell_types', 'celltype'):
+                # Prefer the same task-specific grouping used for proliferation rates
+                # (cell_type_proliferation), falling back to the generic cell_type
+                # column when it isn't present — see docs/advanced.md.
+                for _ct_col in ('cell_type_proliferation', 'cell_type', 'cell_types', 'celltype'):
                     if _ct_col in data.obs:
                         self._cell_types = data.obs[_ct_col].values.astype(str)
                         break
+                if 'lineage' in data.obs:
+                    self._lineage_known = data.obs['lineage'].notna().values
+                    self._lineage = data.obs['lineage'].astype(str).values
         except ImportError:
             pass
 

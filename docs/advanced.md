@@ -374,7 +374,17 @@ TypeB    ,  0.05, 0.2,  0.05
 TypeC    ,  0.01, 0.05, 0.3
 ```
 
-Row/column names must match `adata.obs['cell_type']`. At each consecutive timepoint pair, transition probabilities are computed as `exp(rate × Δt)` and rescaled so that the mean weight per row equals 1 — transitions with weight > 1 become cheaper (preferred), weight < 1 become more expensive (penalised).
+Row/column names must match `adata.obs['cell_type_proliferation']` if that column is present (same task-specific grouping used for [proliferation rates](#anchor-to-a-known-rate)), else `adata.obs['cell_type']`. At each consecutive timepoint pair, transition probabilities are computed as `exp(rate × Δt)` and rescaled so that the mean weight per row equals 1 — transitions with weight > 1 become cheaper (preferred), weight < 1 become more expensive (penalised). Cell types absent from the matrix are left cost-neutral (a one-time warning is printed) rather than silently reusing another type's row/column.
+
+### Clonal lineage constraint (`adata.obs['lineage']`) — opt-in
+
+If `adata.obs['lineage']` is present (e.g. a clonal barcode from lineage tracing), the OT cost is
+adjusted so that a cell only maps to a cell of the same lineage at the next timepoint: cross-lineage
+pairs get a very large (but finite) additive penalty rather than being excluded outright, so Sinkhorn
+stays numerically stable even when a batch happens to contain no same-lineage target — the constraint
+degrades gracefully for that batch instead of breaking convergence. Cells with no lineage annotation
+(NaN/empty) are left unconstrained. No CSV is needed — the barcode is compared cell-to-cell, not
+aggregated by type.
 
 ---
 
