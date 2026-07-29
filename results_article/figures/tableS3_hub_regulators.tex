@@ -1,44 +1,44 @@
 \begin{table}[ht]
 \centering
-\caption{Top \detokenize{10} candidate hub regulators ranked by outgoing regulatory strength $\sum_{j\neq i}|W_{ij}|$ in the GRN inferred by \textsc{CardamomOT} for each experimental dataset.}
+\caption{Top \detokenize{10} candidate hub regulators ranked by outgoing regulatory strength $\sum_{j\neq i}|W_{ij}|$ in the GRN inferred by \textsc{CardamomOT} for each experimental dataset. Values show mean $\pm$ std across 5 independent inference runs.}
 \label{tableS3}
 \small
-\begin{tabularx}{\textwidth}{r l l l r X}
+\begin{tabularx}{\textwidth}{r l l l X}
 \toprule
-Dataset & Rank & Gene & Out.\ Strength & $N$ Edges & Top 3 Outgoing Targets \\
+Dataset & Rank & Gene & Out.\ Strength & Top 4 Outgoing Targets \\
 \midrule
-Semrau & 1 & Hoxb2 & 158.362 & 17 & Zfp42, Pou5f1, Cd24a \\
- & 2 & Lamb1 & 70.049 & 12 & Sparc, Col4a2, Gata6 \\
- & 3 & Dnmt3a & 59.864 & 23 & Nr0b1, Esrrb, Pou5f1 \\
- & 4 & Col4a2 & 47.412 & 10 & Lamb1, Sparc, Gata4 \\
- & 5 & Klf2 & 27.232 & 16 & Dppa2, Zic2, Zfp42 \\
- & 6 & Esrrb & 25.699 & 22 & Dppa4, Klf4, Nr0b1 \\
- & 7 & Sox2 & 25.067 & 11 & Pou5f1, Esrrb, Zic3 \\
- & 8 & Dppa2 & 22.443 & 16 & Hoxa1, Hoxb2, Klf4 \\
- & 9 & Sparc & 17.697 & 13 & Klf4, Lamb1, Krt8 \\
- & 10 & Klf4 & 15.902 & 14 & Dppa4, Klf2, Pou5f1 \\
-\cmidrule{1-6}
-Kameneva & 1 & RPL30 & 162.587 & 82 & RPL34, RPL10, RPL32 \\
- & 2 & MEG3 & 146.010 & 76 & RPS2, RPL41, COL18A1 \\
- & 3 & HAND2 & 106.099 & 50 & STMN2, PHOX2A, PTPRZ1 \\
- & 4 & CHGA & 78.626 & 38 & RAMP1, PENK, CARTPT \\
- & 5 & ALDH1A1 & 59.370 & 83 & RPL10, RPS29, FAU \\
- & 6 & POSTN & 56.965 & 80 & COL5A2, RPL34, RPL12 \\
- & 7 & HTATSF1 & 49.207 & 47 & PENK, RPL41, HINT1 \\
- & 8 & ZEB2 & 46.498 & 66 & RPS2, PNMT, RPL32 \\
- & 9 & PCSK1N & 46.469 & 41 & ATP5F1E, FAU, HINT1 \\
- & 10 & HAND2-AS1 & 40.594 & 50 & MAP1B, BASP1, CD24 \\
-\cmidrule{1-6}
-Schiebinger & 1 & Fabp3 & 73.662 & 101 & Tcl1, Mybl2, Dppa5a \\
- & 2 & Dppa5a & 46.461 & 104 & Tcl1, Cdkn2a, Lncenc1 \\
- & 3 & Ereg & 26.735 & 104 & Fam20c, Myc, Ddit3 \\
- & 4 & Obox6 & 23.778 & 104 & Spic, Dppa4, Hesx1 \\
- & 5 & Txnip & 23.507 & 104 & Hist1h2ap, Nme2, 2810417H13Rik \\
- & 6 & Dmrtc2 & 22.249 & 101 & Tmem35, Epcam, Id3 \\
- & 7 & Cdkn2a & 22.151 & 101 & 2810417H13Rik, Tax1bp3, Gabarap \\
- & 8 & S100a6 & 22.091 & 103 & Dppa5a, Col1a2, Prss23 \\
- & 9 & Tnfrsf12a & 21.375 & 103 & Ereg, Myc, 2810417H13Rik \\
- & 10 & Gm26917 & 20.426 & 104 & Vps8, Vbp1, Erdr1 \\
+Semrau & 1 & Hoxb2 & 112.152 $\pm$ 8.280 & Zfp42, Pou5f1, Cd24a, Nes \\
+ & 2 & Dnmt3a & 58.088 $\pm$ 7.691 & Zfp42, Esrrb, Nr0b1, Hoxb2 \\
+ & 3 & Lamb1 & 54.751 $\pm$ 17.010 & Col4a2, Sparc, Gata6, Dab2 \\
+ & 4 & Esrrb & 43.884 $\pm$ 4.956 & Jarid2, Dppa4, Nr0b1, Dppa2 \\
+ & 5 & Col4a2 & 43.325 $\pm$ 12.778 & Lamb1, Sparc, Gata4, Krt8 \\
+ & 6 & Klf2 & 33.713 $\pm$ 6.399 & Dppa2, Zic3, Zfp42, Dnmt3b \\
+ & 7 & Sox2 & 28.838 $\pm$ 4.929 & Esrrb, Dppa2, Pou5f1, Zfp42 \\
+ & 8 & Dppa2 & 20.506 $\pm$ 3.784 & Esrrb, Hoxa1, Zfp42, Klf4 \\
+ & 9 & Cdh2 & 16.377 $\pm$ 5.590 & Col4a2, Lamb1, Sparc, Sox17 \\
+ & 10 & Klf4 & 16.058 $\pm$ 2.423 & Nr0b1, Klf2, Zic2, Dppa4 \\
+\cmidrule{1-5}
+Kameneva & 1 & RPL30 & 127.018 $\pm$ 8.826 & RPL10, RPL32, RPL34, RPS2 \\
+ & 2 & CHGA & 108.514 $\pm$ 15.115 & CHGB, RAMP1, PENK, HAND2-AS1 \\
+ & 3 & MEG3 & 89.995 $\pm$ 6.449 & COL18A1, RPS2, RPL12, TIMP3 \\
+ & 4 & ATP5F1E & 68.930 $\pm$ 12.536 & RPL32, RPS2, RPL34, RPS29 \\
+ & 5 & HAND2-AS1 & 52.435 $\pm$ 7.682 & STMN2, MAP1B, CD24, RTN1 \\
+ & 6 & POSTN & 50.401 $\pm$ 7.985 & RPL34, EIF4A2, RPL41, RPS13 \\
+ & 7 & ALDH1A1 & 48.818 $\pm$ 7.361 & FAU, BTF3, GAPDH, RPL10 \\
+ & 8 & HTATSF1 & 37.623 $\pm$ 7.016 & RPS4X, RPL41, RPS2, RPL12 \\
+ & 9 & HAND2 & 36.196 $\pm$ 18.502 & PHOX2A, BEX1, UCHL1, GAL \\
+ & 10 & ZEB2 & 33.916 $\pm$ 3.222 & RPS2, RPL32, RPL12, MEG3 \\
+\cmidrule{1-5}
+Schiebinger & 1 & Fabp3 & 53.082 $\pm$ 9.778 & Dppa5a, Mylpf, Mybl2, Zfp42 \\
+ & 2 & Dppa5a & 47.204 $\pm$ 5.487 & Fmr1nb, Vbp1, Msx2, Sox2 \\
+ & 3 & S100a6 & 42.407 $\pm$ 7.778 & Dppa5a, Hesx1, Zfp42, Cited2 \\
+ & 4 & Mylpf & 28.544 $\pm$ 12.236 & Lncenc1, Esrrb, Hesx1, Zfp42 \\
+ & 5 & Gstp1 & 27.070 $\pm$ 2.649 & Gm26917, Gabarap, Txnip, Ypel3 \\
+ & 6 & Cdkn2a & 25.192 $\pm$ 6.199 & Cdkn2b, Fos, Gabarap, Egr1 \\
+ & 7 & Tnfrsf12a & 25.180 $\pm$ 5.143 & Ereg, Myc, Gng12, Gm26917 \\
+ & 8 & Xist & 22.631 $\pm$ 3.971 & Ypel3, AY036118, Cyb5r3, Mrps24 \\
+ & 9 & Txnip & 22.485 $\pm$ 4.308 & Nme2, Hist1h2ap, Gstp1, 2810417H13Rik \\
+ & 10 & Krt8 & 21.895 $\pm$ 2.805 & Wnt7b, Batf3, Msx2, Pdgfb \\
 \bottomrule
 \end{tabularx}
 \end{table}
