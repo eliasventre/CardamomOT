@@ -474,15 +474,16 @@ def load_perturbation_data(cfg):
         color_map,
     )
 
-    # Chi2 sur les proportions affichées (Sim WT vs Sim perturb, run unique .h5ad)
-    # n_cells=1000 fixe : p-values comparables entre datasets, pas d'inflation
+    # Chi2 sur les proportions affichées (Sim single vs Sim perturb, run unique .h5ad de
+    # base — pas les N_SIMS runs utilisés pour la variabilité inter-runs des barres d'erreur)
+    # n_cells=100*n_celltypes fixe : p-values comparables entre datasets, pas d'inflation
     try:
-        n_cells = 100 * len(prop_df.index)
-        p_wt   = prop_df['Sim WT'].values.astype(float)
-        p_pert = prop_df['Sim perturb'].values.astype(float)
+        n_cells  = 100 * len(prop_df.index)
+        p_single = prop_df['Sim single'].values.astype(float)
+        p_pert   = prop_df['Sim perturb'].values.astype(float)
         table  = np.vstack([
-            np.round(p_wt   * n_cells).astype(int),
-            np.round(p_pert * n_cells).astype(int),
+            np.round(p_single * n_cells).astype(int),
+            np.round(p_pert   * n_cells).astype(int),
         ])
         chi2_stat, chi2_pval = chi2_contingency(table)[:2]
     except Exception:

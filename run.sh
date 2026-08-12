@@ -53,7 +53,7 @@ kov="${12:-1}"
 compute_proliferation="${13:-0}"
 use_proliferation="${14:-0}"
 
-Build --compute-proliferation flag string used by infer_network_simul, simulate_network, simulate_network_KOV
+# Build --compute-proliferation flag string used by infer_network_simul, simulate_network, simulate_network_KOV
 prolif_flag=""
 if [ "$compute_proliferation" = "1" ]; then
     prolif_flag="--compute-proliferation"

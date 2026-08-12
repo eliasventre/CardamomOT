@@ -470,7 +470,7 @@ def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, th
     theta_ref_flat = theta_ref_.ravel(order='C')
     ref_network_flat = ref_network_.ravel(order='C')
 
-    max_bounds = max(G, 10)
+    max_bounds = max(np.sqrt(G), 10)
     bounds = [(-max_bounds, max_bounds)] * len(X_flat)
     if not final:
         r_plus = 1 + ref_constraint_pct / max(EPS, (1 - ref_constraint_pct))
@@ -619,8 +619,14 @@ def main_loop_inference(g, y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_
     """
     n_networks_tmp: int = int(1 + np.argmax(ks[1:]))
 
-    theta_init[:G] /= np.maximum(EPS, ref_network)
-    theta_ref[:G] /= np.maximum(EPS, ref_network)
+    if hard_forcing_ref:
+        # Only needed so that the ±ref_constraint_pct bounds (computed on theta_ref_flat
+        # inside core_inference) target the raw reference value after rescaling by
+        # ref_network. Outside hard_forcing_ref, dividing here would cancel the soft
+        # ref_network penalization (stimulus / prior_network_pen) applied via
+        # theta_final[:G] *= ref_network at the end of core_inference.
+        theta_init[:G] /= np.maximum(EPS, ref_network)
+        theta_ref[:G] /= np.maximum(EPS, ref_network)
 
     l_pen1 = l_gen * np.size(y_prot, 0) / (n_networks_tmp * scale * (1 + G**(1/2)))
     theta = core_inference(

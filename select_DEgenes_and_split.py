@@ -86,14 +86,9 @@ def main(argv):
         if not os.path.exists(data_path):
             raise FileNotFoundError(f"Input data file not found at {data_path}")
         adata = ad.read_h5ad(data_path)
+        print(adata)
         print(f"[select_DEgenes_and_split] Loaded input dataset from {data_path}")
         print(f"[select_DEgenes_and_split] Dataset contains {adata.shape[0]} cells and {adata.shape[1]} genes")
-
-        if 'copycat' in p:
-            adata_all_path = os.path.join('collaborations', 'copycat', 'RMS_all', 'Data', 'data.h5ad')
-            if os.path.exists(adata_all_path):
-                adata_all = ad.read_h5ad(adata_all_path)
-                adata = adata[:, [g for g in adata.var_names.values if g in adata_all.var_names.values]]
     except FileNotFoundError as e:
         print(f"[select_DEgenes_and_split] Error: {e}")
         sys.exit(1)
