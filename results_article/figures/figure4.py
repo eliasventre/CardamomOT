@@ -40,8 +40,22 @@ size = [5, 10, 20, 50, 100]
 
 # ---- Timescale robustness constants (panel H) ----
 FIGURE4_TIMESCALE_DIR = BASE_DIR / 'figure4_timescale'
-TIMESCALE_SIGMAS = [0, 0.2, 0.5, 1, 1.5, 2, 3, 5]  # 0 = real (no jitter)
-TIMESCALE_LABELS = ['real', 'σ=0.2', 'σ=0.5', 'σ=1', 'σ=1.5', 'σ=2', 'σ=3', 'σ=5']
+TIMESCALE_NOISE = [0, 0.25, 0.4, 0.55, 0.7, 0.85, 0.95, 1.0]  # 0 = real (Dirichlet-gap noise)
+TIMESCALE_LABELS = ['real', 'η=0.25', 'η=0.4', 'η=0.55', 'η=0.7', 'η=0.85', 'η=0.95', 'η=1']
+
+
+def _random_linspace_dirichlet(start, stop, n, noise, rng):
+    """Dirichlet-gap perturbed linspace. noise=0 → linspace, noise=1 → uniform."""
+    if noise == 0:
+        return np.linspace(start, stop, n)
+    alpha = 1.0 / (noise ** 2)
+    gaps = rng.dirichlet(np.full(n - 1, alpha))
+    internal = np.cumsum(gaps)[:-1]
+    result = np.empty(n)
+    result[0] = start
+    result[1:-1] = start + (stop - start) * internal
+    result[-1] = stop
+    return result
 
 # ============================================================
 # Dropout robustness data preparation & inference (for panel G)
@@ -164,14 +178,14 @@ def run_dropout_inference():
 def prepare_timescale_data():
     """
     Simulate each of the 4 benchmarks with harissa at varying levels
-    of timepoint jitter (sigma). 8 sigma levels × N replicates each.
+    of Dirichlet-gap timepoint noise. 8 noise levels × N replicates each.
     Saves data in figure4_timescale/BENCHMARK/.
-    Resumes per (benchmark, sigma, replicate) if score already exists.
+    Resumes per (benchmark, noise, replicate) if score already exists.
     """
     from harissa import NetworkModel as HarissaNetworkModel
 
     ts_dir = FIGURE4_TIMESCALE_DIR
-    n_sigmas = len(TIMESCALE_SIGMAS)
+    n_noise = len(TIMESCALE_NOISE)
     n_reps = N
     C = 1000  # total cells per simulation
 
@@ -224,7 +238,7 @@ def prepare_timescale_data():
 
     # Master RNG for reproducibility
     master_rng = np.random.default_rng(42)
-    all_seeds = master_rng.integers(0, 2**31, size=(len(benchmarks), n_sigmas, n_reps))
+    all_seeds = master_rng.integers(0, 2**31, size=(len(benchmarks), n_noise, n_reps))
 
     any_work_done = False
     for bi, bench in enumerate(benchmarks):
@@ -249,30 +263,24 @@ def prepare_timescale_data():
         np.savetxt(dst / 'Data/Rates/degradation_rates.txt',
                    mh.d.T, fmt='%.6f', delimiter='\t')
 
-        # Save ground truth (same for all sigma and replicates)
+        # Save ground truth (same for all noise levels and replicates)
         inter = 1 * (abs(mh.inter) > 0)
         for r in range(1, n_reps + 1):
             np.save(dst / 'True' / f'inter_{r}.npy', inter)
 
-        for si, sigma in enumerate(TIMESCALE_SIGMAS):
+        for ni, noise in enumerate(TIMESCALE_NOISE):
             for r in range(1, n_reps + 1):
-                # Skip if score already exists for this (bench, sigma, replicate)
-                if (dst / 'CARDAMOM2' / f'score_s{si}_r{r}.npy').exists():
+                # Skip if score already exists for this (bench, noise, replicate)
+                if (dst / 'CARDAMOM2' / f'score_n{ni}_r{r}.npy').exists():
                     continue
                 any_work_done = True
-                print(f'  Timescale simulation: {bench} sigma={sigma} rep {r}/{n_reps}')
-                rep_rng = np.random.default_rng(all_seeds[bi, si, r - 1])
+                print(f'  Timescale simulation: {bench} noise={noise} rep {r}/{n_reps}')
+                rep_rng = np.random.default_rng(all_seeds[bi, ni, r - 1])
 
-                # Jitter timepoints
-                if sigma == 0:
-                    t = t_orig.copy()
-                else:
-                    t = np.sort(np.clip(
-                        rep_rng.normal(t_orig, sigma), t_min, t_max))
-                    t[0] = t_min
-                    t[-1] = t_max
+                # Dirichlet-gap timepoints (endpoints pinned)
+                t = _random_linspace_dirichlet(t_min, t_max, n_tp, noise, rep_rng)
 
-                np.save(dst / 'Data' / f'timepoints_s{si}_r{r}.npy', t)
+                np.save(dst / 'Data' / f'timepoints_n{ni}_r{r}.npy', t)
 
                 # Assign cells to timepoints (equal per timepoint)
                 time_int = np.zeros(C, dtype='int')
@@ -285,14 +293,14 @@ def prepare_timescale_data():
                 data[1:, 0] = time_int
                 data[1:, 1] = 100 * (time_int > 0)  # stimulus indicator
 
-                # Simulate using actual jittered time for each cell
-                sim_rng = np.random.default_rng(all_seeds[bi, si, r - 1] + 1)
+                # Simulate using actual perturbed time for each cell
+                sim_rng = np.random.default_rng(all_seeds[bi, ni, r - 1] + 1)
                 for k in range(C):
                     sim = mh.simulate(t[k // cells_per_tp], burnin=5)
                     data[k + 1, 2:] = sim_rng.poisson(sim.m[-1])
 
                 # Save data
-                np.savetxt(dst / 'Data' / f'data_s{si}_r{r}.txt',
+                np.savetxt(dst / 'Data' / f'data_n{ni}_r{r}.txt',
                            data.T, fmt='%d', delimiter='\t')
     if not any_work_done:
         print('Timescale data already prepared, skipping.')
@@ -301,7 +309,7 @@ def prepare_timescale_data():
 def run_timescale_inference():
     """Run CARDAMOM2 inference on timescale-perturbed benchmarks (resumes per replicate)."""
     ts_dir = FIGURE4_TIMESCALE_DIR
-    n_sigmas = len(TIMESCALE_SIGMAS)
+    n_noise = len(TIMESCALE_NOISE)
     n_reps = N
 
     sys.path.insert(0, str(REPO_ROOT))
@@ -316,25 +324,25 @@ def run_timescale_inference():
             # Read degradation rates once per benchmark
             d = np.loadtxt(f'{bench}/Data/Rates/degradation_rates.txt',
                            dtype=float, delimiter='\t').T
-            for si in range(n_sigmas):
+            for ni in range(n_noise):
                 for r in range(1, n_reps + 1):
-                    score_path = Path(f'{bench}/CARDAMOM2/score_s{si}_r{r}.npy')
+                    score_path = Path(f'{bench}/CARDAMOM2/score_n{ni}_r{r}.npy')
                     if score_path.exists():
                         continue
                     any_work_done = True
-                    print(f'  Timescale inference: {bench} sigma={TIMESCALE_SIGMAS[si]} '
+                    print(f'  Timescale inference: {bench} noise={TIMESCALE_NOISE[ni]} '
                           f'rep {r}/{n_reps}')
-                    fname = f'{bench}/Data/data_s{si}_r{r}.txt'
-                    t_jittered = np.load(f'{bench}/Data/timepoints_s{si}_r{r}.npy')
+                    fname = f'{bench}/Data/data_n{ni}_r{r}.txt'
+                    t_perturbed = np.load(f'{bench}/Data/timepoints_n{ni}_r{r}.npy')
                     data = np.loadtxt(fname, dtype=int, delimiter='\t')[1:, 1:]
                     x = data.T
-                    # Assign jittered time values to cells (equal per timepoint)
+                    # Assign perturbed time values to cells (equal per timepoint)
                     C_cells = x.shape[0]
-                    n_tp = len(t_jittered)
+                    n_tp = len(t_perturbed)
                     cells_per_tp = C_cells // n_tp
                     time = np.zeros(C_cells)
                     for i in range(n_tp):
-                        time[i * cells_per_tp:(i + 1) * cells_per_tp] = t_jittered[i]
+                        time[i * cells_per_tp:(i + 1) * cells_per_tp] = t_perturbed[i]
                     x[:, 0] = time
                     G = x.shape[1]
                     model = NetworkModel(G - 1)
@@ -346,7 +354,7 @@ def run_timescale_inference():
                         model.d = d
                         model.fit(x, verb=verb)
                         score += model.inter
-                    np.save(f'{bench}/CARDAMOM2/score_s{si}_r{r}', score)
+                    np.save(f'{bench}/CARDAMOM2/score_n{ni}_r{r}', score)
     if not any_work_done:
         print('Timescale inference already complete, skipping.')
 
@@ -357,13 +365,14 @@ run_dropout_inference()
 prepare_timescale_data()
 run_timescale_inference()
 
-# ---- Compute AUPR for dropout robustness (panel G, per dropout level) ----
+# ---- Compute AUPR for dropout robustness (panel G, averaged across benchmarks) ----
 do_dir = FIGURE4_DROPOUT_DIR
 n_do_levels = len(DROPOUT_LEVELS)
 dropout_aupr = {li: [] for li in range(n_do_levels)}
-for bench in benchmarks:
-    for r in range(1, N + 1):
-        for li in range(n_do_levels):
+for r in range(1, N + 1):
+    for li in range(n_do_levels):
+        vals = []
+        for bench in benchmarks:
             inter = abs(np.load(do_dir / bench / f'level_{li}' / 'True' / f'inter_{r}.npy'))
             score = abs(np.load(do_dir / bench / f'level_{li}' / 'CARDAMOM2' / f'score_{r}.npy'))
             G = inter.shape[0]
@@ -371,25 +380,35 @@ for bench in benchmarks:
             y0 = np.array([inter[i, j] for i, j in edges])
             y1 = np.array([score[i, j] for i, j in edges])
             p, rcl, _ = precision_recall_curve(y0, y1)
-            dropout_aupr[li].append(auc(rcl, p))
+            vals.append(auc(rcl, p))
+        dropout_aupr[li].append(np.mean(vals))
 
-# ---- Compute AUPR for timescale robustness (panel H, pooled across 4 benchmarks) ----
+# ---- Compute AUPR for timescale robustness (panel H, averaged across benchmarks) ----
 ts_dir = FIGURE4_TIMESCALE_DIR
-n_sigmas = len(TIMESCALE_SIGMAS)
-timescale_aupr = {si: [] for si in range(n_sigmas)}
-for bench in benchmarks:
-    for r in range(1, N + 1):
+n_noise = len(TIMESCALE_NOISE)
+timescale_aupr = {ni: [] for ni in range(n_noise)}
+for r in range(1, N + 1):
+    # Ground truth is identical across noise levels; load once per (bench, rep)
+    inter_per_bench = {}
+    edges_per_bench = {}
+    for bench in benchmarks:
         inter = abs(np.load(ts_dir / bench / 'True' / f'inter_{r}.npy'))
         G = inter.shape[0]
-        edges = [(i, j) for i in range(G) for j in set(range(1, G)) - {i}]
-        for si in range(n_sigmas):
-            score = abs(np.load(ts_dir / bench / 'CARDAMOM2' / f'score_s{si}_r{r}.npy'))
+        inter_per_bench[bench] = inter
+        edges_per_bench[bench] = [(i, j) for i in range(G) for j in set(range(1, G)) - {i}]
+    for ni in range(n_noise):
+        vals = []
+        for bench in benchmarks:
+            inter = inter_per_bench[bench]
+            edges = edges_per_bench[bench]
+            score = abs(np.load(ts_dir / bench / 'CARDAMOM2' / f'score_n{ni}_r{r}.npy'))
             y0 = np.array([inter[i, j] for i, j in edges])
             y1 = np.array([score[i, j] for i, j in edges])
             p, rcl, _ = precision_recall_curve(y0, y1)
-            timescale_aupr[si].append(auc(rcl, p))
+            vals.append(auc(rcl, p))
+        timescale_aupr[ni].append(np.mean(vals))
 
-# Random baseline for timescale (pooled across all 4 benchmarks)
+# Random baseline for timescale (averaged across benchmarks per replicate)
 ts_aupr_random = []
 for bench in benchmarks:
     for r in range(1, N + 1):
@@ -574,19 +593,19 @@ ax.text(xn, yn, 'Dropout', **optn)
 ax.text(xn, yn + 0.01, 'Dropout', color='none',
         bbox=dict(boxstyle='round,pad=0.2', fc='none', ec='lightgray', lw=0.8), **optn)
 
-# ---- Panel H: Timescale robustness (AUPR vs timepoint jitter) ----
+# ---- Panel H: Timescale robustness (AUPR vs Dirichlet timepoint noise) ----
 ax = plt.subplot(grid[3, 1])
 configure(ax)
 ax.annotate('H', xytext=(x, y), fontweight='bold', **opt_panel)
 
-for si in range(n_sigmas):
-    box = ax.boxplot([timescale_aupr[si]], positions=[si + 1],
+for ni in range(n_noise):
+    box = ax.boxplot([timescale_aupr[ni]], positions=[ni + 1],
                      patch_artist=True, widths=0.5)
     configure_box(box, ('black', 'grey'))
 
-ax.plot([0, n_sigmas + 1], [np.mean(ts_aupr_random)] * 2, '--', color='lightgray', lw=1)
-ax.set_xlim(0.5, n_sigmas + 0.5)
-ax.set_xticks(range(1, n_sigmas + 1))
+ax.plot([0, n_noise + 1], [np.mean(ts_aupr_random)] * 2, '--', color='lightgray', lw=1)
+ax.set_xlim(0.5, n_noise + 0.5)
+ax.set_xticks(range(1, n_noise + 1))
 ax.set_xticklabels(TIMESCALE_LABELS, rotation=45, ha='right', fontsize=5)
 ax.set_ylabel('AUPR', fontsize=6)
 optn = dict(fontsize=9, transform=ax.transAxes, ha='right')
