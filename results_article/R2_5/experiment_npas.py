@@ -25,7 +25,7 @@ REPO_ROOT = BASE_DIR.parents[1]             # repository root
 NPAS_VALUES = [2, 4, 6, 10, 25]
 NPAS_LABELS = ['n_pas=2', 'n_pas=4', 'n_pas=6', 'n_pas=10', 'n_pas=25']
 BENCHMARKS = ['FN4', 'FN8', 'CN5', 'BN8']
-N = 10          # number of replicates
+N = 2          # number of replicates
 N_REPET = 2     # number of initial couplings (averaged)
 
 # ============================================================
@@ -68,6 +68,7 @@ def run_inference():
                 model = NetworkModel(G - 1)
                 model.d = d
                 model.n_pas = npas
+                model.force_n_pas = True  # bypass the auto-floor n_pas=max(n_pas, dt) so small n_pas is actually tested
                 model.fit(x, verb=verb)
                 score = model.inter
 
@@ -75,6 +76,7 @@ def run_inference():
                     model = NetworkModel(G - 1)
                     model.d = d
                     model.n_pas = npas
+                    model.force_n_pas = True
                     model.fit(x, verb=verb)
                     score += model.inter
 

@@ -123,6 +123,7 @@ class NetworkModel:
         self.update_modes = 1
         self.alpha_threshold = .6 # max = 1, thershold for important transition to update alpha full
         self.n_pas = 25 # number of timesteps between timepoints for inference of alpha
+        self.force_n_pas = False # if True, use n_pas as-is instead of auto-flooring it to the inter-timepoint interval length
         # Penalization/prior information
         self.stimulus = 1.0 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
         self.prior_network_pen = 1.0 # 1 if we don't use prior information. If not we can penalize the non-existing age in prior network with values between 1 and 0: 0 = impossible edge
@@ -1060,7 +1061,7 @@ class NetworkModel:
                             modes[vect_t_sim == time], modes[vect_t_sim == times[cnt + 1]],
                             basal, inter, ks, times[cnt + 1] - time,
                             tol=self.alpha_threshold,
-                            n_pas = max(self.n_pas, int(times[cnt + 1] - time)),
+                            n_pas = self.n_pas if self.force_n_pas else max(self.n_pas, int(times[cnt + 1] - time)),
                             samples_data=y_samples[vect_t_sim == time],
                             stim_vals=np.asarray(self._stim_schedule[times[cnt + 1]], dtype=float),
                             scale_proteins=self.scale_proteins
