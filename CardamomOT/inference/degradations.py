@@ -621,24 +621,31 @@ def infer_ratio_d0_d1_unitary(
     * burst **size**  : ``Exp(k1_i · d0_i / (scale · d1_i))``
       i.e. mean burst = ``scale · d1_i / (k1_i · d0_i)``
 
-    This ensures the mean-field ODE limit is ``dP_i/dt = d1_i(kon_i/k1_i − P_i)``.
+    This ensures the mean-field ODE limit is ``dP_i/dt = d1_i(kon_i/k1_i − P_i)``,
+    where ``kon_i`` denotes the *true*, un-normalised kon of the generative
+    process. Note that ``kon_i(P_c)`` below (and the ``ks``/``kon_avg`` computed
+    from it) is already the ``kon_i/k1_i``-normalised version used throughout
+    this codebase (NB-inferred kon/d0, rescaled by the NB-inferred k1/d0) — i.e.
+    it already carries one implicit factor of ``1/k1_i`` relative to the true kon.
 
-    By Campbell's theorem (leading term for small dt):
+    By Campbell's theorem (leading term for small dt), in terms of the true kon:
 
     .. math::
 
         \\operatorname{Var}[\\Delta X_i] \\approx
         \\lambda_i \\cdot E[B_i^2] \\cdot dt
-        = 2\\,dt\\cdot k_{on,i}(P)\\cdot\\mathrm{scale}\\,
+        = 2\\,dt\\cdot k_{on,i}^{\\mathrm{true}}(P)\\cdot\\mathrm{scale}\\,
           \\frac{d_{1,i}^2}{k_{1,i}^2\\,d_{0,i}}
         = \\varepsilon_i \\cdot h_{ic}
 
-    where :math:`\\varepsilon_i = d_{1,i}/d_{0,i}` and
+    where :math:`\\varepsilon_i = d_{1,i}/d_{0,i}` and, substituting
+    :math:`k_{on,i}^{\\mathrm{true}}(P) = k_{1,i}\\cdot k_{on,i}(P_c)`
+    (``kon_i(P_c)`` being the already-normalised kon actually computed below):
 
     .. math::
 
         h_{ic} = 2\\,dt\\cdot\\mathrm{scale}\\cdot
-                 \\frac{d_{1,i}}{k_{1,i}^2}\\cdot k_{on,i}(P_c)
+                 \\frac{d_{1,i}}{k_{1,i}}\\cdot k_{on,i}(P_c)
 
     The regularised method-of-moments estimator is:
 
@@ -702,8 +709,8 @@ def infer_ratio_d0_d1_unitary(
     # ── LS accumulators (float64) ────────────────────────────────────────────
     # Bursty-PDMP model (Campbell's theorem for Exp bursts):
     #   Var(ΔX_i) = ε_i · h_{ic}
-    # where  ε_i = d1_i/d0_i  and
-    #        h_{ic} = 2 · dt · scale · d1_i/k1_i² · kon_i(P_c)
+    # where  ε_i = d1_i/d0_i  and  kon_i(P_c) is the k1-normalised kon (kon_true/k1)
+    #        h_{ic} = 2 · dt · scale · d1_i/k1_i · kon_i(P_c)
     # Regularised MoM: ε_i = (Σ res²_{ci} + λ·ε_prior) / (Σ h_{ic} + λ)
     num_t   = np.zeros((T - 1, G), dtype=np.float64)   # Σ residuals²
     denom_t = np.zeros((T - 1, G), dtype=np.float64)   # Σ h
@@ -800,10 +807,10 @@ def infer_ratio_d0_d1_unitary(
         # ── Residuals and denominator ─────────────────────────────────────────
         residuals = (X_pred - X1_np) ** 2   # (n_pairs, G)
 
-        # h_{ic} = 2 · dt · scale · d1_i/k1_i² · kon_i(P_c)
+        # h_{ic} = 2 · dt · scale · d1_i/k1_i · kon_i(P_c), kon_i(P_c) = kon_avg already = kon_true/k1_i
         # Derived from Campbell's theorem: burst rate=k1·kon_norm·d0, burst size~Exp(k1·d0/(scale·d1))
-        #   Var(ΔP_i) = burst_rate · E[B²] · dt = ε_i · 2·dt·scale·(d1_i/k1_i²)·kon_i
-        h_mat = (2.0 * dt * float(scale)) * (d_param_vec / k1_i**2)[None, :] * kon_avg   # (n_pairs, G)
+        #   Var(ΔP_i) = burst_rate · E[B²] · dt = ε_i · 2·dt·scale·(d1_i/k1_i)·kon_i
+        h_mat = (2.0 * dt * float(scale)) * (d_param_vec / k1_i)[None, :] * kon_avg   # (n_pairs, G)
         h_mat[:, :ns] = 0.0   # stimuli don't get ε estimated
 
         # ── Outlier filtering: exclude top (1 - outlier_quantile) per gene ────

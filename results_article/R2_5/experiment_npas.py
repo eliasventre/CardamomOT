@@ -25,7 +25,7 @@ REPO_ROOT = BASE_DIR.parents[1]             # repository root
 NPAS_VALUES = [2, 4, 6, 10, 25]
 NPAS_LABELS = ['n_pas=2', 'n_pas=4', 'n_pas=6', 'n_pas=10', 'n_pas=25']
 BENCHMARKS = ['FN4', 'FN8', 'CN5', 'BN8']
-N = 2          # number of replicates
+N = 10          # number of replicates
 N_REPET = 2     # number of initial couplings (averaged)
 
 # ============================================================
@@ -189,7 +189,6 @@ def plot_results(aupr_per_bench, aupr_global, aupr_random):
     ax.set_xticklabels(NPAS_LABELS, rotation=30, ha='right', fontsize=5)
     ax.set_ylabel('AUPR', fontsize=6)
     optn = dict(fontsize=8, transform=ax.transAxes, ha='right')
-    ax.text(xn, yn, 'Per-benchmark', **optn)
 
     # ---- Panel B: Global boxplot (averaged across benchmarks) ----
     ax = plt.subplot(grid[0, 1])
@@ -207,10 +206,6 @@ def plot_results(aupr_per_bench, aupr_global, aupr_random):
     ax.set_xticks(range(1, n_npas + 1))
     ax.set_xticklabels(NPAS_LABELS, rotation=30, ha='right', fontsize=5)
     ax.set_ylabel('AUPR', fontsize=6)
-    optn = dict(fontsize=8, transform=ax.transAxes, ha='right')
-    ax.text(xn, yn, 'Global (avg.)', **optn)
-    ax.text(xn, yn + 0.01, 'Global (avg.)', color='none',
-            bbox=dict(boxstyle='round,pad=0.2', fc='none', ec='lightgray', lw=0.8), **optn)
 
     fig.savefig(str(BASE_DIR / 'figure_npas.pdf'), dpi=300, bbox_inches='tight', pad_inches=0.15)
     plt.show()

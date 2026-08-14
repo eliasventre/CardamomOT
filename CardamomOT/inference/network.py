@@ -470,7 +470,7 @@ def core_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_init, th
     theta_ref_flat = theta_ref_.ravel(order='C')
     ref_network_flat = ref_network_.ravel(order='C')
 
-    max_bounds = max(np.sqrt(G), 10)
+    max_bounds = max(G, 10)
     bounds = [(-max_bounds, max_bounds)] * len(X_flat)
     if not final:
         r_plus = 1 + ref_constraint_pct / max(EPS, (1 - ref_constraint_pct))
