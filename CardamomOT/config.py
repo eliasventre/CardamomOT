@@ -20,7 +20,7 @@ DEFAULT_RESULTS_FOLDER = "results"
 # Standard filenames
 DEFAULT_DATA_FILE = "data.h5ad"
 DEFAULT_GENE_LIST_FILE = "gene_list.txt"
-DEFAULT_HALFLIFE_TABLE = "table_halflife_mammalian.csv"
+DEFAULT_HALFLIFE_TABLES = {"mouse": "halflife_mouse.tsv", "human": "halflife_human.tsv"}  # in CardamomOT/data/halflife
 
 # ============================================================================
 # Data and Processing Parameters

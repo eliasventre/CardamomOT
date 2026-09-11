@@ -53,7 +53,7 @@ autoapi_options = [
     "show-inheritance",
     "show-module-summary",
 ]
-autoapi_ignore = ["*cli*.py", "*logging*.py"]
+autoapi_ignore = ["*cli*.py", "*logging*.py", "*data/halflife/*"]
 autoapi_add_toctree_entry = False
 autoapi_keep_files = False
 

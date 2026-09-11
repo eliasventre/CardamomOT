@@ -5,7 +5,6 @@ Zero‑Inflated Negative Binomial (ZiNB) model.
 from typing import Any
 import pandas as pd
 import numpy as np
-from difflib import get_close_matches
 import anndata as ad
 import logging
 
@@ -14,42 +13,31 @@ from CardamomOT.logging import get_logger
 # module logger
 logger = get_logger(__name__)
 
-def ln2(x):
-    return np.log(2) / x if x > 0 else np.nan
+def extract_degradation_rates(gene_list, species="auto", return_details=False):
+    """
+    Literature mRNA (d0) and protein (d1) degradation rates, in hour⁻¹.
 
-def extract_degradation_rates(df, gene_list, cell_line=None, similarity_threshold=np.linspace(.99, 0.01, 10)):
-    df = df.dropna(subset=["gene_symbol"])   
-    
-    if cell_line:
-        df = df[df["cell_line"].str.lower() == cell_line.lower()]
-    
-    known_genes = df["gene_symbol"].unique()
-    
-    deg = np.zeros((2, len(gene_list)))
-    mean_ratio = df["prot_half_life"].astype(float).mean(skipna=True) / df["rna_half_life"].astype(float).mean(skipna=True)
+    Half-lives come from the reference table of the query species
+    (mouse: Schwanhäusser et al. 2011; human: RNADecayCafe for mRNA and
+    Mathieson et al. 2018 for protein). Genes missing from it are estimated
+    from their ortholog in the other species (recalibrated) and from
+    biologically related measured genes (paralogs, gene family, GO
+    function) — see :mod:`CardamomOT.inference.halflife_db`.
 
-    for cnt, gene in enumerate(gene_list):
-        gene_len: int = len(gene)
+    Args:
+        gene_list: gene symbols (or Ensembl gene ids), e.g. ``adata.var_names``.
+        species: ``'auto'`` (detected from the nomenclature), ``'mouse'`` or ``'human'``.
+        return_details: also return the per-gene table (match, source, neighbours).
 
-        for pct in range(100, -1, -10):  # from 100% to 0% in steps of 10%
-            min_len = int(gene_len * pct / 100)
-            prefix = gene[:min_len]
+    Returns:
+        ``deg`` of shape (2, G) with ``deg[0] = d0`` and ``deg[1] = d1`` (h⁻¹),
+        and the details DataFrame if ``return_details``.
+    """
+    from CardamomOT.inference.halflife_db import get_halflife_db
 
-            similar_genes = [g for g in known_genes if g.startswith(prefix)]
-
-            if similar_genes:
-                sim_matches = df[df["gene_symbol"].isin(similar_genes)]
-                prot_half_life = sim_matches["prot_half_life"].astype(float).mean(skipna=True)
-                rna_half_life = sim_matches["rna_half_life"].astype(float).mean(skipna=True)
-                break
-
-        if np.isnan(prot_half_life):
-            prot_half_life = rna_half_life * mean_ratio
-        
-        deg[0, cnt] = np.log(2)/rna_half_life
-        deg[1, cnt] = np.log(2)/prot_half_life
-
-    return deg
+    details = get_halflife_db().lookup(list(gene_list), species=species)
+    deg = np.vstack([details["d0"].to_numpy(), details["d1"].to_numpy()])
+    return (deg, details) if return_details else deg
 
 
 def select_DEgenes(vect_t, vect_samples_id, vect_celltype_id, proba,

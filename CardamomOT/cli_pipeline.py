@@ -52,7 +52,7 @@ PIPELINE_STEPS = [
         "id": "get_degradation_rates",
         "name": "Kinetics",
         "script": "get_degradation_rates.py",
-        "description": "Estimate mRNA degradation and synthesis rates",
+        "description": "Assign literature mRNA and protein degradation rates (h^-1)",
         "default": True,
     },
     {
@@ -132,7 +132,7 @@ PIPELINE_STEPS = [
 DEFAULT_PARAMS = {
     "get_proliferation_rates": {
         "-i": "input project path",
-        "--species": "organism for proliferation/death gene signatures, human or mouse (default: 'human')",
+        "--species": "organism for proliferation/death gene signatures: auto (detected from gene names, default), human or mouse",
     },
     "select_DEgenes": {
         "-i": "input project path",
@@ -148,6 +148,8 @@ DEFAULT_PARAMS = {
     "get_degradation_rates": {
         "-i": "input project path",
         "-s": "split name (default: 'train')",
+        "--species": "auto (detected from gene names, default), human or mouse",
+        "--overwrite": "replace d0/d1 already stored in the AnnData files",
     },
     "infer_mixture": {
         "-i": "input project path",
@@ -382,12 +384,12 @@ def interactive_parameter_input(step_id: str, project_path: str,
         if HAS_QUESTIONARY:
             species = questionary.select(
                 "Organism for proliferation/death gene signatures:",
-                choices=["human", "mouse"],
-                default="human",
+                choices=["auto", "human", "mouse"],
+                default="auto",
             ).ask()
-            params["--species"] = species or "human"
+            params["--species"] = species or "auto"
         else:
-            species = input("Organism for proliferation/death gene signatures (human/mouse) [human]: ").strip().lower() or "human"
+            species = input("Organism for proliferation/death gene signatures (auto/human/mouse) [auto]: ").strip().lower() or "auto"
             params["--species"] = species
 
     elif step_id == "prepare_reference_network":

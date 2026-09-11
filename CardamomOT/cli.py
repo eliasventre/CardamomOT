@@ -175,8 +175,10 @@ def _pipeline(args: argparse.Namespace) -> None:
     fb = args.force_basins
     tb = args.temporal_basins
 
+    species_flag = ['--species', args.species] if args.species else []
+
     if args.use_proliferation:
-        _run_script('get_proliferation_rates.py', ['-i', inp, '--species', args.species])
+        _run_script('get_proliferation_rates.py', ['-i', inp] + species_flag)
 
     _run_script('select_DEgenes_and_split.py',
                 ['-i', inp, '-s', sp, '-r', args.rate, '-c', args.change,
@@ -187,7 +189,7 @@ def _pipeline(args: argparse.Namespace) -> None:
 
     prolif_flag = ['--compute-proliferation'] if args.compute_proliferation else []
 
-    _run_script('get_degradation_rates.py', ['-i', inp, '-s', sp])
+    _run_script('get_degradation_rates.py', ['-i', inp, '-s', sp] + species_flag)
     _run_script('infer_mixture.py',
                 ['-i', inp, '-s', sp, '--mean-forcing', args.mean, '--force-basins', fb, '--temporal-basins', tb])
     _run_script('check_mixture_to_data.py', ['-i', inp, '-s', sp])
@@ -240,9 +242,9 @@ def main() -> None:
     p_pipe.add_argument('-r', '--rate', default='1', help='cell-selection split rate (default: 1)')
     p_pipe.add_argument('-m', '--mean-forcing', default='0.5', dest='mean',
                         help='mean-forcing intensity for NB mixture (model default: 0.5)')
-    p_pipe.add_argument('--species', default='human', choices=['human', 'mouse'],
-                        help='organism for literature proliferation/death gene signatures '
-                             '(default: human)')
+    p_pipe.add_argument('--species', default=None, choices=['human', 'mouse'],
+                        help='organism for literature degradation rates and proliferation/death '
+                             'gene signatures (default: detected from gene names)')
     p_pipe.add_argument('--stimulus', default='-1',
                         help='stimulus-edge penalisation in [0,1] (-1=model default)')
     p_pipe.add_argument('--prior', default='-1',

@@ -88,11 +88,11 @@ python -m CardamomOT.cli pipeline -i my_project -s full -r 0.6 -c 1 -m 0.5
 | `--prior` | no | model default (`1.0`) | prior-absent edge penalization (`0`–`1`) |
 | `-f` / `--force_basins` | no | model default (`1.0`) | weight for preserving NB mixture mode means (`0`–`1`) |
 | `-b` / `--temporal_basins` | no | model default (`1`) | preserve mode means temporally (`0` or `1`) |
-| `--species` | no | `human` | organism (`human`/`mouse`) for the literature-based proliferation-rate estimation described below |
+| `--species` | no | detected from gene names | organism (`human`/`mouse`) for the literature degradation rates and the proliferation-rate estimation described below; only needed to override the automatic detection (`Gata1` = mouse, `GATA1` = human) |
 
 When an optional parameter is omitted, the value defined in `NetworkModel` (`base.py`) is used unchanged. Passing a value explicitly overrides it for that run only.
 
-**By default, the pipeline also estimates a net proliferation rate for every cell** (no configuration needed): the `get_proliferation_rates` step (run first, on the full gene set) scores each cell against built-in human proliferation/death marker gene sets and writes the result to `adata.obs['proliferation_net_rate']`, which is then used to correct the optimal-transport marginals during network inference. This step always (re)computes and overwrites `adata.obs['proliferation_net_rate']`, even if that column is already present; pass `--no-use-proliferation` (`cardamomot pipeline`) / set `use_proliferation=0` (`run.sh`) to skip it entirely and keep your own values instead. See [Population dynamics](#population-dynamics-proliferation-death-and-cell-type-transition-rates) under Advanced Features to use mouse gene sets, supply your own marker genes, or anchor the estimate to a known population-level growth rate.
+**By default, the pipeline also estimates a net proliferation rate for every cell** (no configuration needed): the `get_proliferation_rates` step (run first, on the full gene set) scores each cell against built-in proliferation/death marker gene sets of the detected species and writes the result to `adata.obs['proliferation_net_rate']`, which is then used to correct the optimal-transport marginals during network inference. This step always (re)computes and overwrites `adata.obs['proliferation_net_rate']`, even if that column is already present; pass `--no-use-proliferation` (`cardamomot pipeline`) / set `use_proliferation=0` (`run.sh`) to skip it entirely and keep your own values instead. See [Population dynamics](#population-dynamics-proliferation-death-and-cell-type-transition-rates) under Advanced Features to force the species, supply your own marker genes, or anchor the estimate to a known population-level growth rate.
 
 Separately, `--compute-proliferation` (`cardamomot pipeline`) / `compute_proliferation=1` (`run.sh`) turns on a different, opt-in feature: learning a `R_opt` MLP from the inferred OT couplings and simulating with branching PDMP trajectories. See [Proliferation-aware simulation](docs/advanced.md#proliferation-aware-simulation---compute-proliferation) under Advanced Features.
 
@@ -100,7 +100,7 @@ Separately, `--compute-proliferation` (`cardamomot pipeline`) / `compute_prolife
 ```bash
 ./run.sh <input_dir> [split=full] [change=0] [rate=0] [mean] [stimulus] [prior] [force_basins] [temporal_basins] [ref] [test] [kov] [compute_proliferation] [use_proliferation]
 ```
-Only `input_dir` is required; all other arguments fall back to their model defaults when omitted.
+Only `input_dir` is required; all other arguments fall back to their model defaults when omitted. An optional `--species human|mouse` flag can be added anywhere in the argument list; without it, the species is detected from the gene names.
 
 #### Results
 
@@ -116,15 +116,22 @@ The pipeline automatically creates these directories:
 Instead of using the full pipeline, you can run each step individually:
 
 ```bash
-# 1. Estimate net proliferation rate (default: human — use --species mouse for mouse data).
-#    Runs on the full, unfiltered Data/data.h5ad, before gene selection, so that the
-#    literature marker genes are not at risk of being dropped by DE gene selection.
-python -m CardamomOT.cli step get_proliferation_rates -i my_project --species human
+# 1. Estimate net proliferation rate (species detected from gene names; force it with
+#    --species human|mouse). Runs on the full, unfiltered Data/data.h5ad, before gene
+#    selection, so that the literature marker genes are not at risk of being dropped
+#    by DE gene selection.
+python -m CardamomOT.cli step get_proliferation_rates -i my_project
 
 # 2. Select differentially expressed genes
 python -m CardamomOT.cli step select_DEgenes_and_split -i my_project -s full -m 0.5
 
-# 3. Compute degradation rates
+# 3. Assign literature mRNA/protein degradation rates (hour^-1). The species is detected
+#    from gene names (Gata1 = mouse, GATA1 = human; force it with --species) and each species
+#    uses its own reference (mouse: Schwanhäusser et al. 2011; human: RNADecayCafe for mRNA,
+#    Mathieson et al. 2018 for protein). Genes missing from it are estimated from their
+#    ortholog in the other species (recalibrated) and related genes (paralogs, family, GO).
+#    Per-gene provenance: Data/degradation_rates_report.csv. Existing d0/d1 are kept unless --overwrite.
+#    See docs/advanced.md (Literature degradation rates) and CardamomOT/data/halflife/README.md.
 python -m CardamomOT.cli step get_degradation_rates -i my_project -s full
 
 # 4. Infer mixture parameters (burst kinetics)
@@ -382,7 +389,7 @@ Five levers, from least to most involved, all optional:
 
 | Refinement | How | Why |
 |---|---|---|
-| Species | `--species mouse` on `get_proliferation_rates.py` / `cardamomot pipeline` (default: `human`) | Switches to the built-in mouse marker gene lists (moscot uses different death markers per species — see `docs/advanced.md` for details) |
+| Species | `--species human\|mouse` on `get_proliferation_rates.py` / `cardamomot pipeline` (default: detected from gene names) | Forces the built-in human or mouse marker gene lists (moscot uses different death markers per species — see `docs/advanced.md` for details) |
 | Score on the unfiltered gene set | Place `Data/data_complete.h5ad` (all genes) alongside an already gene-filtered `Data/data.h5ad` | If `Data/data.h5ad` was prepared with genes already filtered, the literature marker genes may be missing from it; `data_complete.h5ad` is used only to score the signature (never modified), and the result is mapped back onto `Data/data.h5ad` by cell name — every cell in `data.h5ad` must also be present in `data_complete.h5ad` |
 | Custom marker genes | `Data/proliferation_signatures.csv`/`.txt`, `Data/death_signatures.csv`/`.txt` (one gene per line or comma-separated) | Override the built-in lists with signatures specific to your system (e.g. a disease- or lineage-specific gene set) |
 | Anchor to a known rate | `Data/proliferation_rates.csv`/`.txt` (two columns, no header: `cell_type, rate`) — **`rate` in hour⁻¹**, matching `adata.obs['time']` (growth curves are often reported per day — divide by 24 first) | If you have a trusted population-level growth rate per cell type (e.g. from a growth curve), the literature-based per-cell estimate is recentred so its mean matches your value within each cell type, while keeping the per-cell heterogeneity from the signature. Grouping uses `adata.obs['cell_type_proliferation']` if present, else falls back to `adata.obs['cell_type']` |

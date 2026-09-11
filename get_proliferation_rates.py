@@ -24,7 +24,11 @@ converse need not hold). If `Data/data_complete.h5ad` is absent,
 `Data/data.h5ad` is used directly for both scoring and output, as before.
 
 Usage:
-    python get_proliferation_rates.py -i <project_path> [--species human|mouse]
+    python get_proliferation_rates.py -i <project_path> [--species auto|human|mouse]
+
+    --species selects the built-in marker gene lists. By default ('auto') it is
+    detected from the gene nomenclature (mouse "Mki67" vs human "MKI67"), as in
+    get_degradation_rates.py; pass it explicitly to override the detection.
 
 Required input files:
     - Data/data.h5ad: count matrix (all genes, pre-selection, unless
@@ -73,6 +77,7 @@ from CardamomOT import find_data_file, read_gene_list, resolve_cell_type_obs
 from CardamomOT.tools.estimate_proliferation import (
     estimate_growth_rates, combine_growth_rates_with_reference,
 )
+from CardamomOT.inference.halflife_db import detect_species
 
 
 def assign_proliferation_rates(adata, prolif_path, species='human', proliferation_genes=None,
@@ -144,7 +149,7 @@ def main(argv):
         None. Updates Data/data.h5ad in place with obs['proliferation_net_rate'].
     """
     inputfile = ''
-    species = 'human'
+    species = 'auto'
     senescence_gating = True
     try:
         opts, args = getopt.getopt(
@@ -153,7 +158,7 @@ def main(argv):
     except getopt.GetoptError:
         print("[get_proliferation_rates] Error: Invalid command-line arguments")
         print("[get_proliferation_rates] Usage: python get_proliferation_rates.py "
-              "-i <project_path> [--species human|mouse] [--no-senescence-gating]")
+              "-i <project_path> [--species auto|human|mouse] [--no-senescence-gating]")
         sys.exit(2)
 
     for opt, arg in opts:
@@ -169,6 +174,10 @@ def main(argv):
 
     if not inputfile:
         print("[get_proliferation_rates] Error: Missing required argument --input")
+        sys.exit(1)
+    species = species.strip().lower()
+    if species not in ("auto", "human", "mouse"):
+        print(f"[get_proliferation_rates] Error: --species must be auto, human or mouse (got '{species}')")
         sys.exit(1)
 
     p = '{}/'.format(inputfile)
@@ -206,8 +215,12 @@ def main(argv):
 
     prolif_path = find_data_file(data_dir, 'proliferation_rates')
 
-    species = species.strip().lower()
-    print(f"[get_proliferation_rates] Using species='{species}'")
+    if species == "auto":
+        species, hits = detect_species(adata_score.var_names)
+        print(f"[get_proliferation_rates] Detected species='{species}' from gene names "
+              f"(official-name matches: {hits}); pass --species to override")
+    else:
+        print(f"[get_proliferation_rates] Using species='{species}'")
     print(f"[get_proliferation_rates] Senescence gating: "
           f"{'enabled' if senescence_gating else 'disabled (plain birth - death)'}")
 

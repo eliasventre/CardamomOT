@@ -1,57 +1,85 @@
 """
 get_degradation_rates.py
 -------------------------
-Extract and assign kinetic degradation rates to genes.
+Assign literature mRNA (d0) and protein (d1) degradation rates to genes, in hour⁻¹.
 
-Loads mammalian half-life data and extracts degradation rates for mRNA
-and protein. Assigns these rates to genes in the dataset, with bounds
-checking to ensure reasonable values for downstream modeling.
+The species is detected from the gene nomenclature (mouse "Gata1" vs human
+"GATA1") unless given, and half-lives (hours) are read from that species' own
+reference, shipped with the package in CardamomOT/data/halflife:
+    - mouse: Schwanhäusser et al. 2011 (corrigendum 2013), NIH3T3, mRNA and protein;
+    - human: RNADecayCafe v1.1 (mRNA, 11 cell lines) and Mathieson et al. 2018
+      (protein, primary cells).
+Genes absent from their species' table get a value estimated on that species'
+scale from their ortholog in the other species' table (recalibrated on common
+orthologs) and from biologically related measured genes (paralogs, gene family,
+Gene Ontology function); see CardamomOT/inference/halflife_db.py.
 
 Usage:
-    python get_degradation_rates.py -i <project_path> -s <split>
+    python get_degradation_rates.py -i <project_path> -s <split> [--species auto|human|mouse] [--overwrite]
 
 Required input files:
     - Data/data_full.h5ad: full count matrix
-    - halflife/table_halflife_mamalian.csv: mammalian half-life data
 
 Output files:
-    - Data/data_full.h5ad: updated with d0 (mRNA) and d1 (protein) degradation rates
+    - Data/data_full.h5ad: updated with d0 (mRNA) and d1 (protein) degradation rates (h⁻¹)
     - Data/data_train.h5ad, data_test.h5ad: updated with degradation rates (if split != "full")
+    - Data/degradation_rates_report.csv: per-gene match, half-lives, source and neighbours used
 """
 import sys; sys.path += ['../']
 import os
 import numpy as np
-from CardamomOT import NetworkModel as NetworkModel_beta
-from CardamomOT import select_DEgenes, extract_degradation_rates
+from CardamomOT import extract_degradation_rates
+from CardamomOT.inference.halflife_db import REFERENCES
 import anndata as ad
 import getopt
-import scipy.sparse
-import json
-import pandas as pd
 
 verb = 1
 
+
+def assign_rates(adata, details, species, overwrite=False):
+    """
+    Write d0/d1 (h⁻¹) and their provenance into ``adata.var``.
+
+    Rates are clipped to [median / 10, 10 × median] of the dataset, as before,
+    now centred on the median so that a few very unstable genes do not shift
+    the window. Existing columns are kept unless ``overwrite``.
+    """
+    assert list(details["gene"]) == [str(g) for g in adata.var_names], "details must follow adata.var_names"
+    for col, quantity in (("d0", "mrna"), ("d1", "protein")):
+        if col in adata.var.columns and not overwrite:
+            print(f"[get_degradation_rates] {col} already present, skipping (use --overwrite to replace it)")
+            continue
+        rates = details[col].to_numpy(dtype=float)
+        med = np.median(rates)
+        adata.var[col] = np.clip(rates, med / 10, 10 * med)
+        adata.var[f"{col}_source"] = details[f"{quantity}_source"].to_numpy()
+        print(f"[get_degradation_rates] Assigned {quantity} degradation rates ({col}), "
+              f"median: {med:.4f} h^-1 (half-life {np.log(2) / med:.1f} h)")
+    adata.uns["degradation_rates"] = {"units": "hour^-1", "species": species,
+                                      "reference_mrna": REFERENCES[species]["mrna"],
+                                      "reference_protein": REFERENCES[species]["protein"]}
+
+
 def main(argv):
     """
-    Extract and assign kinetic degradation rates to genes.
-
-    Loads mammalian half-life data from literature and extracts degradation
-    rates for mRNA (d0) and protein (d1) for each gene. Applies bounds checking
-    to ensure rates are within reasonable ranges for modeling.
+    Assign literature degradation rates to the genes of a project.
 
     Args:
-        argv: Command-line arguments (--input, --split).
+        argv: Command-line arguments (--input, --split, --species, --overwrite).
 
     Returns:
         None. Updates AnnData files with degradation rates.
     """
     inputfile = ''
     split = ''
+    species = 'auto'
+    overwrite = False
     try:
-        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split="])
+        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split=", "species=", "overwrite"])
     except getopt.GetoptError:
         print("[get_degradation_rates] Error: Invalid command-line arguments")
-        print("[get_degradation_rates] Usage: python get_degradation_rates.py -i <project_path> -s <split>")
+        print("[get_degradation_rates] Usage: python get_degradation_rates.py -i <project_path> -s <split> "
+              "[--species auto|human|mouse] [--overwrite]")
         sys.exit(2)
 
     for opt, arg in opts:
@@ -59,12 +87,19 @@ def main(argv):
             inputfile = arg
         elif opt in ("-s", "--split"):
             split = arg
+        elif opt == "--species":
+            species = arg.strip().lower()
+        elif opt == "--overwrite":
+            overwrite = True
         elif opt == "-h":
             print(__doc__)
             sys.exit(0)
 
     if not inputfile:
         print("[get_degradation_rates] Error: Missing required argument --input")
+        sys.exit(1)
+    if species not in ("auto", "human", "mouse"):
+        print(f"[get_degradation_rates] Error: --species must be auto, human or mouse (got '{species}')")
         sys.exit(1)
 
     p = '{}/'.format(inputfile)
@@ -82,51 +117,33 @@ def main(argv):
         print(f"[get_degradation_rates] Please ensure Data/data_full.h5ad exists in {p}")
         sys.exit(1)
 
-    # Load degradation rates from mammalian half-life data
-    csv_path = os.path.join("halflife", "table_halflife_mamalian.csv")
+    # Look up half-lives for genes in dataset
     try:
-        if not os.path.exists(csv_path):
-            raise FileNotFoundError(f"Half-life data not found at {csv_path}")
-        df = pd.read_csv(csv_path, sep=',')
-        print(f"[get_degradation_rates] Loaded half-life data from {csv_path}")
-        print(f"[get_degradation_rates] Half-life table contains {len(df)} entries")
-    except FileNotFoundError as e:
-        print(f"[get_degradation_rates] Error: {e}")
-        print("[get_degradation_rates] Please ensure halflife/table_halflife_mamalian.csv exists")
-        sys.exit(1)
-    except Exception as e:
-        print(f"[get_degradation_rates] Error loading half-life data: {e}")
-        sys.exit(1)
-
-    # Extract degradation rates for genes in dataset
-    try:
-        deg = extract_degradation_rates(df, adata.var_names)
-        print(f"[get_degradation_rates] Extracted degradation rates for {len(deg[0])} genes")
+        _, details = extract_degradation_rates(adata.var_names, species=species, return_details=True)
     except Exception as e:
         print(f"[get_degradation_rates] Error extracting degradation rates: {e}")
         sys.exit(1)
+    species = details["species"].iloc[0]
+    print(f"[get_degradation_rates] Species: {species}")
+    print(f"[get_degradation_rates]   mRNA reference: {REFERENCES[species]['mrna']}")
+    print(f"[get_degradation_rates]   protein reference: {REFERENCES[species]['protein']}")
+    print(f"[get_degradation_rates] Name matching: {details['match'].value_counts().to_dict()}")
+    for quantity in ("mrna", "protein"):
+        sources = details[f"{quantity}_source"].str.split(":").str[0].value_counts().to_dict()
+        print(f"[get_degradation_rates] {quantity} half-life sources: {sources}")
+    unresolved = details.loc[details["match"] == "unresolved", "gene"].tolist()
+    if unresolved:
+        print(f"[get_degradation_rates] {len(unresolved)} gene names not recognised as {species} genes "
+              f"(global median used): {unresolved[:20]}{' ...' if len(unresolved) > 20 else ''}")
 
-    # Assign mRNA degradation rates (d0) with bounds checking
-    if 'd0' not in adata.var.columns:
-        adata.var['d0'] = deg[0]
-        # Apply bounds: 0.1x to 10x mean
-        mean_d0 = np.mean(deg[0])
-        adata.var['d0'] = np.minimum(adata.var['d0'], 10 * mean_d0)
-        adata.var['d0'] = np.maximum(adata.var['d0'], mean_d0 / 10)
-        print(f"[get_degradation_rates] Assigned mRNA degradation rates (d0), mean: {mean_d0:.4f}")
-    else:
-        print("[get_degradation_rates] mRNA degradation rates (d0) already present, skipping")
+    assign_rates(adata, details, species, overwrite)
 
-    # Assign protein degradation rates (d1) with bounds checking
-    if 'd1' not in adata.var.columns:
-        adata.var['d1'] = deg[1]
-        # Apply bounds: 0.1x to 10x mean
-        mean_d1 = np.mean(deg[1])
-        adata.var['d1'] = np.minimum(adata.var['d1'], 10 * mean_d1)
-        adata.var['d1'] = np.maximum(adata.var['d1'], mean_d1 / 10)
-        print(f"[get_degradation_rates] Assigned protein degradation rates (d1), mean: {mean_d1:.4f}")
-    else:
-        print("[get_degradation_rates] Protein degradation rates (d1) already present, skipping")
+    report_path = os.path.join(p, 'Data', 'degradation_rates_report.csv')
+    report = details.copy()
+    report["d0_assigned"] = adata.var["d0"].to_numpy()
+    report["d1_assigned"] = adata.var["d1"].to_numpy()
+    report.to_csv(report_path, index=False)
+    print(f"[get_degradation_rates] Per-gene report written to {report_path}")
 
     # Save updated full dataset
     try:
@@ -162,29 +179,20 @@ def main(argv):
             print(f"[get_degradation_rates] Error: {e}")
             sys.exit(1)
 
-        # Extract degradation rates for train genes
+        # Look up rates for train genes (same species as the full dataset)
         try:
-            deg_train = extract_degradation_rates(df, adata_train.var_names)
+            _, details_train = extract_degradation_rates(adata_train.var_names, species=species,
+                                                         return_details=True)
         except Exception as e:
             print(f"[get_degradation_rates] Error extracting train degradation rates: {e}")
             sys.exit(1)
-
-        # Assign rates to train data with bounds checking
-        if 'd0' not in adata_train.var.columns:
-            adata_train.var['d0'] = deg_train[0]
-            mean_d0_train = np.mean(deg_train[0])
-            adata_train.var['d0'] = np.minimum(adata_train.var['d0'], 10 * mean_d0_train)
-            adata_train.var['d0'] = np.maximum(adata_train.var['d0'], mean_d0_train / 10)
-
-        if 'd1' not in adata_train.var.columns:
-            adata_train.var['d1'] = deg_train[1]
-            mean_d1_train = np.mean(deg_train[1])
-            adata_train.var['d1'] = np.minimum(adata_train.var['d1'], 10 * mean_d1_train)
-            adata_train.var['d1'] = np.maximum(adata_train.var['d1'], mean_d1_train / 10)
+        assign_rates(adata_train, details_train, species, overwrite)
 
         # Copy rates to test data
-        adata_test.var['d1'] = adata_train.var['d1'].values
-        adata_test.var['d0'] = adata_train.var['d0'].values
+        for col in ("d0", "d1", "d0_source", "d1_source"):
+            if col in adata_train.var.columns:
+                adata_test.var[col] = adata_train.var[col].values
+        adata_test.uns["degradation_rates"] = adata_train.uns["degradation_rates"]
 
         # Save updated train/test datasets
         try:
@@ -198,7 +206,7 @@ def main(argv):
     # Report final statistics
     mean_d1 = np.mean(adata.var['d1'].values)
     mean_d0 = np.mean(adata.var['d0'].values)
-    print(f"[get_degradation_rates] Final statistics:")
+    print(f"[get_degradation_rates] Final statistics (h^-1):")
     print(f"[get_degradation_rates]   Mean protein degradation rate (d1): {mean_d1:.4f}")
     print(f"[get_degradation_rates]   Mean mRNA degradation rate (d0): {mean_d0:.4f}")
     print("[get_degradation_rates] Kinetic rates assignment completed successfully")

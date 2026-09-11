@@ -35,7 +35,7 @@ Steps (checked by default unless marked *optional*):
 | **Proliferation rates** | Estimate net proliferation rate per cell from literature gene signatures (runs first, on the full gene set) | ✓ |
 | **Gene selection** | Filter DE genes; split cells into train/test | ✓ |
 | Network constraint | Build prior network from databases | optional |
-| **Kinetics** | Estimate mRNA degradation/synthesis rates | ✓ |
+| **Kinetics** | Assign literature mRNA/protein degradation rates (h⁻¹), species auto-detected | ✓ |
 | **Mixture model** | Fit negative-binomial burst parameters per gene | ✓ |
 | Check mixture | Validate mixture against data | ✓ |
 | **Network inference** | Learn regulatory interactions via optimal transport | ✓ |
@@ -89,7 +89,7 @@ cardamomot pipeline \
     --prior 1.0 \                   # prior-network weighting in [0,1]
     --force-basins 1.0 \            # preserve NB mode means in [0,1]
     --temporal-basins 1 \           # enforce temporal mode consistency (0 or 1)
-    --species human                 # organism for proliferation/death gene signatures  (default: human)
+    --species mouse                 # organism, human | mouse  (default: detected from gene names)
 ```
 
 **Optional-section flags** — these are switches with no value; just add the flag to change the behaviour:
@@ -109,10 +109,10 @@ Each step can be run independently with `cardamomot step <script_name> [args]`, 
 
 ```bash
 # ── Proliferation rates (run first, on the full unfiltered gene set) ─────────
-# Always (re)writes obs['proliferation_net_rate'] (human gene signatures by default);
-# add --species mouse for mouse data (see Advanced Features for further refinements).
+# Always (re)writes obs['proliferation_net_rate'], with the gene signatures of the species
+# detected from gene names (force it with --species human|mouse; see Advanced Features).
 # Skip this step entirely to keep your own obs['proliferation_net_rate'] values.
-cardamomot step get_proliferation_rates -i my_project --species human
+cardamomot step get_proliferation_rates -i my_project
 
 # ── Gene selection and cell split ─────────────────────────────────────────────
 cardamomot step select_DEgenes_and_split \
@@ -122,6 +122,10 @@ cardamomot step select_DEgenes_and_split \
 cardamomot step prepare_reference_network -i my_project -d 3
 
 # ── Kinetics ──────────────────────────────────────────────────────────────────
+# Literature mRNA/protein degradation rates (hour^-1) in adata.var['d0'/'d1'], from the
+# reference table of the detected species (force it with --species human|mouse);
+# per-gene provenance in Data/degradation_rates_report.csv. Existing d0/d1 are kept
+# unless --overwrite. See Advanced Features -> Literature degradation rates.
 cardamomot step get_degradation_rates -i my_project -s full
 
 # ── Mixture model ─────────────────────────────────────────────────────────────

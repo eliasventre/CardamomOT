@@ -1,0 +1,170 @@
+{
+  "mouse": {
+    "mrna": {
+      "reference": "Schwanhausser et al. 2011, Nature 473:337 (corrigendum 2013); mouse NIH3T3 fibroblasts",
+      "n_measured": 4695,
+      "median_half_life_h": 9.92,
+      "with_ortholog": {
+        "beta": {
+          "ortholog": 0.2734,
+          "paralog_high": 0.1159,
+          "paralog_mid": 0.0896,
+          "paralog_low": 0.1485,
+          "family": 0.0839,
+          "function": 0.5067
+        },
+        "n": 4642,
+        "cv_pearson_r": 0.651,
+        "cv_rmse_log": 0.3622,
+        "global_median_rmse_log": 0.457,
+        "ortholog_alone_pearson_r": 0.645
+      },
+      "without_ortholog": {
+        "beta": {
+          "paralog_high": 0.2163,
+          "paralog_mid": 0.1999,
+          "paralog_low": 0.2345,
+          "family": 0.2517,
+          "function": 0.64
+        },
+        "n": 4695,
+        "cv_pearson_r": 0.407,
+        "cv_rmse_log": 0.4186,
+        "global_median_rmse_log": 0.4583
+      },
+      "coverage": {
+        "ortholog": 0.989,
+        "paralog_high": 0.105,
+        "paralog_mid": 0.106,
+        "paralog_low": 0.216,
+        "family": 0.709,
+        "function": 0.99
+      }
+    },
+    "protein": {
+      "reference": "Schwanhausser et al. 2011, Nature 473:337 (corrigendum 2013); mouse NIH3T3 fibroblasts",
+      "n_measured": 5023,
+      "median_half_life_h": 47.91,
+      "with_ortholog": {
+        "beta": {
+          "ortholog": 0.6136,
+          "paralog_high": 0.3046,
+          "paralog_mid": 0.0759,
+          "paralog_low": 0.1576,
+          "family": 0.1148,
+          "function": 0.3774
+        },
+        "n": 4119,
+        "cv_pearson_r": 0.647,
+        "cv_rmse_log": 0.7325,
+        "global_median_rmse_log": 0.9623,
+        "ortholog_alone_pearson_r": 0.594
+      },
+      "without_ortholog": {
+        "beta": {
+          "paralog_high": 0.4434,
+          "paralog_mid": 0.1512,
+          "paralog_low": 0.1915,
+          "family": 0.2319,
+          "function": 0.7569
+        },
+        "n": 5023,
+        "cv_pearson_r": 0.509,
+        "cv_rmse_log": 0.8886,
+        "global_median_rmse_log": 1.0312
+      },
+      "coverage": {
+        "ortholog": 0.82,
+        "paralog_high": 0.122,
+        "paralog_mid": 0.109,
+        "paralog_low": 0.21,
+        "family": 0.721,
+        "function": 0.983
+      }
+    }
+  },
+  "human": {
+    "mrna": {
+      "reference": "RNADecayCafe v1.1 (Vock et al. 2025, bioRxiv 10.1101/2025.08.19.671151); 11 human cell lines, dropout-normalised NR-seq",
+      "n_measured": 16998,
+      "median_half_life_h": 2.515,
+      "with_ortholog": {
+        "beta": {
+          "ortholog": 0.6736,
+          "paralog_high": 0.0938,
+          "paralog_mid": 0.201,
+          "paralog_low": 0.2158,
+          "family": 0.3812,
+          "function": 0.4091
+        },
+        "n": 4694,
+        "cv_pearson_r": 0.684,
+        "cv_rmse_log": 0.5556,
+        "global_median_rmse_log": 0.8055,
+        "ortholog_alone_pearson_r": 0.634
+      },
+      "without_ortholog": {
+        "beta": {
+          "paralog_high": 0.2787,
+          "paralog_mid": 0.3217,
+          "paralog_low": 0.273,
+          "family": 0.369,
+          "function": 0.4978
+        },
+        "n": 16998,
+        "cv_pearson_r": 0.583,
+        "cv_rmse_log": 0.6864,
+        "global_median_rmse_log": 0.8259
+      },
+      "coverage": {
+        "ortholog": 0.276,
+        "paralog_high": 0.148,
+        "paralog_mid": 0.201,
+        "paralog_low": 0.233,
+        "family": 0.664,
+        "function": 0.875
+      }
+    },
+    "protein": {
+      "reference": "Mathieson et al. 2018, Nat Commun 9:689; human primary B cells, NK cells, hepatocytes, monocytes",
+      "n_measured": 6843,
+      "median_half_life_h": 81.264,
+      "with_ortholog": {
+        "beta": {
+          "ortholog": 0.3165,
+          "paralog_high": 0.27,
+          "paralog_mid": 0.1834,
+          "paralog_low": 0.1167,
+          "family": 0.2447,
+          "function": 0.3432
+        },
+        "n": 4086,
+        "cv_pearson_r": 0.69,
+        "cv_rmse_log": 0.5117,
+        "global_median_rmse_log": 0.7129,
+        "ortholog_alone_pearson_r": 0.601
+      },
+      "without_ortholog": {
+        "beta": {
+          "paralog_high": 0.3442,
+          "paralog_mid": 0.3149,
+          "paralog_low": 0.2454,
+          "family": 0.3188,
+          "function": 0.5299
+        },
+        "n": 6843,
+        "cv_pearson_r": 0.533,
+        "cv_rmse_log": 0.6614,
+        "global_median_rmse_log": 0.7813
+      },
+      "coverage": {
+        "ortholog": 0.597,
+        "paralog_high": 0.12,
+        "paralog_mid": 0.155,
+        "paralog_low": 0.246,
+        "family": 0.743,
+        "function": 0.994
+      }
+    }
+  }
+}

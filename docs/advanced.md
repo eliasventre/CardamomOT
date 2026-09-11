@@ -205,6 +205,45 @@ plot_results_sim_kov(p, "KO_CHGA_OV_none", stim=stim, prior=prior)
 
 ---
 
+## Literature degradation rates (`get_degradation_rates`)
+
+`get_degradation_rates.py` writes per-gene mRNA (`adata.var['d0']`) and protein
+(`adata.var['d1']`) degradation rates in **hour⁻¹** (`d = ln 2 / t½`, `t½` in hours, the time unit
+of `adata.obs['time']`), together with their provenance (`d0_source`, `d1_source`), and a per-gene
+report in `Data/degradation_rates_report.csv`. The reference tables ship with the package
+(`CardamomOT/data/halflife/`, see its `README.md` for the sources and validation), so no network
+access is needed.
+
+**Species.** The organism is detected from the gene names — mouse (MGI) symbols such as `Gata1`,
+human (HGNC) symbols such as `GATA1`, or Ensembl ids (`ENSMUSG…` / `ENSG…`). You can force it:
+
+```bash
+cardamomot step get_degradation_rates -i my_project -s full --species mouse
+```
+
+`--species` is also accepted by `cardamomot pipeline` and `run.sh`; the same value (or, when omitted,
+the same detection) is used by `get_proliferation_rates`.
+
+**Reference half-lives.** Each species uses its own table:
+
+| Species | mRNA | protein |
+|---|---|---|
+| mouse | Schwanhäusser et al. 2011 (corrected 2013), NIH3T3 — median 9.9 h | same — median 48 h |
+| human | RNADecayCafe v1.1 (Vock et al. 2025), 11 cell lines — median 2.5 h | Mathieson et al. 2018, primary cells — median 81 h |
+
+The two species are therefore not on the same absolute scale (different cell types and methods).
+
+**Genes absent from the table** of their species are estimated, on that species' scale, from
+their ortholog in the other species' table (linearly recalibrated on the orthologs measured in
+both) and from biologically related measured genes: paralogs (weighted by protein identity), the
+most specific HGNC gene family, and the genes with the most similar Gene Ontology annotation. The
+weights of these sources are fitted by cross-validation on the measured genes; when nothing is
+known (mostly lncRNAs) the median of the table is used. Gene names are matched through official
+symbols, Ensembl ids, previous symbols and synonyms (e.g. `Hist1h4a` → `H4c1`, `OCT4` → `POU5F1`).
+
+Rates are then clipped to [median/10, 10 × median] of the dataset. Existing `d0`/`d1` columns are
+kept unless `--overwrite` is passed, so you can supply your own rates in `adata.var` beforehand.
+
 ## Population dynamics: proliferation, death, and transition rates
 
 ### Net proliferation rate — default behaviour
@@ -248,7 +287,8 @@ literature marker genes needed to score the signature; because the rate lives in
    further rescaling needed. Pass `hours_per_day=1` to `estimate_growth_rates` to recover the raw
    moscot-equivalent day⁻¹ rate if your own `adata.obs['time']` happens to be in days instead.
 
-By default this uses **human** marker gene lists, copied verbatim from moscot's shipped defaults
+The marker gene lists are those of the species detected from the gene names (or given with
+`--species`), copied verbatim from moscot's shipped defaults
 (`moscot.utils.data.proliferation_markers`/`apoptosis_markers`): Tirosh et al. 2016 cell-cycle genes
 for proliferation, MSigDB Hallmark Apoptosis for human death markers (MSigDB Hallmark P53 Pathway
 for mouse — moscot does not use a symmetric death gene set across species).
@@ -267,14 +307,16 @@ Once populated, the OT marginals between consecutive timepoints t₁ and t₂ ar
 
 Five optional levers, from least to most involved:
 
-**1. Species** — switch the built-in marker gene lists:
+**1. Species** — the built-in marker gene lists follow the species detected from the gene names
+(`Mki67` → mouse, `MKI67` → human). To override the detection:
 
 ```bash
 python get_proliferation_rates.py -i my_project --species mouse
 ```
 
-`--species` (`human` or `mouse`, default `human`) is also exposed as `cardamomot pipeline --species`
-and as a trailing `--species` flag on `run.sh` (can appear anywhere in the argument list).
+`--species` (`auto`, `human` or `mouse`; default `auto`) is also exposed as
+`cardamomot pipeline --species` and as a trailing `--species` flag on `run.sh` (can appear anywhere
+in the argument list), where it applies to `get_degradation_rates` as well.
 
 **2. Score on the unfiltered gene set** — if `Data/data.h5ad` was already prepared with a
 pre-filtered gene set (e.g. by an upstream pipeline), the literature marker genes may be missing

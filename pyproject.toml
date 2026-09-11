@@ -89,6 +89,9 @@ Documentation = "https://cardamomot.readthedocs.io"
 [tool.setuptools.packages.find]
 include = ["CardamomOT*"]
 
+[tool.setuptools.package-data]
+CardamomOT = ["data/halflife/*.tsv", "data/halflife/*.tsv.gz", "data/halflife/*.json", "data/halflife/*.md"]
+
 [tool.black]
 line-length = 100
 target-version = ['py38', 'py39', 'py310', 'py311']

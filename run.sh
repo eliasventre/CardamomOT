@@ -22,13 +22,14 @@ conda activate cardamom_light
 #   use_proliferation     : 0/1 — run get_proliferation_rates to (re)estimate
 #                            obs['proliferation_net_rate'] from literature gene
 #                            signatures (default 1)
-#   --species             : organism for get_proliferation_rates literature proliferation/death
-#                            gene signatures, human or mouse (default: human) — trailing
-#                            flag, e.g. ./run.sh my_project full 0.7 0 0.5 --species mouse
+#   --species             : organism, human or mouse — trailing flag, e.g.
+#                            ./run.sh my_project full 0.7 0 0.5 --species mouse.
+#                            If omitted, get_proliferation_rates and get_degradation_rates
+#                            detect it from gene names (Mki67/Gata1 = mouse, MKI67/GATA1 = human)
 
 # --species is a named flag and can appear anywhere in the argument list;
 # pull it out first so the remaining positional arguments line up as before.
-species="human"
+species=""
 positional=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -61,7 +62,7 @@ fi
 
 if [ "$use_proliferation" = "1" ]; then
     echo "Get proliferation rates"
-    python get_proliferation_rates.py -i "${input_dir}" --species "${species}"
+    python get_proliferation_rates.py -i "${input_dir}" ${species:+--species "${species}"}
 fi
 
 echo "Select DE genes and split cells"
@@ -74,7 +75,7 @@ if [ "$ref" = "1" ]; then
 fi
 
 echo "Get degradation rates"
-python get_degradation_rates.py -i "${input_dir}" -s "${split}"
+python get_degradation_rates.py -i "${input_dir}" -s "${split}" ${species:+--species "${species}"}
 
 echo "Inference mixture"
 python infer_mixture.py -i "${input_dir}" -s "${split}" --mean-forcing "${mean_forcing}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"

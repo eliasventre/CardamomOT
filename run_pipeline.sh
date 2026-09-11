@@ -11,12 +11,13 @@
 #   compute_proliferation  : learn R_opt MLP, simulate with branching (default 0)
 #   use_proliferation      : run get_proliferation_rates             (default 1)
 #
-# --species is a trailing named flag (default: human) — used by get_proliferation_rates
-# for literature proliferation/death gene signatures.
+# --species is a trailing named flag (human|mouse) — used by get_proliferation_rates
+# (proliferation/death gene signatures) and get_degradation_rates (half-life tables).
+# If omitted, both detect the species from gene names.
 
 # ./run.sh experimental_datasets/Semrau  full  0.7 0 1 1 1 1 1 0 0 1 0 0
 # ./run.sh experimental_datasets/Kameneva  full  0.7 0 0.5 0.2 1 1 1 0 0 1 0 0 
-./run.sh experimental_datasets/Schiebinger/ train 0.3 0 0.0 1 1 0 0 0 0 1 0 0 --species mouse
+./run.sh experimental_datasets/Schiebinger/ train 0.1 0 0.0 1 1 0 0 0 0 1 0 0 --species mouse
 
 #  ./run.sh collaborations/orga_Olivier full 0.7 0 0.75 0.22 1 1 1 0 0 1 0 0 
 
