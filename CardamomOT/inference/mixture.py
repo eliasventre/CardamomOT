@@ -125,7 +125,11 @@ def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=10
     b_old = b
     b = np.clip(b, seuil, 1/seuil)
     a *= b/(b_old + EPS)
-    a = np.maximum(a, np.minimum(b/2, np.max(a)/100))
+    # Strictly positive floor. When every a[i] is zero (a gene with no
+    # variation at any timepoint) the usual floor np.max(a)/100 is itself
+    # zero, and a zero rate later reaches nbinom.logpmf(x, 0, p) -> NaN.
+    floor = b/2 if np.max(a) <= 0 else np.minimum(b/2, np.max(a)/100)
+    a = np.maximum(a, floor)
 
     return a, b
 
@@ -313,6 +317,15 @@ def predict_resp(x, ks, c, pi=None, pi_zero=None, zi=None, forcing=1.0) -> tuple
         Compute the responsibilities.
         """
         n_components: int = len(ks)
+        if pi is not None and np.size(pi) != n_components:
+            # Sizes must match: logpmf is (N, n_components) and np.log(pi) is
+            # (1, len(pi)), so a mismatch would broadcast silently into a resp
+            # matrix with the wrong number of columns.
+            logger.warning(
+                "predict_resp: pi has %d entries but ks has %d components; "
+                "falling back to a uniform pi", np.size(pi), n_components
+            )
+            pi = None
         if pi is None:
             pi = np.ones(n_components) / n_components
         else:
@@ -359,9 +372,16 @@ def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=
     
     for it in range(max_iter_loop):
         # M-step: update parameters
-        ks_new, c_new = infer_kinetics_temporal(data, basins, a_init=ks, b_init=c, 
+        ks_new, c_new = infer_kinetics_temporal(data, basins, a_init=ks, b_init=c,
                                                  seuil=seuil, max_iter=1e5, tol=tol)
-        
+
+        if np.size(ks_new) != n_components:
+            # infer_kinetics_temporal returns one rate per *occupied* basin, so
+            # a collapse of every cell into a single basin silently shrinks ks.
+            # Everything downstream (pi, resp, nu) still assumes n_components,
+            # so stop here and keep the last consistent parameter set.
+            return ks, c, pi, basins
+
         # parameter constraints based on basins_temporal
         if basins_temporal is not None:
             ks_new = _apply_temporal_constraints(data, basins_temporal, ks_new, c_new, n_components)
@@ -486,6 +506,12 @@ def compute_nu_star(
     K: int = len(r_components)
 
     # initialisation
+    if nu_init is not None and np.size(nu_init) != K:
+        logger.warning(
+            "compute_nu_star: nu_init has %d entries but %d components were "
+            "given; ignoring nu_init", np.size(nu_init), K
+        )
+        nu_init = None
     if nu_init is None:
         logits0 = np.zeros(K)
     else:
@@ -541,6 +567,13 @@ def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_component
     Solves a constrained quadratic optimization problem.
     """
     mean_t = np.mean(data_t)
+
+    # nu, means_components and nu_init must all be indexed by the same
+    # components; sizing the bounds from n_components alone would let a stale
+    # n_components feed SLSQP an x0 of the wrong length.
+    n_components = len(means_components)
+    if np.size(nu_init) != n_components:
+        nu_init = np.ones(n_components) / n_components
 
     # Adjust the level of regularization
     nu_star = compute_nu_star(data=data_t,
@@ -836,7 +869,11 @@ class NegativeBinomialMixtureEM:
             mn = min(m, np.quantile(seuil + x*c_init, n))
             Mn = max(M, np.quantile(seuil + x*c_init, 1-n))
             ks_init = np.linspace(mn, Mn, K)
-            n /= 2 
+            n /= 2
+        # A rate of exactly 0 is not a valid NB shape parameter: scipy's
+        # nbinom.logpmf/cdf return NaN for it, which then poisons the whole
+        # nu optimization. The quantile widening above can still leave one.
+        ks_init = np.maximum(ks_init, seuil * c_init)
         if self.verbose: print(f"  Init: ks_init={ks_init}")
 
         pi_init = np.ones(K) / K
@@ -904,6 +941,53 @@ class NegativeBinomialMixtureEM:
             zi_p = 1
         return K + 1 + (K - 1) + zi_p
     
+
+    def _fit_constant_gene(self, x_all, vect_t_all, seuil):
+        """
+        Degenerate single-component model for a gene whose counts are identical
+        in every cell.
+
+        Such a gene carries no information to split into bursty modes: the
+        temporal M-step collapses every cell into one basin, which used to
+        shrink ``ks`` behind the back of the rest of the pipeline. Returning a
+        clean 1-component fit keeps it well formed, and a single mode is what
+        the network inference already reads as "neutral": both
+        ``NetworkModel.fit_network`` and
+        ``NetworkModel.refine_network_degradations`` zero the gene's row and
+        column of ``ref_network`` when ``len(np.unique(modes[:, g])) < 2``, so
+        it is never regulated and never regulating.
+        """
+        N: int = x_all.size
+        value = float(x_all[0]) if N else 0.0
+        c = 1.0
+        ks: np.ndarray[Any, np.dtype[Any]] = np.array([max(value * c, seuil)], dtype=float)
+        resp: np.ndarray[Any, np.dtype[Any]] = np.ones((N, 1))
+        basins: np.ndarray[Any, np.dtype[Any]] = np.zeros(N, dtype=int)
+
+        # Mirror the pi structure of _assign_basins(final=True): a dict keyed by
+        # timepoint under preserve_mean_values, a flat array otherwise.
+        if self.preserve_mean_values and vect_t_all is not None:
+            pi: Any = {t: np.ones(1) for t in np.unique(vect_t_all)}
+        else:
+            pi = np.ones(1)
+
+        aic, loglik = compute_aic_for_params(x_all, ks, c, np.ones(1), 0, None)
+
+        best_model = {
+            'ks':              ks,
+            'c':               c,
+            'pi':              pi,
+            'pi_zero':         0.0,
+            'basins':          basins,
+            'resp':            resp,
+            'loglik':          float(loglik),
+            'n_components':    1,
+            'aic':             float(aic),
+            'initial_K_tried': 1,
+        }
+        self.best_model = best_model
+        return best_model
+
 
     def _fit_with_scboolseq(self, x_all, vect_t_all, labels_all, seuil, dropout=None):
         """
@@ -1008,6 +1092,10 @@ class NegativeBinomialMixtureEM:
         x_all: np.ndarray[Any, np.dtype[Any]] = np.asarray(x).astype(int)
         N_all: int = x_all.size
         vect_t_all = vect_t
+
+        # ── Constant gene: nothing to fit, return a neutral 1-mode model ────
+        if N_all == 0 or x_all.min() == x_all.max():
+            return self._fit_constant_gene(x_all, vect_t_all, seuil)
 
         # ── scBoolSeq fast path: skip EM, use pre-computed binary labels ────
         if self.use_scBoolSeq and scboolseq_labels is not None:
