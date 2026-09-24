@@ -685,7 +685,10 @@ def infer_ratio_d0_d1_unitary(
     """
     device = "cpu"
     X_prot   = np.asarray(X_prot,  dtype=np.float32)
-    times    = np.asarray(times,   dtype=np.float32)
+    # float64 on purpose: time values are used as keys of stim_schedule and
+    # ratio dicts built from float64 times; a float32 cast turns e.g. 5.55 into
+    # 5.550000190734863 and the lookup misses.
+    times    = np.asarray(times,   dtype=np.float64)
     k1_vec   = np.asarray(k1_vec,  dtype=np.float32)
     d_learned_temporal = np.asarray(d_learned_temporal, dtype=np.float32)
     ks_np    = np.asarray(ks,      dtype=np.float32)   # (n_modes, G)
@@ -904,7 +907,10 @@ def inference_degradation_prot(
     device = "cpu"
     ns: int = int(n_stimuli)
     X_prot = np.asarray(X_prot, dtype=np.float32)
-    times  = np.asarray(times,  dtype=np.float32)
+    # float64 on purpose: time values are used as keys of stim_schedule and
+    # ratio dicts built from float64 times; a float32 cast turns e.g. 5.55 into
+    # 5.550000190734863 and the lookup misses.
+    times  = np.asarray(times,  dtype=np.float64)
     bias   = np.asarray(bias,   dtype=np.float32)
 
     G: int = X_prot.shape[1]
@@ -1275,7 +1281,8 @@ def infer_ratio_d0_d1_full(
     """
     device = "cpu"
     X_prot   = np.asarray(X_prot,       dtype=np.float32)
-    times    = np.asarray(times,        dtype=np.float32)
+    # float64 on purpose: see inference_degradation_prot (stim_schedule keys).
+    times    = np.asarray(times,        dtype=np.float64)
     bias_np  = np.asarray(bias,         dtype=np.float32)
     theta_np = np.asarray(theta_inter,  dtype=np.float32)
     d_arr    = np.asarray(d_learned,    dtype=np.float32)   # (G,) or (T-1, G)

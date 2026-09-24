@@ -125,9 +125,7 @@ def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=10
     b_old = b
     b = np.clip(b, seuil, 1/seuil)
     a *= b/(b_old + EPS)
-    # Strictly positive floor. When every a[i] is zero (a gene with no
-    # variation at any timepoint) the usual floor np.max(a)/100 is itself
-    # zero, and a zero rate later reaches nbinom.logpmf(x, 0, p) -> NaN.
+    # Keep a > 0 even when all a[i] == 0 (nbinom.logpmf is NaN for a zero rate).
     floor = b/2 if np.max(a) <= 0 else np.minimum(b/2, np.max(a)/100)
     a = np.maximum(a, floor)
 
@@ -318,9 +316,7 @@ def predict_resp(x, ks, c, pi=None, pi_zero=None, zi=None, forcing=1.0) -> tuple
         """
         n_components: int = len(ks)
         if pi is not None and np.size(pi) != n_components:
-            # Sizes must match: logpmf is (N, n_components) and np.log(pi) is
-            # (1, len(pi)), so a mismatch would broadcast silently into a resp
-            # matrix with the wrong number of columns.
+            # A size mismatch would silently broadcast resp to the wrong width.
             logger.warning(
                 "predict_resp: pi has %d entries but ks has %d components; "
                 "falling back to a uniform pi", np.size(pi), n_components
@@ -376,10 +372,7 @@ def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=
                                                  seuil=seuil, max_iter=1e5, tol=tol)
 
         if np.size(ks_new) != n_components:
-            # infer_kinetics_temporal returns one rate per *occupied* basin, so
-            # a collapse of every cell into a single basin silently shrinks ks.
-            # Everything downstream (pi, resp, nu) still assumes n_components,
-            # so stop here and keep the last consistent parameter set.
+            # All cells collapsed into fewer basins, so ks shrank: keep the last consistent fit.
             return ks, c, pi, basins
 
         # parameter constraints based on basins_temporal
@@ -568,9 +561,7 @@ def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_component
     """
     mean_t = np.mean(data_t)
 
-    # nu, means_components and nu_init must all be indexed by the same
-    # components; sizing the bounds from n_components alone would let a stale
-    # n_components feed SLSQP an x0 of the wrong length.
+    # Size everything from the actual components, not a possibly stale n_components.
     n_components = len(means_components)
     if np.size(nu_init) != n_components:
         nu_init = np.ones(n_components) / n_components
@@ -870,9 +861,7 @@ class NegativeBinomialMixtureEM:
             Mn = max(M, np.quantile(seuil + x*c_init, 1-n))
             ks_init = np.linspace(mn, Mn, K)
             n /= 2
-        # A rate of exactly 0 is not a valid NB shape parameter: scipy's
-        # nbinom.logpmf/cdf return NaN for it, which then poisons the whole
-        # nu optimization. The quantile widening above can still leave one.
+        # A zero rate makes nbinom.logpmf/cdf return NaN.
         ks_init = np.maximum(ks_init, seuil * c_init)
         if self.verbose: print(f"  Init: ks_init={ks_init}")
 
@@ -943,20 +932,8 @@ class NegativeBinomialMixtureEM:
     
 
     def _fit_constant_gene(self, x_all, vect_t_all, seuil):
-        """
-        Degenerate single-component model for a gene whose counts are identical
-        in every cell.
-
-        Such a gene carries no information to split into bursty modes: the
-        temporal M-step collapses every cell into one basin, which used to
-        shrink ``ks`` behind the back of the rest of the pipeline. Returning a
-        clean 1-component fit keeps it well formed, and a single mode is what
-        the network inference already reads as "neutral": both
-        ``NetworkModel.fit_network`` and
-        ``NetworkModel.refine_network_degradations`` zero the gene's row and
-        column of ``ref_network`` when ``len(np.unique(modes[:, g])) < 2``, so
-        it is never regulated and never regulating.
-        """
+        """Single-mode model for a gene constant across all cells; its single mode
+        makes the network inference zero its ref_network row and column."""
         N: int = x_all.size
         value = float(x_all[0]) if N else 0.0
         c = 1.0
@@ -964,8 +941,7 @@ class NegativeBinomialMixtureEM:
         resp: np.ndarray[Any, np.dtype[Any]] = np.ones((N, 1))
         basins: np.ndarray[Any, np.dtype[Any]] = np.zeros(N, dtype=int)
 
-        # Mirror the pi structure of _assign_basins(final=True): a dict keyed by
-        # timepoint under preserve_mean_values, a flat array otherwise.
+        # Same pi structure as _assign_basins(final=True).
         if self.preserve_mean_values and vect_t_all is not None:
             pi: Any = {t: np.ones(1) for t in np.unique(vect_t_all)}
         else:
