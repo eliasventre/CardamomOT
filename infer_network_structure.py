@@ -22,7 +22,8 @@ Output files:
 import sys; sys.path += ['../']
 import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta, find_data_file
-from CardamomOT import check_stationary, STATIONARY_EXIT_CODE, STATIONARY_MESSAGEimport getopt
+from CardamomOT import check_stationary, STATIONARY_EXIT_CODE, STATIONARY_MESSAGE
+import getopt
 import anndata as ad
 import pandas as pd
 import os

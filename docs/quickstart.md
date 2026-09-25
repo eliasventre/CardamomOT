@@ -8,8 +8,13 @@ CardamomOT reads a single **AnnData** file (`h5ad` format). The required metadat
 
 | Field | Type | Description |
 |---|---|---|
-| `adata.obs['time']` | float | Measurement time for each cell |
-| `adata.obs['cell_type']` | str | Cell type label (optional but recommended) |
+| `adata.obs['time']` | float | Measurement time for each cell. If absent or unique, the data are treated as stationary: gene selection (on cell types only) and mixture inference run, then the pipeline stops — network inference will be handled by CardamomOT-stat (in prep.) |
+| `adata.obs['cell_type']` | str | Cell type label (optional but recommended), used for DE gene selection |
+| `adata.obs['cell_type_selection']` | str | Optional override of `cell_type` for DE gene selection |
+| `adata.obs['cell_type_proliferation']` | str | Optional, only used with `Data/proliferation_rates` to anchor the literature proliferation estimate ([details](advanced.md)) |
+| `adata.obs['cell_type_transition']` | str | Optional, only used with `Data/transition_rates` to structure the OT ([details](advanced.md)) |
+
+`cell_type_proliferation` and `cell_type_transition` may differ (e.g. a finer grouping for proliferation). If only one of them is defined, it is used for both; if neither is, `cell_type` is used. Both anchorings are all-or-nothing: if any cell type is missing from the corresponding file, a warning is printed and the anchoring is skipped for all cells.
 | `adata.X` | matrix | Raw or normalised count matrix |
 
 Organise your project folder as follows:
