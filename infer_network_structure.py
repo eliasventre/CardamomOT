@@ -22,7 +22,7 @@ Output files:
 import sys; sys.path += ['../']
 import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta, find_data_file
-import getopt
+from CardamomOT import check_stationary, STATIONARY_EXIT_CODE, STATIONARY_MESSAGEimport getopt
 import anndata as ad
 import pandas as pd
 import os
@@ -78,16 +78,10 @@ def main(argv):
         raise FileNotFoundError(error_msg)
 
     # ─── CHECK TEMPORAL INFORMATION ──────────────────────────────────────
-    try:
-        times = adata.obs['time'].values
-        if len(np.unique(times)) <= 1:
-            raise ValueError(
-                "Data must contain temporal information with at least 2 distinct timepoints."
-            )
-    except KeyError as e:
-        error_msg = f"Error: 'time' column not found in adata.obs. {e}"
-        print(error_msg)
-        raise SystemExit(error_msg)
+    # Stationary data are handled by CardamomOT-stat (in prep.)
+    if check_stationary(adata):
+        print(f"[infer_network_structure] {STATIONARY_MESSAGE}")
+        sys.exit(STATIONARY_EXIT_CODE)
 
     print(f"[infer_network_structure] Starting network inference ({adata.shape[1]} genes)...")
 

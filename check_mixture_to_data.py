@@ -24,7 +24,7 @@ Output files:
 import numpy as np
 import sys, getopt
 import anndata as ad
-from CardamomOT import plot_data_umap_toref, plot_data_distrib
+from CardamomOT import plot_data_umap_toref, plot_data_distrib, check_stationary
 import scipy.sparse
 import os
 import ot
@@ -91,18 +91,13 @@ def main(argv):
     else:
         data_rna_extracted = np.asarray(adata.X.T, dtype=float)
 
-    # Validate temporal information
-    try:
-        times = adata.obs['time'].values 
-        if len(np.unique(times)) <= 1:
-            raise ValueError("Data must contain multiple timepoints in obs['time']")
+    # Temporal information (absent or single timepoint = stationary setting)
+    stationary = check_stationary(adata)
+    times = adata.obs['time'].values.astype(float)
+    if stationary:
+        print("[check_mixture_to_data] Stationary data (no or single timepoint)")
+    else:
         print(f"[check_mixture_to_data] Detected {len(np.unique(times))} timepoints")
-    except KeyError:
-        print("[check_mixture_to_data] Error: data.obs['time'] not found")
-        sys.exit(1)
-    except ValueError as e:
-        print(f"[check_mixture_to_data] Error: {e}")
-        sys.exit(1)
     
     data_real = np.vstack([times, data_rna_extracted]).astype(float)
 

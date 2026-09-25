@@ -38,6 +38,9 @@ from .config import (
     find_data_file,
     read_gene_list,
     resolve_cell_type_obs,
+    check_stationary,
+    STATIONARY_EXIT_CODE,
+    STATIONARY_MESSAGE,
     DEFAULT_DATA_FOLDER,
     DEFAULT_CARDAMOM_FOLDER,
 )
@@ -103,6 +106,9 @@ __all__ = [
     "find_data_file",
     "read_gene_list",
     "resolve_cell_type_obs",
+    "check_stationary",
+    "STATIONARY_EXIT_CODE",
+    "STATIONARY_MESSAGE",
     "DEFAULT_DATA_FOLDER",
     "DEFAULT_CARDAMOM_FOLDER",
     # Inference functions

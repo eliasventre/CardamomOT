@@ -161,28 +161,43 @@ def find_data_file(data_dir: Path, basename: str,
     return None
 
 
-def resolve_cell_type_obs(adata, preferred: str, fallback: str = "cell_type") -> Optional[str]:
+# Obs columns tried in order for each task-specific cell-type grouping.
+# Proliferation and transition groupings fall back on each other before `cell_type`.
+CELL_TYPE_OBS_KEYS = {
+    "selection": ("cell_type_selection", "cell_type"),
+    "proliferation": ("cell_type_proliferation", "cell_type_transition", "cell_type"),
+    "transition": ("cell_type_transition", "cell_type_proliferation", "cell_type"),
+}
+
+
+def resolve_cell_type_obs(adata, task: str) -> Optional[str]:
     """
     Pick which adata.obs column to use as the cell-type grouping for a given
-    task, letting preprocessing override the generic cell types with a
-    task-specific labeling (e.g. a coarser or finer grouping than
-    `cell_type`) without touching `cell_type` itself.
+    task ("selection", "proliferation" or "transition"), letting preprocessing
+    override the generic `cell_type` with a task-specific labeling.
 
-    Args:
-        adata: AnnData object to inspect.
-        preferred: Task-specific obs column to use if present (e.g.
-            "cell_type_proliferation", "cell_type_selection").
-        fallback: Generic obs column to fall back to (default "cell_type").
-
-    Returns:
-        `preferred` if it exists in adata.obs, else `fallback` if that
-        exists, else None.
+    Returns the first column of `CELL_TYPE_OBS_KEYS[task]` present in
+    adata.obs, else None.
     """
-    if preferred in adata.obs.columns:
-        return preferred
-    if fallback in adata.obs.columns:
-        return fallback
+    for key in CELL_TYPE_OBS_KEYS[task]:
+        if key in adata.obs.columns:
+            return key
     return None
+
+
+# Exit code of scripts that stop on stationary data (no/single timepoint)
+STATIONARY_EXIT_CODE = 3
+STATIONARY_MESSAGE = "Stationary data (no or single timepoint): switch to method CardamomOT-stat, in prep."
+
+
+def check_stationary(adata, time_key: str = "time") -> bool:
+    """
+    Fill a missing `adata.obs[time_key]` with 0 and return True when the data
+    have at most one timepoint (stationary setting, handled by CardamomOT-stat).
+    """
+    if time_key not in adata.obs.columns:
+        adata.obs[time_key] = 0.0
+    return adata.obs[time_key].nunique() <= 1
 
 
 def read_gene_list(path: Path) -> List[str]:

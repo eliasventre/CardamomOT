@@ -1,0 +1,227 @@
+\section{Methods}
+\label{methods_section}
+
+\subsection{Mechanistic modeling of cellular dynamics}
+\label{sec:mechanistic_model}
+
+At the single-cell level, cellular dynamics can be described by the stochastic evolution of the level of mRNAs and proteins expressed by each gene. The framework adopted in this study for characterizing their evolution relies on a hybrid formulation of the classical two-state gene-expression model embedded within a regulatory network ~\cite{herbachinferring2017}. In this model, each gene is associated with a promoter that fluctuates between an \emph{active} and an \emph{inactive} state. When the promoter is active, transcription occurs at rate $s_0$, generating mRNA molecules that are subsequently translated into proteins at rate $s_1$. Both mRNAs and proteins degrade with respective rates $d_0$ and $d_1$. For independent genes, switching between the inactive and active promoter states follows exponential waiting times with parameters $k_{\mathrm{on}}$ and $k_{\mathrm{off}}$. For modeling the effect of a GRN $\theta$, encoded by an $n \times n$ matrix $\theta = (\theta_{ij})$, the activation rate of each gene $i$ are replaced by gene-specific functions $k^\theta_{\mathrm{on},i}(P)$ depending on the whole protein field $P$. Each entry $\theta_{ij}$ specifies the direction, sign, and magnitude of the influence of gene $j$ on gene $i$. Following~\cite{herbach2018modelisation, ventre2023one}, we describe these new activations rates by a sigmoid function, a simplified version of the mechanistic formulation in~\cite{herbachinferring2017,bonnaffoux2019wasabi}.
+
+Recent results indicate that the time spent in the active states are more constrained than previously believed~\cite{RN6412}, suggesting that regulation acts primarily through changes in activation frequency~\cite{li2011central}. Accordingly, we assume that inactivation rates $k_{\mathrm{off}, i}$ remain independent of protein levels. We also focus on the \emph{bursty} regime, defined by $k_{\mathrm{on}} \ll k_{\mathrm{off}}$, where activation events are brief but highly productive, in agreement with experimental observations~\cite{suter2011mammalian}. In this setting, transcription typically occurs in bursts including a few to hundreds of mRNAs, the burst size following an exponential law with mean $s_0/k_{\mathrm{off}}$. 
+
+Under these assumptions, it has been shown that the model reproduces well the mixture of Negative Binomial distributions of mRNA levels~\cite{ventre2022reverse}, commonly reported in single-cell datasets~\cite{albayrak2016digital}. Thus, this stochastic model at the single-cell level generates probability distributions at the population level that are in line with experimental observations, motivating the fact to use it as a \emph{generative model} of cell development.
+
+\subsubsection*{Mathematical description of the model}
+\paragraph{Biological model}
+For each gene $i \in \{1,\dots,n\}$, the mRNA level $M_i(t)$ and the protein level $P_i(t)$
+follow
+\begin{equation*}
+M_i(t) \xrightarrow{k_{on,i}^\theta(P(t))} M_i(t) + \mathcal{E}\left(\frac{k_{\mathrm{off}, i}}{s_{0, i}}\right), 
+\end{equation*}
+\begin{equation}
+\label{eq:full_model}
+\frac{dM_i}{dt} = - d_{0,i} M_i(t),
+\qquad 
+\frac{dP_i}{dt} = s_{1,i} M_i(t) - d_{1,i} P_i(t).
+\end{equation}
+
+The GRN matrix $\theta$ is encoded through the gene-specific burst rate
+functions
+\begin{equation}
+\label{kon_function}
+k^{\theta}_{\mathrm{on},i}(P)
+ = k_{0,i} + (k_{1,i}-k_{0,i}) 
+   \left( 1 + \exp{\Big[-\beta_i - \sum_{j=1}^n \theta_{ij} P_j\Big]}\right)^{-1},
+\end{equation}
+where $k_{0,i}$ and $k_{1,i}$ denote respectively the minimal and maximal burst frequencies of gene $i$. The parameter $\beta_i$ represents its basal activity and can also capture the effective influence of unobserved regulators acting on the system.
+
+\paragraph{Observational model}
+
+
+\paragraph{Simplified statistical model}
+
+In the setting where the dynamics of bursts and mRNAs degradation are much
+faster than those of proteins, the conditional
+distribution of $M_i(t)$ given $P(t)$ is well approximated by a
+quasi–stationary Negative Binomial distribution \cite{herbach2018modelisation}:
+\begin{equation}
+M_i(t)\mid P(t)
+ \sim \mathrm{NB}\!\left(
+     \frac{k^{\theta}_{\mathrm{on},i}(P(t))}{d_{0,i}},
+     \frac{k_{\mathrm{off},i}}{s_{0,i}}
+   \right).
+\label{eq:beta_qs}
+\end{equation}
+
+Furthermore, for each gene $i$, we assume that $k^{\theta}_{\mathrm{on},i}(P)$
+is effectively piecewise–constant, taking a finite set of values
+$\{k_{z,i}\}_{z\in Z}$ associated with discrete promoter-activity ``basins’’.
+This induces, for each timepoint $t$, a mixture model
+\begin{equation}
+M(t) \sim \sum_{z\in Z} \mu_t(z)
+         \prod_{i=1}^n 
+         \mathrm{NB}\!\left(
+           \frac{k_{z,i}}{d_{0,i}}, 
+           \frac{k_{\mathrm{off},i}}{s_{0,i}}
+         \right),
+\label{eq:beta_mixture}
+\end{equation}
+where $\mu_t$ denotes the distribution of cells among basins at time $t$.\\
+
+Finally, we also introduce a deterministic limit characterizing proteins at the limit of infinitely slow proteins, that we already described in \cite{ventre2022reverse} for the general model in the non-brusty regime, which can be roughly understood by the fact that mRNAs are approximated by their mean value given $P$:
+\begin{equation*}
+\frac{dP}{dt} = s_{1} \frac{k^{\theta}_{\mathrm{on}}(P)s_0}{k_{\mathrm{off}}d_0} - d_{1} P(t).
+\end{equation*}
+As proteins are not observed, we can arbitrarily set $s_1 = \frac{d_1 d_0 k_{\mathrm{off}}}{k_1 s_0}$ which allows to rescale proteins between $0$ and $1$ in the deterministic limit model as it becomes simply:
+\begin{equation}
+\label{eq:deterministic_model}
+\frac{dP}{dt} = d_{1} \left(\frac{k^{\theta}_{\mathrm{on}}(P)}{k_1} - P(t)\right).
+\end{equation}
+Interestingly, this allows to consider a Hidden Markov Model where proteins (the hidden variables) follows a deterministic dynamics defined by \eqref{eq:beta_qs} and generate mRNAs (the observations) through the protein-dependent statistical distribution \eqref{eq:beta_qs} shaped by the GRN $\theta$.
+
+\subsection{Overview of CardamomOT}
+The main aim of CardamomOT is to allow for the mechanistic model described above to be used as a generative model for scRNA-seq data, by calibrating its parameters from a sequence of temporal datasets. The calibrated model is then used to generate new sequences of datasets, at unknown timepoints to predict unseen cell fate, or with some gene perturbation to quantify its effect on the population.\\
+
+The method requires an initial knowledge about degradation rates of mRNAs and proteins, $d_0, d_1$, and is able to consider initial knowledge about proliferation and death rates, $b, d$, and known regulatory interactions encoded in a GRN $\theta^0$. 
+
+% --------------------------------------------------------------------
+
+\subsubsection{Preprocessing: Calibration of the NB mixture model from scRNA-seq snapshots allow to transform cellular states into vector of basins}
+\label{subsec:Mixture_inference}
+
+Given scRNA-seq measurements $\widehat P_t$ of mRNA counts at timepoints
+$t_1<\dots<t_N$, we first infer the NB mixture model
+\eqref{eq:beta_mixture} using the same procedure as in the original
+CARDAMOM method \cite{ventre2023one}. For each gene $i$, we use an EM algorithm to infer for each timepoint $t_j$ a distribution $\textrm{NB}(a_{j,i}, b_i)$ with $b_i$ fixed across the timepoints. We then make the hypothesis that each gene reaches its minimal and maximal frequency of bursts at one timepoint and calibrate $$\frac{k_{0,i}}{d_{0, i}} = \min_j \{a_{j,i}\},\,\frac{k_{1,i}}{d_{0, i}} = \max_j \{a_{j,i}\},\,\frac{k_{\mathrm{off},i}}{s_{0, i}} := b_i.$$
+
+For each cell $c$ at time $t$, this yields a probability matrix ${\mathrm{Pr}}_c$ of size $|Z| \times n$ where the product of each line characterizes the probability of the cell to belong to each basin label $z \in Z$.
+
+We can use this probability matrix to cluster cells into basins by choosing 
+\begin{equation}
+z_c := \argmax_z \{\prod_i {\mathrm{Pr}}_c(z, i)\}.
+\label{basins_argmax}
+\end{equation}
+We thus obtain a sequence of empirical marginals in the reduced space of basins:
+\[
+\widehat Z_t := \{ z_c \;:\; c\in \widehat P_t \}.
+\]
+Note that this clustering into basins is done in an univariate setting, without considering here genes interactions: this limitation of the original method will be leveraged in Step 3 of Section \ref{subsec:Trajectory_and_GRN_inference} by updating at each iteration the basins associated to each cell using the inferred GRN structure. Note that if an initial GRN $\theta^0$ is available, one can follow this method from this step too.
+
+% --------------------------------------------------------------------
+
+\subsubsection{An EM-like iterative procedure allow to infer both GRN structure and protein trajectories}
+\label{subsec:Trajectory_and_GRN_inference}
+
+The key novelty of CardamomOT compared to the original method is that protein
+levels $P_c(t)$ are not computed using the quasistationary approximation, which was actually imposing some strong constraint on the dynamics itself. Instead, we fully handle the difficulty coming from the fact that proteins being slow with respect to mRNAs they cannot be estimated at a timepoint only given the distribution of mRNAs at this timepoint, we reconstruct the protein values $P_c(t)$ values \emph{through explicit trajectory inference} (TI). 
+
+Moreover, as protein trajectories are driven by the GRN, it appears clearly that, contrary to most of methods generally used in TI \cite{schiebinger2019optimal, rimawi2025simulation} \emph{TI should be performed given a GRN.} We thus replace the second step of CARDAMOM by an iterative EM-like procedure alternating between trajectory inference and GRN reconstruction until convergence of both the GRN and the protein trajectories. This step is similar to \cite{zhang2024joint}, but achieved with a mechanistic model and computing hidden protein trajectories, allowing to generate more realistic trajectories and a better GRN reconstruction (see Section \ref{results_section}).
+
+This iterative procedure consists in the four following steps.
+
+\paragraph{Step 1: Sample realistic protein trajectories given a GRN and the classification of cells into basins, by solving a sequence of mechanistic based optimal transport problems}
+
+For each gene, recall that protein dynamics satisfy
+\[
+\frac{dP}{dt} = s_{1} M(t) - d_{1} P(t),
+\]
+and the mRNA values $M_i(t)$ along a trajectory are distributed according to
+the NB mixture component associated to the basin sequence. For every cell $c$ observed at time $t_j$ and every cell $c'$ observed at $t_{j+1}$, we can then interpolate between the observed vectors $M_{c}(t_j)$ and $M_{c'}(t_{j+1}$ in $[t_j, t_{j+1}]$ using an approximate PDMP bridge formula (see Appendix \ref{app_detailed_interpolation} for more details) and then integrate the previous equation to compute a candidate protein vector $P_{c,c'}$.
+
+We then define for each pair of timepoints $(t_j, t_{j+1})$ a GRN-driven cost matrix $C^{j}$  by:
+\begin{equation}
+    \label{cost_matrix}
+    \forall (c, c') \in \widehat P_{t_j} \times \widehat P_{t_{j+1}}:\, C^j_{c, c'} := \mathrm{loss} (k_{\mathrm{on}}^\theta(P_{c,c'}(t_{j+1})) , k_{z_{c'}}).
+\end{equation}
+
+Then we solve the regularized optimal transport problem:
+\begin{equation}
+    \label{eq:proteins_update}
+    \mathrm{OT}
+_C^{j, \varepsilon_1}(\widehat P_{t_j}, \widehat P_{t_{j+1}}):= \min\limits_{\pi}\left\{\sum\limits_{{c \in \widehat P_{t_j}}} \sum\limits_{{c' \in \widehat P_{t_{j+1}}}} C^j_{c, c'} \pi(c, c') + \varepsilon_1 \pi(c, c') \ln\left(\frac{\pi(c, c')}{P_{t_{j}}(c) P_{t_{j+1}}(c')}\right)\right\},
+\end{equation} 
+such that $\sum\limits{c \in \widehat P_{t_j}}\pi(c, c') = \widehat P_{t_{j+1}}(c')$ and $\sum\limits{c' \in \widehat P_{t_{j+1}}}\pi(c, c') = \widehat P_{t_{j}}(c)$.
+We obtain a coupling matrix $\pi_j:=\argmin(\ref{eq:proteins_update})$ allowing to sample from each \emph{ancestor} cell $c$ in $\widehat P_{t_j}$ a \emph{descendant cell} $c'$ in $\widehat P_{t_{j+1}}$, and we define the protein vector $P_{c'}(t_{j+1}) := P_{c,c'}$. 
+
+This amounts to consider that, given the GRN, the descendant of a given cell is the one for which the bursting modes obtained by evaluating the GRN burst rate function \eqref{kon_function} on the computed resulting protein vector is the closest to the bursting modes directly observed in the dataset for this cell.
+
+This reconstruction of the protein vectors is repeated from $t_0$ to $t_{N-1}$, generating full protein trajectories along the timepoints.
+
+% --------------------------------------------------------------------
+
+\paragraph{Step 2: Update the GRN by minimizing the loss between the bursting frequency modes and the burst rate functions estimated on the protein values}
+\label{subsec:Trajectory_inference}
+
+For fixed reconstructed protein trajectories, the GRN $\theta$ is optimized by
+minimizing a global loss between predicted bursting
+rates and the mixture-derived modes:
+\begin{equation}
+\theta^{\ast}
+   = \arg\min_{\theta}
+      \sum_{c \in \widehat P}
+      \mathrm{loss}(
+         k^{\theta}_{\mathrm{on}}\!\big(P_c\big)
+         , \mathbf{k}_{z_c})
+      + \lambda \|\theta - \theta^0\|_1.
+\label{eq:GRN_update}
+\end{equation}
+
+This generalizes the regression step of the original CARDAMOM method: instead of using a
+quasi-static approximation $P_c=\mathbf{k}_{z_c}$ and to iterate along the timepoints, all timepoints contribute simultaneously via their reconstructed protein values. Note that we use this time a simple LASSO penalization instead of the custom penalization that was necessary to make evolve the network along the timepoints. Moreover, we don't penalize with respect to the GRN inferred at the previous iteration, but only with respect to the GRN encoding initial knowledge regulatory interactions. Indeed, as the GRN inferred at the previous iteration has already been used to update the protein trajectories, we don't need to force the new GRN to be close to it at this step to ensure the convergence of the algorithm. This amounts to considering that protein trajectories and GRN contain a similar information, which is in line with the main hypothesis of a GRN-driven underlying model of cell differentiation. This also works better in practice.
+
+% --------------------------------------------------------------------
+
+\paragraph{Step 3: Update the classification of cells into basins solving a GRN-constrained optimal transport problem}
+
+Given the updated GRN $\theta^*$, we recompute the classification of cells into basins by solving another GRN-constrained optimal transport problem. We compute:
+\begin{equation}
+\label{eq:basins_update}
+\gamma^* = \argmin_{\gamma}\{\sum_{z \in Z}
+      \sum_{c \in \widehat P}-\left(\ln\left(\mathrm{Pr}_c(z)\right) + \varepsilon_3 \ln\left(1 - \mathrm{loss}(
+         k^{\theta}_{\mathrm{on}}\!\big(P_c\big)
+         , \mathbf{k}_{z})\right)\right) \gamma(c, z)\},
+\end{equation}
+such that $\sum\limits_{c \in \widehat P}\gamma(c, z) = \sum\limits_{c \in \widehat P}\mathrm{Pr}_c(z)$ and 
+$\sum\limits_{z \in \widehat Z}\gamma(c, z) = 1$
+
+We then re-classify a cell $c$ in the new basin: $z_c = \argmax_z \gamma^*(c, z)$.
+
+This step thus produces new basin classification, which in turn enables, together with the new GRN obtained in Step 2, the reconstruction of updated protein trajectories as in Step 1.\\
+
+% --------------------------------------------------------------------
+
+Steps 1--3 are repeated until convergence. 
+The resulting algorithm is:
+
+\begin{algorithm}[H]
+\caption{CardamomOT}
+\begin{algorithmic}[1]
+\State Infer the NB mixture parameters and initialize for each cell $c$ the basin label $z_c^0$ using \eqref{basins_argmax} or \eqref{eq:basins_update} if an initial GRN is available.
+\For{$k=0,1,\dots$ until convergence}
+  \State Solve $N$ OT problems of the form \eqref{eq:proteins_update} for computing a sequence of couplings $\{\pi_j\}_{j=1,\cdots,N}$ and sample a sequence of $L$ protein trajectories $\{P^{(k+1, l)}(t)\}_{l=1,\cdots,L}$ from the resulting multimarginal coupling $\pi = \pi_N \otimes \cdots \otimes \pi_1$ (Step 1).
+  \State Update GRN $\theta^{(k+1)}$ using \eqref{eq:GRN_update}) (Step 2).
+  \State Update basin labels $z_c^{(k)}$ using \eqref{eq:basins_update}) (Step 3).
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+Empirically, this iterative scheme converges in a small number of iterations
+(typically $20$--$40$), and stabilizes both the inferred GRN, the protein
+trajectories and the basin labels.
+
+% --------------------------------------------------------------------
+
+\subsubsection{Postprocessing: A NeuralODEs algorithm allows to re-estimate kinetic rates from the calibrated GRN and inferred protein trajectories}
+
+Given the optimal GRN $\theta^*$ and the set of associated protein trajectories $\{P^{l}(t)\}_{l=1,\cdots,L}$ computed in the previous iterative procedure, we can now use the deterministic limit \eqref{eq:deterministic_model} to ensure that the kinetic rates $d_0$ and $d_1$ are well adapted for the model to regenerate these trajectories from the GRN. For this sake, we run a NeuralODEs algorithm with the Python package \textrm{torchdiffeq} to calibrate the parameter $d_1$ of the rescaled deterministic model \eqref{eq:deterministic_model}, starting from the initial protein vectors $\{P^{l}(0)\}_{l=1,\cdots,L}$. We used teacher-forcing \cite{yeo2021generative} as it gave better results. Then, we calibrate $d_0$ by fitting the variance of the error between simulated and original protein trajectories using this time the Stochastic Differential Equation (SDE) of the model that we detailed in \cite{ventre2020reduction}.\\
+
+
+Finally, the method outputs:
+
+\begin{itemize}
+\item inferred trajectories and for every cell in a trajectory, the basin label, its associated vector of bursting modes, and the vector of normalized protein levels vector; 
+\item an inferred GRN $\theta^*$, signed and directed;
+\item all the parameters of the mechanistic model presented in Section \ref{sec:mechanistic_model}.
+\end{itemize}
+
+Overall, our method thus calibrates a generative model allowing simulation and perturbation
+experiments, like in silico knockouts or overexpression by starting the protein values of cells at $0$ and $1$, and the basal parameters of the corresponding genes at $-\infty$ and $+\infty$, respectively.

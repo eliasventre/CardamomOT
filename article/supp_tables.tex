@@ -1,0 +1,81 @@
+\begin{table}[ht]
+\centering
+\caption{Comparison of reference parameters and parameters inferred by CardamomOT for different simulated datasets. Results show mean $\pm$ standard deviation across all genes.}
+\label{tableS1}
+\small
+\begin{tabular}{|l|cc|cc|cc|cc|}
+\hline
+\multirow{2}{*}{Parameter} & \multicolumn{2}{c|}{FN4} & \multicolumn{2}{c|}{CN5} & \multicolumn{2}{c|}{BN8} & \multicolumn{2}{c|}{FN8} \\
+\cline{2-9}
+& Ref & Inf & Ref & Inf & Ref & Inf & Ref & Inf \\
+\hline
+$k_0 /d_0$ & 0 & 0.194$\pm$0.211 & 0 & 0.263$\pm$0.120 & 0 & 0.138$\pm$0.117 & 0 & 0.076$\pm$0.046 \\
+$k_1 /d_0$ & 10 & 8.044$\pm$0.888 & 4 & 3.315$\pm$0.401 & 8 & 5.599$\pm$1.870 & 5 & 3.474$\pm$1.445 \\
+$k_{off}/s_0$ & 0.02 & 0.018$\pm$0.001 & 0.02 & 0.019$\pm$0.001 & 0.02 & 0.017$\pm$0.003 & 0.02 & 0.019$\pm$0.005 \\
+\shortstack[l]{\% of correctly\\attributed modes} &  & 92.9 &  & 85.2 &  & 91.3 &  & 92.6 \\
+\hline
+\end{tabular}
+\end{table}
+
+
+\begin{table}[ht]
+\centering
+\caption{Related to Figure \ref{figure3}. Average runtime for inferring a network from datasets of 1000 cells simulated with tree-like networks for which the results of the inference are represented in Figure \ref{figure3}, for the six algorithms that are used in the benchmark and 10 runs each. Timings measured on a 16-GB RAM, 2.4 GHz Intel Core i5 computer.}
+\label{tableS2}
+\small\begin{tabular}{|l|c|c|c|c|c|c|c|}
+\hline
+Runtime & PIDC & SINCERITIES & CARDAMOM & RF & \textbf{CardamomOT} & GENIE3 \\
+\hline
+5 genes & \SI{0.02}{s} & \SI{0.01}{s} & \SI{0.10}{s} & \SI{2.71}{s} & \SI{4.71}{s} & \SI{9.02}{s}\\
+10 genes & \SI{0.04}{s} & \SI{0.03}{s} & \SI{0.29}{s} & \SI{3.45}{s} & \SI{8.92}{s} & \SI{17.27}{s}\\
+20 genes & \SI{0.06}{s} & \SI{0.06}{s} & \SI{0.72}{s} & \SI{4.05}{s} & \SI{17.18}{s} & \SI{31.17}{s}\\
+50 genes & \SI{0.18}{s} & \SI{0.24}{s} & \SI{2.98}{s} & \SI{5.91}{s} & \SI{28.57}{s} & \SI{83.18}{s}\\
+100 genes & \SI{0.75}{s} & \SI{0.77}{s} & \SI{9.14}{s} & \SI{10.06}{s} & \SI{55.08}{s} & \SI{159.42}{s} \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Top 10 candidate hub regulators ranked by outgoing regulatory strength $\sum_{j\neq i}|\theta_{ij}|$ in the GRN inferred by \textsc{CardamomOT} for each experimental dataset, excluding virtual stimulus nodes. Values show mean $\pm$ standard deviation across 5 independent inference runs.}
+\label{tableS3}
+\small
+\begin{tabularx}{\textwidth}{r l l l X}
+\toprule
+Dataset & Rank & Gene & Out.\ Strength & Top 4 Outgoing Targets \\
+\midrule
+Semrau & 1 & Hoxb2 & 133.172 $\pm$ 8.280 & Zfp42, Pou5f1, Cd24a, Dppa2 \\
+ & 2 & Dnmt3a & 74.666 $\pm$ 7.691 & Nr0b1, Dppa2, Zic3, Dppa4 \\
+ & 3 & Lamb1 & 59.402 $\pm$ 17.010 & Sparc, Col4a2, Dab2, Gata6 \\
+ & 4 & Col4a2 & 44.181 $\pm$ 12.778 & Lamb1, Sparc, Gata4, Krt8 \\
+ & 5 & Hoxa1 & 29.536 $\pm$ 5.789 & Pou5f1, Zfp42, Hoxb2, Meis1 \\
+ & 6 & Esrrb & 27.715 $\pm$ 4.956 & Nr0b1, Dnmt3b, Dnmt3a, Klf4 \\
+ & 7 & Klf2 & 27.534 $\pm$ 6.399 & Zic2, Dnmt3b, Dppa4, Zic3 \\
+ & 8 & Sox2 & 23.893 $\pm$ 4.929 & Pou5f1, Esrrb, Zic3, Zfp42 \\
+ & 9 & Fgf4 & 22.624 $\pm$ 4.434 & Klf2, Dppa2, Nr0b1, Jarid2 \\
+ & 10 & Dppa2 & 21.308 $\pm$ 3.784 & Hoxb2, Zfp42, Esrrb, Klf4 \\
+\cmidrule{1-5}
+Kameneva & 1 & RPL30 & 152.159 $\pm$ 8.826 & RPL32, RPL10, ALDH1A1, RPL12 \\
+ & 2 & CHGA & 127.811 $\pm$ 15.115 & CHGB, CARTPT, SCG2, CNTN1 \\
+ & 3 & MEG3 & 115.906 $\pm$ 6.449 & RPL12, COL18A1, MEG8, NRXN1 \\
+ & 4 & POSTN & 65.639 $\pm$ 7.985 & RPL10, FAU, RPS13, RPL41 \\
+ & 5 & ALDH1A1 & 63.319 $\pm$ 7.361 & MAP1B, PTN, RPL32, IGFBP2 \\
+ & 6 & HAND2 & 61.796 $\pm$ 18.502 & PHOX2A, BASP1, UCHL1, MAP1B \\
+ & 7 & HAND2-AS1 & 52.155 $\pm$ 7.682 & MAP1B, UCHL1, CD24, RTN1 \\
+ & 8 & ATP5F1E & 49.231 $\pm$ 12.536 & RPS2, RPL34, RPL32, RPL30 \\
+ & 9 & RGS5 & 47.065 $\pm$ 8.048 & STMN2, RGS4, DBH, BASP1 \\
+ & 10 & MT-CYB & 42.587 $\pm$ 7.282 & PTPRZ1, GAL, ALDH1A1, PLP1 \\
+\cmidrule{1-5}
+Schiebinger & 1 & Fabp3 & 73.662 $\pm$ 9.778 & Tcl1, Mybl2, Dppa5a, Mylpf \\
+ & 2 & Dppa5a & 46.461 $\pm$ 5.487 & Tcl1, Cdkn2a, Lncenc1, Esrrb \\
+ & 3 & Ereg & 26.735 $\pm$ 5.240 & Fam20c, Myc, Ddit3, Id3 \\
+ & 4 & Obox6 & 23.778 $\pm$ 4.661 & Spic, Dppa4, Hesx1, Lncenc1 \\
+ & 5 & Txnip & 23.507 $\pm$ 4.308 & Hist1h2ap, Nme2, 2810417H13Rik, Cenpm \\
+ & 6 & Dmrtc2 & 22.249 $\pm$ 4.361 & Tmem35, Epcam, Id3, Cdkn2a \\
+ & 7 & Cdkn2a & 22.151 $\pm$ 6.199 & 2810417H13Rik, Tax1bp3, Gabarap, Fos \\
+ & 8 & S100a6 & 22.091 $\pm$ 7.778 & Dppa5a, Col1a2, Prss23, Lox \\
+ & 9 & Tnfrsf12a & 21.375 $\pm$ 5.143 & Ereg, Myc, 2810417H13Rik, Nmt1 \\
+ & 10 & Gm26917 & 20.426 $\pm$ 4.003 & Vps8, Vbp1, Erdr1, Scand1 \\
+\bottomrule
+\end{tabularx}
+\end{table}

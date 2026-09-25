@@ -85,6 +85,11 @@ python check_mixture_to_data.py -i "${input_dir}" -s "${split}"
 
 echo "Infer network structure"
 python infer_network_structure.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"
+# Exit code 3 = stationary data (no/single timepoint), handled by CardamomOT-stat
+if [ $? -eq 3 ]; then
+    echo "Stopping pipeline: switch to method CardamomOT-stat, in prep."
+    exit 0
+fi
 
 echo "Adapt network to simulate and degradation rates"
 python infer_network_simul.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}" $prolif_flag

@@ -21,6 +21,7 @@ from joblib import Parallel, delayed
 from sklearn.model_selection import GridSearchCV, LeaveOneOut
 from sklearn.neighbors import KernelDensity
 from scipy.ndimage import gaussian_filter1d
+from ..config import resolve_cell_type_obs, CELL_TYPE_OBS_KEYS
 from ..inference import (inference_network, filter_network,
                         minimal_repetition_choice, find_next_prot, my_otdistance, count_errors, kon_ref_vector, inference_alpha,
                         NegativeBinomialMixtureEM, predict_resp,
@@ -183,7 +184,9 @@ class NetworkModel:
             import anndata
             import scipy.sparse
             if isinstance(data, anndata.AnnData):
-                vect_t = data.obs[time_key].values.astype(float)
+                # Missing time column = stationary data (single timepoint 0)
+                vect_t = (data.obs[time_key].values.astype(float) if time_key in data.obs
+                          else np.zeros(data.n_obs))
                 X = data.X.toarray() if scipy.sparse.issparse(data.X) else np.asarray(data.X, dtype=float)
                 if self.n_stimuli > 1:
                     X = np.hstack([np.zeros((X.shape[0], self.n_stimuli - 1), dtype=float), X])
@@ -191,6 +194,62 @@ class NetworkModel:
         except (ImportError, AttributeError):
             pass
         return data
+
+    def _load_ot_constraints(self, data, transition_rates=None):
+        """
+        Load the optional OT constraints from AnnData: per-cell net proliferation
+        rates, lineage barcodes, and cell-type transition rates with their grouping
+        (`resolve_cell_type_obs(data, 'transition')`, read only if
+        `transition_rates` is given). Transitions are all-or-nothing: if the
+        grouping is missing or any cell type is absent from the matrix, the OT
+        runs without transition constraint.
+        """
+        self._prolif_net_rate = None
+        self._cell_types = None
+        self._transition_rates = None
+        self._transition_type_labels = None
+        self._lineage = None
+        self._lineage_known = None
+        obs = getattr(data, 'obs', None)
+        if obs is not None:
+            if 'proliferation_net_rate' in obs:
+                self._prolif_net_rate = obs['proliferation_net_rate'].values.astype(float)
+            if 'lineage' in obs:
+                self._lineage_known = obs['lineage'].notna().values
+                self._lineage = obs['lineage'].astype(str).values
+
+        if transition_rates is None:
+            return
+        ct_col = resolve_cell_type_obs(data, 'transition') if obs is not None else None
+        if ct_col is None:
+            print("Warning: transition_rates given but adata.obs has none of "
+                  f"{list(CELL_TYPE_OBS_KEYS['transition'])}; OT run without transition constraint")
+            return
+        cell_types = obs[ct_col].values.astype(str)
+        types = set(cell_types)
+        _Tr = np.asarray(transition_rates, dtype=float)
+        if hasattr(transition_rates, 'index') and hasattr(transition_rates, 'columns'):
+            tr_df = transition_rates.copy()
+            tr_df.index, tr_df.columns = tr_df.index.astype(str), tr_df.columns.astype(str)
+            labels = [l for l in tr_df.index if l in set(tr_df.columns)]
+            # Partial anchoring is worse than none: every type must be in rows and columns
+            missing = sorted(types - set(labels))
+            if missing:
+                print(f"Warning: cell type(s) {missing} of adata.obs['{ct_col}'] not found in "
+                      "transition_rates rows/columns; OT run without transition constraint")
+                return
+            # Align columns on rows so that index i means the same type on both axes
+            _Tr = tr_df.loc[labels, labels].to_numpy().astype(float)
+        else:
+            labels = None
+            if _Tr.shape != (len(types), len(types)):
+                print(f"Warning: transition_rates shape {_Tr.shape} does not match the "
+                      f"{len(types)} types of adata.obs['{ct_col}']; OT run without transition constraint")
+                return
+        self._cell_types = cell_types
+        self._transition_type_labels = labels
+        self._transition_rates = np.clip(_Tr, 0.0, None)  # store raw non-negative rates
+        print(f"Transition rates anchored on adata.obs['{ct_col}']")
 
     def _build_stimulus_schedule(self, times_unique, stimulus_schedule=None, times_ref=None):
         if stimulus_schedule is None:
@@ -634,30 +693,13 @@ class NetworkModel:
                             _lbl_to_i = {l: i for i, l in enumerate(_labels)}
                         else:
                             _lbl_to_i = {c: i for i, c in enumerate(np.unique(_ct))}
-                        # Unmapped cell types (not in the transition_rates matrix) get -1,
-                        # never a real index — they must stay cost-neutral, not silently
-                        # inherit row/col 0's transition profile.
-                        src_ti = np.array([_lbl_to_i.get(str(_ct[r]), -1) for r in src_real])
-                        tgt_ti = np.array([_lbl_to_i.get(str(_ct[j]), -1) for j in cell_idx])
-
-                        n_src_types, n_tgt_types = _tr.shape
-                        valid_src = (src_ti >= 0) & (src_ti < n_src_types)
-                        valid_tgt = (tgt_ti >= 0) & (tgt_ti < n_tgt_types)
-                        if not (valid_src.all() and valid_tgt.all()) and not getattr(self, '_warned_unmapped_cell_types', False):
-                            _unmapped = sorted(set(str(_ct[r]) for r in src_real[~valid_src]) |
-                                                set(str(_ct[j]) for j in cell_idx[~valid_tgt]))
-                            print(f"Warning: cell type(s) {_unmapped} not found in transition_rates "
-                                  f"matrix; no OT cost adjustment applied for these cells.")
-                            self._warned_unmapped_cell_types = True
+                        # Every cell type is in the matrix (checked in _load_ot_constraints)
+                        src_ti = np.array([_lbl_to_i[str(_ct[r])] for r in src_real])
+                        tgt_ti = np.array([_lbl_to_i[str(_ct[j])] for j in cell_idx])
 
                         tr_prob = np.exp(_tr * delta_t)
-                        tr_prob = tr_prob / tr_prob.sum(axis=1, keepdims=True) * n_tgt_types
-                        tr_w = np.ones((len(src_ti), len(tgt_ti)))
-                        valid_pair = valid_src[:, None] & valid_tgt[None, :]
-                        _rows = np.clip(src_ti, 0, n_src_types - 1)
-                        _cols = np.clip(tgt_ti, 0, n_tgt_types - 1)
-                        tr_w_full = tr_prob[np.ix_(_rows, _cols)]
-                        tr_w[valid_pair] = tr_w_full[valid_pair]
+                        tr_prob = tr_prob / tr_prob.sum(axis=1, keepdims=True) * _tr.shape[1]
+                        tr_w = tr_prob[np.ix_(src_ti, tgt_ti)]
                         pairwise_dist = pairwise_dist / np.maximum(tr_w, 1e-10)
 
                     # --- Lineage constraint ---
@@ -1292,38 +1334,7 @@ class NetworkModel:
         except ImportError:
             pass
 
-        # --- Load per-cell growth rates and cell types from AnnData ---
-        self._prolif_net_rate = None
-        self._cell_types = None
-        self._transition_rates = None
-        self._transition_type_labels = None
-        self._lineage = None
-        self._lineage_known = None
-        try:
-            import anndata as _ad
-            if isinstance(data, _ad.AnnData):
-                if 'proliferation_net_rate' in data.obs:
-                    self._prolif_net_rate = data.obs['proliferation_net_rate'].values.astype(float)
-                # Prefer the same task-specific grouping used for proliferation rates
-                # (cell_type_proliferation), falling back to the generic cell_type
-                # column when it isn't present — see docs/advanced.md.
-                for _ct_col in ('cell_type_proliferation', 'cell_type', 'cell_types', 'celltype'):
-                    if _ct_col in data.obs:
-                        self._cell_types = data.obs[_ct_col].values.astype(str)
-                        break
-                if 'lineage' in data.obs:
-                    self._lineage_known = data.obs['lineage'].notna().values
-                    self._lineage = data.obs['lineage'].astype(str).values
-        except ImportError:
-            pass
-
-        if transition_rates is not None:
-            if hasattr(transition_rates, 'index') and hasattr(transition_rates, 'to_numpy'):
-                self._transition_type_labels = list(transition_rates.index.astype(str))
-                _Tr = transition_rates.to_numpy().astype(float)
-            else:
-                _Tr = np.asarray(transition_rates, dtype=float)
-            self._transition_rates = np.clip(_Tr, 0.0, None)  # store raw non-negative rates
+        self._load_ot_constraints(data, transition_rates)
 
         # If no sample ID provided, assume one global sample
         if vect_samples_id is None:
@@ -2426,38 +2437,7 @@ class NetworkModel:
         if vect_samples_id is None:
             vect_samples_id = np.zeros_like(vect_t)
 
-        # --- Load per-cell growth rates and cell types from AnnData ---
-        self._prolif_net_rate = None
-        self._cell_types = None
-        self._transition_rates = None
-        self._transition_type_labels = None
-        self._lineage = None
-        self._lineage_known = None
-        try:
-            import anndata as _ad
-            if isinstance(data, _ad.AnnData):
-                if 'proliferation_net_rate' in data.obs:
-                    self._prolif_net_rate = data.obs['proliferation_net_rate'].values.astype(float)
-                # Prefer the same task-specific grouping used for proliferation rates
-                # (cell_type_proliferation), falling back to the generic cell_type
-                # column when it isn't present — see docs/advanced.md.
-                for _ct_col in ('cell_type_proliferation', 'cell_type', 'cell_types', 'celltype'):
-                    if _ct_col in data.obs:
-                        self._cell_types = data.obs[_ct_col].values.astype(str)
-                        break
-                if 'lineage' in data.obs:
-                    self._lineage_known = data.obs['lineage'].notna().values
-                    self._lineage = data.obs['lineage'].astype(str).values
-        except ImportError:
-            pass
-
-        if transition_rates is not None:
-            if hasattr(transition_rates, 'index') and hasattr(transition_rates, 'to_numpy'):
-                self._transition_type_labels = list(transition_rates.index.astype(str))
-                _Tr = transition_rates.to_numpy().astype(float)
-            else:
-                _Tr = np.asarray(transition_rates, dtype=float)
-            self._transition_rates = np.clip(_Tr, 0.0, None)  # store raw non-negative rates
+        self._load_ot_constraints(data, transition_rates)
 
         times = np.sort(np.unique(vect_t))
         kz = self.a[:-1]

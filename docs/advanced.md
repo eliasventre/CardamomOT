@@ -359,9 +359,9 @@ tokenised on whitespace/commas.
 
 **4. Anchor to a known rate** — if you have a trusted population-level growth rate per cell type
 (e.g. measured from a growth curve on sorted populations), place in `Data/`. Grouping uses
-`adata.obs['cell_type_proliferation']` if present, else falls back to `adata.obs['cell_type']` —
-add `cell_type_proliferation` during preprocessing if you want a coarser or finer grouping for
-this task specifically, without touching `cell_type` itself:
+`adata.obs['cell_type_proliferation']` if present, else `cell_type_transition`, else
+`cell_type` (if none is present, the unanchored estimate is kept) — add `cell_type_proliferation` during preprocessing if
+you want a coarser or finer grouping for this task specifically, without touching `cell_type` itself:
 
 ```
 # proliferation_rates.csv (or .txt) — two columns, no header
@@ -378,8 +378,9 @@ left unconverted would be 24× too strong or too weak.
 
 The literature-based per-cell estimate is then recentred, within each cell type present in this
 file, so its mean matches the reference value exactly — while keeping the per-cell heterogeneity
-coming from the gene signature. Cell types absent from the file keep their raw (unanchored)
-literature estimate, and a warning is printed listing which ones. Concretely, for a cell type `g`
+coming from the gene signature. Anchoring is all-or-nothing: if any cell type of the data is
+absent from the file, a warning lists them and all cells keep the raw (unanchored) literature
+estimate, since a partial anchoring would bias the relative rates. Concretely, for a cell type `g`
 with reference rate `r_g`:
 
 ```
@@ -416,7 +417,7 @@ TypeB    ,  0.05, 0.2,  0.05
 TypeC    ,  0.01, 0.05, 0.3
 ```
 
-Row/column names must match `adata.obs['cell_type_proliferation']` if that column is present (same task-specific grouping used for [proliferation rates](#anchor-to-a-known-rate)), else `adata.obs['cell_type']`. At each consecutive timepoint pair, transition probabilities are computed as `exp(rate × Δt)` and rescaled so that the mean weight per row equals 1 — transitions with weight > 1 become cheaper (preferred), weight < 1 become more expensive (penalised). Cell types absent from the matrix are left cost-neutral (a one-time warning is printed) rather than silently reusing another type's row/column.
+Row/column names must match `adata.obs['cell_type_transition']` if that column is present, else `cell_type_proliferation` (the grouping used for [proliferation rates](#anchor-to-a-known-rate)), else `cell_type`. At each consecutive timepoint pair, transition probabilities are computed as `exp(rate × Δt)` and rescaled so that the mean weight per row equals 1 — transitions with weight > 1 become cheaper (preferred), weight < 1 become more expensive (penalised). The constraint is all-or-nothing: if no grouping column is found, or any cell type of the data is absent from the matrix rows or columns, a warning is printed and the OT runs without any transition constraint.
 
 ### Clonal lineage constraint (`adata.obs['lineage']`) — opt-in
 

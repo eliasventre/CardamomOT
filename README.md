@@ -59,9 +59,10 @@ my_project/
 
 **Required format for `data.h5ad`:**
 - Gene counts (rows = genes, columns = cells)
-- `data.obs['time']`: measurement time for each cell
+- `data.obs['time']`: measurement time for each cell (if absent or unique, the data are treated as stationary: gene selection and mixture run on cell types only, then the pipeline stops — network inference will be handled by CardamomOT-stat, in prep.)
 - `data.obs['cell_type']`: cell types (optional)
-- `data.obs['cell_type_proliferation']` / `data.obs['cell_type_selection']`: optional overrides of `cell_type` used only for proliferation-rate anchoring / DE gene selection respectively, if you want a coarser or finer grouping for those specific tasks
+- `data.obs['cell_type_selection']`: optional override of `cell_type` for DE gene selection
+- `data.obs['cell_type_proliferation']` / `data.obs['cell_type_transition']`: groupings matching the rows of `Data/proliferation_rates` (optional anchor of the literature estimate) / `Data/transition_rates` (structures the OT). They may differ; if only one of the two is defined it is used for both, and if neither is defined `cell_type` is used
 
 ### 3. Run the full analysis
 
@@ -392,7 +393,7 @@ Five levers, from least to most involved, all optional:
 | Species | `--species human\|mouse` on `get_proliferation_rates.py` / `cardamomot pipeline` (default: detected from gene names) | Forces the built-in human or mouse marker gene lists (moscot uses different death markers per species — see `docs/advanced.md` for details) |
 | Score on the unfiltered gene set | Place `Data/data_complete.h5ad` (all genes) alongside an already gene-filtered `Data/data.h5ad` | If `Data/data.h5ad` was prepared with genes already filtered, the literature marker genes may be missing from it; `data_complete.h5ad` is used only to score the signature (never modified), and the result is mapped back onto `Data/data.h5ad` by cell name — every cell in `data.h5ad` must also be present in `data_complete.h5ad` |
 | Custom marker genes | `Data/proliferation_signatures.csv`/`.txt`, `Data/death_signatures.csv`/`.txt` (one gene per line or comma-separated) | Override the built-in lists with signatures specific to your system (e.g. a disease- or lineage-specific gene set) |
-| Anchor to a known rate | `Data/proliferation_rates.csv`/`.txt` (two columns, no header: `cell_type, rate`) — **`rate` in hour⁻¹**, matching `adata.obs['time']` (growth curves are often reported per day — divide by 24 first) | If you have a trusted population-level growth rate per cell type (e.g. from a growth curve), the literature-based per-cell estimate is recentred so its mean matches your value within each cell type, while keeping the per-cell heterogeneity from the signature. Grouping uses `adata.obs['cell_type_proliferation']` if present, else falls back to `adata.obs['cell_type']` |
+| Anchor to a known rate | `Data/proliferation_rates.csv`/`.txt` (two columns, no header: `cell_type, rate`) — **`rate` in hour⁻¹**, matching `adata.obs['time']` (growth curves are often reported per day — divide by 24 first) | If you have a trusted population-level growth rate per cell type (e.g. from a growth curve), the literature-based per-cell estimate is recentred so its mean matches your value within each cell type, while keeping the per-cell heterogeneity from the signature. Grouping uses `adata.obs['cell_type_proliferation']` if present, else `cell_type_transition`, else `cell_type`. All-or-nothing: if any cell type is missing from the table (or no grouping is found), the unanchored estimate is kept for all cells |
 | Full manual override | Set `adata.obs['proliferation_net_rate']` yourself **and** skip the step (`--no-use-proliferation` / `use_proliferation=0`) | The step no longer preserves pre-existing values on its own — it always overwrites them when run |
 
 See [Advanced Features → Refining proliferation rates](docs/advanced.md#refining-proliferation-rates) for the exact formulas and defaults.
@@ -410,7 +411,7 @@ TypeB    ,  0.05, 0.2,  0.05
 TypeC    ,  0.01, 0.05, 0.3
 ```
 
-Row/column names must match the values of `adata.obs['cell_type']` (or `cell_types` / `celltype`).
+Row/column names must match the values of `adata.obs['cell_type_transition']` if present, else `cell_type_proliferation`, else `cell_type`. All-or-nothing: if any cell type is missing from the matrix (or no grouping is found), the OT runs without transition constraint.
 
 At each pair of consecutive timepoints separated by Δt, transition probabilities are computed as `exp(rate × Δt)` and each row is rescaled to sum to `n_types` (number of cell types), so the mean weight per row equals 1 and the overall cost scale is preserved on average.
 

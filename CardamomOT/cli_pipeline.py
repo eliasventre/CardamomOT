@@ -13,6 +13,8 @@ from typing import Dict, List, Optional
 import json
 import subprocess
 
+from CardamomOT.config import STATIONARY_EXIT_CODE, STATIONARY_MESSAGE
+
 try:
     import questionary
     # Force disable questionary due to macOS terminal compatibility issues
@@ -494,6 +496,9 @@ def run_step(script_name: str, params: Dict[str, str], repo_root: str) -> bool:
         if result.returncode == 0:
             print(f"✅ {script_name} completed successfully")
             return True
+        elif result.returncode == STATIONARY_EXIT_CODE:
+            print(f"⏹️  {STATIONARY_MESSAGE} Stopping pipeline.")
+            sys.exit(0)
         else:
             print(f"⚠️  {script_name} exited with code {result.returncode}")
             response = input("Continue to next step? [Y/n]: ").strip().lower()

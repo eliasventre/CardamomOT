@@ -13,7 +13,7 @@ Usage:
 import sys
 sys.path += ['../']
 import numpy as np
-from CardamomOT import NetworkModel as NetworkModel_beta
+from CardamomOT import NetworkModel as NetworkModel_beta, check_stationary
 import anndata as ad
 import getopt
 import os
@@ -69,20 +69,10 @@ def main(argv):
         raise FileNotFoundError(error_msg)
 
     # ─── CHECK TEMPORAL INFORMATION ──────────────────────────────────────
-    try:
-        times = adata.obs['time'].values
-        if len(np.unique(times)) <= 1:
-            raise ValueError(
-                "Data must contain temporal information with at least 2 distinct timepoints. "
-                "Ensure adata.obs['time'] is present."
-            )
-    except KeyError as e:
-        error_msg = f"Error: 'time' column not found in adata.obs. {e}"
-        print(error_msg)
-        raise SystemExit(error_msg)
-    except ValueError as e:
-        print(f"Error: {e}")
-        raise SystemExit(e)
+    # Absent or single timepoint: stationary setting, mixture fitted without temporal constraints
+    if check_stationary(adata) and verb:
+        print("[infer_mixture] Stationary data (no or single timepoint): "
+              "fitting mixture without temporal constraints")
 
     # ─── LOAD STIMULUS SCHEDULE (optional) ──────────────────────────────
     stim_sched = None

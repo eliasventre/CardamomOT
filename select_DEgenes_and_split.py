@@ -7,7 +7,9 @@ Usage:
     python select_DEgenes_and_split.py -i <project_path> -s <split> -r <rate> -c <change> [-m <mean_forcing>]
 
 Required input files:
-    - Data/data.h5ad: input count matrix with temporal information
+    - Data/data.h5ad: input count matrix, with temporal information in
+      obs['time'] (if absent or unique, the data are treated as stationary:
+      genes are selected on cell-type variations only, and obs['time'] = 0)
 
 Cell-type grouping for gene selection uses `adata.obs['cell_type_selection']`
 if present, else falls back to `adata.obs['cell_type']`; add
@@ -24,7 +26,7 @@ import os
 import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta
 from CardamomOT import select_DEgenes
-from CardamomOT import resolve_cell_type_obs
+from CardamomOT import resolve_cell_type_obs, check_stationary
 import anndata as ad
 import getopt
 import scipy as scp
@@ -93,15 +95,14 @@ def main(argv):
         print(f"[select_DEgenes_and_split] Error: {e}")
         sys.exit(1)
 
-    # Validate temporal information
-    try:
-        times = adata.obs['time'].values
-        if len(np.unique(times)) <= 1:
-            raise ValueError("Dataset must contain temporal information with multiple timepoints")
+    # Temporal information (absent or single timepoint = stationary setting)
+    stationary = check_stationary(adata)
+    times = adata.obs['time'].values
+    if stationary:
+        print("[select_DEgenes_and_split] Stationary data (no or single timepoint): "
+              "gene selection uses cell types only")
+    else:
         print(f"[select_DEgenes_and_split] Found {len(np.unique(times))} unique timepoints: {sorted(np.unique(times))}")
-    except (KeyError, ValueError) as e:
-        print(f"[select_DEgenes_and_split] Error: {e}")
-        sys.exit(1)
 
     def _make_model(n_genes):
         m = NetworkModel_beta(n_genes)
@@ -114,11 +115,17 @@ def main(argv):
         return m
 
     vect_samples_id = np.zeros(adata.n_obs)
-    celltype_col = resolve_cell_type_obs(adata, 'cell_type_selection')
+    celltype_col = resolve_cell_type_obs(adata, 'selection')
     vect_celltype_id = adata.obs[celltype_col].values if celltype_col is not None else np.zeros(adata.n_obs)
 
     genes_list_init = list(adata.var_names.values)
     genes_to_keep = []
+
+    # Without time nor several cell types, no variation criterion is available
+    if int(change) and stationary and len(np.unique(vect_celltype_id)) <= 1:
+        print("[select_DEgenes_and_split] Warning: stationary data with a single cell type, "
+              "skipping gene selection (all genes kept)")
+        change = '0'
 
     if int(change):
         print(f"[select_DEgenes_and_split] Performing gene selection with change parameter: {change}")
@@ -167,10 +174,11 @@ def main(argv):
             with open(genes_list_path, "r") as f:
                 genes_list = [line.strip() for line in f if line.strip()]
             print(f"[select_DEgenes_and_split] Loaded {len(genes_list)} genes of biological interest")
+            variations = cell_type_variations if stationary else temporal_variations
             for gene in genes_list:
                 if gene in genes_list_init:
                     idx_g = genes_list_init.index(gene)
-                    if temporal_variations[idx_g] > 0.01:
+                    if variations[idx_g] > 0.01:
                         genes_to_keep.append(gene)
 
         genes_list_tokeep = list(set(genes_to_keep))
@@ -182,7 +190,7 @@ def main(argv):
     # Refresh metadata after potential gene filtering
     times = adata.obs['time'].values if 'time' in adata.obs else np.zeros(adata.n_obs)
     vect_samples_id = adata.obs['dataset_id'].values if 'dataset_id' in adata.obs else np.zeros(adata.n_obs)
-    celltype_col = resolve_cell_type_obs(adata, 'cell_type_selection')
+    celltype_col = resolve_cell_type_obs(adata, 'selection')
     vect_celltype_id = adata.obs[celltype_col].values if celltype_col is not None else np.zeros(adata.n_obs)
     genes_list_init = list(adata.var_names.values)
     genes_list_init.sort()

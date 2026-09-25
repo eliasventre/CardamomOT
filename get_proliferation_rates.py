@@ -55,10 +55,10 @@ Optional input files:
     - Data/proliferation_rates.csv|txt: two columns, no header
       (cell_type, net_rate) — anchors the literature estimate's per-cell-type
       mean to a trusted population-level rate. Grouping uses
-      `adata.obs['cell_type_proliferation']` if present, else falls back to
-      `adata.obs['cell_type']`; add `cell_type_proliferation` during
-      preprocessing to use a coarser/finer grouping for this task without
-      touching `cell_type` itself. `net_rate` must be in the same
+      `adata.obs['cell_type_proliferation']` if present, else
+      `cell_type_transition`, else `cell_type`; if no grouping is found or
+      any cell type is missing from the file, the unanchored estimate is
+      kept for all cells. `net_rate` must be in the same
       time unit as `adata.obs['time']` (hours, not moscot/WOT's day^-1
       convention — see CardamomOT.tools.estimate_proliferation), since it is
       blended directly with the (already hour^-1) literature estimate
@@ -74,6 +74,7 @@ import anndata as ad
 import pandas as pd
 
 from CardamomOT import find_data_file, read_gene_list, resolve_cell_type_obs
+from CardamomOT.config import CELL_TYPE_OBS_KEYS
 from CardamomOT.tools.estimate_proliferation import (
     estimate_growth_rates, combine_growth_rates_with_reference,
 )
@@ -98,7 +99,7 @@ def assign_proliferation_rates(adata, prolif_path, species='human', proliferatio
     literature estimate is anchored so its mean matches the reference rate
     within each cell type, keeping per-cell heterogeneity from the
     signature. Grouping uses `adata.obs['cell_type_proliferation']` if
-    present, else falls back to `adata.obs['cell_type']`.
+    present, else `cell_type_transition`, else `cell_type`.
     `rate` must be expressed per hour, matching `adata.obs['time']`
     and the (already hour^-1) literature estimate it is blended with — see
     estimate_proliferation.estimate_growth_rates for why that estimate is in
@@ -117,25 +118,33 @@ def assign_proliferation_rates(adata, prolif_path, species='human', proliferatio
     print(f"{prefix} Estimated literature-based proliferation rates for "
           f"{len(net_lit)} cells (mean={net_lit.mean():.4f})")
 
-    celltype_col = resolve_cell_type_obs(adata, 'cell_type_proliferation')
+    adata.obs['proliferation_net_rate'] = net_lit
+    if prolif_path is None:
+        print(f"{prefix} No Data/proliferation_rates.{{csv,txt}} found; "
+              "using literature-only proliferation rate estimate")
+        return
 
-    if prolif_path is not None and celltype_col is not None:
-        user_rates = pd.read_csv(prolif_path, sep=None, engine='python',
-                                  header=None, index_col=0).iloc[:, 0]
-        user_rates.index = user_rates.index.astype(str)
-        adata.obs['proliferation_net_rate'] = combine_growth_rates_with_reference(
-            net_lit, adata.obs[celltype_col].astype(str).values, user_rates.to_dict()
-        )
-        print(f"{prefix} Anchored literature proliferation rates to {prolif_path} "
-              f"per '{celltype_col}' ({len(user_rates)} types)")
-    else:
-        if prolif_path is not None:
-            print(f"{prefix} Found {prolif_path} but neither adata.obs['cell_type_proliferation'] "
-                  "nor adata.obs['cell_type'] is present; using unanchored literature estimate")
-        else:
-            print(f"{prefix} No Data/proliferation_rates.{{csv,txt}} found; "
-                  "using literature-only proliferation rate estimate")
-        adata.obs['proliferation_net_rate'] = net_lit
+    # Anchor only if a cell-type grouping matches the reference rates
+    celltype_col = resolve_cell_type_obs(adata, 'proliferation')
+    if celltype_col is None:
+        print(f"{prefix} Warning: found {prolif_path} but adata.obs has none of "
+              f"{list(CELL_TYPE_OBS_KEYS['proliferation'])}; using unanchored literature estimate")
+        return
+    user_rates = pd.read_csv(prolif_path, sep=None, engine='python',
+                              header=None, index_col=0).iloc[:, 0]
+    user_rates.index = user_rates.index.astype(str)
+    labels = adata.obs[celltype_col].astype(str).values
+    # Partial anchoring is worse than none: every cell type needs a reference rate
+    missing = sorted(set(labels) - set(user_rates.index))
+    if missing:
+        print(f"{prefix} Warning: cell type(s) {missing} of adata.obs['{celltype_col}'] "
+              f"not found in {prolif_path}; using unanchored literature estimate for all cells")
+        return
+    adata.obs['proliferation_net_rate'] = combine_growth_rates_with_reference(
+        net_lit, labels, user_rates.to_dict()
+    )
+    print(f"{prefix} Anchored literature proliferation rates to {prolif_path} "
+          f"per '{celltype_col}' ({len(user_rates)} types)")
 
 
 def main(argv):

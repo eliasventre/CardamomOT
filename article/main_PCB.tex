@@ -1,0 +1,1421 @@
+\documentclass[a4paper, 11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[backend=biber,style=vancouver]{biblatex}
+\addbibresource{proj_lib.bib}
+\usepackage{amsmath}
+\usepackage[normalem]{ulem}
+\usepackage[margin=1in]{geometry}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{multirow}
+\usepackage{lineno}
+
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{siunitx}
+\usepackage{amsfonts}
+\usepackage{enumitem} 
+\usepackage{dsfont}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\theoremstyle{plain}
+\newtheorem{conj}{Assumption}
+\newtheorem{theo}{Theorem}
+\newtheorem{prop}{Lemma}
+\newtheorem{cor}{Corollary}
+\newtheorem{defn}{Definition}
+\theoremstyle{remark}
+\newtheorem{rem}{Remark}
+\DeclareUnicodeCharacter{2212}{-}
+\DeclareUnicodeCharacter{FB01}{-}
+\DeclareUnicodeCharacter{FB03}{-}
+\usepackage{graphicx}
+\usepackage{float}
+\graphicspath{{figures/}}
+\usepackage[labelfont=bf]{caption}
+\captionsetup[figure]{name=Fig}
+\DeclareCaptionLabelFormat{sinum}{#2~#1}
+\usepackage{subcaption}
+
+\newcommand*{\firstreview}[1]{{\color{black}#1}}
+\usepackage[toc]{appendix}
+
+\usepackage{tikz}
+\usetikzlibrary{positioning, decorations, arrows, shapes}
+\tikzset{
+    rndproc/.style={circle,draw, thick}
+}
+\tikzset{
+    hidden/.style={rndproc, fill=white!20!gray}
+}
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    citecolor=red,
+    linkcolor=blue,
+    linktoc=all
+}
+\definecolor{ao(english)}{rgb}{0.0, 0.5, 0.0}
+
+\title{Mechanistic-based gene regulatory network and trajectory inference from temporal series of single-cell data}
+\author{Elias Ventre}
+
+\begin{document}
+\setlength\parindent{0pt}
+\begin{center}
+\noindent {\textbf{CardamomOT: a mechanistic optimal transport-based framework for gene regulatory network inference, trajectory reconstruction and generative modeling}}
+\end{center}
+    \vspace{.5cm}
+\noindent \textbf{Authors}: Yann Maugé$^{1}$, Elias Ventre$^{1,*}$.\par
+1 - COMPO, Inria Méditerranée, Cancer Research Center of Marseille, Inserm UMR1068, CNRS UMR7258, UM105, Aix-Marseille Université, SouthROCK Center of Excellence in Pediatric Oncology Research, Marseille, France.
+\par
+* elias.ventre@inria.fr
+
+\linenumbers
+\section*{Abstract}
+A key challenge in inferring gene regulatory networks (GRNs) governing cellular processes such as differentiation and reprogramming from experimental data lies in the impossibility of directly measuring protein dynamics at the single-cell level, which prevents establishing causal relationships between regulator activity and target responses. In earlier work, we introduced CARDAMOM, an algorithm that uses temporal snapshots of scRNA-seq data to calibrate a GRN-driven mechanistic model of gene expression. However, this method had several limitations: it could only rely on the relative ordering of time points rather than their exact labels, imposed restrictive quasi-stationary assumptions on protein dynamics, and depended on multiple hyperparameters.
+
+Here, we present CardamomOT, a new method based on the same mechanistic model that jointly reconstructs the GRN and unobserved protein trajectories from the data within a mechanistic optimal transport framework. By incorporating exact time labels and priors on protein kinetic rates from the literature, and substantially reducing the number of required hyperparameters, our approach addresses these limitations and substantially improves the accuracy and robustness of GRN calibration. We validate our framework on both \textit{in silico} and experimental datasets, demonstrating computational scalability and consistently improved performance over state-of-the-art methods in both GRN and trajectory reconstruction \firstreview{on simulated datasets, and, on experimental datasets, reconstruction of cellular trajectories, velocity fields and latent protein levels that are mutually consistent, together with GRN structures consistent with known biology}. We also show that these improvements make the calibrated mechanistic model suitable to be used as a generative model to generate testable predictions of cellular responses to unseen perturbations. To our knowledge, this is among the first methods to explicitly integrate mechanistic GRN inference, trajectory reconstruction, and simulation of realistic datasets into a unified framework for scRNA-seq time series analysis.
+
+\newpage
+
+\section*{Author summary}
+Predicting gene regulatory interactions and understanding how cellular trajectories respond to perturbations are central challenges in cell biology and bioinformatics, yet they have long been addressed as separate problems. Only a few recent approaches leverage temporal single-cell RNA sequencing data to jointly infer gene regulatory networks (GRNs) and cellular trajectories, including our previous method CARDAMOM.
+
+In this work, we introduce CardamomOT, a new framework that integrates optimal transport—a mathematical theory that has become widely used in computational biology in recent years—within a mechanistic modeling approach. This allows us to link cells across timepoints while jointly reconstructing the underlying, unobserved protein trajectories that drive gene regulation. By explicitly modeling these latent dynamics, our method substantially improves the robustness and accuracy of GRN inference.
+
+In contrast to many black-box approaches, CardamomOT is grounded in a biologically interpretable mechanistic model of gene expression, incorporating key processes such as transcriptional bursting, protein translation, and degradation. This framework naturally accommodates prior knowledge on RNA and protein kinetic rates available in the literature and remains consistent with the statistical properties of single-cell transcriptomic data.
+
+\firstreview{We show that CardamomOT accurately infers GRNs and reconstructs cellular trajectories on simulated data, and recovers biologically consistent GRNs and trajectories on experimental data.}  Moreover, because it provides a fully calibrated generative model, it can be used to predict cellular responses to unseen perturbations by modifying the inferred regulatory interactions.
+
+\section*{Introduction}
+
+Biological processes such as cellular differentiation and reprogramming are governed by time-dependent changes in gene expression. These dynamic processes can be partially observed at the single-cell level thanks to the development of single-cell RNA sequencing (scRNA-seq) technologies. Recent advances have enabled researchers to collect single-cell gene expression data from cell populations at multiple time points, revealing high and meaningful variability between individual cells \cite{Mojtahedi_2016, Richard_2016, Semrau_2017, Stumpf_2016} that population-based approaches fail to capture due to averaging effects \cite{Mar_2019, Coskun_2016}.
+
+The dynamics of gene expression in single cells are traditionally attributed to the underlying structure of gene regulatory networks (GRNs), which describe interactions between genes mediated by the production of regulatory proteins (e.g. transcription factors (TFs) and their upstream activators) and RNAs (e.g. miRNA, siRNA, etc.). Consequently, automated inference of GRNs from high-throughput data has become a central task in systems biology \cite{sanguinetti2019gene}, driven by continuous improvements in experimental technologies. Methods such as GENIE3 \cite{huynh2010inferring} and its extension SCENIC \cite{aibar2017scenic} have become standard tools, and have been extended to account for temporal structure when available \cite{huynh2018dyngenie3}. More broadly, it is now well established that GRN identifiability can be greatly enhanced by observing cellular trajectories at single-cell resolution \cite{qiu2020inferring}.
+
+In practice, however, such trajectories remain largely inaccessible at the genome-wide scale. Although emerging approaches (e.g., live-cell transcriptomics or Raman-based techniques \cite{chen2022live, kobayashi2024prediction}) begin to enable longitudinal measurements, they currently lack the throughput, resolution, and temporal depth required for robust inference. Standard scRNA-seq protocols, by contrast, are destructive and preclude repeated measurements of the same cell.
+
+As a result, most datasets consist of independent snapshots of cell populations at successive timepoints, treated as samples from a shared underlying dynamical process. This disconnect between the destructive nature of scRNA-seq and the need for longitudinal tracking poses a major challenge for GRN inference. To address it, optimal transport (OT)-based methods \cite{santambrogio2015optimal} have been widely used to reconstruct population-level trajectories by linking cells across timepoints \cite{schiebinger2019optimal, lavenant2021towards, qiu2022mapping}, effectively approximating cell dynamics under a least-action principle in gene expression space. A wide range of methods have subsequently been developed for building a GRN from such trajectories, from simple differential expression analysis \cite{massri2021developmental} to flow matching \cite{tong2023simulation, rimawi2025simulation} and mechanistic neuralODEs \cite{bertin2025scalable}. However, most OT-based trajectory inference methods rely on oversimplified assumptions about the geometry of gene expression space and consider a squared-Euclidean OT cost, which amounts to working in a flat space. In the entropically regularized version of OT used in the aforementioned references, this is equivalent to assuming that individual cells follow a stochastic differential equation (SDE) with constant diffusion rate. Trajectory reconstruction then effectively consists in finding the best gradient drift reproducing the observed dynamics under an initial Brownian-motion prior in gene expression space \cite{leonard2012schrodinger}, reflecting a lack of mechanistic prior knowledge \cite{fournie2025cell}. Recent approaches propose to go beyond this Brownian prior by introducing new OT-derived dynamical problems \cite{neklyudov2023computational, zhang2024joint, lamoline2025dynamic, guan2024identifying}, but the geometric constraints remain only partially mechanistic, and realistic priors often come at a much higher computational cost (see Appendix~\ref{supp_OT}).
+
+A second important challenge arises from the limited availability of single-cell proteomics. Despite notable progress in recent years \cite{ahmad2023review}, current technologies can quantify only a subset of proteins, and key regulators such as TFs often remain inaccessible. As a result, statistical modeling typically relies on scRNA data whose synthesis by transcriptional bursts makes it inherently stochastic and highly variable \cite{zong2010lysogen, ochiai2014stochastic}, with non-Gaussian distributions \cite{herbach2018modelisation, Mar_2019}. The variable relationship between mRNA and protein levels, due to transcriptional and translational regulation, makes it difficult to functionally interpret mRNA variations to build a GRN, particularly in time-series scRNA-seq datasets where the kinetic rates characterizing mRNA and protein dynamics can impact the reconstructed GRN \cite{ventre2023one}. This challenge is generally ignored in the aforementioned OT-based methods, which operate in transcript space only and thus rely on a gene-only underlying model, without explicitly accounting for hidden variables such as proteins for which kinetic information is nevertheless available. Bertin et al. constitute a notable exception \cite{bertin2025scalable}, using deep learning techniques to integrate latent variables such as additional genes and proxies for proteins. However, they do not explicitly model protein dynamics or kinetic rates, and the trajectory inference component still relies on a Brownian-motion prior without mechanistic constraints. To the best of our knowledge, the only class of methods directly addressing this challenge is based on mechanistic modeling of gene expression dynamics \cite{herbachinferring2017, bonnaffoux2019wasabi, ventre2022reverse, ventre2023one, fang2025trajectory}, all using multidimensional generalizations of the well-known two-state model \cite{peccoud1995markovian}.
+
+In this paper, we present CardamomOT, which extends our previously published method CARDAMOM \cite{ventre2023one} and addresses both challenges simultaneously within a unified mechanistic optimal transport framework. Compared to CARDAMOM, CardamomOT introduces three key advances: (i) it explicitly reconstructs protein trajectories through an iterative OT-based procedure, abandoning the quasi-stationary approximation on protein dynamics; (ii) it directly incorporates exact time labels and prior knowledge on kinetic rates, increasing robustness by removing the need for time-dependent hyperparameters; and (iii) it produces a fully calibrated generative model of gene expression, enabling downstream analyses that go beyond GRN inference.
+
+More precisely, CardamomOT calibrates the GRN-driven mechanistic model of gene expression introduced in \cite{herbachinferring2017, ventre2023one} from temporal snapshots of scRNA-seq data by jointly reconstructing hidden protein trajectories and a GRN capable of regenerating the observed dataset (Fig~\ref{figure1}). This joint reconstruction is performed through an iterative expectation-maximization-like (EM-like) procedure alternating between protein trajectory inference — via an OT problem with a mechanistic, GRN-driven cost — and GRN calibration by regression on the reconstructed protein values, until convergence (Fig~\ref{figure1}D). The method requires prior knowledge about kinetic rates of protein dynamics, can benefit from prior knowledge about kinetic rates of mRNA dynamics, and can be further constrained by known regulatory interactions.
+
+We validate CardamomOT on multiple tasks: GRN inference accuracy, reconstruction of cellular trajectories and associated velocity fields, data regeneration, and perturbation prediction. A central advantage of this approach is that the calibrated mechanistic model functions as a generative model: once trained, it can simulate new temporal snapshots that reproduce the observed data and can be used to predict the effect of unseen genetic perturbations directly \textit{in silico} (Fig~\ref{figure1}E). In particular, gene knockouts and overexpressions can be simulated by modifying protein levels and basal parameters in the GRN without retraining the model. 
+
+Benchmarks and applications are performed on an already published set of simulated datasets \cite{ventre2023one}, an experimental dataset of sympathoadrenal differentiation, preprocessed with pseudotime in \cite{gandrillon2025inferring} from Kameneva et al. \cite{kameneva2021single}, and two well-known timestamped experimental datasets of differentiating cells: one characterizing the retinoic acid driven mouse embryonic stem cells differentiation, from Semrau et al. \cite{Semrau_2017}, and one representing the reprogramming of fibroblasts to induced pluripotent stem cells (iPSCs), from Schiebinger et al. \cite{schiebinger2019optimal}.
+We show, among other results, that CardamomOT correctly predicts the effect of the overexpression of {Obox6} and {Zfp42} on iPSC reprogramming efficiency \cite{schiebinger2019optimal} — an outcome that had been verified experimentally — using only temporal scRNA-seq data for inference and no prior knowledge of these factors' function.
+
+\paragraph{Related works.}
+On the GRN inference side, the mechanistic model used throughout this article was introduced together with the first method to infer a GRN from it in \cite{herbachinferring2017, herbach2018modelisation}, and later extended to temporal snapshots in CARDAMOM \cite{ventre2023one}. CARDAMOM, however, could not exploit experimental time labels beyond their relative ordering, relied on a quasi-stationary approximation for protein dynamics that implicitly constrained kinetic rates, did not reconstruct individual cell trajectories, and required time-dependent regularization hyperparameters that limited its robustness and prevented its use as a generative model. 
+
+On the trajectory inference side, several approaches have recently been proposed to go beyond the Brownian-motion prior. Reference Fitting (RF) \cite{zhang2024joint} and GRIT \cite{lamoline2025dynamic} jointly infer cellular trajectories and GRNs using entropic OT by approximating the system dynamics as a linear Ornstein–Uhlenbeck process. This approach, however, is limited to linear systems and cannot effectively model non-linear dynamics. Wasserstein Lagrangian Flows (WLF) have been introduced to solve a dynamical OT-like problem by directly incorporating a potential energy constraint in the Lagrangian of the corresponding variational problem \cite{neklyudov2023computational}, but this comes at a high computational cost since all characteristics of the underlying process and its time-varying measure must be parametrized by neural networks. Our approach can be seen as an extension of RF and GRIT to the case where the reference process is a non-linear mechanistic process, making it suitable for modeling complex behaviors. There is also a direct link with WLF, as CardamomOT can be interpreted as solving an OT-like variational problem where the Lagrangian is induced by a simplified mechanistic process on a well-chosen latent space. These correspondences are detailed in Appendix~\ref{supp_OT}.
+
+
+
+\section{Methods}
+\label{methods_section}
+
+\subsection{Mechanistic modeling of cellular dynamics}
+\label{sec:mechanistic_model}
+
+Single-cell dynamics emerge from the stochastic interplay between gene activation, mRNA synthesis, protein production, \firstreview{and their respective degradation processes.} We adopt the hybrid two-state gene-expression model embedded in a regulatory network introduced in~\cite{herbachinferring2017}, which provides a parsimonious yet biologically grounded description of this interplay.
+
+\paragraph{Biological model.}
+Each gene $i \in \{1,\dots,n\}$ has a promoter that switches stochastically between an inactive and an active state. When active, transcription fires at rate $s_{0,i}$, producing mRNA molecules subsequently translated into proteins at rate $s_{1,i}$; both species degrade with rates $d_{0,i}$ and $d_{1,i}$, respectively. For an isolated gene, the switching rates are fixed constants $k_{\mathrm{on},i}$ and $k_{\mathrm{off},i}$. To encode a GRN $\theta = (\theta_{ij})$, the rates of gene $i$ are replaced by protein-dependent functions, $k^{\theta}_{\mathrm{on},i}(P)$, so that each entry $\theta_{ij}$ captures the sign, direction, and magnitude of the influence of gene $j$ on gene $i$.
+
+Recent experimental evidence suggests that regulation acts primarily through changes in activation frequency rather than inactivation rates~\cite{li2011central,RN6412}. Accordingly, we take $k_{\mathrm{off},i}$ to be independent of protein levels and focus on the \emph{bursty} regime $k_{\mathrm{on},i} \ll k_{\mathrm{off},i}$, where transcription occurs in short, highly productive bursts of mean size $s_{0,i}/k_{\mathrm{off},i}$\firstreview{, which is well supported for the majority of the genes~\cite{suter2011mammalian, RN6412}. Constitutively expressed genes may not
+satisfy $k_{\mathrm{on}} \ll k_{\mathrm{off}}$; for these, the Negative-Binomial approximation remains
+valid but the two-mode approximation is less appropriate. An extension to softmax activation functions which generalize the sigmoid to genes exhibiting more than two expression modes would be useful in that case.}
+
+ Following~\cite{herbach2018modelisation,ventre2023one}, in all applications presented in this article we adopt a sigmoid parameterization for the activation rates
+\begin{equation}
+\label{kon_function}
+k^{\theta}_{\mathrm{on},i}(P)
+= k_{0,i} + (k_{1,i}-k_{0,i}) \,\sigma\!\left(\beta_i + \sum_{j=1}^n \theta_{ij} P_j\right),
+\qquad
+\sigma(u) = \left(1 + e^{-u}\right)^{-1},
+\end{equation}
+where $k_{0,i}$ and $k_{1,i}$ are the minimal and maximal burst frequencies of gene $i$, and $\beta_i$ is its basal activity. We nevertheless emphasize that our method is directly applicable to a more general class of functions, that are already implemented in our Python package CardamomOT, as discussed in Section \ref{discussion}.
+
+The full stochastic dynamics of mRNA $M_i(t)$ and protein $P_i(t)$ are then
+\begin{equation}
+\label{eq:full_model}
+M_i(t) \xrightarrow{k_{on,i}^{\theta}(P(t))} M_i(t) + \mathcal{E}\!\left(\frac{k_{\mathrm{off}, i}}{s_{0, i}}\right), 
+\qquad
+\frac{dM_i}{dt} = - d_{0,i} M_i,
+\qquad 
+\frac{dP_i}{dt} = s_{1,i} M_i - d_{1,i} P_i.
+\end{equation}
+\firstreview{forming a hybrid stochastic-deterministic model where $\xrightarrow{}$ denotes a stochastic jump and $\mathcal{E}\!\left(\frac{k_{\mathrm{off}, i}}{s_{0, i}}\right)$ is the exponential distribution characterizing the burst size of mean $s_0/k_{\mathrm{off}}$.}
+
+\firstreview{This model belongs to the general class of Piecewise Deterministic Markov Processes (PDMP).}
+
+\paragraph{Simplified statistical model.}
+When bursting and mRNA degradation are fast relative to protein dynamics, the conditional distribution of $M_i(t)$ given $P(t)$ reaches quasi-stationarity and is well approximated by a Negative Binomial (NB) distribution\firstreview{~\cite{zong2010lysogen, grun_validation_2014, herbach2018modelisation}}:
+\begin{equation}
+\label{eq:beta_qs}
+M_i(t)\mid P(t)
+ \sim \mathrm{NB}\!\left(
+     \frac{k^{\theta}_{\mathrm{on},i}(P(t))}{d_{0,i}},\,
+     \frac{k_{\mathrm{off},i}}{s_{0,i}}
+   \right).
+\end{equation}
+\firstreview{where $\mathrm{NB}(a,b)$ denotes the Gamma--Poisson mixture defined by
+$\lambda \sim \mathrm{Gamma}(\text{shape } a, \text{rate } b)$ and $M \mid \lambda \sim
+\mathcal{P}(\lambda)$, so that $a = k^{\theta}_{\mathrm{on},i}(P(t))/d_{0,i}$ is the shape
+parameter (burst frequency relative to the mRNA degradation rate) and
+$b = k_{\mathrm{off},i}/s_{0,i}$ the rate parameter (inverse mean burst size). This yields
+$\mathbb{E}[M_i] = a/b = \frac{k^{\theta}_{\mathrm{on},i}(P(t))}{d_{0,i}}\frac{s_{0,i}}{k_{\mathrm{off},i}}$
+and a Fano factor $1 + s_{0,i}/k_{\mathrm{off},i}$, i.e. that mean expression
+is the product of burst frequency and burst size, and that overdispersion is controlled by burst
+size. Equivalently, in the size--probability convention, $\mathrm{NB}$ with size $a$ and
+probability $b/(1+b)$.}
+
+Assuming further that $k^{\theta}_{\mathrm{on},i}(P)$ is effectively piecewise constant, taking values $\{\mathbf{k}_{z,i}\}_{z\in Z}$ associated with discrete promoter-activity \emph{basins}, the marginal distribution of $M(t)$ at population level becomes an NB mixture:
+\begin{equation}
+\label{eq:beta_mixture}
+M(t) \sim \sum_{z\in Z} \mu_t(z)
+         \prod_{i=1}^n 
+         \mathrm{NB}\!\left(
+           \frac{\mathbf{k}_{z,i}}{d_{0,i}},\, 
+           \frac{k_{\mathrm{off},i}}{s_{0,i}}
+         \right),
+\end{equation}
+where $\mu_t$ is the distribution of cells among basins at time $t$. This mixture structure motivates using the basin labels $z$ as a discrete, mechanistically interpretable representation of cell state.
+
+\paragraph{Deterministic limit for proteins.}
+In the limit where proteins evolve on a much slower timescale than mRNAs, the latter are well approximated by their conditional mean given $P$, and protein dynamics satisfy
+\begin{equation*}
+\frac{dP}{dt} = s_{1} \,\frac{k^{\theta}_{\mathrm{on}}(P)\,s_0}{k_{\mathrm{off}}\,d_0} - d_{1} P(t),
+\end{equation*}
+where the notation is here vectorial. Setting $s_1 = d_1 d_0 k_{\mathrm{off}} / (k_1 s_0)$ rescales protein levels to the unit interval, yielding
+\begin{equation}
+\label{eq:deterministic_model}
+\frac{dP}{dt} = v_1(P) := d_{1}\,\biggl(\frac{k^{\theta}_{\mathrm{on}}(P)}{k_1} - P(t)\biggr),
+\end{equation}
+which we use both for trajectory interpolation (Appendix~\ref{app_detailed_interpolation}) and for the postprocessing calibration of kinetic rates (Section~\ref{subsec:postproc}).
+
+This normalization does not alter the qualitative dynamics of the system, but simply corresponds to a rescaling of protein concentrations. Since protein levels are not directly observed, their absolute scale is not identifiable and can be fixed without loss of generality. Importantly, this choice ensures that all protein variables $P_i$ lie on a comparable scale, so that the interaction coefficients $\theta_{ij}$ in Eq.~\eqref{kon_function} have a consistent interpretation in terms of regulatory strength across genes.
+
+
+We emphasize that in our method presented below, we systematically adopt a \textit{metastable} perspective (i.e., cells spend most of their time near stable attractors and undergo rare stochastic transitions between them), as characterized in~\cite{ventre2020reduction}: the deterministic model~\eqref{eq:deterministic_model} captures intra-basin dynamics, with basins corresponding to attractors of the limiting system, while stochastic fluctuations govern rare transitions between these basins in experimentally relevant regimes.
+
+The dynamics of transitions between basins, combined with~\eqref{eq:beta_qs}, define a Hidden Markov Model in which basins follow a continuous-time Markov chain and generate mRNA levels according to the GRN-dependent distribution~\eqref{eq:beta_qs}. We provide further details on this perspective in Appendix~\ref{supp_OT}, where we refer to this model as the \textit{phenomenological model} (see also \cite{ventre2020reduction}).
+
+\paragraph{Average behavior for mRNAs.}
+In contrast to proteins, there is no simple deterministic limit that closes the dynamics directly in mRNA space: the burst frequency $k^{\theta}_{\mathrm{on}}$ is controlled by proteins, so that $M$ alone does not form a closed system. Nevertheless, given a protein state \(P(t)\), we can define an average mRNA velocity based on burst size and frequency:
+\begin{equation}
+\label{eq:velocity_rna}
+\frac{dM}{dt}
+= v_0(P)
+:= k^{\theta}_{\mathrm{on}}(P)\,\frac{s_0}{k_{\mathrm{off}}}
+- d_0\,M(t),
+\end{equation}
+which we use for evaluation of trajectory inference in \ref{figure_S7}~Fig.
+
+We emphasize that this effective field is in general highly history-dependent, because the promoter activation regimes are driven by proteins that evolve on a slower timescale and encode the underlying regulatory logic. Any velocity model formulated directly on mRNAs alone must therefore implicitly integrate over these hidden protein states, and thus over the mechanistic structure of the GRN, leading to an effective regulation that is no longer explicitly mechanistic \cite{bertin2025scalable}. CardamomOT keeps the dependence on $P$ explicit and reconstructs protein trajectories alongside the GRN, so that both protein and mRNA dynamics remain grounded in the same mechanistic model.
+
+
+\subsection{Overview of CardamomOT}
+\label{subsec:overview}
+
+CardamomOT calibrates the mechanistic model above as a \emph{generative model} for scRNA-seq time series. Starting from raw count matrices at successive timepoints $t_1 < \cdots < t_N$, it jointly infers the GRN $\theta^*$ and hidden protein trajectories $\{P_c(t)\}_{t=t_1,\dots,t_N}$ for each cell $c$, then uses the calibrated model to simulate new data or predict perturbation effects. The method requires prior knowledge of protein degradation rates $d_1$, and can optionally incorporate mRNA degradation rates $d_0$ and known regulatory interactions $\theta^0$.
+
+\subsubsection{Preprocessing: inferring the NB mixture and initializing basin labels}
+\label{subsec:Mixture_inference}
+
+We first calibrate the NB mixture model~\eqref{eq:beta_mixture} gene by gene across timepoints, following~\cite{ventre2023one}. For each gene $i$ and timepoint $t_j$, we fit $\mathrm{NB}(a_{j,i}, b_i)$ with $b_i$ shared across time, and set
+\[
+\frac{k_{0,i}}{d_{0,i}} = \min_j a_{j,i},\quad
+\frac{k_{1,i}}{d_{0,i}} = \max_j a_{j,i},\quad
+\frac{k_{\mathrm{off},i}}{s_{0,i}} = b_i.
+\]
+This yields, for each cell $c$, a probability matrix $\mathrm{Pr}_c$ of size $|Z|\times n$ encoding the likelihood of belonging to each basin. Cells are initialized by maximum-likelihood assignment:
+\begin{equation}
+\label{basins_argmax}
+z_c^0 := \argmax_z \prod_i \mathrm{Pr}_c(z,i).
+\end{equation}
+If a prior GRN $\theta^0$ is available, this assignment can already incorporate network information via the GRN-constrained update described in Step~3 below.
+
+\subsubsection{Iterative inference of GRN and protein trajectories}
+\label{subsec:Trajectory_and_GRN_inference}
+
+The core novelty of CardamomOT is to abandon the quasi-stationary approximation $P_c \approx k^{\theta}_{\mathrm{on}}(P_c)/k_1$ used in CARDAMOM, and instead reconstruct protein trajectories $\{P_c(t)\}_{t=t_1,\dots,t_N}$ through explicit trajectory inference. Since protein dynamics are driven by the GRN, trajectory inference and GRN reconstruction are tightly coupled: the GRN shapes the interpolation cost, and the reconstructed trajectories in turn constrain the GRN. We therefore alternate between the two in an EM-like loop.
+
+\paragraph{Step 1: Protein trajectory reconstruction via mechanistic OT.}
+
+Given a current GRN $\theta$ and basin labels $\{z_c\}$, we seek, for each cell $c_{t_j}$ at time $t_j$, its most likely descendant $c_{t_{j+1}}$ at $t_{j+1}$ (i.e., the cell at the next timepoint that most plausibly derives from the same lineage). For each candidate cell $c'$ observed at $t_{j+1}$, we compute a candidate protein vector $P_{c_{t_j},c'}$ by integrating the deterministic ODE~\eqref{eq:deterministic_model} from $P_{c_{t_j}}$ towards a state consistent with $c'$; this interpolation accounts for a possible single mode switch along the interval (see Appendix~\ref{app_detailed_interpolation} for details). The cost of the candidate is
+\begin{equation}
+    \label{cost_matrix}
+    C^j_{c_{t_j},c'} := \mathrm{loss}\!\left(k_{\mathrm{on}}^{\theta}\!\left(P_{c_{t_j},c'}(t_{j+1})\right),\, \mathbf{k}_{z_{c'}}\right),
+\end{equation}
+where $\mathbf{k}_{z_{c'}}$ denotes the target burst-mode vector associated with the basin of $c'$, and \texttt{loss} is typically taken as the cross-entropy, consistent with the sigmoid parametrization of $k_{\mathrm{on}}^\theta$ in Eq. \eqref{kon_function}.
+
+We then solve the entropically regularized OT problem
+\begin{equation}
+    \label{eq:proteins_update}
+    \pi_j := \argmin_{\pi}\left\{\sum_{c,c'} C^j_{c,c'}\,\pi(c,c') + \varepsilon_1\,\pi(c,c')\ln\frac{\pi(c,c')}{\hat{P}_{t_j}(c)\,\hat{P}_{t_{j+1}}(c')}\right\},
+\end{equation}
+subject to the marginal constraints $\sum_c \pi(c,c') = \hat{P}_{t_{j+1}}(c')$ and $\sum_{c'}\pi(c,c') = \hat{P}_{t_j}(c)$. Here $\hat{P}_{t_j}$ denotes the empirical distribution of cells at time $t_j$, and $\varepsilon_1$ plays the role of a temperature parameter, typically decreased linearly over iterations from $\sqrt{N_g}$ to $0.01$, where $N_g$ is the number of genes. $\sqrt{N_g}$ is chosen to counterbalance the typical scale of the cost matrix \eqref{cost_matrix}: at the first iterations, the number of incorrectly labeled genes scales as the square root of the total number of genes.
+
+The optimal coupling $\pi_j$ is then used to sample a descendant $c'$ for each ancestor $c_{t_j}$, and we set $P_{c_{t_{j+1}}} := P_{c_{t_j},c'}$. Repeating this from $t_1$ to $t_{N-1}$ yields full protein trajectories for all sampled cells.
+
+\paragraph{Step 2: GRN update.}
+
+Given the reconstructed protein trajectories, we update the GRN by minimizing the loss between GRN-predicted burst rates and mixture-derived basin modes over all cells and timepoints:
+\begin{equation}
+\label{eq:GRN_update}
+\theta^{\ast}
+   = \argmin_{\theta}
+      \sum_{c}
+      \mathrm{loss}\!\left(k^{\theta}_{\mathrm{on}}(P_c),\, \mathbf{k}_{z_c}\right)
+      + \lambda \|\theta - \theta^0\|_1,
+\end{equation}
+where $\mathbf{k}_{z_c}$ is the burst-mode vector associated with the basin of cell $c$. Compared to CARDAMOM, all timepoints now contribute jointly through their reconstructed protein values, and a simple $l1$ penalty with respect to the prior GRN $\theta^0$ replaces the custom time-dependent regularization. The regularization strength $\lambda$ thus controls the sparsity of the inferred network. We set it as $\lambda = 0.05 \cdot {N_c}/\sqrt{N_g}$, where $N_c$ is the number of cells,
+reflecting the heuristic that the number of active regulators per gene scales at most as $\sqrt{N_g}$, and that a per-gene basin label attribution error of $5\%$ is a reasonable target for reliable inference.
+
+\paragraph{Step 3: Basin label refinement.}
+
+Given the updated GRN $\theta^*$, basin labels are refined by solving a GRN-constrained assignment problem that balances the per-cell NB log-likelihood with consistency between inferred proteins and candidate basin modes:
+\begin{equation}
+\label{eq:basins_update}
+\gamma^* = \argmin_{\gamma}\sum_{z,c}
+      -\!\left(\ln\mathrm{Pr}_c(z)
+       + \varepsilon_2\ln\!\left(1 - \mathrm{loss}\!\left(k^{\theta}_{\mathrm{on}}(P_c),\mathbf{k}_{z}\right)\right)\right)\gamma(c,z),
+\end{equation}
+subject to $\sum_c\gamma(c,z) = \sum_c\mathrm{Pr}_c(z)$ and $\sum_z\gamma(c,z) = 1$. Here, the quantity $\mathrm{loss}\!\left(k^{\theta}_{\mathrm{on}}(P_c),\mathbf{k}_{z_c}\right)$ is renormalized to be in $[0, 1]$, such that the $\ln$ is well defined. The parameter $\varepsilon_2$ controls how strongly consistency with the mechanistic model influences label assignment; it is typically increased linearly over iterations from $0$ to $0.5$, so that it never completely overwhelms the NB likelihood.
+
+Cells are then reassigned as $z_c = \argmax_z\,\gamma^*(c,z)$.
+
+\paragraph{Algorithm summary.}
+Steps~1--3 are iterated until convergence, typically within $20$--$40$ iterations:
+
+\begin{algorithm}[H]
+\caption{CardamomOT}
+\begin{algorithmic}[1]
+\State Infer NB mixture parameters; initialize basin labels $\{z_c^0\}$ via~\eqref{basins_argmax}, or via~\eqref{eq:basins_update} if a prior GRN is available.
+\For{$k=0,1,\dots$ until convergence}
+  \State Compute cost matrices $\{C^j\}$ via interpolation (Appendix~\ref{app_detailed_interpolation}); solve \firstreview{$N-1$} OT problems~\eqref{eq:proteins_update}; sample $L$ protein trajectories from the multimarginal coupling $\pi_1\otimes\cdots\otimes\pi_{N-1}$. \hfill (Step~1)
+  \State Update $\theta^{(k+1)}$ by solving~\eqref{eq:GRN_update}. \hfill (Step~2)
+  \State Update basin labels $\{z_c^{(k+1)}\}$ via~\eqref{eq:basins_update}. \hfill (Step~3)
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{Postprocessing: kinetic rate recalibration via differentiable ODE}
+\label{subsec:postproc}
+
+Once the GRN $\theta^*$ and protein trajectories $\{P^l(t)\}_{l=1,\dots,L}$ have converged, we recalibrate kinetic rates so that simulations from the model reproduce the observed dynamics. This step can be interpreted as fitting the parameters of an SDE approximating the protein dynamics in the metastable regime, theoretically derived from the mechanistic model in~\cite{ventre2020reduction}.
+
+In practice, we use a two-step approximation.
+
+\paragraph{Step (i): protein degradation rate $d_1$.}
+\firstreview{Rather than a generic black-box neural network, the ODE used here directly instantiates the mechanistic vector field of Eq.~\eqref{eq:deterministic_model}, $v_1(P)=d_1\odot\big(k_{\mathrm{on}}^{\theta^*}(P)/k_1-P\big)$, with the converged GRN $\theta^*$ and $k_1$ held fixed. Only the protein degradation rates $d_1\in\mathbb{R}^n_{>0}$ are trainable, reparametrized through a softplus to enforce positivity; we additionally allow a per-gene multiplicative correction on the sigmoid argument of $k_{\mathrm{on}}^{\theta^*}$, initialized at $1$ and regularized toward $1$ (see below), to absorb residual scale mismatches left over from the protein normalization discussed after Eq.~\eqref{eq:deterministic_model}.}
+
+\firstreview{For each reconstructed trajectory $l$ and each pair of consecutive observed timepoints $(t_j,t_{j+1})$, the ODE is integrated forward with the differentiable ODE solver of \texttt{torchdiffeq}, starting from the \emph{reconstructed} protein state $P^l(t_j)$ rather than from the model's own prediction at the previous interval. This \emph{teacher-forcing} scheme prevents integration error from compounding across the many intervals of a full time series and is now standard practice for calibrating dynamical models on single-cell time series, as in PRESCIENT~\cite{yeo2021generative} and STORIES~\cite{huizing2025stories}.}
+
+\firstreview{The training loss is the mean squared error between the integrated endpoint $\hat P^l(t_{j+1})$ and the reconstructed observation $P^l(t_{j+1})$, summed over all trajectories and consecutive timepoint pairs,
+\begin{equation}
+\mathcal{L}(d_1) = \sum_{l,j} \big\| \hat P^l_{d_1}(t_{j+1}) - P^l(t_{j+1}) \big\|^2
++ \lambda_{d}\,\|d_1 - d_1^{\mathrm{prior}}\|^2
++ \lambda_{s}\,\|s - 1\|^2,
+\label{eq:neuralode_loss}
+\end{equation}
+where $s$ denotes the per-gene scale correction described above, and $\lambda_d,\lambda_s = 0.01, 1$, respectively, shrink the fitted rates toward the literature-informed prior $d_1^{\mathrm{prior}}$ and the scale toward its neutral value, respectively. Gradients are backpropagated through the ODE solver and $d_1$ (and $s$) are updated with Adam until convergence of the loss (Algorithm~\ref{alg:neuralode}).}
+
+\paragraph{Step (ii): mRNA degradation rate $d_0$.}
+We calibrate the mRNA degradation rate $d_0$ by fitting the variance of stochastic fluctuations around the deterministic trajectories, so that simulated expression noise matches the observed variability. \firstreview{Concretely, in the bursty regime, the protein increment over a short interval $dt$ is driven
+by a compound Poisson process with burst rate $\propto \mathrm{kon}_i^{\theta^*}(P)\cdot d_{0,i}$
+and mean burst size $\propto d_{1,i}/(k_{1,i}\,d_{0,i})$ \cite{ventre2022reverse}. By Campbell's theorem, this predicts,
+at leading order,
+\begin{equation}
+\operatorname{Var}[\Delta P_i] \;\approx\; \tau_i \, h_i(P), \qquad
+\tau_i := \frac{d_{1,i}}{d_{0,i}}, \qquad
+h_i(P) := 2\,dt\,\frac{d_{1,i}}{k_{1,i}^2}\,k_{\mathrm{on},i}^{\theta^*}(P),
+\label{eq:eps_moment}
+\end{equation}
+so that $\tau_i$ can be estimated by matching the squared residuals of the Step~(i) ODE predictions (used as a proxy for $\operatorname{Var}[\Delta P_i]$) against $h_i$ evaluated along the reconstructed trajectories. We use the regularized, closed-form method-of-moments estimator
+\begin{equation}
+\hat\tau_i = \frac{\sum_{c} \big(\hat P_{i,c} - P_{i,c}\big)^2 + \lambda_\tau\, \tau_i^{\mathrm{prior}}}
+{\sum_{c} h_i(P_c) + \lambda_\tau},
+\label{eq:eps_estimator}
+\end{equation}
+pooling over cells $c$ and, optionally, over timepoints; $\lambda_\tau = 1$ shrinks
+$\hat\tau_i$ toward a literature-informed prior $\tau_i^{\mathrm{prior}} =
+d_{1,i}^{\mathrm{prior}}/d_{0,i}^{\mathrm{prior}}$ (by default corresponding to an mRNA
+half-life of 9\,h and a protein half-life of 46\,h, i.e.\ $\tau_i^{\mathrm{prior}}
+\approx 1/5$, consistent with the adiabatic regime $d_1 \ll d_0$ required by the model), unless gene-specific prior degradation rates are
+supplied by the user, and $d_{0,i}$ is recovered as $d_{1,i}/\hat\tau_i$.
+}
+
+These refined kinetic parameters are thus built such that the model generates trajectories with realistic timescales and levels of stochasticity.
+
+\firstreview{
+\begin{algorithm}[htb]
+\caption{ODE recalibration of protein degradation rates $d_1$ (Step (i))}
+\label{alg:neuralode}
+\begin{algorithmic}[1]
+\Require converged GRN $\theta^*$, reconstructed trajectories $\{P^l(t_j)\}_{l,j}$, prior $d_1^{\mathrm{prior}}$
+\State Initialize $d_1 \leftarrow d_1^{\mathrm{prior}}$, scale correction $s \leftarrow 1$
+\While{not converged}
+  \For{each trajectory $l$ and consecutive pair $(t_j, t_{j+1})$}
+    \State Integrate $\hat P^l_{d_1}(t_{j+1}) \leftarrow P^l(t_j) + \int_{t_j}^{t_{j+1}} v_1\big(P;\theta^*,d_1,s\big)\,dt$
+  \EndFor
+  \State Compute loss $\mathcal{L}(d_1)$ as in Eq.~\eqref{eq:neuralode_loss}
+  \State Update $d_1, s$ by one Adam step on $\nabla_{d_1,s}\mathcal{L}$ (backpropagation through the ODE solver)
+\EndWhile
+\State \Return $d_1$
+\end{algorithmic}
+\end{algorithm}
+}
+
+
+Overall, the method outputs: the inferred GRN $\theta^*$ (signed and directed); the reconstructed protein trajectories with basin labels and burst-mode vectors; and all parameters of the mechanistic model described in Section~\ref{sec:mechanistic_model}, together forming a calibrated generative model ready for simulation and \textit{in silico} perturbation experiments.
+
+
+\section{Results}
+\label{results_section}
+
+We validated the CardamomOT pipeline on both synthetic and experimental datasets, demonstrating its ability to jointly infer \firstreview{GRNs} and cellular trajectories from temporal snapshots of scRNA-seq data, and to generate realistic simulated datasets. The method was tested on five benchmark network topologies, previously introduced in \cite{ventre2023one}, and three experimental datasets: (i) mouse embryonic stem cell (mESC) differentiation \cite{Semrau_2017} (9 timepoints, $\sim 1{,}300$ cells), (ii) sympathoadrenal differentiation ordered by pseudotime \cite{gandrillon2025inferring} (6 pseudo-timepoints, $\sim 1{,}800$ cells), and (iii) mouse embryonic fibroblast (MEF) reprogramming to induced pluripotent stem cells (iPSCs) \cite{schiebinger2019optimal} (35 timepoints, $\sim 250{,}000$ cells). In what follows, we present results that illustrate the complete CardamomOT workflow, from preprocessing to perturbation analysis, and show how the calibrated mechanistic model can be used as a comprehensive tool for dynamic single-cell analysis.
+
+\subsection{Simulation of temporal snapshots}
+\label{subsec:simulation_temporal_snapshots}
+
+To evaluate CardamomOT's performance, we first generated synthetic datasets using the HARISSA package \cite{herbach2024harissa}, which simulates \firstreview{biologically stochastic trajectories following the same} mechanistic model \firstreview{as CardamomOT,} described in Section~\ref{sec:mechanistic_model}. We used five benchmark network topologies from \cite{ventre2023one}: (i) FN4, a 4-gene feedforward network; (ii) FN8, an 8-gene feedforward network; (iii) BN8, an 8-gene bifurcating network; (iv) CN5, a 5-gene cascade network; and (v) a tree topology with varying numbers of genes (5, 10, 20, 50, 100 genes).
+
+For each network, we simulated \emph{in vitro}-like perturbation experiments by first equilibrating the system for $t<0$, then introducing a virtual stimulus gene fixed at maximal protein level at $t=0$, triggering a transition toward a new stochastic steady state. Temporal snapshots were generated by independently sampling cells at timepoints \firstreview{equally distributed} from $t=0$ to $t=96$ hours. The model parameters ($k_{0,i}$, $k_{1,i}$, $s_{0,i}/k_{\mathrm{off},i}$, $\beta_i$, $\theta_{ij}$) and degradation rates ($d_{0,i}$, $d_{1,i}$) for all genes used for these benchmarks are available online with the code repository.
+
+This simulation framework allowed us to evaluate CardamomOT's performance under controlled \firstreview{model-matched} conditions where the ground truth GRN and protein levels are known, as well as true cellular trajectories when simulating without killing cells at each timepoint. \firstreview{This establishes best-case performance when model assumptions are satisfied, and all competing methods are evaluated under identical
+conditions.} We then apply the method to experimental datasets, where validation is more challenging.
+
+\subsection{The statistical mixture model captures both mechanistic parameters and biological cell states}
+\label{subsec:statistical_model_validation}
+
+The first step of CardamomOT (preprocessing) consists in calibrating the NB mixture model described in Equation~\eqref{eq:beta_mixture} for each gene and timepoint (Fig~\ref{figure1}C). This step serves two critical purposes: (i) inferring the mechanistic parameters ($k_{0,i}$, $k_{1,i}$, $k_{\mathrm{off},i}/s_{0,i}$) from the data, and (ii) clustering cells into discrete promoter-activity basins that reflect their underlying regulatory states.
+
+We first validated this approach on the simulated datasets, where ground truth parameters are
+known (\ref{tableS1}~Table). \firstreview{The burst size parameter $k_{\mathrm{off},i}/s_{0,i}$
+is recovered accurately across all benchmark networks (0.017--0.019 against a reference value of
+0.02), and the minimal burst frequency $k_{0,i}/d_{0,i}$ is estimated close to zero. The maximal
+burst frequency $k_{1,i}/d_{0,i}$ is systematically underestimated by $\sim$20--30\%, which
+follows from the estimation procedure rather than from a poor fit: $k_{1,i}$ is the saturating
+value of the sigmoid in Eq.~\eqref{kon_function}, whereas $\max_j a_{j,i}$ estimates the largest
+burst frequency actually attained in the data, and regulatory inputs do not fully saturate
+$k^{\theta}_{\mathrm{on},i}$ in these simulations.}
+
+In addition, CardamomOT precisely classifies cells into basins using maximum likelihood for each
+gene, with an average of $85\%$--$93\%$ correct classification across the datasets
+(\ref{tableS1}~Table).
+
+For experimental datasets, where ground truth is unavailable, we assessed the quality of the statistical model fit through multiple metrics:
+\begin{itemize}
+    \item \textbf{Low-dimensional embeddings:} We performed UMAP dimensionality reduction on both the original scRNA-seq data and data simulated from the calibrated statistical model. The simulated data preserved the overall temporal structure of the experimental data in UMAP space (Fig~\ref{figure2}A,B), indicating that the statistical model captures the essential features of the gene expression landscape. In all comparisons using UMAPs throughout the paper, a low-dimensional embedding is learned from the concatenated dataset and the coordinates are then used to plot each dataset separately.
+    \item \textbf{Marginal distributions:} The inferred NB mixture models \firstreview{are consistent with} the observed marginal distributions and temporal patterns of gene expression for all timepoints, as illustrated in Fig~\ref{figure2}E--H for selected genes exhibiting strong connectivity in the inferred GRN of each dataset (\ref{figure_S1}--\ref{figure_S3}~Figs).
+    \item \textbf{Correlations:} We assessed the ability of the NB mixture model to reproduce pairwise gene expression correlations observed in the reference data (\ref{figure_S5}~Fig). The inferred model captures the overall correlation structure, with gene pair correlations in the NB mixture closely tracking those in the reference data across all three datasets. However, the strongest correlations tend to be slightly underestimated. This is consistent with a known limitation of the NB mixture framework: by assuming conditional independence of genes given the basin label, the model cannot capture residual correlations between genes that remain correlated within individual basins. As a result, intra-basin co-regulation between highly correlated genes is partially lost, leading to a mild attenuation of the highest correlation values. 
+    \item \textbf{Cell type identification:} We trained Random Forest classifiers on the experimental data using cell type annotations (when available) or clustering-based labels, and evaluated their performance on data simulated from the calibrated statistical model. The classifiers achieved high accuracy on reconstructing the relative proportions of cell types (Fig~\ref{figure2}C,D), demonstrating that the inferred basin labels correspond to biologically meaningful cell states. This evaluation strategy, based on cross-dataset classification, has become standard in single-cell analysis \cite{stuart2019comprehensive} and provides an objective measure of how well the statistical model captures cell type-specific expression patterns.
+    These results are particularly striking for the Kameneva and Schiebinger datasets, which exhibit non-trivial branching dynamics that are shown to be well distinguished by the statistical model.
+\end{itemize}
+
+Taken together, these results show that the preprocessing step of CardamomOT not only infers mechanistically interpretable parameters but also produces a discrete representation of cellular states (basin labels) that forms the foundation for the subsequent joint GRN and trajectory inference.
+
+\subsection{Benchmarking CardamomOT: performance, robustness and scalability of GRN inference}
+\label{subsec:grn_inference_benchmark}
+
+We next evaluated CardamomOT's ability to infer GRN structure from temporal snapshots. We compared CardamomOT against several state-of-the-art methods: (i) CARDAMOM \cite{ventre2023one}, the previous version of our method; (ii) RF \cite{zhang2024joint}, a recent \firstreview{OT}-based method that jointly infers trajectories and linear GRNs; (iii) GENIE3 \cite{huynh2010inferring}, a widely used random forest-based method; and (iv) SINCERITIES \cite{papili2018sincerities}, a method designed for temporal scRNA-seq data. For methods that infer undirected edges, we additionally compared against PIDC \cite{chan2017gene} and Pearson correlation, used as a sanity check to ensure that good performance is not solely due to highly correlated data that would be easy to detect.
+
+All methods were evaluated using the Area Under the Precision-Recall curve (AUPR), a standard metric for GRN inference that is robust to class imbalance (i.e., the fact that most gene pairs are not connected). Results were averaged over 10 independent simulations for each network topology.
+
+\paragraph{\firstreview{CardamomOT achieves scalable GRN inference across network topologies on model-matched simulated data.}}
+On all benchmark networks, CardamomOT achieved consistently higher AUPR scores than all competing methods (Fig~\ref{figure3}A). The improvement was particularly pronounced for the more complex networks (FN8, BN8, and trees with more than 10 genes), where CardamomOT's mechanistic modeling and trajectory inference provided a substantial advantage over methods that rely solely on correlation-based or quasi-static approximations. CardamomOT infers both the sign and direction of regulatory interactions, which is crucial for understanding causal relationships in GRNs. When comparing against methods that only infer undirected edges (Fig~\ref{figure3}B), CardamomOT maintained its performance advantage, highlighting the value of mechanistic modeling for resolving regulatory directionality.
+
+The convergence of the inference procedure is illustrated in \ref{figure_S8}~Fig: 
+the training loss decreases monotonically and stabilizes within 20--25 optimization 
+steps across all benchmark networks, while the AUPR score rises rapidly in the first 
+iterations and plateaus at its final value. This indicates that the iterative EM-like 
+procedure converges reliably and that the reported AUPR scores correspond to 
+fully converged models rather than intermediate states.
+
+Moreover, the runtimes reported in \ref{tableS2}~Table show that CardamomOT scales 
+well to realistic dataset sizes: even for networks of 100 genes with 1{,}000 cells, inference 
+completes in under one minute, and CardamomOT remains faster than GENIE3, 
+a widely used reference for GRN inference. The true limiting factor for 
+scaling to larger networks is therefore not computational cost but the 
+identifiability of the network structure: with $n$ genes, the number of 
+GRN parameters grows as $n^2$, and the information available in temporal 
+snapshots becomes insufficient to robustly constrain all interactions beyond 
+a certain network size. This identifiability ceiling is further discussed in 
+Section~\ref{discussion}.
+
+\paragraph{Iterative refinement significantly improves GRN inference accuracy.}
+To assess the contribution of the iterative refinement procedure (Steps~1--3 in Section~\ref{subsec:Trajectory_and_GRN_inference}), we compared CardamomOT against several ablated versions: (i) a version that directly returns the network and trajectories inferred after the first round of the iterative procedure, i.e.\ the network computed from the trajectories associated with an OT coupling between basins; (ii) a version with random initialization of the OT coupling instead of the \firstreview{OT}-based initialization; and (iii) a version combining both modifications. The full CardamomOT method consistently outperformed ablated versions (i) and (iii) (Fig~\ref{figure4}A--E), demonstrating that the iterative refinement procedure does contribute to improved inference accuracy. Remarkably, the iterative procedure converged to similar GRN structures regardless of initialization (compare “CardamomOT” and “random init” in Fig~\ref{figure4}A--E), suggesting that the benchmark networks exhibit sufficient identifiability for the method to escape local optima.
+
+\paragraph{CardamomOT is robust with respect to prior estimation of kinetic rates.}
+A critical advantage of CardamomOT over CARDAMOM is that it directly incorporates protein degradation rates $d_1$ into the inference procedure (see Equation~\eqref{eq:deterministic_model} and Step~1 of Section~\ref{subsec:Trajectory_and_GRN_inference}), allowing a much better approximation of protein trajectories than the quasi-static approximation of the previous method.
+\firstreview{Protein half-lives in mammalian cells typically range 40--100~h, with a broader
+range of roughly 10--200~h in more extreme cases \cite{Dear2024, schwanhausser2011global}.
+Uncertainty on these estimates can be substantial: Rolfs et al.\ \cite{Rolfs2021} report a
+median uncertainty of $\pm$0.9~days ($\approx$22~h) across a mouse tissue atlas of 3106
+proteins. For a protein with a half-life in the 40--50~h range this corresponds to roughly
+$\pm$50\% relative uncertainty, and to a comparable or larger perturbation of the degradation
+rate $d_1 = \ln 2 / t_{1/2}$, since the two are inversely related. To evaluate robustness to uncertainty in these rates, we ran CardamomOT on simulated data while systematically perturbing the input degradation rates from $\pm 20\%$ up to $\pm 400\%$ of their true values. The method maintained high AUPR scores (averaged across FN4, FN8, BN8 and CN5) even with moderate perturbations ($\pm 50\%$), and clearly outperformed random guessing and competing benchmark methods even with very large perturbations ($\pm 200$--$400\%$, Fig~\ref{figure4}F).
+Typical literature-derived
+estimates therefore fall around the upper end of the range in which CardamomOT retains high
+accuracy (Fig~\ref{figure4}F), while short-lived proteins and the tail of the uncertainty
+distribution may exceed it --- which is why we assessed robustness up to $\pm$400\%.}
+
+
+\firstreview{
+\paragraph{CardamomOT is robust to technical noise.}
+scRNAseq measurements are prone to technical noise due to inefficient capture and sequencing. To test CardamomOT robustness to technical noise, we performed inference on simulated datasets with increasing levels of binomial dropout (5\% -- 90\%, averaged across FN4, FN8, BN8 and CN5). CardamomOT maintains high AUPR scores with slightly increasing variability at high levels of dropout, confirming robustness to moderate technical noise (Fig~\ref{figure4}G). 
+}
+
+\firstreview{
+\paragraph{CardamomOT is robust to temporal variability in measurements.}
+scRNAseq experiments commonly show irregular measurement schedules. We thus tested CardamomOT robustness to variation in measurement times by performing inference on simulated datasets on a scale going from equally spaced timepoints to randomly sampled timepoints. Average AUPR across FN4, FN8, BN8 and CN5 only slightly degrades highly variable scales, confirming CardamomOT capability to work with different measurement schedules (Fig~\ref{figure4}H). 
+}
+
+Overall, \firstreview{these results establish CardamomOT as a robust method for GRN inference on the benchmark considered.}
+
+\firstreview{\paragraph{Interpreting the ordering of methods in Fig~\ref{figure3}A}
+An important detail in Fig~\ref{figure3}A deserves comment: CARDAMOM, which does not
+reconstruct explicit cellular trajectories and instead relies on a quasi-stationary
+approximation~\cite{ventre2023one}, nonetheless outperforms RF, which does perform trajectory
+inference via optimal transport. This ordering should not be read as a general ranking of GRN
+inference methods, as evidence that trajectory reconstruction is unhelpful in general, or as
+evidence that OT with a Brownian/linear reference is worse than skipping trajectory inference
+altogether. Rather, it reflects a mismatch in how well each method's underlying dynamical
+assumptions fit the statistical structure of the data.}
+
+\firstreview{CARDAMOM's statistical model is the Negative Binomial approximation derived from the}
+very mechanistic model used to generate the simulated datasets
+(Section~\ref{subsec:simulation_temporal_snapshots}), so it is, in this specific sense, correctly
+specified for these data and can recover accurate parameter estimates without tracking cells
+across timepoints. RF does reconstruct trajectories, but under a linear Ornstein--Uhlenbeck
+reference process that neither exploits this NB structure nor captures the nonlinear, GRN-driven
+dynamics of the benchmark networks; this mismatch degrades both the inferred trajectories and the
+GRN subsequently built from them. CardamomOT is designed precisely to combine the strengths of
+both, by pairing explicit trajectory reconstruction with the same nonlinear mechanistic reference
+process instead of a misspecified linear one --- which is why it outperforms both. The general
+statement is therefore that the value of an OT step depends on how well the reference process
+matches the true dynamics, not on the presence or absence of trajectory inference per se.
+
+The ablation study of Fig 4A–E supports this reading directly. The \texttt{noloop} variant returns the network obtained after a single round of the procedure, without the iterative refinement of Steps 1–3, performing a single round of OT on the burst modes. Its accuracy is accordingly lower than that of the full method — substantially so on BN8, yet it remains above RF on all four benchmark networks (compare Fig~\ref{figure4}A–D with Fig~\ref{figure3}A).
+
+\paragraph{GRN inference for experimental datasets.}
+We applied CardamomOT to the three experimental datasets to obtain GRN structures
+(\ref{figure_S1}--\ref{figure_S3}~Figs). The gene sets used for each dataset, and the virtual
+stimulus nodes included to represent the experimental perturbation applied at $t=0$ (retinoic
+acid for Semrau; Dox and Serum for the two successive phases of the Schiebinger protocol), are
+described in Appendix~\ref{supp_experimental}.
+
+\firstreview{GRNs inferred across 5 independent runs on each dataset showed mean cosine
+similarities of 0.777 (Semrau), 0.859 (Kameneva) and 0.798 (Schiebinger)
+(\ref{figure_S9}~Fig), indicating reproducible overall network structure with residual
+run-to-run variability.} The inferred GRNs are notably sparse
+(\ref{figure_S1}A--\ref{figure_S3}A~Figs), with a small number of hub regulators
+concentrating most of the regulatory activity --- a hallmark of biologically realistic network
+structure \cite{Grotewold2018, sanguinetti2019gene} that is not always recovered by inference
+methods without explicit sparsity constraints. \firstreview{Top regulators ranked by outgoing
+regulatory strength are reported with their main targets in \ref{tableS3}~Table.} The most
+connected regulators are consistent with those identified in the original studies: Hoxb2,
+Dnmt3a, Lamb1 and Col4a2 for Semrau (\ref{figure_S1}C~Fig), in agreement with \cite{Semrau_2017},
+and CHGA among the dominant regulators for Kameneva (\ref{figure_S2}C~Fig), consistent with
+\cite{gandrillon2025inferring}. \firstreview{Several highly expressed housekeeping genes (RPL30,
+ATP5F1E) also rank among the top Kameneva regulators (\ref{tableS3}~Table), which likely
+reflects their coherent expression across all cells rather than genuine regulatory activity, and
+illustrates the importance of gene selection discussed in Section~\ref{discussion}.}
+
+The diagonal coefficients of the inferred GRN matrices, corresponding to auto-regulatory
+interactions, are systematically non-negligible across all three datasets
+(\ref{figure_S1}B--\ref{figure_S3}B~Figs). While often excluded in GRN inference frameworks
+\cite{huynh2010inferring}, these terms naturally arise in our setting as a parsimonious
+explanation for bimodal gene expression dynamics, and are discussed in
+Section~\ref{discussion}. \firstreview{As an internal consistency check, we verified that the
+inferred targets of the stimulus nodes are broadly consistent with the known biology of each
+experimental protocol (Appendix~\ref{supp_experimental}).}
+
+These inferred networks serve as the foundation for the perturbation experiments described in
+Section~\ref{subsec:perturbation_analysis}.
+
+\subsection{CardamomOT accurately reconstructs hidden protein vectors, cellular trajectories and velocity fields \texorpdfstring{\firstreview{of simulated data}}{of simulated data}}
+\label{subsec:trajectory_inference_validation}
+
+Unlike existing trajectory inference methods that model dynamics directly on mRNA levels
+using simplified diffusion processes~\cite{schiebinger2019optimal} or linear
+systems~\cite{zhang2024joint}, CardamomOT constructs trajectories at the protein
+level, explicitly accounting for the highly bursty nature of transcription and the slower,
+more stable dynamics of proteins. We evaluate the benefits of this trajectory reconstruction on three complementary
+levels:
+\begin{itemize}
+    \item the accuracy of the predicted \textbf{velocity fields} on cross-sectional
+data (Fig~\ref{figure5}), evaluated in both transcript and protein space;
+    \item the accuracy of the predicted \textbf{cell-to-cell
+couplings} on true trajectory data when simulated cells are not virtually killed at each timepoint (\ref{figure_S7}~Fig);
+    \item the similarity of the hidden protein levels reconstructed by the method compared to the simulated ones, which are not used by the algorithm (\ref{figure_S6}~Fig).
+\end{itemize}
+
+\paragraph{Velocity fields on cross-sectional data.}
+For the mechanistic model, the expected instantaneous velocity fields for mRNAs and
+proteins at a given state $(M, P)$ are given by the velocity fields $v_0$ and $v_1$ described in Eqs. \eqref{eq:velocity_rna} and \eqref{eq:deterministic_model}, respectively. For CardamomOT, both velocity fields are evaluated using the inferred parameters
+$(\theta, d_0, d_1, k_1)$ and the reconstructed protein trajectories.
+For RF~\cite{zhang2024joint}, the mRNA velocity is given by the instantaneous drift
+of the calibrated linear Ornstein–Uhlenbeck process,
+$v_0^{\mathrm{RF}}(M) = MA + b$,
+where $A$ and $b$ are the inferred generator matrix and bias; the protein velocity is
+derived by applying the same linear operator to the protein values used as a proxy.
+We evaluate the agreement of each predicted velocity field with the mechanistic reference
+using a weighted cosine similarity, where weights are given by the product of the norms of the two
+velocity vectors.
+
+RF's mRNA-based velocity field shows poor agreement with the mechanistic reference,
+with cosine similarities close to zero across all benchmark networks
+(Fig~\ref{figure5}A). This reflects an intrinsic limitation: mRNA levels
+are dominated by stochastic transcriptional bursting, and a global linear model cannot
+capture the local, protein-dependent regulation that drives gene expression changes.
+The resulting velocity field is essentially a uniform flow in UMAP space
+(Fig~\ref{figure5}E), bearing little resemblance to the structured, GRN-driven dynamics
+of the system. In contrast, CardamomOT achieves cosine similarities exceeding $0.8$
+across all networks (Fig~\ref{figure5}A), and the corresponding UMAP stream plots
+(Fig~\ref{figure5}C) show velocity fields with coherent, biologically interpretable
+structure.
+
+The disparity between methods is also visible at the protein level. Proteins evolve
+more slowly and deterministically than mRNAs, making their dynamics less sensitive to
+transcriptional noise and therefore more tractable for trajectory inference.
+When RF's linear dynamics are applied to protein space, the agreement with the mechanistic
+reference clearly improves (cosine similarity $\sim 0.25$--$0.4$,
+Fig~\ref{figure5}B), suggesting that even simplified linear models can partially capture
+protein-level trends. The resulting velocity field is nevertheless still close to a uniform flow in UMAP space, and poorly reflects the true temporal evolution of cells (Fig~\ref{figure5}F). 
+
+By contrast, CardamomOT— which directly infers protein trajectories
+and uses the mechanistic model to predict protein velocities — achieves
+higher cosine similarities (again exceeding $0.75$, Fig~\ref{figure5}B), with
+protein UMAP stream plots (Fig~\ref{figure5}D) showing well-structured trajectories
+consistent with the underlying GRN dynamics (in particular a correct orientation of the cycle across timepoint).
+
+\paragraph{Coupling accuracy on true trajectory data.}
+
+To complement this analysis, we also evaluated both methods on simulated datasets where
+true cell-to-cell correspondences are known, i.e.\ where individual cells are tracked
+across consecutive timepoints (\ref{figure_S7}~Fig). In this
+setting, we can directly assess the quality of the inferred couplings by measuring the
+expected distance between predicted and observed descendants, with the same metric as in \cite{forrow2021lineageot}. This metric is computed separately for mRNA (with a $\log(1+x)$ transformation to reduce the influence of highly expressed genes) and for proteins (already rescaled in $[0,1]$).
+
+CardamomOT achieves consistently lower descendant distances than RF on mRNA (\ref{figure_S7}A~Fig) and proteins (\ref{figure_S7}B~Fig), confirming that the mechanistic coupling provides more accurate cell-to-cell correspondences. 
+
+\paragraph{CardamomOT reconstructs protein trajectories from transcriptomic snapshots.}
+A key feature of CardamomOT is its ability to infer protein trajectories that are 
+never directly observed in scRNA-seq data. To evaluate this capability on simulated 
+datasets, where ground truth protein values are available, we compared the 
+reconstructed protein trajectories to the true simulated ones across all benchmark networks (\ref{figure_S6}~Fig). The inferred protein UMAP embeddings 
+closely reproduce the structure of the reference trajectories in all cases, capturing 
+both the global topology of the differentiation process and the temporal ordering of 
+cells. This demonstrates that CardamomOT can reliably recover simulated hidden protein dynamics 
+from transcriptomic snapshots alone.
+
+\subsection{The calibrated model \texorpdfstring{\firstreview{regenerates cellular trajectories consistent with experimental data}}{regenerates cellular trajectories consistent with experimental data}}
+\label{subsec:generative_model_validation}
+
+A distinguishing feature of CardamomOT is its use as a \emph{generative model}: once calibrated on temporal snapshots, the model (with its inferred GRN, mechanistic parameters and protein dynamics) should be able to simulate new datasets that closely resemble the original data. This generative capability is critical for two reasons: (i) it provides a stringent test of whether the model has captured the essential dynamics of the system, and (ii) it enables \emph{in silico} experimentation through perturbation analysis (Section~\ref{subsec:perturbation_analysis}).
+
+To validate this capability, we simulated new temporal snapshots starting from 
+$t=0$ and compared them to the original experimental data using the same metrics 
+as in Section~\ref{subsec:statistical_model_validation}. Despite the 
+complexity of the inference procedure, the fully calibrated model reproduces the 
+experimental data with a quality comparable to the NB mixture model alone:
+\begin{itemize}
+\item \textbf{Low-dimensional embeddings:} Original and simulated cells overlap 
+extensively in joint mRNA UMAP space (Fig~\ref{figure6}A--F), confirming that the 
+mechanistic model, driven by the inferred GRN and protein dynamics, 
+captures the global structure of the gene expression landscape while 
+exhibiting realistic stochastic variability. \firstreview{This analysis was repeated using the trajectory-preserving method PHATE \cite{Moon2019}, providing qualitatively consistent visualization of the global trajectory structure (\ref{figure_S10}~Fig).}
+
+\item \textbf{Marginal distributions and correlations:} The marginal distributions and 
+pairwise gene expression correlations of simulated data are in close agreement 
+with those of the NB mixture model at all timepoints (\ref{figure_S4} and 
+\ref{figure_S5}~Figs; $>0.95$ correlation of gene pair correlations across all datasets), 
+demonstrating that the GRN-driven simulation does not distort the statistical 
+structure captured at the preprocessing stage. The mild underestimation of the 
+strongest correlations observed in \ref{figure_S5}~Fig is thus inherited from 
+the conditional independence assumption of the NB mixture, and not introduced 
+by the mechanistic model.
+
+\item \textbf{Regulatory gene dynamics:} Temporal profiles of key regulators show 
+close agreement between original and simulated data in both mean expression 
+and variance (Fig~\ref{figure6}J--O). This is a particularly stringent test: 
+errors in GRN inference typically manifest as incorrect dynamics for highly 
+connected genes \cite{ventre2023one}, so this agreement is consistent with the inferred GRN capturing genuine regulatory relationships.
+
+\item \textbf{Cell type proportions:} Cell type compositions are highly consistent between original and simulated data across all timepoints (Fig~\ref{figure6}G--I), confirming that the mechanistic model reproduces the temporal evolution of major cell populations. Nevertheless, for the Kameneva and Schiebinger datasets, some intermediate or rare populations (in particular the “Intermediate” cells in Kameneva and the trophoblasts in Schiebinger) are less well captured, leading to noticeable discrepancies in their inferred proportions. These cell types correspond to subtle variations in expression patterns that are difficult to represent with a statistical model using only two modes per gene, as further discussed in Section~\ref{discussion}.
+
+
+\end{itemize}
+
+These results demonstrate that the mechanistic model inferred by CardamomOT constitutes a generative model of single-cell transcriptomic dynamics and supports its use for predictive perturbation analysis.
+
+\subsection{\texorpdfstring{\firstreview{In silico perturbations predict some observed experimental outcomes and identify potential key regulators}}{In silico perturbations predict some observed experimental outcomes and identify potential key regulators}}
+\label{subsec:perturbation_analysis}
+
+A central objective of GRN inference is to assess whether the inferred network can predict the effects of unseen genetic perturbations on cell fate decisions. The calibrated CardamomOT model enables such analyses by simulating the system under controlled perturbation scenarios. We considered two types of perturbations: (i) gene knockout (KO), where a gene's protein level is fixed at zero and its basal parameter $\beta_i$ is set to $-1000$, and (ii) gene overexpression (OV), where a gene's protein level is fixed at one (in the rescaled units of Equation~\eqref{eq:deterministic_model}) and its basal parameter $\beta_i$ is set to $+1000$ (this value ensuring that it overwhelms the effect of any other regulatory interaction).
+
+For each perturbation, we generated simulated temporal snapshots using the same time points and sampling scheme as in the original datasets. We quantified perturbation effects by measuring changes in cell-type proportions, with cell identities assigned using the Random Forest classifiers described in Section~\ref{subsec:statistical_model_validation}. To isolate the contribution of the inferred GRN, we compared experimental data to: (i) wild-type simulated data (\textit{sim WT} in Fig~\ref{figure7}); (ii) simulated data with the perturbation applied from $t = 0$ (\textit{Sim perturb}); and (iii) wild-type simulated data in which only the expression level of the perturbed gene was replaced by its value under perturbation (\textit{Sim single}). 
+
+\firstreview{Condition (iii) was included to assess whether the observed effects could be
+explained solely by changes in the expression of the perturbed gene, for example
+if that gene acts as a strong marker of a given cell type.}
+
+To further quantify these differences, we computed
+$\chi^2$ statistics comparing the cell-type distributions of Sim perturb and Sim single
+from the base simulated dataset shown in Fig~\ref{figure7}.
+Because the number of simulated cells differs by orders of magnitude across datasets
+(from a few thousand for Semrau and Kameneva to $\sim$250{,}000 for Schiebinger),
+using the raw cell counts would make the $\chi^2$ statistic strongly dependent on dataset
+size, so we rescaled the compared proportions to a fixed, dataset-independent
+pseudo-count of 100 cells per cell type before computing it. We emphasize that this rescaled statistic is used as a comparative measure of
+compositional separation rather than as a formal inferential test on the underlying
+biological system.
+Variability across independent stochastic replicates is reported separately as
+error bars in Fig~\ref{figure7}.
+All perturbations except CHGA KO produced compositional shifts larger than the run-to-run variability observed across stochastic replicates, supporting that the
+predicted effects are not solely driven by marginal changes in the perturbed gene expression
+but arise from the propagated regulatory interactions encoded in the inferred GRN.
+
+
+\paragraph{ES differentiation (Semrau).}
+Using the GRN inferred from the ES differentiation time series, we evaluated 
+the effect of {Dnmt3a} overexpression. The model predicts that {Dnmt3a} 
+OV substantially alters cell fate distribution, with a marked increase in the 
+proportion of neuroectoderm cells at the expense of pluripotent cells compared 
+to the wild-type simulation (Fig~\ref{figure7}A). The predicted regulatory 
+targets of {Dnmt3a} are predominantly inhibitory, including key pluripotency 
+regulators such as {Esrrb}, {Zfp42} and {Klf4}, as well as 
+lineage-associated factors such as {Hoxb2} and {Zic3}, consistent 
+with a broad repressive role on the pluripotency transcriptional program.
+
+This result is particularly interesting from a mechanistic perspective. Unlike 
+\firstreview{TFs} that directly contact the transcription machinery, {Dnmt3a} 
+is a de novo DNA methyltransferase that acts indirectly on gene regulation through 
+CpG methylation — a well-documented epigenetic mark generally associated with 
+gene expression silencing \cite{bird2002dna}. The predominantly inhibitory interactions 
+inferred by CardamomOT for {Dnmt3a} are consistent with its known epigenetic 
+function, illustrating that the GRN model is capable of capturing indirect 
+regulatory effects mediated by epigenetic mechanisms and is not restricted to 
+direct physical interactions between \firstreview{TFs} and their targets.
+
+\paragraph{Sympathoadrenal differentiation (Kameneva).}  
+The analysis in \cite{gandrillon2025inferring} identified four important regulators: {CHGA}, {STMN2}, {CHGB} and {HMGB2}. We quantified the effect on the proportion of chromaffin cells and sympathoblasts, the principal cell types in sympathoadrenal development, associated with the perturbation of each of these genes alone or in combination. Among the tested perturbations, KO of CHGA alone produced a moderate reduction in the proportion of sympathoblasts, of an amplitude comparable to the run-to-run variability of the simulations (Fig~\ref{figure7}B). The combined perturbation consisting of CHGA KO and STMN2 OV, by contrast, markedly amplified this effect, nearly abolishing the emergence of sympathoblasts in the simulations (Fig~\ref{figure7}C). This contrast between the single and combined perturbations indicates that the inferred GRN captures non-trivial combinatorial effects on lineage commitment, rather than a simple additive contribution of each perturbed gene. We emphasize that, unlike the Obox6 and Zfp42 predictions discussed below, these two perturbations have not been tested experimentally and should be read as model-generated hypotheses.
+
+\paragraph{MEF-to-iPSC reprogramming (Schiebinger).}  
+In \cite{schiebinger2019optimal}, the authors reported that OV of {Obox6} and {Zfp42}, 
+two \firstreview{TFs} not typically included in standard reprogramming cocktails, 
+enhances the efficiency of MEF-to-iPSC conversion. To assess whether CardamomOT 
+recovers this behavior, we inferred a GRN from the reprogramming time series and 
+simulated the effect of {Obox6} and {Zfp42} OV.
+
+Both perturbations consistently increase the proportion of iPSC-like cells \firstreview{in the simulations} compared 
+to control conditions (Fig~\ref{figure7}D,E), in line with the experimental 
+observations of \cite{schiebinger2019optimal}, with a similar magnitude of 
+effect (for {Obox6} OV we measure an increase from $\sim 20\%$ to $\sim 40\%$ of iPSC-like cells). Importantly, this effect emerges solely from the temporal scRNA-seq data 
+used for inference, without incorporating any prior knowledge about the function 
+of these factors.
+
+The predicted regulatory targets provide a mechanistic interpretation of this 
+behavior. {Zfp42} OV activates several pluripotency-associated genes, 
+including {Esrrb} and {Dppa4} (Fig~\ref{figure7}D), both well-known 
+markers of the naive pluripotent state. {Obox6} OV similarly activates 
+{Gata3}, {Lncenc1} and {Mycn}, and notably upregulates {Zfp42} 
+itself (Fig~\ref{figure7}E), suggesting a positive feedback loop between the 
+two factors that may reinforce the iPSC-like state. Rather than inducing broad 
+lineage rewiring, both perturbations thus appear to strengthen specific components 
+of the pluripotency transcriptional program already present in the data.
+
+Taken together, these perturbation \firstreview{prediction} analyses support the use of CardamomOT as a framework for generating quantitative, mechanistically interpretable perturbation hypotheses across distinct biological systems. While experimental validation remains essential, the consistency observed across multiple datasets supports the relevance of the inferred networks for studying cell fate control.
+\firstreview{Interestingly, the four regulators perturbed in silico above (Dnmt3a, CHGA, Obox6, Zfp42) represent only a fraction of the candidate hub regulators inferred across datasets (S3 Table), which also includes regulators with little or no established role in the corresponding process — e.g. the lncRNA HAND2-AS1 (Kameneva) or the poorly annotated Dmrtc2 and Gm26917 (Schiebinger). Their co-occurrence with validated regulators in the same ranked output illustrates the potential of CardamomOT to generate testable hypotheses about uncharacterized genes, though such candidates should be weighed against biological plausibility — a subset of top Kameneva hits (RPL30, ATP5F1E) instead reflect housekeeping expression rather than genuine regulatory activity (Section~\ref{subsec:grn_inference_benchmark}).}
+
+
+\section{Discussion}
+\label{discussion}
+
+Taken together, our results demonstrate that CardamomOT provides a complete pipeline for mechanistic analysis of temporal scRNA-seq data. Starting from raw count matrices and timepoint labels, the method (i) infers mechanistic parameters and identifies discrete regulatory states (Section~\ref{subsec:statistical_model_validation}), (ii) reconstructs both GRN structure and hidden protein trajectories through an iterative refinement procedure (Sections~\ref{subsec:grn_inference_benchmark} and~\ref{subsec:trajectory_inference_validation}), (iii) generates a calibrated model that can simulate realistic cellular dynamics (Section~\ref{subsec:generative_model_validation}), and (iv) predicts the effects of unseen genetic perturbations (Section~\ref{subsec:perturbation_analysis}).
+
+\paragraph{A unified framework for GRN inference and trajectory reconstruction}
+Most existing approaches treat GRN inference and trajectory inference as separate problems: GRN inference methods typically assume static or quasi-static cellular states, while trajectory inference methods focus on reconstructing cell-to-cell transitions without explicitly modeling gene regulation. CardamomOT unifies these perspectives through an iterative procedure that alternates between reconstructing protein trajectories given a GRN (Step~1) and updating the GRN structure given the trajectories (Step~2), until convergence.
+
+This iterative refinement is essential for achieving high inference accuracy: removing the iterative loop substantially degrades performance (Fig~\ref{figure4}), confirming that the GRN and trajectories contain complementary information that must be jointly optimized. At the same time, the method converges to similar GRN structures regardless of initialization in our benchmarks (Fig~\ref{figure4}A--E), suggesting that the temporal structure of the data provides sufficient constraints to escape local optima for the network topologies and temporal resolutions tested here.
+
+The mechanistic foundation of CardamomOT also enables trajectory reconstruction at the protein level rather than the mRNA level. As shown in Section~\ref{subsec:trajectory_inference_validation}, mRNA-based velocity fields exhibit poor agreement with the underlying mechanistic dynamics due to the highly stochastic, bursty nature of transcription, whereas protein dynamics are slower and more deterministic, providing a more stable substrate for trajectory inference. By explicitly modeling the conditional distribution of mRNA given protein levels, CardamomOT captures both bursty transcriptional dynamics and relatively smooth, GRN-driven protein trajectories, achieving high cosine similarities with respect to the ground-truth velocity fields (Fig~\ref{figure5}B).
+
+\paragraph{Mechanistic modeling improves interpretability and generalizability}
+Unlike black-box or purely data-driven approaches, CardamomOT is grounded in an explicit mechanistic model of gene expression derived from biophysical principles. This provides two key advantages. First, the inferred parameters—burst frequencies, burst sizes, and protein degradation rates—are directly interpretable in terms of molecular processes, enabling biological insights beyond network topology alone. Second, by incorporating prior knowledge about kinetic rates and known regulatory interactions, CardamomOT can leverage existing biological information to improve inference, particularly in data-limited regimes.
+
+Robustness to uncertainty in kinetic parameters is a practical consideration for experimental applications. As shown in Fig~\ref{figure4}F, CardamomOT maintains high inference accuracy even when protein degradation rates are perturbed by up to $\pm 50\%$ from their true values, and clearly outperforms baseline methods even with perturbations as large as $\pm 200$--$400\%$. This robustness arises because the iterative procedure jointly optimizes the GRN structure and the inferred trajectories, allowing the method to partially compensate for kinetic misspecification through adjustments in the network topology.
+
+The same mechanistic framework allows CardamomOT to function as a generative model. Once calibrated on experimental data, the model can simulate new datasets that closely reproduce the original observations in terms of marginal distributions, low-dimensional embeddings, and cell-type proportions (Fig~\ref{figure6}). This generative capability simultaneously provides a stringent test of whether the model has captured the essential dynamics of the system and enables \textit{in silico} experimentation, including perturbation analysis and prediction of unseen cell fates.
+
+\paragraph{Perturbation predictions and biological relevance of inferred GRNs}
+A central objective of GRN inference is to predict how unseen genetic perturbations
+will alter cellular behavior. CardamomOT addresses this challenge by simulating
+perturbations directly within the calibrated mechanistic model. In the experimental
+systems analyzed here, the inferred GRNs \firstreview{are consistent with the
+perturbation effects for which independent experimental evidence is available,} such as
+the impact of \firstreview{TF} overexpression on reprogramming efficiency, and suggest
+additional regulatory relationships that could be tested experimentally. These results
+indicate that CardamomOT infers network topology \firstreview{together with regulatory
+relationships that appear functionally interpretable, although the available validation
+remains limited to a small number of cases.} \firstreview{It should also be noted that inferred GRNs are directly constrained by the information contained in the observed trajectories, which depends both on the nature of the data and on the gene set selected; we return to this point below.}
+
+\paragraph{Optimal transport as a mechanistic framework for trajectory inference}
+The use of \firstreview{OT} for trajectory inference has become widespread in recent years, motivated by the idea that cells follow trajectories that minimize a cost in gene expression space. However, most OT-based methods implicitly assume that cells follow Brownian motion with a constant diffusion rate, corresponding to a Euclidean or squared-Euclidean cost. This assumption lacks biological justification and ignores the mechanistic constraints imposed by gene regulation \cite{fournie2025cell}.
+
+CardamomOT extends this framework by introducing a mechanistic cost function that explicitly incorporates the GRN structure. The cost of transitioning between two cells is determined by how well the GRN-predicted burst rates match the observed burst modes, naturally accounting for the fact that gene expression dynamics are driven by protein-mediated regulation rather than passive diffusion. Our approach can be viewed as a generalization of \firstreview{RF} to the case where the reference process is a nonlinear mechanistic model instead of a linear Ornstein–Uhlenbeck process, making it suitable for modeling complex regulatory dynamics.
+
+From a theoretical perspective, there is a direct connection between our approach and Wasserstein Lagrangian Flows, which incorporate potential energy constraints into the OT Lagrangian. CardamomOT implicitly defines a Lagrangian derived from the mechanistic model via stochastic calculus (see Appendix~\ref{supp_OT}), but avoids the computational burden of parametrizing all characteristics of the process and time-varying measures with neural networks. By discretizing the problem into a sequence of pairwise OT problems constrained by the mechanistic model, CardamomOT achieves computational efficiency while retaining mechanistic interpretability.
+
+\paragraph{Scalability and identifiability}
+In our experiments, the computational cost of CardamomOT was not the primary bottleneck: inference on networks \firstreview{of 100 genes and 1000 cells completed in under a minute (\ref{tableS2}~Table), while inference of approximately 100 genes and} tens of thousands of cells completed in about one hour. The true limiting factor is the identifiability of the network parameters. With $n$ genes and a fully connected GRN, the number of parameters scales as $n^2$, \textit{i.e} $10^4$ for $n=100$; beyond this scale, \firstreview{even though running CardamomOT is temporally achievable,} the information contained in temporal snapshots may be insufficient to robustly constrain the network structure.
+
+Importantly, from a theoretical perspective, the convergence of our 
+iterative procedure to a global optimum is not guaranteed, as the 
+objective \eqref{eq:schrodinger_basins} is non-convex in general; 
+the empirical convergence observed throughout our experiments should 
+therefore be understood as convergence to a stationary point, whose 
+quality depends on the temporal structure and richness of the data.
+
+The stochasticity inherent in our iterative procedure nevertheless provides a natural framework to assess identifiability of this optimum. Indeed, the OT coupling sampled at each iteration introduces randomness analogous to the temperature parameter in simulated annealing, so that different initializations may in principle converge to different local optima. In practice, our benchmark experiments (Fig~\ref{figure4}A--E) show that the method converges to similar GRN structures regardless of initialization, suggesting that the temporal data provide sufficient constraints for the simulated networks tested here. \firstreview{Inferred GRNs on experimental data show mean cosine similarities of independent runs ranging from 0.777 to 0.859 depending on the dataset, i.e. reproducible overall network structure with residual run-to-run variability (\ref{figure_S9}~Fig). Since these more complex
+settings do not provide the same constraints, we recommend running inference on 3--5 random
+seeds for networks $>$ 20 genes; high variability in edge weights across runs would signal poor
+identifiability for that edge.} Systematically exploring the variability of optimal networks across different initial couplings would therefore be a principled way to quantify identifiability as a function of network size and data richness, and represents a promising direction for future work.
+
+Addressing identifiability for larger networks will require incorporating external biological constraints. Prior regulatory information—such as \firstreview{TF} binding databases, ChIP-seq data, or resources like OmniPath \cite{turei2016omnipath} can substantially reduce the effective parameter space. A prior network construction option using the Neko tool \cite{ruscone2025neko} via OmniPath is already available in the CardamomOT repository.
+
+A complementary strategy concerns the structure of the basin space. While the number of theoretically possible basins for $n$ genes is $2^n$, biological systems occupy only a small fraction of this space: not all combinations of per-gene expression modes are accessible, as cell types correspond to coherent regulatory states. It is therefore both possible and desirable to introduce an intermediate step that restricts the basin space using prior biological information—such as known cell types or unsupervised clustering—combined with mixture-of-experts approaches to construct burst-mode vectors from per-gene univariate NB fits. Reducing the effective basin space in this way would simultaneously improve identifiability and computational efficiency.
+
+\firstreview{
+\paragraph{Gene selection and its influence on inferred networks}
+All experimental applications presented here operate on gene subsets rather than the full
+transcriptome (Appendix~\ref{supp_experimental}), which is not a neutral choice. Regulatory
+activity can only be attributed to included genes, so that the influence of an omitted regulator
+is redistributed among retained genes and inferred edges may summarise indirect regulation
+through unobserved intermediates. Selecting genes from known markers or previously characterised
+modules, as for the Semrau and Kameneva datasets, additionally biases the network toward
+well-characterised regulatory axes: the agreement between inferred hub regulators and those of
+the original studies (Section~\ref{subsec:grn_inference_benchmark}) is thus a consistency check
+on a pre-selected gene set rather than an unbiased recovery.
+More fundamentally, the selected gene set should be recognised as a form of prior information in
+its own right, on the same footing as the prior constraints on individual edges discussed above:
+it determines which regulatory relationships the method is allowed to express at all --- and,
+when made on statistical grounds alone, which spurious ones it is likely to produce, as
+illustrated by the housekeeping genes ranking among the top inferred Kameneva regulators
+(Section~\ref{subsec:grn_inference_benchmark}). We therefore recommend making this choice
+explicit and, where possible, splitting it in two. Prior biological knowledge of the system under
+study, or the specific hypotheses motivating the analysis, can be used to designate a core set of
+nodes of interest; the regulatory context of these nodes can then be assembled semi-automatically,
+by combining curated interaction databases such as those discussed above with data-driven
+discovery --- for instance by using a genome-wide scalable inference method to obtain a
+coarse-grained approximation of the global network, such as OTVelo \cite{zhao2025optimal}, and
+retaining the genes that this approximation places in the neighbourhood of the core set.
+Automating this construction is the object of ongoing work in our team.
+This also clarifies the practical form taken by the identifiability ceiling discussed above,
+which is best understood as a trade-off between the size of the network considered and the amount
+of prior structure imposed on its edges. The fewer prior constraints one is willing to inject on
+the structure of $\theta$, the smaller the gene set must be --- we recommend not exceeding of the
+order of $100$ genes in the fully unconstrained setting; conversely, the more prior structure one accepts, whether
+through a prior network $\theta^0$ or through zeroed entries,
+the larger the gene set can be for a comparable level of reliability.
+}
+
+
+
+\paragraph{Diagonal coefficients and auto-regulatory interactions}
+A specificity of CardamomOT concerns the diagonal coefficients of the inferred GRN matrix, i.e. auto-regulatory interactions. As visible in the inferred networks on experimental datasets (\ref{figure_S1}--\ref{figure_S3}~Figs), CardamomOT tends to infer non-negligible auto-activations for many variable genes. This is not a numerical artifact: in the mechanistic model, the combination of a positive auto-activation with a negative basal parameter $\beta_i$ is the most parsimonious way to produce bistability for an isolated gene, and therefore to reproduce transitions between two expression modes. It is thus natural that for any gene exhibiting bimodal dynamics, the model partially attributes this variability to self-reinforcing regulation \cite{bonnaffoux2019wasabi}.
+
+Importantly, this tendency is not purely a mathematical convenience. Positive auto-regulatory feedbacks are well documented as a mechanism for stabilizing cell states and enhancing the robustness of cell fate decisions \cite{ferrell2002self}. In this sense, the auto-activations inferred by CardamomOT may reflect genuine biological regulatory structure rather than overfitting. We note that most GRN inference methods explicitly exclude diagonal coefficients from inference \cite{sanguinetti2019gene}, which circumvents this question entirely at the cost of ignoring a potentially relevant class of interactions.
+
+In CardamomOT, we deliberately choose not to apply a specific penalty on diagonal coefficients, allowing the model to use auto-activation as an explanation for observed bimodality when this is consistent with the data. In practice, however, we recommend that users of CardamomOT specify in advance whether auto-regulatory interactions are biologically plausible for their system of interest—for instance by setting the corresponding entries of the prior network $\theta^0$ to zero—in order to prevent the model from systematically routing unexplained variability through this pathway.
+
+\paragraph{Limitations and future directions}
+Despite its strengths, the current version of CardamomOT has limitations that open avenues for future development.\\
+
+\textit{Model assumptions.} CardamomOT relies on several simplifying 
+assumptions, including the two-state model of transcription, the bursty 
+regime approximation ($k_{on} \ll k_{off}$), and the use of sigmoids to 
+model GRN-dependent burst rates. While these assumptions are well supported 
+by experimental observations \cite{da2025two, dar2012transcriptional}, they 
+may not hold universally across all genes and cell types. Notably, an 
+extension to softmax activation functions — which generalize the sigmoid to 
+genes exhibiting more than two expression modes — is already implemented in 
+the CardamomOT package. In practice, this extension introduces a preliminary 
+model selection step in which the optimal number of modes per gene is 
+determined from a user-specified maximum using an AIC criterion; the full 
+inference pipeline is then adapted to handle gene-specific numbers of modes. 
+This comes at the cost of reduced interpretability, since each mode 
+transition is governed by a distinct regulatory network. Further extensions 
+could incorporate even more flexible regulatory functions, such as Hill 
+functions \cite{ismail2025exploring, herbachinferring2017} or more complex neural 
+network-based parametrizations \cite{huang2026deep}, albeit with further 
+reductions in interpretability and identifiability.\\
+
+\textit{Temporal resolution.} CardamomOT requires temporal snapshots at multiple time points, and its performance depends on the temporal resolution. The OT assumption—that between two consecutive timepoints, mode transitions are direct with no unobserved intermediate states—is well justified when timepoints are sufficiently close relative to regulatory timescales. For datasets with sparse or irregular sampling, rapid transient dynamics involving multiple mode transitions may be missed. Extending the framework to accommodate intermediate unobserved switches would improve robustness, albeit at an additional computational cost.\\
+
+\textit{Proliferation and death.}
+The current implementation of CardamomOT assumes that cells neither 
+proliferate nor die between consecutive timepoints, so that the marginal 
+constraints of the OT problem are strictly enforced. This assumption is 
+reasonable for many differentiation datasets, but may break down in 
+systems with significant proliferation or apoptosis. Incorporating growth 
+and death rates into our framework is however conceptually straightforward 
+within the \firstreview{OT} formalism. When proliferation and death rates 
+can be estimated from external data — for instance from cell cycle markers 
+or DNA content, as in \cite{schiebinger2019optimal} — they can be directly 
+folded into the marginal constraints of the OT problem following the 
+same strategy. When lineage tracing data are available alongside 
+transcriptomic snapshots, the observed lineage tree can be used to 
+deconvolve the contribution of proliferation from that of regulatory 
+dynamics, following an approach analogous to \cite{ventre2023trajectory}. In the 
+absence of such prior information, unbalanced \firstreview{OT} \cite{chizat2018scaling} 
+provides a natural relaxation of the marginal constraints, allowing the 
+inferred coupling to account for unequal cell numbers across timepoints 
+without requiring explicit knowledge of proliferation or death rates. 
+These extensions lie beyond the scope of the present work, but are 
+actively being integrated into the CardamomOT package.\\
+
+\textit{Multi-omic extensions.} Beyond the transport formalism itself, the mechanistic model underlying 
+CardamomOT can also be enriched to accommodate richer data modalities. 
+In its current form, it describes gene expression dynamics at the level 
+of mRNA and protein, and is thus naturally suited to transcriptomic data, 
+possibly augmented by proteomic measurements. Multi-omic single-cell 
+technologies are now increasingly available, jointly profiling 
+transcription and chromatin accessibility (e.g. scATAC-seq), DNA 
+methylation, or histone modifications. These data provide complementary 
+mechanistic information: chromatin accessibility reflects the regulatory 
+state of promoters and enhancers, and is directly related to the 
+promoter-switching dynamics modeled here; methylation provides information 
+about longer-term epigenetic memory. Extending our mechanistic framework 
+to jointly model transcription, chromatin dynamics, and other epigenomic 
+layers is a major direction for future work. Our inference approach — 
+grounded in the Schrödinger problem and relying on state-of-the-art OT 
+tools — is well suited to be extended to such richer mechanistic models, 
+and we anticipate that this line of development will substantially expand 
+the scope and biological resolution of mechanistic single-cell inference.\\
+
+In summary, CardamomOT provides a principled, mechanistically grounded framework 
+for joint GRN inference, trajectory reconstruction, and generative modeling from 
+temporal snapshots of single-cell transcriptomic data. By explicitly modeling the 
+stochastic dynamics of gene expression and integrating \firstreview{OT} theory 
+with mechanistic modeling, it advances our ability to decode the regulatory programs 
+that govern cellular differentiation and reprogramming. Beyond inference, the 
+calibrated model functions as \firstreview{an in-silico representation} of the biological system: it can 
+simulate realistic single-cell datasets, predict the effects of unseen genetic 
+perturbations, and generate mechanistically interpretable hypotheses about cell 
+fate control — \firstreview{capabilities that are not jointly addressed by the comparator methods considered here.}
+
+We anticipate that CardamomOT will be most powerful in biological systems where 
+prior knowledge is available to constrain the inference: systems with characterized 
+protein kinetics, known regulatory modules, or existing network resources such as 
+OmniPath \cite{turei2016omnipath}. As single-cell atlases of well-studied differentiation and reprogramming systems mature, such settings are increasingly common, and CardamomOT could become a useful reference tool for mechanistic 
+single-cell analysis, bridging the gap between data-driven trajectory inference 
+and biophysically grounded models of gene regulation.
+
+
+\begin{appendices}
+
+\section{Detailed interpolation procedure}
+\label{app_detailed_interpolation}
+
+We describe how the candidate protein vector $P_{c,c'}(t_{j+1})$ is computed for each pair of cells $(c, c')$ at consecutive timepoints $(t_j, t_{j+1})$. The goal is to integrate the protein ODE~\eqref{eq:deterministic_model} between $t_j$ and $t_{j+1}$, while allowing for a single switch of the driving burst mode.
+
+\paragraph{Switching time.}
+For each source cell $c$ and each gene $i$, we introduce a \emph{switching parameter} $\alpha_{c,i} \in (0,1)$ that encodes the fraction of the interval $[t_j, t_{j+1}]$ elapsed before the mode of gene $i$ transitions from the basin of $c$ to that of $c'$. Formally, the protein of gene $i$ evolves under basin $z_c$ on $[t_j,\, t_j + \alpha_{c,i}\Delta t]$ and under basin $z_{c'}$ on $[t_j + \alpha_{c,i}\Delta t,\, t_{j+1}]$, where $\Delta t = t_{j+1} - t_j$.
+
+\paragraph{Explicit interpolation formula.}
+Since~\eqref{eq:deterministic_model} is a linear ODE with piecewise constant driving term, it can be integrated in closed form on each sub-interval. For gene $i$, denoting by $m_{c,i}:=\mathbf{k}_{z_c,i}/k_{1,i}$ and $m_{c',i}:=\mathbf{k}_{z_{c'},i}/k_{1,i}$ the normalized basin modes at $t_j$ and $t_{j+1}$, respectively, we obtain
+\begin{equation}
+\label{eq:interp_simple}
+P_{c,c',i}(t_{j+1}) = m_{c',i} + \left(m_{c,i} + \bigl(P_{c,i}(t_j) - m_{c,i}\bigr)e^{-d_{1,i}\,\alpha_{c,i}\Delta t} - m_{c',i}\right)e^{-d_{1,i}(1-\alpha_{c,i})\Delta t}.
+\end{equation}
+
+\paragraph{Use of observed mRNAs as mode proxies.}
+To better reflect the stochasticity of mRNA in the full model~\eqref{eq:full_model}, we replace the normalized basin modes $m_{c,i}$ by observed (normalized) mRNA counts $M_{c,i}\,\frac{d_{0, i} k_{\mathrm{off}, i}s_{0,i}}{k_{1,i}s_{0,i}}$ as proxies for the true modes. This provides a richer, cell-specific signal while introducing only a mild approximation (gene expression noise and mode uncertainty are partially conflated). In practice, this proxy yields more realistic protein trajectories, especially when cells within the same basin show broad mRNA distributions.
+
+\paragraph{Iterative update of switching parameters.}
+The switching parameters $\alpha_{c,i}$ are updated at each iteration of the main loop. For a given cell $c$ at time $t_j$:
+\begin{enumerate}
+    \item For each gene $i$, we compute $P_{c,c',i}(t_{j+1}; \alpha)$ using~\eqref{eq:interp_simple} at a grid of candidate values $\alpha \in \{1/n_{\mathrm{pas}}, 2/n_{\mathrm{pas}}, \dots, 1\}$.
+    \item We evaluate $k^{\theta}_{\mathrm{on},i}\bigl(P_{c,c'}(t_{j+1};\alpha)\bigr)$ for each candidate $\alpha$ under the current GRN $\theta$.
+    \item We set $\alpha_{c,i}$ to the smallest $\alpha$ such that the predicted burst rate is closer to the target mode $\mathbf{k}_{z_{c'},i}$ than to the source mode $\mathbf{k}_{z_c,i}$, i.e. the earliest time at which the trajectory commits to the new basin.
+\end{enumerate}
+Genes for which the difference between source and target burst rates is very small (below a threshold $\delta := 0.1$) are left unchanged, as their switching time cannot be reliably identified from the data. This update scheme ensures that $\alpha_{c,i}$ progressively encodes the effective transition timing as the GRN estimate improves.
+
+\paragraph{Interpretation of the interpolation.}
+The interpolation described above can be interpreted as an approximate bridge for the mechanistic model~\eqref{eq:full_model}: by conditioning on observed mRNA states at both endpoints and integrating the protein equation with a single mode switch at time $\alpha\Delta t$, we obtain a deterministic approximation of the most probable protein path between the two observations. The iterative update of $\alpha$ refines this approximation alongside the GRN.
+
+\paragraph{Regime of validity.}
+\firstreview{Eq.~\eqref{eq:interp_simple} is not a numerical discretization of a nonlinear ODE.
+Within $[t_j,t_{j+1}]$ we replace $k^{\theta}_{\mathrm{on},i}(P(t))$ by a piecewise-constant
+driving term taking the two endpoint basin modes with a single switch at
+$t_j+\alpha_{c,i}\Delta t$; Eq.~\eqref{eq:deterministic_model} is then linear and
+Eq.~\eqref{eq:interp_simple} is its exact closed-form solution. The approximation therefore lies
+in the substitution --- the regulatory feedback is frozen within the interval --- and in the
+assumption that a single switch per gene suffices to describe it, together with the mRNA-proxy
+approximation stated above; the grid over $\alpha$ is a search over switching times, not a
+time-stepping scheme.}
+
+\firstreview{This piecewise-constant treatment concerns only the construction of candidate
+protein paths between two observed timepoints. The nonlinear, GRN-driven structure is retained
+wherever the network is estimated or used: in the OT cost of Eq.~\eqref{cost_matrix}, the GRN
+regression of Eq.~\eqref{eq:GRN_update} and the label refinement of
+Eq.~\eqref{eq:basins_update}; in the kinetic recalibration of Section~\ref{subsec:postproc},
+where the full field $v_1$ is integrated with an adaptive-step solver; and in the generative
+simulations, which sample the complete PDMP~\eqref{eq:full_model}. The linearity of
+Eq.~\eqref{eq:interp_simple} is thus a local device for generating transport candidates, not a
+linearization of the inferred dynamics.}
+
+\firstreview{Both approximations hold in the metastable, bursty and adiabatic regime already
+required by the model of Section~\ref{sec:mechanistic_model}: within a basin the driving mode is
+close to constant, and inter-basin transitions are rare and fast. Outside this regime the
+discrete-basin representation itself --- the mixture~\eqref{eq:beta_mixture} and its labels $z$
+--- ceases to describe the data, since cells can no longer be assigned to a small number of
+promoter-activity states. The interpolation therefore adds no restriction beyond those the
+mechanistic model already requires: the two approximations share a regime of validity and break
+down together. The remaining case, several switches within one interval, is the sampling-
+resolution limitation discussed in Section~\ref{discussion}.}
+
+\paragraph{Practical choice of $n_{\mathrm{pas}}$.}
+\firstreview{The number of grid points $n_{\mathrm{pas}}$ used to search for the switching
+time $\alpha_{c,i}$ (default $25$, and in practice further increased automatically so that at
+least one grid point falls within each unit of the inter-timepoint interval
+$\Delta t = t_{j+1}-t_j$) has little practical influence on the inferred trajectories once it
+is not chosen pathologically small. Because Eq.~\eqref{eq:interp_simple} varies smoothly
+in $\alpha$, the interpolation error introduced by a coarser grid is itself
+smooth. Moreover, $\alpha_{c,i}$ is
+re-estimated at every iteration of the main EM loop
+(Section~\ref{subsec:Trajectory_and_GRN_inference}) jointly with the GRN, so any residual
+discretization error from an early, coarse estimate is corrected over subsequent iterations.
+A sensitivity analysis under refinement of $n_{\mathrm{pas}}$ confirms this
+(\ref{figure_S11}~Fig): AUPR plateaus from $n_{\mathrm{pas}} \approx 4$ onwards on all four
+benchmark networks, and only the extreme value $n_{\mathrm{pas}} = 2$ — which removes
+essentially all timing resolution within an interval — degrades accuracy.}
+
+
+\section{Link with other model learning approaches}
+\label{supp_OT}
+
+We briefly explain how CardamomOT fits into the broader family of Schrödinger- and OT-based trajectory inference methods, and how it relates to \firstreview{RF}~\cite{zhang2024joint} and Wasserstein Lagrangian Flows~\cite{neklyudov2023computational}.
+
+\subsection{The Schrödinger problem as a template for trajectory inference}
+
+Let $Q$ be a reference path measure on gene expression trajectories over $[t_1, t_N]$. Given empirical marginals $\{\hat{P}_{t_j}\}_{j=1}^N$ from a time-stamped scRNA-seq dataset, the (multimarginal) Schrödinger problem seeks the path measure closest to $Q$ that matches the observed marginals:
+\begin{equation}
+\label{eq:schrodinger}
+P^* := \argmin_{P :\, P_{t_j} = \hat{P}_{t_j},\, \forall j}
+\mathbf{H}(P \mid Q),
+\end{equation}
+where $\mathbf{H}(P\mid Q)$ is the relative entropy (KL divergence) of $P$ with respect to $Q$. When $Q = W^\sigma$ is a Brownian motion with diffusion $\sigma$,~\eqref{eq:schrodinger} reduces to the entropic OT problem used in~\cite{schiebinger2019optimal}: its solution $P^*$ describes the most likely cellular trajectories under a free-diffusion prior. The two-marginal version between consecutive timepoints yields the classical Sinkhorn algorithm.
+
+In the diffusion setting,~\eqref{eq:schrodinger} can be reformulated as a variational problem with Lagrangian
+\begin{equation}
+\label{eq:Benamou}
+P^* = \argmin_{P:\, P_{t_j} = \hat{P}_{t_j}}
+\int_0^T \mathcal{L}(x(t), \dot{x}(t))\,dP_t,
+\qquad
+\mathcal{L}(x,v) = \frac{1}{2}\|v\|^2,
+\end{equation}
+which is the dynamic Benamou–Brénier formulation of OT~\cite{leonard2012schrodinger}. The choice of reference process $Q$ thus encodes a prior on cellular dynamics.
+
+\subsection{Reference Fitting and Wasserstein Lagrangian Flows}
+
+\paragraph{Reference Fitting.}
+\firstreview{RF}~\cite{zhang2024joint} replaces the Brownian reference by a linear Ornstein–Uhlenbeck (OU) process $U^\theta$, whose drift $A^\theta x$ is parametrized by a network matrix $\theta$. The corresponding problem reads
+\begin{equation}
+\label{eq:RF}
+\theta^* = \argmin_\theta
+\min_{P: P_{t_j} = \hat{P}_{t_j}}
+\mathbf{H}(P \mid U^\theta),
+\end{equation}
+where the inner minimization is again a Schrödinger problem (solved pairwise with Gaussian Sinkhorn), and the outer minimization fits the linear drift. This restricts the dynamics to linear systems and does not capture nonlinear GRN behaviour.
+
+\paragraph{Wasserstein Lagrangian Flows.}
+\firstreview{WLF}~\cite{neklyudov2023computational} instead modify the Lagrangian by adding a potential energy term $V(x)$:
+\begin{equation}
+\label{eq:WLF}
+P^* = \argmin_{P: P_{t_j} = \hat{P}_{t_j}}
+\int_0^T \mathcal{L}(x(t), \dot{x}(t))\,dP_t,
+\qquad
+\mathcal{L}(x,v) = \frac{1}{2}\|v\|^2 + V(x),
+\end{equation}
+where $V$ acts as a prior on the energy landscape of cells. All components (time-varying measures and drift) are learned jointly through neural networks, providing a flexible but computationally demanding framework.
+
+\subsection{CardamomOT as a mechanistic Schrödinger problem}
+
+In CardamomOT, the reference process is the GRN-driven model~\eqref{eq:full_model}, which belongs to the general class of PDMPs. This nonlinear, non-diffusive process induces a Markovian path measure on the basin space via the phenomenological model introduced in Section~\ref{sec:mechanistic_model}: the basin label $z_c(t)$ follows a Markov chain whose transition rates are determined by $\theta$ through a complex relationship involving the computation of mean first passage times between basins for protein dynamics, as explored in detail in previous work~\cite{ventre2020reduction}. We denote this path measure by $Q^\theta$.
+
+The Schrödinger problem on the basin space thus becomes
+\begin{equation}
+\label{eq:schrodinger_basins}
+\theta^* = \argmin_\theta
+\min_{Z: Z_{t_j} = \hat{Z}_{t_j}}
+\mathbf{H}(Z \mid Q^\theta),
+\end{equation}
+where $\hat{Z}_{t_j}$ is the empirical distribution of basin labels at time $t_j$, obtained in the preprocessing step. This is structurally analogous to~\eqref{eq:RF}, with the linear reference $U^\theta$ replaced by the mechanistic Markov chain $Q^\theta$ on the space of basins, whose rates depend on the non-linear underlying dynamics on proteins.
+
+\subsection[The EM loop as an iterative minimizer of (reference)]{The EM loop as an iterative minimizer of~\eqref{eq:schrodinger_basins}}
+
+The alternating optimization in CardamomOT (Steps~1–3 of Section~\ref{subsec:Trajectory_and_GRN_inference}) can be viewed as a coordinate-descent algorithm for~\eqref{eq:schrodinger_basins}.
+
+Minimizing over $Z$ with fixed $\theta$ (Step~1) corresponds to computing a Schrödinger bridge with a structured reference process $Q^\theta$ \cite{baradat2024convergence}, which provides a mechanistic justification for the cost in~\eqref{cost_matrix}. Indeed, basin dynamics can be viewed as the evolution of the effective activation state $k_{\mathrm{on}}^\theta(P(t))$, and are therefore driven by the underlying protein dynamics. In the metastable regime, where proteins follow the deterministic limit within each basin and undergo rare stochastic transitions between basins, this induces an effective dynamics on the space of basins whose associated action yields the cost in~\eqref{cost_matrix}.
+
+Minimizing over $\theta$ with fixed $Z$ (Step~2) is a regression step that fits the GRN to basin transitions, equivalent to maximizing a path likelihood for $Q^\theta$ along sampled trajectories. Step~3 updates the empirical marginals $\hat{Z}_{t_j}$ by refining basin labels consistently with the current $\theta$.
+
+Together, these steps define an iterative scheme converging toward a stationary point of~\eqref{eq:schrodinger_basins}, analogous to Iterative Proportional Fitting (Sinkhorn) but with a mechanistic reference process on the latent basin space.
+
+\subsection{Summary}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+Method & Reference process $Q$ & Lagrangian modification & Ambient space \\
+\midrule
+WOT / Sinkhorn~\cite{schiebinger2019optimal} & Brownian motion & None & mRNA \\
+\firstreview{RF}~\cite{zhang2024joint} & Linear OU & None & mRNA \\
+WLF~\cite{neklyudov2023computational} & Brownian motion & $V(x)$ & mRNA \\
+\textbf{CardamomOT} & \textbf{Non-linear PDMP \eqref{eq:full_model}} & \textbf{None} & \textbf{basin} \\
+\bottomrule
+\end{tabular}
+\caption{Positioning of CardamomOT within the Schrödinger/variational OT family. The key distinction is the use of a mechanistic, non-diffusive reference process defined on the latent basin space rather than on mRNA space.}
+\label{tab:schrodinger}
+\end{table}
+
+In summary, CardamomOT can be seen as a mechanistic generalization of \firstreview{RF}, using a nonlinear GRN-driven PDMP as reference instead of a linear SDE. The connection to WLF arises through the Lagrangian interpretation: the mechanistic GRN effectively defines an energy landscape that constrains inferred trajectories, but here this landscape is derived from biophysical modeling rather than learned from data.
+
+
+\section{Details on GRN inference for experimental datasets}
+\label{supp_experimental}
+
+This appendix provides additional detail on the gene selection procedure, the 
+stimulus nodes introduced in each experimental dataset, and the consistency 
+between their inferred targets and the known biology of each protocol. It 
+complements the summary given in Section~\ref{subsec:grn_inference_benchmark}.
+
+\paragraph{Gene selection.} For the Semrau and Kameneva datasets, all available 
+cells were used directly on the subset of genes identified in 
+\cite{ventre2023one} and \cite{gandrillon2025inferring}, respectively. For the 
+Schiebinger dataset, genes were selected as a combination of markers identified 
+in the original study \cite{schiebinger2019optimal} and dynamically variable 
+genes across timepoints, the latter being identified using a weighted measure 
+combining per-gene entropy and Wasserstein distances between consecutive 
+timepoint distributions, following \cite{gandrillon2025inferring}.
+
+\paragraph{Stimulus nodes.} Following the simulation framework described in 
+Section~\ref{subsec:simulation_temporal_snapshots}, a virtual stimulus gene is included in each 
+inferred network to represent the experimental perturbation applied at $t=0$. 
+For the Semrau dataset, this corresponds to the addition of retinoic acid, which 
+triggers ES cell differentiation \cite{Semrau_2017}; for the Schiebinger dataset, 
+it represents the doxycycline-induced expression of the OSKM reprogramming 
+factors \cite{schiebinger2019optimal}. For the Kameneva dataset, where cells are 
+ordered by pseudotime rather than experimental time and no clear exogenous 
+stimulus is applied, a stimulus gene is nonetheless included to push cells out of 
+their initial equilibrium state, but its contribution to the network is strongly 
+penalized via the prior regularization so that it does not dominate the inferred 
+regulatory interactions.
+
+Because the Schiebinger protocol involves two successive phases --- a serum/LIF medium in addition to an initial 
+doxycycline-induced expression of the OSKM reprogramming factors (days~0--8), 
+followed by withdrawal of doxycycline (days~8--18) \cite{schiebinger2019optimal} --- we introduced two 
+distinct stimulus nodes rather than a single averaged one: a Dox node active 
+during the induction phase (days~0--8), and a Serum node active throughout the 
+experiment (days~0--18).
+
+\paragraph{Consistency of inferred stimulus targets with known biology.} 
+The stimulus node inferred for the Semrau dataset corresponds to retinoic acid 
+(RA) and predominantly represses naive pluripotency regulators such as Esrrb, 
+Klf2 and Klf4, while activating Dnmt3a and Jarid2 (\ref{figure_S1}F~Fig), 
+broadly consistent with the known pro-differentiation effect of retinoic acid on 
+mouse embryonic stem cells. For the Schiebinger dataset, the inferred targets of 
+Dox include the lack of activation of the late pluripotency marker Dppa5a and the 
+epithelial gene Cldn7, consistent with the early phase of reprogramming preceding 
+the mesenchymal-to-epithelial transition (\ref{figure_S3}E~Fig). The Serum 
+node drives inhibition of Lox, a pro-EMT enzyme whose suppression is known to 
+facilitate mesenchymal-to-epithelial transition during reprogramming, alongside 
+repression of genes associated with inflammatory signaling (Ereg, Tnfrsf12a) 
+(\ref{figure_S3}G~Fig). Together, these stimulus-specific regulatory programs 
+are individually more interpretable than a single averaged node, and broadly 
+consistent with the known biology of the Schiebinger protocol.
+
+
+\end{appendices}
+
+
+\section*{Acknowledgment}
+We would like to especially thank Olivier Gandrillon for sharing the preprocessed dataset obtained from Kameneva et al. \cite{kameneva2021single}, critical reading of the manuscript and substantial help for testing and improving the Python package CardamomOT. We also thank all members of the Inria COMPO team, and of the Southrock consortium, for providing such stimulating working environment. 
+
+
+\newpage
+\printbibliography
+
+\begin{figure}
+\centering
+\fbox{\includegraphics[width=.8\textwidth]{figure_1.eps}}
+    \caption{
+CardamomOT infers gene regulatory networks (GRNs) and protein trajectories from temporal snapshots of scRNA-seq data using a mechanistic optimal transport framework. (A) The two-state gene expression model underlying the method, in which promoter switching rates are modulated by a GRN matrix $\theta$. (B) Input data consisting of independent scRNA-seq snapshots at successive timepoints. (C) Preprocessing step: a Negative Binomial mixture model is calibrated for each gene and timepoint, clustering cells into discrete promoter-activity basins. (D) Iterative EM-like inference cycle alternating between protein trajectory reconstruction via GRN-driven optimal transport (Step 1), GRN update by regression on reconstructed protein values (Step 2), and basin label refinement (Step 3). (E) The calibrated model is used as a generative module for simulating alternative trajectories and in silico perturbation experiments.}
+    \label{figure1}
+\end{figure}
+
+\begin{figure}
+\centering
+\includegraphics[width=.92\textwidth]{figure_2.eps}
+    \caption{
+(A–D) UMAP embeddings of reference scRNA-seq data (A, C) and data simulated from the 
+CardamomOT NB mixture model (B, D), colored by timepoint (A–B) and cell type (C–D), for 
+the Semrau, Kameneva and Schiebinger datasets. (E–F) Temporal profiles of mean $\pm$ SD 
+gene expression across all cells for selected key regulators, comparing reference data (gray) and model 
+simulations (red), for the Schiebinger (E) and Semrau (F) datasets. (G–H) Marginal mRNA 
+distributions at selected timepoints for S100a6 (G) and Col1a2 (H) in the Schiebinger dataset, showing close agreement 
+between model and reference data across all timepoints.}
+    \label{figure2}
+\end{figure}
+
+\begin{figure}
+\centering
+\includegraphics[width=\linewidth]{figure_3.eps}
+    \caption{CardamomOT outperforms competing methods on GRN inference benchmarks. Performance is measured by the Area Under the Precision-Recall curve (AUPR), averaged over 10 independent simulations per network. The dashed gray line indicates the random baseline. (A) Directed GRN inference from temporal snapshots on four benchmark network topologies (FN4, CN5, BN8, FN8) and tree networks of increasing size (5–100 genes). (B) Same comparison for undirected edge inference, including additional correlation-based methods (PIDC, Pearson). \firstreview{Boxplots throughout the figure show median, interquartile range (box) and 1.5x interquartile range (bars).}}
+    \label{figure3}
+\end{figure}
+
+\begin{figure}
+\centering
+\includegraphics[width=0.95\linewidth]{figure_4.eps}
+    \caption{(A–E) Directed GRN inference performance (AUPR) \firstreview{averaged over 10 independent simulations per network} comparing CardamomOT against three ablated variants: random OT initialization (random init), removal of the loop procedure (noloop), and their combination (random + noloop), on four benchmark networks and tree topologies of increasing size. (F) Robustness to uncertainty in protein degradation rates $d_1$: AUPR averaged across 10 independent simulations for all four benchmark networks when input degradation rates are perturbed from ±20\% to ±400\% of their true values, compared to the performance obtained with the real rates. \firstreview{(G) Robustness to dropout in input data: AUPR averaged across 10 independent simulations for all four benchmark networks for base data and 7 increasing levels of binomial dropout ranging from $0\%$ (no dropout, renamed real in the figure) to $90\%$. (H) Robustness in variability in timescales: AUPR averaged across 10 independent simulations for all four benchmark networks for base data and 7 increasing levels of variability in timepoint sampling. For each replicate, inter-timepoint gaps were drawn from $\text{Dirichlet}(\alpha = 1/\eta^2)$ with endpoints fixed, where $\eta$ ranges from $0$ (equispaced timepoints, renamed real in the figure) to $1$ (uniformly sampled timepoints). Boxplots throughout the figure show median, interquartile range (box) and 1.5x interquartile range (bars).}}
+    \label{figure4}
+\end{figure}
+
+\begin{figure}
+\centering
+\includegraphics[width=0.98\textwidth]{figure_5.eps}
+    \caption{Evaluation of the mRNA and protein velocity fields reconstruction on 
+    cross-sectional data for CardamomOT and Reference Fitting. (A--B) Weighted cosine similarity between the velocity fields 
+    predicted by CardamomOT and Reference Fitting and the mechanistic ground-truth velocity 
+    field, for mRNA (A) and protein (B), on four benchmark networks (BN8, FN8, CN5, FN4). 
+    Bars show the mean over 5 independent simulations; error bars indicate the standard error 
+    of the mean. (C--F) UMAP embeddings of RNA (C,E) 
+    and protein (D,F) expression of CN5 benchmark cells, overlaid with velocity stream plots 
+    from CardamomOT (C--D) and Reference Fitting (E--F). (G--H) UMAP of RNA (G) and inferred 
+    protein (H) data from the Schiebinger dataset, with 
+    CardamomOT velocity stream plots.}
+    \label{figure5}
+\end{figure}
+
+
+
+\begin{figure}
+\centering
+\includegraphics[width=.92\textwidth]{figure_6.eps}
+\caption{CardamomOT performs well as a generative model of protein and mRNA distributions. 
+UMAPs of reference (A,C,E) and simulated (B,D,F) data for 3 differentiation datasets. 
+Cell type composition for reference and simulated data across timepoints (G--I). Cell type 
+composition was inferred for simulated data by a random forest model trained on reference 
+data. (J--O) Temporal profiles of mean $\pm$ SD gene expression across all cells for selected key regulators, 
+comparing reference data (gray), Negative Binomial reconstruction (blue) and model 
+simulations (red), for Col4a2 in the Semrau dataset (J), STMN2 and CHGA in the Kameneva 
+dataset (K--L), and Obox6, Zfp42 and S100a6 in the Schiebinger dataset (M--O).}
+\label{figure6}
+\end{figure}
+
+
+\begin{figure}
+\centering
+\includegraphics[width=.85\textwidth]{figure_7.eps}
+\caption{In silico perturbations using the inferred GRNs \firstreview{can} recapitulate experimentally 
+observed effects. For each perturbation, three 
+panels are shown: (left) the regulatory network centered on the perturbed gene, showing 
+its top predicted targets with activation (green) and inhibition (red) edges; (middle) 
+cell type proportions comparing reference data, wild-type simulation (Sim WT), 
+simulation with only the perturbed gene modified (Sim single) and perturbed simulation (Sim perturb); (right) UMAP trajectories 
+for reference data, wild-type and perturbed simulations, colored by cell type. The $\chi^2$ test was computed on the base simulated dataset shown here; error bars show the standard deviation of cell-type proportions across $N = 5$ independent stochastic replicates.}
+\label{figure7}
+\end{figure}
+
+\clearpage
+
+
+\renewcommand{\thefigure}{S\arabic{figure}}
+\renewcommand{\thetable}{S\arabic{table}}
+\setcounter{figure}{0}
+\setcounter{table}{0}
+
+\section*{Supporting information}
+\captionsetup[figure]{labelformat=sinum}
+\captionsetup[table]{labelformat=sinum}
+
+\begin{table}[ht]
+\centering
+\caption{Comparison of reference parameters and parameters inferred by CardamomOT for different simulated datasets. Results show mean $\pm$ standard deviation across all genes.}
+\label{tableS1}
+\end{table}
+
+
+\begin{table}[ht]
+\centering
+\caption{Related to Fig~\ref{figure3}. Average runtime for inferring a network from datasets of 1000 cells simulated with tree-like networks for which the results of the inference are represented in Fig~\ref{figure3}, for the six algorithms that are used in the benchmark and 10 runs each. Timings measured on a 16-GB RAM, 2.4 GHz Intel Core i5 computer.}
+\label{tableS2}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Top 10 candidate hub regulators ranked by outgoing regulatory strength $\sum_{j\neq i}|\theta_{ij}|$ in the GRN inferred by \textsc{CardamomOT} for each experimental dataset, excluding virtual stimulus nodes. Values show mean $\pm$ standard deviation across 5 independent inference runs.}
+\label{tableS3}
+\end{table}
+
+\clearpage
+
+\makeatletter
+\let\origincludegraphics\includegraphics
+\renewcommand{\includegraphics}[2][]{}%
+\makeatother
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figureS1.eps}
+    \caption{Representation of the inferred gene regulatory network for the Semrau dataset. (A) Graph showing the top 70 edges of the GRN by absolute regulation strength, limited to a max of 5 incoming regulating edges for visualization. (B) Signed log1p transformed full GRN matrix representing the strength of all genes on each other, with lines being regulators and columns being targets. (C) Violin plot of dataset genes ranked by the sum of all their outgoing edges, with the top genes labeled. (D–G) Small GRN representation of the top regulators Hoxb2, Dnmt3a, RA and Lamb1, showing their top 8 regulatory targets.}
+    \label{figure_S1}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figureS2.eps}
+    \caption{Representation of the inferred gene regulatory network for the Kameneva dataset. (A) Graph showing the top 120 edges of the GRN by absolute regulation strength, limited to a max of 5 incoming regulating edges for visualization. (B) Signed log1p transformed full GRN matrix representing the strength of all genes on each other, with lines being regulators and columns being targets. (C) Violin plot of dataset genes ranked by the sum of all their outgoing edges, with the top genes labeled. (D–G) Small GRN representation of the top regulators RPL30, CHGA, MEG3 and POSTN, showing their top 8 regulatory targets.}
+    \label{figure_S2}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figureS3.eps}
+    \caption{Representation of the inferred gene regulatory network for the Schiebinger dataset. (A) Graph showing the top 100 edges of the GRN by absolute regulation strength, limited to a max of 5 incoming regulating edges for visualization. (B) Signed log1p transformed full GRN matrix representing the strength of all genes on each other, with lines being regulators and columns being targets. (C) Violin plot of dataset genes ranked by the sum of all their outgoing edges, with the top genes labeled. (D–G) Small GRN representation of the top regulators Fabp3 and Dppa5a, and of the two stimulus nodes Dox and Serum, showing their top 8 regulatory targets.}
+    \label{figure_S3}
+\end{figure}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figureS4.eps}
+    \caption{Marginal mRNA distributions for selected genes, showing (leftmost column) 
+    all timepoints joined and (remaining columns) three selected timepoints for each 
+    gene. Three of the main regulators were selected for the Semrau (A--C), Kameneva 
+    (D--F) and Schiebinger (G--I) datasets, namely \textit{Col4a2}, \textit{Hoxb2} and \textit{Dnmt3a} for 
+    Semrau, \textit{CHGA}, \textit{RPL30} and \textit{MEG3} for Kameneva, and \textit{Dppa5a}, \textit{Xist} and \textit{Fabp3} for 
+    Schiebinger. Marginal distributions are shown for the reference data (gray) and 
+    the Negative Binomial mixture model (red).}
+    \label{figure_S4}
+\end{figure}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=.9\textwidth]{figureS5.eps}
+    \caption{Pairwise gene expression correlation structure across reference, NB mixture 
+    and simulated datasets, for the Semrau (A--C), Kameneva (D--F) and Schiebinger 
+    (G--I) datasets. (A, D, G) Scatter plots of pairwise gene correlations computed 
+    from the reference data versus those computed from the NB mixture model, with the 
+    dashed line indicating perfect agreement. (B, E, H) Same comparison between the NB 
+    mixture model and the full generative model simulations. (C, F, I) Dataset-to-dataset 
+    correlation matrices summarizing the Pearson correlation between the vectors of all 
+    pairwise gene correlations across the three datasets (Reference, NB, Sim), providing 
+    a global measure of how well each model reproduces the correlation structure of the 
+    reference data.}
+    \label{figure_S5}
+\end{figure}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figureS6.eps}
+    \caption{UMAPs of reference and CardamomOT inferred protein trajectories for the 
+    (A--B) FN4, (C--D) CN5, (E--F) BN8 and (G--H) FN8 datasets. (A, C, E, G) UMAPs 
+    of reference simulated protein trajectories are reproduced by (B, D, F, H) inferred 
+    protein trajectories from the reference protein-associated RNA data.}
+    \label{figure_S6}
+\end{figure}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figureS7.eps}
+    \caption{Evaluation of the cell-to-cell coupling accuracy on true 
+    trajectory data for CardamomOT and Reference Fitting. (A--B) OT descendant distance for mRNA (A) and protein (B): Bars show the mean over 5 
+    independent simulations of true trajectories per network; error bars indicate the standard 
+    error. (C--F) UMAP embeddings of RNA (C,E) and protein (D,F) expression of CN5 benchmark 
+    cells simulated as true trajectories, with velocity stream plots derived from the inferred 
+    couplings of CardamomOT (C--D) and Reference Fitting (E--F). (G--H) UMAP of RNA (G) 
+    and inferred protein (H) data from Schiebinger et al.\ 2019 \cite{schiebinger2019optimal}, 
+    with CardamomOT velocity stream plots derived from the inferred trajectories.}
+    \label{figure_S7}
+\end{figure}
+
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.9\textwidth]{figureS8.eps}%
+  \caption{%
+Evolution of the loss function and AUPR score during training for the networks FN4, CN5, BN8, and FN8 used in the Benchmark of Figs~\ref{figure3} and \ref{figure4}. (A) Mean training loss at each optimization step, averaged over 10 independent runs, with shaded bands indicating the uncertainty (standard error). (B) The corresponding evolution of the AUPR score over the same training steps and networks.%
+}
+  \label{figure_S8}
+\end{figure}
+
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=1.0\textwidth]{figureS9.eps}%
+  \caption{%
+\firstreview{For each of the three experimental datasets (Semrau, Kameneva, 
+Schiebinger), the inference was repeated $N=5$ times independently with 
+distinct random initializations. All $\binom{N}{2} = 10$ pairwise comparisons 
+between runs are reported symmetrically, without any reference run.
+\textbf{(A)}~Pairwise cosine similarity between GRN weight matrices across 
+independent runs, displayed as violin plots with individual pairwise values 
+overlaid. The mean ($\mu$) and standard deviation ($\sigma$) are reported below 
+each violin. 
+\textbf{(B)}~Pairwise Area Under the Precision-Recall curve (AUPR) as a 
+function of the number of top-ranked genes considered ($k = 10, 20, 30, 40, 
+50$), where genes are ranked by their average L1 degree across all runs. For 
+each pair of runs $(i, j)$, the GRN from run $i$ is binarized 
+(edges with $|w| > 0.5$) and used as ground truth to evaluate the ranking 
+provided by run $j$, and vice versa; the two resulting AUPR values are 
+averaged. Thin lines represent individual pairwise comparisons; the bold line 
+and shaded band show the mean $\pm 1\sigma$ across pairs. The dashed grey line 
+indicates the random baseline (network sparsity at each $k$). AUPR values 
+substantially exceed the random baseline across all datasets and values of $k$, 
+confirming that the inferred GRN topology is reproducible across independent 
+runs.}}
+  \label{figure_S9}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=1.0\textwidth]{figureS10.eps}%
+  \caption{%
+\firstreview{CardamomOT simulations broadly preserve the global structure and temporal ordering in trajectory-preserving PHATE embeddings. PHATE embeddings of reference (A,C,E) and simulated (B,D,F) RNA data for the 3 differentiation datasets used in the study.}}
+  \label{figure_S10}
+\end{figure}
+
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{figureS11.eps}
+    \caption{Sensitivity of GRN inference accuracy to the
+switching-time grid resolution $n_{\mathrm{pas}}$. (A) AUPR of CardamomOT across
+$n_{\mathrm{pas}}$ levels for each simulated benchmark network (FN4, FN8, CN5, BN8),
+shown as mean $\pm$ SD over 10 independent simulations. (B) AUPR for the same runs averaged
+across the four benchmark networks. Boxplots show median, interquartile range (box) and
+1.5x interquartile range (bars). The dashed gray line indicates the random baseline.}
+    \label{figure_S11}
+\end{figure}
+
+\end{document}
+
+

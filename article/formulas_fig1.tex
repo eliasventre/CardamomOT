@@ -1,0 +1,118 @@
+\documentclass[a4paper, 11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[backend=biber,style=numeric]{biblatex}
+% Proper maths and encoding
+\usepackage{amsmath}
+\usepackage[normalem]{ulem}
+\usepackage[margin=1in]{geometry}
+% Algorithms
+\usepackage{algorithm}
+\usepackage{algpseudocode} % fournit environment algorithmic
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{amsfonts}
+\usepackage{enumitem} 
+\usepackage{dsfont}
+\usepackage{booktabs}
+
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\begin{document}
+
+1)
+
+\begin{equation}
+\label{kon_function_test}
+1) \quad k^{\theta}_{\mathrm{on}}(P_{global})
+ = {\color{DarkRed} k_{0}} + ({\color{DarkGreen} k_{1}}-{\color{DarkRed} k_{0}})f(P_{global},\theta)
+\end{equation}
+
+\begin{equation}
+2) \quad 
+{\color{orange}M(t)} \xrightarrow{k_{on}^\theta(P_{global}(t))} {\color{orange}M(t)} + \mathcal{E}\left(\frac{k_{\mathrm{off}}}{s_{0}}\right), \quad  
+\frac{d{\color{orange}M}}{dt} = - d_{0}{\color{orange}M}
+\end{equation}
+
+
+
+\[
+3) \quad \frac{d{\color{blue}P}}{dt} = s_{1} {\color{orange}M} - d_{1}{\color{blue}P}
+\]
+
+C
+
+\begin{equation}
+2) \quad {\color{orange}M(t)}\mid P_{global}(t)
+ \sim \mathrm{NB}\!\left(
+     \frac{k^{\theta}_{\mathrm{on}}(P_{global}(t))}{d_{0}},
+     \frac{k_{\mathrm{off}}}{s_{0}}
+   \right)
+\label{eq:beta_qs}
+\end{equation}
+
+Step1
+
+\begin{equation}
+    \label{cost_matrix}
+    C^j_{c_{t_j},c'} = \mathrm{loss}\!\left(k_{\mathrm{on}}^{\theta}\!\left(P_{c_{t_j},c'}(t_{j+1})\right),\, \mathbf{k}_{z_{c'}}\right),
+\end{equation}
+
+
+1.1) For every cell-cell coupling,
+
+we find the potential $P_{c_{t_j},c'}$ :
+
+$M_{c_{t_j}}$
+$M_{c'}$
+$P_{c_{t_j},c'}$
+
+1.2) We update the GRN-based cost, 
+
+and using $P_{c_{t_j}}$ and $P_{c_{t_j},c'}$ , 
+
+$P_{c'}$ is sampled following $OT_C^{j}(\widehat P_{t_j}, \widehat P_{t_{j+1}})$ :
+
+\begin{equation}
+    \label{eq:proteins_update}
+    \mathrm{OT}
+_C^{j}(\widehat P_{t_j}, \widehat P_{t_{j+1}})=\argmin\limits_{\pi}\left\{\sum\limits_{{c \in \widehat P_{t_j}}} \sum\limits_{{c' \in \widehat P_{t_{j+1}}}} C^j_{c, c'} \pi(c, c') + Reg \right\}
+\end{equation}
+
+Step 2
+
+\begin{equation}
+\theta^{\ast}
+   = \arg\min_{\theta}
+      \sum_{c \in \widehat P}
+      \mathrm{loss}(
+         k^{\theta}_{\mathrm{on}}\!\big(P_c\big)
+         , \mathbf{k}_{z_{c}})
+      + Reg
+\label{eq:GRN_update}
+\end{equation}
+
+Step 3
+
+\begin{equation}
+\label{eq:basins_update}
+\gamma^* = \argmin_{\gamma}\{\sum_{z \in Z}
+      \sum_{c \in \widehat P}-\left(\ln\left(\mathrm{Pr}_c(z)\right) + \varepsilon \ln\left(1 - \mathrm{loss}(
+         k^{\theta}_{\mathrm{on}}\!\big(P_c\big)
+         , \mathbf{k}_{z_{c}})\right)\right) \gamma(c, z)\}
+\end{equation}
+
+such that : $\sum\limits_{c \in \widehat P}\gamma(c, z) = \sum\limits_{c \in \widehat P}\mathrm{Pr}_c(z)$, and
+$\sum\limits_{z \in \widehat Z}\gamma(c, z) = 1$. Cells are assigned $z_c = \argmax \limits_z \gamma^*(c, z)$ 
+
+
+
+
+
+Simul
+\begin{equation}
+\theta, d_{0}, d_{1}, \frac{k_{\mathrm{off}}}{s_{0}}, M(t_{0})...
+\end{equation}
+
+
+\end{document}
