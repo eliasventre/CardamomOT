@@ -1195,7 +1195,8 @@ class NetworkModel:
                             stim_vals=np.asarray(self._stim_schedule[times[cnt + 1]], dtype=float),
                             scale_proteins=self.scale_proteins
                         )
-                alphas = Parallel(n_jobs=min(len(times) - 1, os.cpu_count() or 1))(
+                # Same pool size as every other Parallel call: a different n_jobs makes loky respawn workers
+                alphas = Parallel(n_jobs=-1)(
                     alpha_task(cnt, time) for cnt, time in enumerate(times[:-1]))
                 for cnt, alpha_cnt in enumerate(alphas):
                     y_alpha[cnt] = alpha_cnt
@@ -1936,7 +1937,7 @@ class NetworkModel:
                         lambda_mlp=self.lambda_mlp,
                         g_obs_train=g_obs_all[idx] if g_obs_all is not None else None)
 
-                results = Parallel(n_jobs=n_jobs_deg)(
+                results = Parallel(n_jobs=-1)(  # same pool size everywhere (no loky worker respawn)
                     delayed(seeded_call)(task_seed(self.seed, 3, t), run_main_inference_degradation_prot, t)
                     for t in range(0, len(times)-1)
                 )
