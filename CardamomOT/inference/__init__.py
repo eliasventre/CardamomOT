@@ -1,8 +1,7 @@
 """
 Inference of the network model.
 """
-from .network import inference_network
-from .network_final import inference_network_pytorch
+from .network import inference_network, active_regulators, PrevProt, signed_floor
 from .trajectory import filter_network, minimal_repetition_choice, inference_alpha, find_next_prot, my_otdistance, count_errors, kon_ref_vector
 from .mixture import NegativeBinomialMixtureEM, predict_resp
 from .simulations import simulate_next_prot_ode, simulate_next_prot_pdmp
@@ -11,7 +10,7 @@ from .degradations import compare_trajectories_umap, train_kon_correction_mlp, i
 from .proliferations import train_proliferation_mlp
 
 
-__all__ = ['inference_network',  'inference_network_pytorch', 'filter_network',
+__all__ = ['inference_network', 'active_regulators', 'PrevProt', 'signed_floor', 'filter_network',
            'minimal_repetition_choice', 'inference_alpha', 'find_next_prot', 'my_otdistance', 'count_errors', 'kon_ref_vector',
            'NegativeBinomialMixtureEM', 'predict_resp',
            'simulate_next_prot_ode', 'simulate_next_prot_pdmp',

@@ -237,10 +237,6 @@ All source files in `CardamomOT/inference/` have been thoroughly documented and 
   - PDMP simulations (BurstyPDMP)
   - Synthetic trajectory generation
 
-- **[network_final.py](CardamomOT/inference/network_final.py)** - Final network processing
-  - Network cleanup and validation
-  - Edge ranking and filtering
-  - Result export
 
 ---
 
@@ -269,8 +265,7 @@ CardamomOT/
 │   │   ├── degradations.py
 │   │   ├── pretreatment.py
 │   │   ├── trajectory.py
-│   │   ├── simulations.py
-│   │   └── network_final.py
+│   │   └── simulations.py
 │   │
 │   ├── model/                    ← Model definitions
 │   └── tools/                    ← Visualization and analysis tools

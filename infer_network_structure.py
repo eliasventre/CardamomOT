@@ -144,7 +144,7 @@ def main(argv):
         if common_genes:
             sub_df = ref_df.loc[common_genes, [c for c in common_genes if c in ref_df.columns]]
             print(f"[infer_network_structure] shape of ref_network gene block = {sub_df.shape}")
-            ref_mat = np.abs(sub_df.to_numpy())
+            ref_mat = sub_df.to_numpy()  # signed: |v| > 1 forces the edge sign
             row_idxs = [ns + genes_only.index(g) for g in sub_df.index]
             col_idxs = [ns + genes_only.index(g) for g in sub_df.columns]
             for n in range(model.n_networks):
@@ -164,7 +164,7 @@ def main(argv):
         _common_ref = [g for g in genes_only if g in _ref_df.index]
         if _common_ref:
             _sub = _ref_df.loc[_common_ref, [c for c in _common_ref if c in _ref_df.columns]]
-            _ref_mat = np.abs(_sub.to_numpy())
+            _ref_mat = _sub.to_numpy()  # signed: |v| > 1 forces the edge sign
             _row_idxs = [ns + genes_only.index(g) for g in _sub.index]
             _col_idxs = [ns + genes_only.index(g) for g in _sub.columns]
             for _n in range(model.n_networks):
@@ -194,11 +194,11 @@ def main(argv):
             _vals = _ref_df.to_numpy().astype(float)
             if _vals.shape[0] == G_tot:
                 # Full matrix including stimulus provided
-                _block = np.abs(_vals)
+                _block = _vals
             else:
                 # Gene-only matrix: embed into gene block
                 _block = np.zeros((G_tot, G_tot))
-                _block[ns:ns + _n_genes, ns:ns + _n_genes] = np.abs(_vals)
+                _block[ns:ns + _n_genes, ns:ns + _n_genes] = _vals
             for _n in range(model.n_networks):
                 model.ref_network[:, :, _n] = _block
 

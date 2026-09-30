@@ -7,7 +7,7 @@ This script infers the burst kinetics parameters (mixture model) from temporal
 scRNA-seq data.
 
 Usage:
-    python infer_mixture.py -i <project_path> -s <split> [-m <mean_threshold>]
+    python infer_mixture.py -i <project_path> -s <split> [-m <mean_threshold>] [--published-version] [--soft-em-refinement]
 """
 
 import sys
@@ -34,9 +34,12 @@ def main(argv):
     mean_forcing = -1
     force_basins = -1
     temporal_basins = -1
+    published_version = False
+    soft_em_refinement = False
 
     try:
-        opts, args = getopt.getopt(argv, "hi:s:m:f:b:", ["input=", "split=", "mean-forcing=", "force-basins=", "temporal-basins="])
+        opts, args = getopt.getopt(argv, "hi:s:m:f:b:", ["input=", "split=", "mean-forcing=", "force-basins=", "temporal-basins=",
+                                                        "published-version", "soft-em-refinement"])
     except getopt.GetoptError:
         print("Error: Invalid arguments. Use: infer_mixture.py -i <project> -s <split> [-m <mean_forcing>] [-f <force_basins>] [-b <temporal_basins>]")
         sys.exit(2)
@@ -51,6 +54,10 @@ def main(argv):
             force_basins = float(arg)
         if opt in ("-b", "--temporal-basins"):
             temporal_basins = int(arg)
+        if opt == "--published-version":
+            published_version = True
+        if opt == "--soft-em-refinement":
+            soft_em_refinement = True
 
     p = '{}/'.format(inputfile)
 
@@ -94,6 +101,8 @@ def main(argv):
         model.force_basins = force_basins
     if temporal_basins >= 0:
         model.temporal_basins = temporal_basins
+    model.published_version = published_version
+    model.soft_em_refinement = soft_em_refinement
     if verb:
         print(f"[infer_mixture] force_basins={model.force_basins}, temporal_basins={model.temporal_basins}")
     if mean_forcing >= 0:

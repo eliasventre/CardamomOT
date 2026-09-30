@@ -58,7 +58,7 @@ To bias network inference toward known biology, first build a prior network from
 cardamomot step prepare_reference_network -i my_project -d 3
 ```
 
-This generates `Data/ref_network.csv`, a gene × gene binary (or weighted) interaction matrix. The `--prior` parameter then controls how strongly edges absent from this prior are penalised.
+This generates `Data/ref_network.csv`, a gene × gene binary (or weighted) interaction matrix. The `--prior` parameter then controls how strongly edges absent from this prior are penalised. Values are signed weights: `0` marks an absent edge, `0 < |v| ≤ 1` leaves the sign free but makes the edge cost `1/|v|` more than a sure edge (in both the inference and the refinement, without reducing its maximal strength), and `|v| > 1` marks a sure edge whose sign is forced (`> 1` activation, `< -1` inhibition). Weights produced by `prepare_reference_network` lie in `[-1, 1]`, so they never force a sign.
 
 | `--prior` value | Effect |
 |---|---|

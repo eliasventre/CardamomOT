@@ -27,6 +27,7 @@ Output files:
 import sys; sys.path += ['../']
 import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta
+from CardamomOT.inference import signed_floor
 import getopt
 import anndata as ad
 import pandas as pd
@@ -159,7 +160,7 @@ def main(argv):
             if common_genes:
                 sub_df = ref_df.loc[common_genes, [c for c in common_genes if c in ref_df.columns]]
                 print(f"[infer_network_simul] ref_network gene block = {sub_df.shape}")
-                ref_mat = np.abs(sub_df.to_numpy())
+                ref_mat = sub_df.to_numpy()  # signed: |v| > 1 forces the edge sign
                 row_idxs = [ns + genes_only.index(g) for g in sub_df.index]
                 col_idxs = [ns + genes_only.index(g) for g in sub_df.columns]
                 for n in range(model.n_networks):
@@ -173,7 +174,7 @@ def main(argv):
     else:
         print("[infer_network_simul] No reference network found, using inferred network only")
 
-    model.ref_network = np.maximum(model.prior_network_pen, model.ref_network)
+    model.ref_network = signed_floor(model.ref_network, model.prior_network_pen)  # keeps signed priors
     model.ref_network[:ns, :] = model.stimulus
 
     # ─── LOAD INTER_SIMUL_REF (optional) ────────────────────────────────

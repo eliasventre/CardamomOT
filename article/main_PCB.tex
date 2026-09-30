@@ -415,10 +415,10 @@ gene, with an average of $85\%$--$93\%$ correct classification across the datase
 
 For experimental datasets, where ground truth is unavailable, we assessed the quality of the statistical model fit through multiple metrics:
 \begin{itemize}
-    \item \textbf{Low-dimensional embeddings:} We performed UMAP dimensionality reduction on both the original scRNA-seq data and data simulated from the calibrated statistical model. The simulated data preserved the overall temporal structure of the experimental data in UMAP space (Fig~\ref{figure2}A,B), indicating that the statistical model captures the essential features of the gene expression landscape. In all comparisons using UMAPs throughout the paper, a low-dimensional embedding is learned from the concatenated dataset and the coordinates are then used to plot each dataset separately.
-    \item \textbf{Marginal distributions:} The inferred NB mixture models \firstreview{are consistent with} the observed marginal distributions and temporal patterns of gene expression for all timepoints, as illustrated in Fig~\ref{figure2}E--H for selected genes exhibiting strong connectivity in the inferred GRN of each dataset (\ref{figure_S1}--\ref{figure_S3}~Figs).
+    \item \textbf{Low-dimensional embeddings:} We performed UMAP dimensionality reduction on both the original scRNA-seq data and data simulated from the calibrated statistical model. The simulated data preserved the overall temporal structure of the experimental data in UMAP space (Fig~\ref{figure2}A, \ref{figure2}B), indicating that the statistical model captures the essential features of the gene expression landscape. In all comparisons using UMAPs throughout the paper, a low-dimensional embedding is learned from the concatenated dataset and the coordinates are then used to plot each dataset separately.
+    \item \textbf{Marginal distributions:} The inferred NB mixture models \firstreview{are consistent with} the observed marginal distributions and temporal patterns of gene expression for all timepoints, as illustrated in Fig~\ref{figure2}E--\ref{figure2}H for selected genes exhibiting strong connectivity in the inferred GRN of each dataset (\ref{figure_S1}--\ref{figure_S3}~Figs).
     \item \textbf{Correlations:} We assessed the ability of the NB mixture model to reproduce pairwise gene expression correlations observed in the reference data (\ref{figure_S5}~Fig). The inferred model captures the overall correlation structure, with gene pair correlations in the NB mixture closely tracking those in the reference data across all three datasets. However, the strongest correlations tend to be slightly underestimated. This is consistent with a known limitation of the NB mixture framework: by assuming conditional independence of genes given the basin label, the model cannot capture residual correlations between genes that remain correlated within individual basins. As a result, intra-basin co-regulation between highly correlated genes is partially lost, leading to a mild attenuation of the highest correlation values. 
-    \item \textbf{Cell type identification:} We trained Random Forest classifiers on the experimental data using cell type annotations (when available) or clustering-based labels, and evaluated their performance on data simulated from the calibrated statistical model. The classifiers achieved high accuracy on reconstructing the relative proportions of cell types (Fig~\ref{figure2}C,D), demonstrating that the inferred basin labels correspond to biologically meaningful cell states. This evaluation strategy, based on cross-dataset classification, has become standard in single-cell analysis \cite{stuart2019comprehensive} and provides an objective measure of how well the statistical model captures cell type-specific expression patterns.
+    \item \textbf{Cell type identification:} We trained Random Forest classifiers on the experimental data using cell type annotations (when available) or clustering-based labels, and evaluated their performance on data simulated from the calibrated statistical model. The classifiers achieved high accuracy on reconstructing the relative proportions of cell types (Fig~\ref{figure2}C, \ref{figure2}D), demonstrating that the inferred basin labels correspond to biologically meaningful cell states. This evaluation strategy, based on cross-dataset classification, has become standard in single-cell analysis \cite{stuart2019comprehensive} and provides an objective measure of how well the statistical model captures cell type-specific expression patterns.
     These results are particularly striking for the Kameneva and Schiebinger datasets, which exhibit non-trivial branching dynamics that are shown to be well distinguished by the statistical model.
 \end{itemize}
 
@@ -453,7 +453,7 @@ a certain network size. This identifiability ceiling is further discussed in
 Section~\ref{discussion}.
 
 \paragraph{Iterative refinement significantly improves GRN inference accuracy.}
-To assess the contribution of the iterative refinement procedure (Steps~1--3 in Section~\ref{subsec:Trajectory_and_GRN_inference}), we compared CardamomOT against several ablated versions: (i) a version that directly returns the network and trajectories inferred after the first round of the iterative procedure, i.e.\ the network computed from the trajectories associated with an OT coupling between basins; (ii) a version with random initialization of the OT coupling instead of the \firstreview{OT}-based initialization; and (iii) a version combining both modifications. The full CardamomOT method consistently outperformed ablated versions (i) and (iii) (Fig~\ref{figure4}A--E), demonstrating that the iterative refinement procedure does contribute to improved inference accuracy. Remarkably, the iterative procedure converged to similar GRN structures regardless of initialization (compare “CardamomOT” and “random init” in Fig~\ref{figure4}A--E), suggesting that the benchmark networks exhibit sufficient identifiability for the method to escape local optima.
+To assess the contribution of the iterative refinement procedure (Steps~1--3 in Section~\ref{subsec:Trajectory_and_GRN_inference}), we compared CardamomOT against several ablated versions: (i) a version that directly returns the network and trajectories inferred after the first round of the iterative procedure, i.e.\ the network computed from the trajectories associated with an OT coupling between basins; (ii) a version with random initialization of the OT coupling instead of the \firstreview{OT}-based initialization; and (iii) a version combining both modifications. The full CardamomOT method consistently outperformed ablated versions (i) and (iii) (Fig~\ref{figure4}A--\ref{figure4}E), demonstrating that the iterative refinement procedure does contribute to improved inference accuracy. Remarkably, the iterative procedure converged to similar GRN structures regardless of initialization (compare “CardamomOT” and “random init” in Fig~\ref{figure4}A--\ref{figure4}E), suggesting that the benchmark networks exhibit sufficient identifiability for the method to escape local optima.
 
 \paragraph{CardamomOT is robust with respect to prior estimation of kinetic rates.}
 A critical advantage of CardamomOT over CARDAMOM is that it directly incorporates protein degradation rates $d_1$ into the inference procedure (see Equation~\eqref{eq:deterministic_model} and Step~1 of Section~\ref{subsec:Trajectory_and_GRN_inference}), allowing a much better approximation of protein trajectories than the quasi-static approximation of the previous method.
@@ -505,7 +505,7 @@ process instead of a misspecified linear one --- which is why it outperforms bot
 statement is therefore that the value of an OT step depends on how well the reference process
 matches the true dynamics, not on the presence or absence of trajectory inference per se.
 
-The ablation study of Fig 4A–E supports this reading directly. The \texttt{noloop} variant returns the network obtained after a single round of the procedure, without the iterative refinement of Steps 1–3, performing a single round of OT on the burst modes. Its accuracy is accordingly lower than that of the full method — substantially so on BN8, yet it remains above RF on all four benchmark networks (compare Fig~\ref{figure4}A–D with Fig~\ref{figure3}A).
+The ablation study of Fig 4A–E supports this reading directly. The \texttt{noloop} variant returns the network obtained after a single round of the procedure, without the iterative refinement of Steps 1–3, performing a single round of OT on the burst modes. Its accuracy is accordingly lower than that of the full method — substantially so on BN8, yet it remains above RF on all four benchmark networks (compare Fig~\ref{figure4}A--\ref{figure4}D with Fig~\ref{figure3}A).
 
 \paragraph{GRN inference for experimental datasets.}
 We applied CardamomOT to the three experimental datasets to obtain GRN structures
@@ -631,7 +631,7 @@ complexity of the inference procedure, the fully calibrated model reproduces the
 experimental data with a quality comparable to the NB mixture model alone:
 \begin{itemize}
 \item \textbf{Low-dimensional embeddings:} Original and simulated cells overlap 
-extensively in joint mRNA UMAP space (Fig~\ref{figure6}A--F), confirming that the 
+extensively in joint mRNA UMAP space (Fig~\ref{figure6}A--\ref{figure6}F), confirming that the 
 mechanistic model, driven by the inferred GRN and protein dynamics, 
 captures the global structure of the gene expression landscape while 
 exhibiting realistic stochastic variability. \firstreview{This analysis was repeated using the trajectory-preserving method PHATE \cite{Moon2019}, providing qualitatively consistent visualization of the global trajectory structure (\ref{figure_S10}~Fig).}
@@ -648,11 +648,11 @@ by the mechanistic model.
 
 \item \textbf{Regulatory gene dynamics:} Temporal profiles of key regulators show 
 close agreement between original and simulated data in both mean expression 
-and variance (Fig~\ref{figure6}J--O). This is a particularly stringent test: 
+and variance (Fig~\ref{figure6}J--\ref{figure6}O). This is a particularly stringent test: 
 errors in GRN inference typically manifest as incorrect dynamics for highly 
 connected genes \cite{ventre2023one}, so this agreement is consistent with the inferred GRN capturing genuine regulatory relationships.
 
-\item \textbf{Cell type proportions:} Cell type compositions are highly consistent between original and simulated data across all timepoints (Fig~\ref{figure6}G--I), confirming that the mechanistic model reproduces the temporal evolution of major cell populations. Nevertheless, for the Kameneva and Schiebinger datasets, some intermediate or rare populations (in particular the “Intermediate” cells in Kameneva and the trophoblasts in Schiebinger) are less well captured, leading to noticeable discrepancies in their inferred proportions. These cell types correspond to subtle variations in expression patterns that are difficult to represent with a statistical model using only two modes per gene, as further discussed in Section~\ref{discussion}.
+\item \textbf{Cell type proportions:} Cell type compositions are highly consistent between original and simulated data across all timepoints (Fig~\ref{figure6}G--\ref{figure6}I), confirming that the mechanistic model reproduces the temporal evolution of major cell populations. Nevertheless, for the Kameneva and Schiebinger datasets, some intermediate or rare populations (in particular the “Intermediate” cells in Kameneva and the trophoblasts in Schiebinger) are less well captured, leading to noticeable discrepancies in their inferred proportions. These cell types correspond to subtle variations in expression patterns that are difficult to represent with a statistical model using only two modes per gene, as further discussed in Section~\ref{discussion}.
 
 
 \end{itemize}
@@ -719,7 +719,7 @@ recovers this behavior, we inferred a GRN from the reprogramming time series and
 simulated the effect of {Obox6} and {Zfp42} OV.
 
 Both perturbations consistently increase the proportion of iPSC-like cells \firstreview{in the simulations} compared 
-to control conditions (Fig~\ref{figure7}D,E), in line with the experimental 
+to control conditions (Fig~\ref{figure7}D, \ref{figure7}E), in line with the experimental 
 observations of \cite{schiebinger2019optimal}, with a similar magnitude of 
 effect (for {Obox6} OV we measure an increase from $\sim 20\%$ to $\sim 40\%$ of iPSC-like cells). Importantly, this effect emerges solely from the temporal scRNA-seq data 
 used for inference, without incorporating any prior knowledge about the function 
@@ -747,7 +747,7 @@ Taken together, our results demonstrate that CardamomOT provides a complete pipe
 \paragraph{A unified framework for GRN inference and trajectory reconstruction}
 Most existing approaches treat GRN inference and trajectory inference as separate problems: GRN inference methods typically assume static or quasi-static cellular states, while trajectory inference methods focus on reconstructing cell-to-cell transitions without explicitly modeling gene regulation. CardamomOT unifies these perspectives through an iterative procedure that alternates between reconstructing protein trajectories given a GRN (Step~1) and updating the GRN structure given the trajectories (Step~2), until convergence.
 
-This iterative refinement is essential for achieving high inference accuracy: removing the iterative loop substantially degrades performance (Fig~\ref{figure4}), confirming that the GRN and trajectories contain complementary information that must be jointly optimized. At the same time, the method converges to similar GRN structures regardless of initialization in our benchmarks (Fig~\ref{figure4}A--E), suggesting that the temporal structure of the data provides sufficient constraints to escape local optima for the network topologies and temporal resolutions tested here.
+This iterative refinement is essential for achieving high inference accuracy: removing the iterative loop substantially degrades performance (Fig~\ref{figure4}), confirming that the GRN and trajectories contain complementary information that must be jointly optimized. At the same time, the method converges to similar GRN structures regardless of initialization in our benchmarks (Fig~\ref{figure4}A--\ref{figure4}E), suggesting that the temporal structure of the data provides sufficient constraints to escape local optima for the network topologies and temporal resolutions tested here.
 
 The mechanistic foundation of CardamomOT also enables trajectory reconstruction at the protein level rather than the mRNA level. As shown in Section~\ref{subsec:trajectory_inference_validation}, mRNA-based velocity fields exhibit poor agreement with the underlying mechanistic dynamics due to the highly stochastic, bursty nature of transcription, whereas protein dynamics are slower and more deterministic, providing a more stable substrate for trajectory inference. By explicitly modeling the conditional distribution of mRNA given protein levels, CardamomOT captures both bursty transcriptional dynamics and relatively smooth, GRN-driven protein trajectories, achieving high cosine similarities with respect to the ground-truth velocity fields (Fig~\ref{figure5}B).
 
@@ -787,7 +787,7 @@ the empirical convergence observed throughout our experiments should
 therefore be understood as convergence to a stationary point, whose 
 quality depends on the temporal structure and richness of the data.
 
-The stochasticity inherent in our iterative procedure nevertheless provides a natural framework to assess identifiability of this optimum. Indeed, the OT coupling sampled at each iteration introduces randomness analogous to the temperature parameter in simulated annealing, so that different initializations may in principle converge to different local optima. In practice, our benchmark experiments (Fig~\ref{figure4}A--E) show that the method converges to similar GRN structures regardless of initialization, suggesting that the temporal data provide sufficient constraints for the simulated networks tested here. \firstreview{Inferred GRNs on experimental data show mean cosine similarities of independent runs ranging from 0.777 to 0.859 depending on the dataset, i.e. reproducible overall network structure with residual run-to-run variability (\ref{figure_S9}~Fig). Since these more complex
+The stochasticity inherent in our iterative procedure nevertheless provides a natural framework to assess identifiability of this optimum. Indeed, the OT coupling sampled at each iteration introduces randomness analogous to the temperature parameter in simulated annealing, so that different initializations may in principle converge to different local optima. In practice, our benchmark experiments (Fig~\ref{figure4}A--\ref{figure4}E) show that the method converges to similar GRN structures regardless of initialization, suggesting that the temporal data provide sufficient constraints for the simulated networks tested here. \firstreview{Inferred GRNs on experimental data show mean cosine similarities of independent runs ranging from 0.777 to 0.859 depending on the dataset, i.e. reproducible overall network structure with residual run-to-run variability (\ref{figure_S9}~Fig). Since these more complex
 settings do not provide the same constraints, we recommend running inference on 3--5 random
 seeds for networks $>$ 20 genes; high variability in edge weights across runs would signal poor
 identifiability for that edge.} Systematically exploring the variability of optimal networks across different initial couplings would therefore be a principled way to quantify identifiability as a function of network size and data richness, and represents a promising direction for future work.
@@ -1076,6 +1076,8 @@ Together, these steps define an iterative scheme converging toward a stationary 
 
 \subsection{Summary}
 
+In summary, CardamomOT can be seen as a mechanistic generalization of \firstreview{RF}, using a nonlinear GRN-driven PDMP as reference instead of a linear SDE (Table~\ref{tab:tab1}). The connection to WLF arises through the Lagrangian interpretation: the mechanistic GRN effectively defines an energy landscape that constrains inferred trajectories, but here this landscape is derived from biophysical modeling rather than learned from data.
+
 \begin{table}[h]
 \centering
 \begin{tabular}{lccc}
@@ -1089,11 +1091,8 @@ WLF~\cite{neklyudov2023computational} & Brownian motion & $V(x)$ & mRNA \\
 \bottomrule
 \end{tabular}
 \caption{Positioning of CardamomOT within the Schrödinger/variational OT family. The key distinction is the use of a mechanistic, non-diffusive reference process defined on the latent basin space rather than on mRNA space.}
-\label{tab:schrodinger}
+\label{tab:tab1}
 \end{table}
-
-In summary, CardamomOT can be seen as a mechanistic generalization of \firstreview{RF}, using a nonlinear GRN-driven PDMP as reference instead of a linear SDE. The connection to WLF arises through the Lagrangian interpretation: the mechanistic GRN effectively defines an energy landscape that constrains inferred trajectories, but here this landscape is derived from biophysical modeling rather than learned from data.
-
 
 \section{Details on GRN inference for experimental datasets}
 \label{supp_experimental}

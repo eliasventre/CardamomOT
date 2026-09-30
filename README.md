@@ -290,7 +290,7 @@ The network inference step accepts optional arrays to **warm-start** the optimis
 | `inter_init.npy` / `.csv` | `(G, G)` or `(G, G, n_networks)` | Initial values for interaction matrix |
 | `basal_ref.npy` / `.csv` | same as `basal_init` | Regularisation target for basal (penalises deviations; entries ≠ 0 also exclude that sample/gene from the `constrain_basal_uniform` penalty) |
 | `inter_ref.npy` / `.csv` | same as `inter_init` | Regularisation target for interactions |
-| `ref_network.csv` | `(G, G)` gene-indexed CSV | Binary/real prior interaction graph (sparsity mask) |
+| `ref_network.csv` | `(G, G)` gene-indexed CSV | Prior interaction graph: `0` = absent edge, `0 < |v| ≤ 1` = sign free, the edge costs `1/|v|` more than a sure edge; `|v| > 1` = sure edge with forced sign (e.g. `2` = activation, `-2` = inhibition) |
 
 **CSV format for `basal_ref` / `inter_ref`:** rows and columns must be gene names matching `adata.var_names` (upper-cased). Stimulus rows/columns (`Stimulus`, `Stimulus_0`, …) are handled automatically.
 
