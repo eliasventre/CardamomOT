@@ -128,8 +128,8 @@ class NetworkModel:
         self.scale_pen = 20 # Error that is expected = 1/scale_pen
         self.compute_with_proba = 0 # Determine if compute with proba or kon values in network inference (recommended:1)
         self.weight_prev = .4 # max = .5 to not withdrawn the inference on timepoints, allows the calibration to incorporate some "flow-matching" method
-        self.batch_size_network = 2048 # Maximum number of cells used for network calibration in the inference (stratified by time and sample).
-        self.n_final_network_fits = None # At convergence, theta is averaged over this many fits on independent subsamples (None = 1 + n_states // batch_size_network, 0 = keep last fit)
+        self.batch_size_network = 256 # Maximum number of cells used for network calibration in the inference (stratified by time and sample).
+        self.n_network_fits = 5 # Theta = mean of min(n_network_fits, 1 + n_states // batch_size_network) fits on independent subsamples, at every network update
         # Inference of alpha = switch moment between each timepoint and modes
         self.update_modes = 1
         self.alpha_threshold = .6 # max = 1, thershold for important transition to update alpha full
@@ -857,15 +857,15 @@ class NetworkModel:
         """
         Theta from fit_fn(sel) on sub-samples of batch_size_network trajectory states,
         stratified by (time, sample) and cell type (labels, if not None). Mean over
-        n_fits independent sub-samples (None: 1 + n_states // batch_size_network, i.e. enough
-        to cover every state about once), or a single fit when one sub-sample holds every state.
+        min(n_fits, 1 + n_states // batch_size_network) independent sub-samples (enough to
+        cover every state about once, at most n_fits); a single fit when one sub-sample holds
+        every state.
         Returns (basal, inter, basal_tmp, inter_tmp).
         """
         sel, full = grouped_subsample([times_vec, samples_vec], self.batch_size_network, labels)
         fits = [fit_fn(sel)]
         if not full:
-            if n_fits is None:
-                n_fits = 1 + len(times_vec) // self.batch_size_network
+            n_fits = min(n_fits, 1 + len(times_vec) // self.batch_size_network)
             for _ in range(max(n_fits, 1) - 1):
                 fits.append(fit_fn(grouped_subsample([times_vec, samples_vec], self.batch_size_network, labels)[0]))
         return tuple(np.mean([f[i] for f in fits], axis=0) for i in range(4))
@@ -1025,18 +1025,6 @@ class NetworkModel:
             weight_prev = self.weight_prev * min(1, (n_iter-1)/min_n_loops) # Flow matching from second iteration and small at early ones
 
             if count_end == count_max or n_iter > self.max_iter:
-                # Final theta: mean of independent fits on stratified subsamples, all from the current
-                # theta (a single fit if the subsample already holds every trajectory state)
-                if compute_theta and len(times) > 1 and self.n_final_network_fits != 0:
-                    if self.weight_prev > 0:
-                        refresh_prev_prot()
-                    basal, inter, basal_tmp, inter_tmp = fit_theta(weight_prev, basal, inter, self.n_final_network_fits)
-                    kon_vector = y_kon.copy()
-                    kon_vector[:, ns:] = self._kon_ref_per_sample(y_prot, ks, inter, basal, samples_id=samples_id, samples_data=y_samples)[:, ns:]
-                    if verb:
-                        error_avg = self._count_errors_per_sample(y_prot, y_kon, y_proba, ks, inter, basal,
-                                                                  samples_id=samples_id, samples_data=y_samples)
-                        print(f"Final theta | Error: {error_avg:.5f}")
                 break
 
             # --- Shuffle order of cells for each sample ---
@@ -1142,7 +1130,8 @@ class NetworkModel:
             if compute_theta and len(times) > 1:
                 if self.weight_prev > 0:
                     refresh_prev_prot()
-                basal, inter, basal_tmp, inter_tmp = fit_theta(weight_prev, basal, inter, 1)
+                # Mean of fits on independent stratified subsamples covering the trajectory states
+                basal, inter, basal_tmp, inter_tmp = fit_theta(weight_prev, basal, inter, self.n_network_fits)
 
             error_2 = self._count_errors_per_sample(y_prot, y_kon, y_proba, ks, inter, basal,
                                                     samples_id=samples_id, samples_data=y_samples)
@@ -1774,7 +1763,7 @@ class NetworkModel:
 
         # Mean theta over fits on (time, sample, cell type)-stratified subsamples (single fit if one holds all)
         basal, inter, _, _ = self._fit_theta_averaged(
-            fit_on, self.times_data, self.samples_data, self.traj_cell_types, self.n_final_network_fits)
+            fit_on, self.times_data, self.samples_data, self.traj_cell_types, self.n_network_fits)
 
         ### filter_edges
         if self.filter_network:

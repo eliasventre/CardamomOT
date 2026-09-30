@@ -303,17 +303,11 @@ def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
     results = Parallel(n_jobs=-1)(
         delayed(seeded_call)(task_seed(seed, i), single_run, i) for i in range(n_order))
 
-    # Agregation
+    # Aggregation: majority vote over the gene orders, per edge and timepoint
+    # (kept if active in strictly more than half of the runs; stays monotone in time)
     stacked = np.stack(results, axis=0)  # (n_order, T, G, G, n_networks)
-    inter_t = np.zeros((T, G, G, n_networks))
-    pos_mask = stacked != 0                         # (n_order, T, G, G, n_networks)
-    last_positive_i = np.where(pos_mask, np.arange(n_order)[:, None, None, None, None], -1).argmax(axis=0)
-    inter_t = stacked[last_positive_i, 
-                    np.arange(T)[:, None, None, None],
-                    np.arange(G)[None, :, None, None],
-                    np.arange(G)[None, None, :, None],
-                    np.arange(n_networks)[None, None, None, :]]
-    inter_t[~pos_mask.any(axis=0)] = 0
+    votes = np.mean(stacked != 0, axis=0)           # (T, G, G, n_networks)
+    inter_t = np.where(votes > 0.5, inter_ref[None], 0.0)
 
     # Filtre
     inter = inter_ref * (inter_t[-1] != 0)
