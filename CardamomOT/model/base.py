@@ -128,8 +128,8 @@ class NetworkModel:
         self.scale_pen = 20 # Error that is expected = 1/scale_pen
         self.compute_with_proba = 0 # Determine if compute with proba or kon values in network inference (recommended:1)
         self.weight_prev = .4 # max = .5 to not withdrawn the inference on timepoints, allows the calibration to incorporate some "flow-matching" method
-        self.batch_size_network = 256 # Maximum number of cells used for network calibration in the inference (stratified by time and sample); at least 10 x n_genes is used.
-        self.n_network_fits = 5 # Theta = mean of min(n_network_fits, 1 + n_states // batch_size_network) fits on independent subsamples, at every network update
+        self.batch_size_network = None # Cells per network sub-sample (stratified by time and sample); raised to 10 x the parameters of a target-gene fit if lower; None = that floor
+        self.n_network_fits = 10 # Theta = mean of min(n_network_fits, 1 + n_states // batch_size) fits on disjoint subsamples, at every network update
         # Inference of alpha = switch moment between each timepoint and modes
         self.update_modes = 1
         self.alpha_threshold = .6 # max = 1, thershold for important transition to update alpha full
@@ -853,20 +853,26 @@ class NetworkModel:
                 strata[idx] = km.fit_predict(np.log1p(data_rna[idx, ns:]))
         return strata
 
-    def _network_batch_size(self, n_genes):
-        """Network sub-sample size: batch_size_network, but at least 10 states per gene (parameters per target)."""
-        return max(self.batch_size_network, 10 * n_genes)
+    def _n_params_per_target(self, active_cols, n_samples):
+        """Largest parameter count of one target-gene fit: (active regulators + per-sample basals) x n_networks."""
+        k_max = max((len(c) for c in active_cols[self.n_stimuli:]), default=0)
+        return (k_max + n_samples) * int(self.n_networks)
 
-    def _fit_theta_averaged(self, fit_fn, times_vec, samples_vec, labels, n_fits, n_genes):
+    def _network_batch_size(self, n_params):
+        """Network sub-sample size: at least 10 states per parameter; batch_size_network (if not None) can only raise it."""
+        floor = 10 * n_params
+        return floor if self.batch_size_network is None else max(self.batch_size_network, floor)
+
+    def _fit_theta_averaged(self, fit_fn, times_vec, samples_vec, labels, n_fits, n_params):
         """
         Theta from fit_fn(sels) (one fit per sub-sample, run jointly) on sub-samples of
-        _network_batch_size(n_genes) trajectory states,
+        _network_batch_size(n_params) trajectory states,
         stratified by (time, sample) and cell type (labels, if not None). Mean over
         min(n_fits, 1 + n_states // batch_size) disjoint sub-samples (covering every state
         about once, at most n_fits); a single fit when one sub-sample holds every state.
         Returns (basal, inter, basal_tmp, inter_tmp).
         """
-        batch_size = self._network_batch_size(n_genes)
+        batch_size = self._network_batch_size(n_params)
         # Disjoint sub-samples covering as many states as possible (a single one if it holds them all)
         n_fits = max(1, min(n_fits, 1 + len(times_vec) // batch_size))
         sels, _ = grouped_partition([times_vec, samples_vec], batch_size, n_fits, labels)
@@ -1017,7 +1023,8 @@ class NetworkModel:
                     final=0, constrain_basal_uniform=self.constrain_basal_uniform,
                     hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
                     seuil_zero_min_ref=self.seuil_zero_min_ref)
-            return self._fit_theta_averaged(fit_on, vect_t_sim, y_samples, traj_cell_types(), n_fits, y_prot.shape[1])
+            return self._fit_theta_averaged(fit_on, vect_t_sim, y_samples, traj_cell_types(), n_fits,
+                                            self._n_params_per_target(prev_cols, n_samples_local))
 
         # Stratum of each real cell, for balanced OT batches; real cells at t0 per sample
         strata = self._traj_strata(data_rna, vect_t, vect_samples_id, times, samples_id)
@@ -1781,7 +1788,8 @@ class NetworkModel:
 
         # Mean theta over fits on (time, sample, cell type)-stratified subsamples (single fit if one holds all)
         basal, inter, _, _ = self._fit_theta_averaged(
-            fit_on, self.times_data, self.samples_data, self.traj_cell_types, self.n_network_fits, y_prot.shape[1])
+            fit_on, self.times_data, self.samples_data, self.traj_cell_types, self.n_network_fits,
+            self._n_params_per_target(prev_cols, len(samples_id)))
 
         ### filter_edges
         if self.filter_network:
