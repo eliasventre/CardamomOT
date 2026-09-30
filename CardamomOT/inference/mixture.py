@@ -26,6 +26,7 @@ from scipy.optimize import minimize
 import ot
 
 from CardamomOT.logging import get_logger
+from .sampling import stratified_choice
 
 # module-level logger
 logger = get_logger(__name__)
@@ -1106,7 +1107,7 @@ class NegativeBinomialMixtureEM:
         return best_model
 
     def fit(self, x, vect_t=None, vect_celltypes=None, quant_init=None, seuil=0.001,
-            batch_size_mixture=None, scboolseq_labels=None, scboolseq_dropout=None):
+            batch_size_mixture=None, scboolseq_labels=None, scboolseq_dropout=None, strata=None):
         """
         Fit the NB mixture model to data ``x``.
 
@@ -1119,6 +1120,8 @@ class NegativeBinomialMixtureEM:
                most ``batch_size_mixture`` cells per timepoint; responsibilities
                (resp) and basin assignments are then recomputed on ALL cells
                with the learned parameters.
+        strata : (N,) cell types or None
+               If given, the sub-sample is cell-type proportional within each timepoint.
         """
         # ── Keep full-data references for the final resp computation ────────
         x_all: np.ndarray[Any, np.dtype[Any]] = np.asarray(x).astype(int)
@@ -1142,12 +1145,11 @@ class NegativeBinomialMixtureEM:
                 idx_list = []
                 for time in np.unique(vect_t_all):
                     idx_t = np.where(vect_t_all == time)[0]
-                    n_sel = min(batch_size_mixture, len(idx_t))
-                    idx_list.append(np.random.choice(idx_t, n_sel, replace=False))
+                    idx_list.append(stratified_choice(
+                        idx_t, batch_size_mixture, None if strata is None else strata[idx_t]))
                 cells_to_use = np.concatenate(idx_list)
             else:
-                n_sel = min(batch_size_mixture, N_all)
-                cells_to_use = np.random.choice(N_all, n_sel, replace=False)
+                cells_to_use = stratified_choice(np.arange(N_all), batch_size_mixture, strata)
         else:
             cells_to_use = np.arange(N_all)
 

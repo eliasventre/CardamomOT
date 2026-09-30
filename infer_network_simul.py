@@ -131,6 +131,11 @@ def main(argv):
         if os.path.exists(kon_beta_h_path):
             model.kon_beta_harissa = np.load(kon_beta_h_path)
             print("[infer_network_simul] Loaded kon_beta_harissa for Harissa-mode network re-inference")
+        ct_path = os.path.join(p, 'cardamomOT', 'data_cell_types.npy')
+        if os.path.exists(ct_path):
+            cell_types = np.load(ct_path)
+            if len(cell_types) == len(model.times_data):
+                model.traj_cell_types = cell_types
         R_opt_path = os.path.join(p, 'cardamomOT', 'data_R_opt.npy')
         if os.path.exists(R_opt_path):
             model.R_opt = np.load(R_opt_path)

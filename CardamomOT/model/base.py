@@ -20,14 +20,19 @@ import multiprocessing as mp
 from joblib import Parallel, delayed
 from sklearn.model_selection import GridSearchCV, LeaveOneOut
 from sklearn.neighbors import KernelDensity
+from sklearn.cluster import MiniBatchKMeans
 from scipy.ndimage import gaussian_filter1d
+from scipy.spatial.distance import cdist
 from ..config import resolve_cell_type_obs, CELL_TYPE_OBS_KEYS
 from ..inference import (inference_network, active_regulators, PrevProt, signed_floor, filter_network,
-                        minimal_repetition_choice, find_next_prot, my_otdistance, count_errors, kon_ref_vector, inference_alpha,
+                        minimal_repetition_choice, find_next_prot, my_otdistance, count_errors,
+                        kon_ref_vector, inference_alpha,
                         NegativeBinomialMixtureEM, predict_resp,
                         simulate_next_prot_ode, simulate_next_prot_pdmp,
                         train_kon_correction_mlp, infer_ratio_d0_d1_full, infer_ratio_d0_d1_unitary, inference_degradation_prot,
-                        train_proliferation_mlp, fit_scale_theta)
+                        train_proliferation_mlp, fit_scale_theta,
+                        seed_everything, seeded_call, task_seed,
+                        stratified_order, stratified_choice, grouped_subsample)
 
 np.set_printoptions(precision=3, suppress=True)
 EPS=1e-16
@@ -81,6 +86,7 @@ class NetworkModel:
         self._stim_schedule = None
 
         ### Default behaviour
+        self.seed = None # Random seed for reproducibility (main process and parallel workers); None = not seeded (runs vary)
 
         ## Compute mixture parameters
         self.hard_em = 1 # Do we initialize with a hard_em ?
@@ -90,7 +96,7 @@ class NetworkModel:
         self.temporal_basins = 1 # Is it preserved temporally ?
         self.transform_proba = 0 # Do we want to force probas to be steep for compatibility with sigmoid model?
         self.seuil = 1e-2 # minimum for beta mixture parameters (second parameters)
-        self.batch_size_mixture = 512 # Maximum number of cells per time used for mixture calibration in the inference.
+        self.batch_size_mixture = 1024 # Maximum number of cells per time used for mixture calibration in the inference.
         self.published_version = False # NB mixture as published (Sinkhorn argmax basins, posterior-sum target masses)
         self.soft_em_refinement = False # NB mixture: refine (ks, c) by soft EM with fixed basin masses (ignored if published_version)
         self.use_scBoolSeq = False # If True, initialize NB mixture with scBoolSeq binarization instead of hard EM
@@ -109,6 +115,7 @@ class NetworkModel:
         self.stopThr_init = 1e-7 # initial tolerance for sinkhorn algorithm
         self.batch_size_traj = 512 # Maximum number of cells used per time point per sample for solving EOT problems in the inference.
         self.batch_size_traj_exp = 512 # Target size of the real (experimental) cell batches matched against each reconstruction batch; decoupled from batch_size_traj so the OT target pool can stay well-sized even when batch_size_traj is kept small for cost.
+        self.n_strata_traj = 10 # Real-cell batches are stratified by cell type if available, else by this number of k-means clusters (0 = uniform batches)
         self.unbalanced_reg = 5 # Unbalanced regularization parameter for UOT if > 0, OT if 0
         self.init_entropic_noise = 1.5 # Initial entropic penalization for OT
         self.quant_samples = .95 # Quantile of cells number per sample to use for inference
@@ -121,7 +128,8 @@ class NetworkModel:
         self.scale_pen = 20 # Error that is expected = 1/scale_pen
         self.compute_with_proba = 0 # Determine if compute with proba or kon values in network inference (recommended:1)
         self.weight_prev = .4 # max = .5 to not withdrawn the inference on timepoints, allows the calibration to incorporate some "flow-matching" method
-        self.batch_size_network = 2048 # Maximum number of cells used for network calibration in the inference.
+        self.batch_size_network = 2048 # Maximum number of cells used for network calibration in the inference (stratified by time and sample).
+        self.n_final_network_fits = None # At convergence, theta is averaged over this many fits on independent subsamples (None = 1 + n_states // batch_size_network, 0 = keep last fit)
         # Inference of alpha = switch moment between each timepoint and modes
         self.update_modes = 1
         self.alpha_threshold = .6 # max = 1, thershold for important transition to update alpha full
@@ -143,7 +151,8 @@ class NetworkModel:
 
         ## Compute degradations after inference
         self.recompute_degradations = 1 # Do we want to recompute degradation rates for simulations ?
-        self.batch_size_degradations = 256 # number of trajectories to take to make the inference (slow without gpu)
+        self.traj_cell_types = None # Cell type of the real cell behind each trajectory state (set by fit_network)
+        self.batch_size_degradations = 256 # Trajectories drawn per interval at each optimizer step of the degradation inference (slow without gpu)
         self.use_temporal_degradations = 1 # If so, compute temporal degradation rates for simulations ?
         self.lambda_scale  = 1e-3  # L2 penalty on scale[ns:] around 1 (large = scale stays ~1; 0 = free)
         self.lambda_deg0   = 1  # L2 penalty on d0 around d_init (0 = free; large = stays close to prior)
@@ -197,6 +206,22 @@ class NetworkModel:
             pass
         return data
 
+    @staticmethod
+    def _cell_type_labels(data):
+        """Per-cell cell-type labels (str) used to stratify batches, or None if unavailable."""
+        obs = getattr(data, 'obs', None)
+        if obs is None:
+            return None
+        key = resolve_cell_type_obs(data, 'transition')
+        return None if key is None else obs[key].values.astype(str)
+
+    def _t0_cell_types(self, vect_t, vect_samples_id, sample):
+        """Cell types of the first-timepoint cells of a sample (None if unavailable)."""
+        ct = getattr(self, '_strata_labels', None)
+        if ct is None:
+            return None
+        return ct[(vect_t == np.min(vect_t)) & (vect_samples_id == sample)]
+
     def _load_ot_constraints(self, data, transition_rates=None):
         """
         Load the optional OT constraints from AnnData: per-cell net proliferation
@@ -212,6 +237,8 @@ class NetworkModel:
         self._transition_type_labels = None
         self._lineage = None
         self._lineage_known = None
+        # Cell types (if any) stratify every batch built from the data
+        self._strata_labels = self._cell_type_labels(data)
         obs = getattr(data, 'obs', None)
         if obs is not None:
             if 'proliferation_net_rate' in obs:
@@ -341,10 +368,12 @@ class NetworkModel:
 
 
     def core_binarization(self, data_rna, gene_names, vect_t, G_tot, min_components=1, max_components=5, refilter=0, max_iter_kinetics=100,
-                          verb=True, kov_cell_mask=None, scboolseq_matrix=None, scboolseq_dropouts=None):
+                          verb=True, kov_cell_mask=None, scboolseq_matrix=None, scboolseq_dropouts=None, strata=None):
         """
         Parameters
         ----------
+        strata : (N_cells,) array or None
+            Cell types stratifying the per-timepoint sub-sample of the mixture fit.
         kov_cell_mask : (N_cells, G_tot) int8 array or None
             Per-cell KO/OV constraints derived from KO_OV_inference.
 
@@ -389,7 +418,7 @@ class NetworkModel:
                     scbs_labels = None
                     scbs_dropout = None
             model = kinetics.fit(x, vect_t=vect_t, seuil=self.seuil,
-                                 batch_size_mixture=self.batch_size_mixture,
+                                 batch_size_mixture=self.batch_size_mixture, strata=strata,
                                  scboolseq_labels=scbs_labels,
                                  scboolseq_dropout=scbs_dropout)
             ks, c, pi0, proba, pi = np.sort(model['ks']), model['c'], np.mean(np.asarray(model['pi_zero'])), model['resp'], model['pi']
@@ -411,7 +440,7 @@ class NetworkModel:
             return ks, c, pi0, proba, tmp, pi
 
         results = Parallel(n_jobs=-1)(
-        delayed(run_main_loop_for_gene)(g) for g in range(ns, G_tot)
+        delayed(seeded_call)(task_seed(self.seed, 1, g), run_main_loop_for_gene, g) for g in range(ns, G_tot)
         )
 
         for idx, g in enumerate(range(ns, G_tot)):
@@ -486,6 +515,7 @@ class NetworkModel:
         """
         Fit the mixture model parameters to the data.
         """
+        seed_everything(self.seed)
         data_rna = self._parse_input(data, time_key)
         N_cells, G_tot = data_rna.shape
         vect_t = data_rna[:, 0]
@@ -508,7 +538,8 @@ class NetworkModel:
                                         verb=verb,
                                         kov_cell_mask=kov_cell_mask,
                                         scboolseq_matrix=scboolseq_matrix,
-                                        scboolseq_dropouts=scboolseq_dropouts)
+                                        scboolseq_dropouts=scboolseq_dropouts,
+                                        strata=self._cell_type_labels(data))
 
         self.pi_zinb = pi_zeros
         self.modes = frequency_modes_smooth
@@ -562,7 +593,7 @@ class NetworkModel:
                                       alpha_old, vect_samples_id_modified,
                                       basal, inter, s1, ks, init_cells, R_opt_traj, to_keep_for_update, offset_init=[0],
                                       n_iter=1, N_full=[100], N_samples=[100], intensity_prior=10,
-                                      real_cell_batches=None, batch_idx=None):
+                                      real_cell_batches=None, batch_idx=None, sim_real_idx=None):
         """
         Infer the protein trajectories when d1 is known and theta is not.
 
@@ -571,6 +602,8 @@ class NetworkModel:
             each batch of the reconstruction ensemble only targets its corresponding
             batch of real cells instead of the full experimental set.
         batch_idx : current batch index per sample (into real_cell_batches[s_idx]).
+        sim_real_idx : (T * N_total,) int array or None, updated in place with the real
+            cell behind each trajectory state (-1 = not yet assigned).
         """
 
         G = vect_rna.shape[1]
@@ -586,7 +619,8 @@ class NetworkModel:
         prot_old_is_nonzero = y_prot_old.any()
 
         # Track which real cell (index into vect_rna) each simulated slot corresponds to.
-        sim_real_idx = np.full(rna_modified.shape[0], -1, dtype=int)
+        if sim_real_idx is None:
+            sim_real_idx = np.full(rna_modified.shape[0], -1, dtype=int)
 
         # Set stimulus values per timepoint (schedule-based)
         for t_idx, t_i in enumerate(times):
@@ -609,6 +643,9 @@ class NetworkModel:
                 proba_modified[offset+offset_init[s]:offset+offset_init[s] + N_samples[s]] = self.proba[cell_indices][selected_init]
             rna_modified[offset+offset_init[s]:offset+offset_init[s] + N_samples[s], ns:] = vect_rna[cell_indices][selected_init, ns:]
             sim_real_idx[offset+offset_init[s]:offset+offset_init[s] + N_samples[s]] = global_cell_idx[selected_init]
+            # Sample label of every trajectory slot, last timepoint included
+            for t_idx in range(T):
+                vect_samples_id_modified[N_total * t_idx + offset:N_total * t_idx + offset + N_full[s]] = s
 
             offset += N_full[s]
 
@@ -626,34 +663,35 @@ class NetworkModel:
                 next_index = N_total * (t_idx + 1) + offset_init_s
                 N_sample = N_samples[s_idx]
                 N_cells = len(cell_idx)
-                start_index_full = N_total * (t_idx + 1) + offset
-                next_index_full = N_total * (t_idx + 1) + offset + N_full[s_idx]
-
-                vect_samples_id_modified[N_total * t_idx + offset:N_total * t_idx + offset + N_full[s_idx]] = s_idx
 
                 if N_sample and N_cells:
 
-                    # Snapshot minimal des anciennes valeurs pour le bloc alpha
-                    if prot_old_is_nonzero and time != times[-2]:
-                        prot_old_snapshot = y_prot_old[start_index_full:next_index_full, ns:].copy()
-                        kon_old_snapshot  = y_kon_old[start_index_full:next_index_full, ns:].copy()
-                    else:
-                        prot_old_snapshot = None
-                        kon_old_snapshot  = None
-
                     current_indices = np.arange(start_index, start_index + N_sample)
+                    next_indices = np.arange(next_index, next_index + N_sample)
                     alpha_indices = np.arange(offset_init_s, offset_init_s + N_sample)
+
+                    # Old trajectories of this batch block at t+1 (not yet overwritten):
+                    # candidate pool for the alpha re-assignment below
+                    if prot_old_is_nonzero and time != times[-2]:
+                        prot_old_blk = y_prot_old[next_indices, ns:]
+                        kon_old_blk = y_kon_old[next_indices, ns:]
+                        alpha_old_blk = alpha_old[t_idx + 1, alpha_indices]
+                    else:
+                        prot_old_blk = None
+
+                    prot_init = prot_modified[current_indices, ns:]
+                    alpha_init = alpha_modified[t_idx, alpha_indices]
                     mode_init = self.adaptive_shrinkage(rna_modified[current_indices, ns:] * s1, kon_modified[current_indices, ns:]) / s1
                     mode_end = self.adaptive_shrinkage(vect_rna[cell_idx, ns:] * s1, self.modes[cell_idx, ns:]) / s1
 
                     basal_s = basal[min(s_idx, basal.shape[0] - 1)] if basal.ndim == 3 else basal
-                    pairwise_dist, next_prot = my_otdistance(
+                    pairwise_dist = my_otdistance(
                         kon_modified[current_indices, ns:], self.modes[cell_idx, ns:],
-                        prot_modified[current_indices, ns:],
+                        prot_init,
                         rna_modified[current_indices, ns:], vect_rna[cell_idx, ns:],
                         proba_modified[current_indices, ns:], self.proba[cell_idx, ns:, :],
                         mode_init, mode_end,
-                        alpha_modified[t_idx, alpha_indices],
+                        alpha_init,
                         s1, ks, self.d[1, ns:], times[t_idx + 1] - time, basal_s, inter, loss=self.loss_norm,
                         n_iter=n_iter, intensity_prior=intensity_prior,
                         compute_with_proba=self.compute_with_proba,
@@ -758,34 +796,79 @@ class NetworkModel:
                         R_n = (2.0 / delta_t) * (log_m - log_m.mean())
                     R_opt_traj[start_index:start_index + N_sample] = R_n
 
-                    coupling_norm = coupling / coupling.sum(axis=1, keepdims=True)
-                    for n in range(N_sample):
-                        m = np.random.choice(N_cells, p=coupling_norm[n])
-                        target_index = next_index + n
-                        kon_modified[target_index] = self.modes[cell_idx[m]]
-                        if self.compute_with_proba:
-                            proba_modified[target_index] = self.proba[cell_idx[m]]
-                        rna_modified[target_index, ns:] = vect_rna[cell_idx[m], ns:]
-                        prot_modified[target_index, ns:] = next_prot[n, m, ns:]
-                        prot_formodes[cell_idx[m], ns:] = next_prot[n, m, ns:]
-                        to_keep_for_update[cell_idx[m]] = 1
-                        sim_real_idx[target_index] = cell_idx[m]
+                    # Draw one target per trajectory from its coupling row (inverse CDF)
+                    cdf = np.cumsum(coupling, axis=1)
+                    u = np.random.random(N_sample) * cdf[:, -1]
+                    m_idx = np.minimum((cdf < u[:, None]).sum(axis=1), N_cells - 1)
+                    tgt = cell_idx[m_idx]
 
-                        # Re-assign alpha — 
-                        if prot_old_snapshot is not None:
-                            target_prot = prot_modified[target_index, ns:]
-                            distances_prot = np.linalg.norm(prot_old_snapshot - target_prot, 1, axis=1)
-                            target_kon = kon_modified[target_index, ns:]
-                            distances_kon = np.linalg.norm(kon_old_snapshot - target_kon, 1, axis=1)
-                            match = np.argmin((1/G) * distances_prot + ((G-1)/G) * distances_kon)
-                            alpha_modified[t_idx+1, offset_init_s + n] = alpha_old[t_idx+1, offset + match]
+                    # End states recomputed for the sampled pairs only
+                    next_prot = find_next_prot(
+                        self.d[1, ns:], prot_init, rna_modified[current_indices, ns:],
+                        vect_rna[tgt, ns:], mode_init, mode_end[m_idx], alpha_init, s1, delta_t)
+
+                    kon_modified[next_indices] = self.modes[tgt]
+                    if self.compute_with_proba:
+                        proba_modified[next_indices] = self.proba[tgt]
+                    rna_modified[next_indices, ns:] = vect_rna[tgt, ns:]
+                    prot_modified[next_indices, ns:] = next_prot
+                    prot_formodes[tgt, ns:] = next_prot
+                    to_keep_for_update[tgt] = 1
+                    sim_real_idx[next_indices] = tgt
+
+                    # Re-assign alpha from the nearest old trajectory of the block (weighted L1)
+                    if prot_old_blk is not None:
+                        w_p, w_k = 1 / G, (G - 1) / G
+                        d_match = cdist(np.hstack([next_prot * w_p, kon_modified[next_indices, ns:] * w_k]),
+                                        np.hstack([prot_old_blk * w_p, kon_old_blk * w_k]), 'cityblock')
+                        alpha_modified[t_idx + 1, alpha_indices] = alpha_old_blk[np.argmin(d_match, axis=1)]
 
                 offset += N_full[s_idx]
 
         return prot_modified, prot_formodes, rna_modified, kon_modified, \
                 proba_modified, alpha_modified, vect_samples_id_modified, \
                   R_opt_traj, to_keep_for_update
-    
+
+    def _traj_strata(self, data_rna, vect_t, vect_samples_id, times, samples_id):
+        """
+        Stratum label of each real cell, used to build balanced OT batches (source
+        trajectories by their t0 cell, real target cells): cell types if provided, else
+        k-means clusters of log1p(rna) per (sample, time) where cells are split into
+        several batches. None = uniform batches.
+        """
+        _ct = getattr(self, '_strata_labels', None)
+        if _ct is not None:
+            return _ct
+        if not self.n_strata_traj:
+            return None
+        ns = self.n_stimuli
+        strata = np.zeros(len(vect_t), dtype=int)
+        for s_idx, sample in enumerate(samples_id):
+            for t_idx, t in enumerate(times):
+                idx = np.flatnonzero((vect_t == t) & (vect_samples_id == sample))
+                if len(idx) <= min(self.batch_size_traj, self.batch_size_traj_exp):
+                    continue
+                km = MiniBatchKMeans(n_clusters=min(self.n_strata_traj, len(idx)), n_init=3,
+                                     random_state=task_seed(self.seed, 7, s_idx, t_idx))
+                strata[idx] = km.fit_predict(np.log1p(data_rna[idx, ns:]))
+        return strata
+
+    def _fit_theta_averaged(self, fit_fn, times_vec, samples_vec, labels, n_fits):
+        """
+        Theta from fit_fn(sel) on sub-samples of batch_size_network trajectory states,
+        stratified by (time, sample) and cell type (labels, if not None). Mean over
+        n_fits independent sub-samples (None: 1 + n_states // batch_size_network, i.e. enough
+        to cover every state about once), or a single fit when one sub-sample holds every state.
+        Returns (basal, inter, basal_tmp, inter_tmp).
+        """
+        sel, full = grouped_subsample([times_vec, samples_vec], self.batch_size_network, labels)
+        fits = [fit_fn(sel)]
+        if not full:
+            if n_fits is None:
+                n_fits = 1 + len(times_vec) // self.batch_size_network
+            for _ in range(max(n_fits, 1) - 1):
+                fits.append(fit_fn(grouped_subsample([times_vec, samples_vec], self.batch_size_network, labels)[0]))
+        return tuple(np.mean([f[i] for f in fits], axis=0) for i in range(4))
 
     def loop_trajectories(
         self,
@@ -895,36 +978,80 @@ class NetworkModel:
             for s in range(n_samples_local)
         ]
 
+        def refresh_prev_prot():
+            # Flow-matching states at t+1 from the current trajectories and alphas
+            modes = self.adaptive_shrinkage(y_rna[:, ns:] * s1, y_kon[:, ns:]) / s1
+            for cnt, time in enumerate(times[:-1]):
+                idx_prev = slice(N_tot * cnt, N_tot * (cnt + 1))
+                idx_next = slice(N_tot * (cnt + 1), N_tot * (cnt + 2))
+                self._fill_prev_prot(
+                    y_prot_prev, idx_next, y_alpha[cnt], times[cnt + 1] - time,
+                    self.d[1, ns:], y_prot[idx_prev, ns:],
+                    y_rna[idx_prev, ns:] * self.scale_proteins,
+                    y_rna[idx_next, ns:] * self.scale_proteins,
+                    modes[idx_prev], modes[idx_next], s1)
+
+        # Real cell behind each trajectory state, and its cell type (None if unavailable)
+        y_real = np.full(len(vect_t_sim), -1, dtype=int)
+        cell_types = getattr(self, '_strata_labels', None)
+
+        def traj_cell_types():
+            if cell_types is None:
+                return None
+            return np.where(y_real >= 0, cell_types[np.maximum(y_real, 0)], '')
+
+        def fit_theta(weight_prev, basal_start, inter_start, n_fits):
+            # Network fit(s) on (time, sample, cell type)-stratified subsamples of the trajectories
+            def fit_on(_sel):
+                return inference_network(
+                    y_samples[_sel], y_kon[_sel], y_proba[_sel], y_prot[_sel], y_prot_prev.select_cells(_sel),
+                    ks, n_stimuli=ns, samples_id=samples_id,
+                    ref_network=self.ref_network, basal_init=basal_start, inter_init=inter_start,
+                    basal_ref=basal_ref, inter_ref=inter_ref,
+                    proba=self.compute_with_proba, scale=self.scale_pen,
+                    weight_prev=weight_prev, loss=self.loss_norm,
+                    final=0, constrain_basal_uniform=self.constrain_basal_uniform,
+                    hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
+                    seuil_zero_min_ref=self.seuil_zero_min_ref)
+            return self._fit_theta_averaged(fit_on, vect_t_sim, y_samples, traj_cell_types(), n_fits)
+
+        # Stratum of each real cell, for balanced OT batches; real cells at t0 per sample
+        strata = self._traj_strata(data_rna, vect_t, vect_samples_id, times, samples_id)
+        t0_real = [np.flatnonzero((vect_t == times[0]) & (vect_samples_id == sample)) for sample in samples_id]
+
         # === Main loop ===
         while count_end <= count_max:
 
-            if count_end == count_max or n_iter > self.max_iter:
-                # if N_tot * len(times) > self.batch_size_network:
-                #     basal, inter, basal_tmp, inter_tmp = inference_network(
-                #         y_samples, y_kon, y_proba, y_prot, y_prot_prev,
-                #         ks, n_stimuli=ns, samples_id=samples_id,
-                #         ref_network=self.ref_network, basal_init=basal, inter_init=inter,
-                #         basal_ref=basal_ref, inter_ref=inter_ref,
-                #         proba=self.compute_with_proba, scale=self.scale_pen,
-                #         weight_prev=weight_prev, loss=self.loss_norm,
-                #         final=0, constrain_basal_uniform=self.constrain_basal_uniform,
-                #         hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
-                #         seuil_zero_min_ref=self.seuil_zero_min_ref)
-                #     # --- Update kon_theta for alpha ---
-                #     kon_vector[:, ns:] = self._kon_ref_per_sample(y_prot, ks, inter, basal, samples_id=samples_id, samples_data=y_samples)[:, ns:]
-                break
-            
             weight_prev = self.weight_prev * min(1, (n_iter-1)/min_n_loops) # Flow matching from second iteration and small at early ones
 
+            if count_end == count_max or n_iter > self.max_iter:
+                # Final theta: mean of independent fits on stratified subsamples, all from the current
+                # theta (a single fit if the subsample already holds every trajectory state)
+                if compute_theta and len(times) > 1 and self.n_final_network_fits != 0:
+                    if self.weight_prev > 0:
+                        refresh_prev_prot()
+                    basal, inter, basal_tmp, inter_tmp = fit_theta(weight_prev, basal, inter, self.n_final_network_fits)
+                    kon_vector = y_kon.copy()
+                    kon_vector[:, ns:] = self._kon_ref_per_sample(y_prot, ks, inter, basal, samples_id=samples_id, samples_data=y_samples)[:, ns:]
+                    if verb:
+                        error_avg = self._count_errors_per_sample(y_prot, y_kon, y_proba, ks, inter, basal,
+                                                                  samples_id=samples_id, samples_data=y_samples)
+                        print(f"Final theta | Error: {error_avg:.5f}")
+                break
+
             # --- Shuffle order of cells for each sample ---
+            # Source batches are consecutive slot blocks: with strata, the order is a stratified
+            # interleaving on the t0 cell of each trajectory, so every batch holds each stratum in proportion
+            indices_shuffled = [
+                np.random.permutation(N_full[s]) if strata is None
+                else stratified_order(np.arange(N_full[s]), strata[t0_real[s][init_cells_full[s]]])
+                for s in range(len(samples_id))
+            ]
+            init_cells_full = [
+                init_cells_full[s][indices_shuffled[s]]
+                for s in range(len(samples_id))
+            ]
             if n_iter > 1:
-                indices_shuffled = [
-                    np.random.permutation(N_full[s]) for s in range(len(samples_id))
-                ]
-                init_cells_full = [
-                    init_cells_full[s][indices_shuffled[s]]
-                    for s in range(len(samples_id))
-                ]
 
                 # Reorder alpha, y_prot, y_kon according to new cell order
                 offset = 0
@@ -938,8 +1065,6 @@ class NetworkModel:
                         y_rna[cnt * N_tot + offset : cnt * N_tot + offset + N] = y_rna[cnt * N_tot + offset + indices_shuffled[s]]
                         y_proba[cnt * N_tot + offset : cnt * N_tot + offset + N] = y_proba[cnt * N_tot + offset + indices_shuffled[s]]
                         offset += N
-            else:
-                indices_shuffled = [np.arange(N_full[s]) for s in range(len(samples_id))]
 
             # --- Redraw per-sample, per-time batches of real (experimental) cells ---
             # Redrawn every outer iteration (fresh randomness, same cadence as the
@@ -957,6 +1082,11 @@ class NetworkModel:
             #     concatenating independent shuffles of the real cells and slicing
             #     consecutive chunks, which spreads the redundancy as evenly as possible
             #     while guaranteeing full coverage.
+            # With strata, each shuffle is a stratified interleaving, so every batch holds
+            # each cell type / cluster in proportion (rare states are not left out).
+            def shuffle_real(idx):
+                return np.random.permutation(idx) if strata is None else stratified_order(idx, strata[idx])
+
             real_cell_batches = [[None] * (len(times) - 1) for _ in range(n_samples_local)]
             for s_idx, sample in enumerate(samples_id):
                 K_nom = max(self.batch_size_traj_exp, N_samples[s_idx])
@@ -970,7 +1100,7 @@ class NetworkModel:
                     K = min(N_real, max(K_nom, int(np.ceil(N_real / B_s))))
                     L = B_s * K
                     reps = int(np.ceil(L / N_real))
-                    tiled = np.concatenate([np.random.permutation(idx) for _ in range(reps)])[:L]
+                    tiled = np.concatenate([shuffle_real(idx) for _ in range(reps)])[:L]
                     real_cell_batches[s_idx][t_idx] = [tiled[b * K:(b + 1) * K] for b in range(B_s)]
 
             offset_init = [0] * len(samples_id)
@@ -994,7 +1124,8 @@ class NetworkModel:
                         N_full=N_full, N_samples=N_tmp,
                         n_iter=n_iter + min_n_loops * min(1, 1 - compute_theta + hard_forcing_ref),
                         intensity_prior=intensity_prior * compute_theta * (1 - hard_forcing_ref),
-                        real_cell_batches=real_cell_batches, batch_idx=batch_idx
+                        real_cell_batches=real_cell_batches, batch_idx=batch_idx,
+                        sim_real_idx=y_real
                     )
 
                 offset_init = [offset_init[s] + N_tmp[s] for s in range(len(samples_id))]
@@ -1010,35 +1141,8 @@ class NetworkModel:
                                                    samples_id=samples_id, samples_data=y_samples)
             if compute_theta and len(times) > 1:
                 if self.weight_prev > 0:
-                    modes = self.adaptive_shrinkage(y_rna[:, ns:] * s1, y_kon[:, ns:]) / s1
-                    for cnt, time in enumerate(times[:-1]):
-                        idx_prev = slice(N_tot * cnt, N_tot * (cnt + 1))
-                        idx_next = slice(N_tot * (cnt + 1), N_tot * (cnt + 2))
-                        self._fill_prev_prot(
-                            y_prot_prev, idx_next, y_alpha[cnt], times[cnt + 1] - time,
-                            self.d[1, ns:], y_prot[idx_prev, ns:],
-                            y_rna[idx_prev, ns:] * self.scale_proteins,
-                            y_rna[idx_next, ns:] * self.scale_proteins,
-                            modes[idx_prev], modes[idx_next], s1)
-
-                # --- Subsample at most batch_size cells per timepoint ---
-                batch_per_time = 1 + self.batch_size_network // len(times)
-                _sel = np.concatenate([
-                                (lambda idx: np.random.choice(idx, size=batch_per_time, replace=False) 
-                                if len(idx) > batch_per_time else idx)(np.where(vect_t_sim == t)[0])
-                    for t in times
-                ])
-
-                basal, inter, basal_tmp, inter_tmp = inference_network(
-                    y_samples[_sel], y_kon[_sel], y_proba[_sel], y_prot[_sel], y_prot_prev.select_cells(_sel),
-                    ks, n_stimuli=ns, samples_id=samples_id,
-                    ref_network=self.ref_network, basal_init=basal, inter_init=inter,
-                    basal_ref=basal_ref, inter_ref=inter_ref,
-                    proba=self.compute_with_proba, scale=self.scale_pen,
-                    weight_prev=weight_prev, loss=self.loss_norm,
-                    final=0, constrain_basal_uniform=self.constrain_basal_uniform,
-                    hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
-                    seuil_zero_min_ref=self.seuil_zero_min_ref)
+                    refresh_prev_prot()
+                basal, inter, basal_tmp, inter_tmp = fit_theta(weight_prev, basal, inter, 1)
 
             error_2 = self._count_errors_per_sample(y_prot, y_kon, y_proba, ks, inter, basal,
                                                     samples_id=samples_id, samples_data=y_samples)
@@ -1200,6 +1304,9 @@ class NetworkModel:
         self.samples_data = y_samples
         self.times_data = vect_t_sim
         self.alpha = y_alpha
+        # Real cell behind each trajectory state and its cell type (stratify later batches)
+        self.traj_real_idx = y_real
+        self.traj_cell_types = traj_cell_types()
 
         # Harissa: continuous adaptive_shrinkage burst-rate estimates, used in
         # refine_network_degradations in place of discrete mode assignments (kon_beta).
@@ -1283,6 +1390,7 @@ class NetworkModel:
         verb : bool
             Whether to print progress.
         """
+        seed_everything(self.seed)
 
         # --- Initialization ---
         data_rna = self._parse_input(data, time_key)
@@ -1347,8 +1455,8 @@ class NetworkModel:
 
         # --- Choose initial cells per sample ---
         init_cells_full = [
-            minimal_repetition_choice(nb_cells[s, 0], N_full[s])
-            for s in range(len(samples_id))
+            minimal_repetition_choice(nb_cells[s, 0], N_full[s], labels=self._t0_cell_types(vect_t, vect_samples_id, sample))
+            for s, sample in enumerate(samples_id)
         ]
 
         # --- Extract kinetic parameters ---
@@ -1473,28 +1581,20 @@ class NetworkModel:
 
         for cnt, time in enumerate(times[:-1]):
             delta_t = times[cnt + 1] - time
+            rows_prev = slice(N * cnt, N * (cnt + 1))
+            rows_next = slice(N * (cnt + 1), N * (cnt + 2))
+            kb_prev = np.ascontiguousarray(kon_beta[rows_prev, ns:], dtype=np.float64)
+            kb_next = np.ascontiguousarray(kon_beta[rows_next, ns:], dtype=np.float64)
 
-            for n in range(N):
-                idx_prev = N * cnt + n
-                idx_next = N * (cnt + 1) + n
-                alpha_n = self.alpha[cnt, n]
-
-                prot_modified[idx_next, ns:] = find_next_prot(
-                    d1,
-                    prot_modified[idx_prev, ns:],
-                    kon_beta[idx_prev, ns:],
-                    kon_beta[idx_next, ns:],
-                    kon_beta[idx_prev, ns:],
-                    kon_beta[idx_next, ns:],
-                    alpha_n,
-                    s,
-                    delta_t
-                )
+            # All N trajectories at once
+            prot_modified[rows_next, ns:] = find_next_prot(
+                np.asarray(d1, dtype=np.float64),
+                np.ascontiguousarray(prot_modified[rows_prev, ns:], dtype=np.float64),
+                kb_prev, kb_next, kb_prev, kb_next,
+                np.ascontiguousarray(self.alpha[cnt, :N], dtype=np.float64),
+                s, float(delta_t))
 
             if prot_modified_prev is not None and self.weight_prev > 0:
-                rows_prev = slice(N * cnt, N * (cnt + 1))
-                rows_next = slice(N * (cnt + 1), N * (cnt + 2))
-                kb_prev, kb_next = kon_beta[rows_prev, ns:], kon_beta[rows_next, ns:]
                 self._fill_prev_prot(
                     prot_modified_prev, rows_next, self.alpha[cnt, :N], delta_t,
                     d1, prot_modified[rows_prev, ns:], kb_prev, kb_next, kb_prev, kb_next, s)
@@ -1505,24 +1605,26 @@ class NetworkModel:
     def select_cells_to_use(self):
 
         n_samples = len(np.unique(self.samples_data))
-        N_t = np.sum(self.times_data == 0)
+        t0 = np.min(self.times_data)
+        N_t = np.sum(self.times_data == t0)
         cells_to_use = np.zeros_like(self.times_data, dtype=int)
         times = np.unique(self.times_data)
 
         for s in range(n_samples):
-            # cellules appartenant à l’échantillon s au temps 0
-            idx_first = (self.samples_data == s) & (self.times_data == 0)
+            # Trajectories of sample s at the first timepoint
+            idx_first = (self.samples_data == s) & (self.times_data == t0)
             idx_first_indices = np.where(idx_first)[0]
             N_s = len(idx_first_indices)
 
-            # tirage aléatoire d’un sous-ensemble
-            n_pick = min(N_s, self.batch_size_degradations)
-            if n_pick == 0:
+            if N_s == 0:
                 continue
 
-            chosen_idx = np.random.choice(idx_first_indices, n_pick, replace=False)
+            # Random subset of trajectories, cell-type proportional at the first timepoint
+            chosen_idx = stratified_choice(
+                idx_first_indices, self.batch_size_degradations,
+                None if self.traj_cell_types is None else self.traj_cell_types[idx_first_indices])
 
-            # marquer les mêmes cellules à travers tous les temps
+            # Same trajectories at every timepoint
             for cnt, t in enumerate(times):
                 idx_cnt = chosen_idx+N_t*cnt
                 cells_to_use[idx_cnt] = 1
@@ -1593,9 +1695,10 @@ class NetworkModel:
         ``kon_theta`` using the current (pre-loaded simul) network. No inference,
         MLP training, or parameter update is performed.
         """
+        seed_everything(self.seed)
 
         times = np.sort(np.unique(self.times_data))
-        N_tot = np.sum(self.times_data == 0)
+        N_tot = np.sum(self.times_data == times[0])
 
         if stimulus_schedule is not None or self._stim_schedule is None:
             self._stim_schedule = self._build_stimulus_schedule(times, stimulus_schedule)
@@ -1654,18 +1757,24 @@ class NetworkModel:
 
         # inference_network returns (n_samples, G_tot, n_networks) for basal
         _final_call = 0 if (self.hard_forcing_ref or self.inter_simul_ref is not None) else 1
-        basal, inter, _, _ = inference_network(
-            self.samples_data, self.kon_beta, self.proba_traj,
-            y_prot, y_prot_prev, ks, n_stimuli=ns, proba=self.compute_with_proba,
-            ref_network=self.ref_network, basal_init=basal_ref, inter_init=inter_ref,
-            basal_ref=basal_ref, inter_ref=inter_ref,
-            scale=self.scale_pen * 2, # # slightly stronger regularization for network
-            weight_prev=self.weight_prev, loss=self.loss_norm, final=_final_call,
-            samples_id=samples_id,
-            constrain_basal_uniform=self.constrain_basal_uniform,
-            hard_forcing_ref=self.hard_forcing_ref, ref_constraint_pct=self.ref_constraint_pct,
-            seuil_zero_min_ref=self.seuil_zero_min_ref,
-        )
+
+        def fit_on(_sel):
+            return inference_network(
+                self.samples_data[_sel], self.kon_beta[_sel], self.proba_traj[_sel],
+                y_prot[_sel], y_prot_prev.select_cells(_sel), ks, n_stimuli=ns, proba=self.compute_with_proba,
+                ref_network=self.ref_network, basal_init=basal_ref, inter_init=inter_ref,
+                basal_ref=basal_ref, inter_ref=inter_ref,
+                scale=self.scale_pen * 2, # # slightly stronger regularization for network
+                weight_prev=self.weight_prev, loss=self.loss_norm, final=_final_call,
+                samples_id=samples_id,
+                constrain_basal_uniform=self.constrain_basal_uniform,
+                hard_forcing_ref=self.hard_forcing_ref, ref_constraint_pct=self.ref_constraint_pct,
+                seuil_zero_min_ref=self.seuil_zero_min_ref,
+            )
+
+        # Mean theta over fits on (time, sample, cell type)-stratified subsamples (single fit if one holds all)
+        basal, inter, _, _ = self._fit_theta_averaged(
+            fit_on, self.times_data, self.samples_data, self.traj_cell_types, self.n_final_network_fits)
 
         ### filter_edges
         if self.filter_network:
@@ -1675,7 +1784,8 @@ class NetworkModel:
                 seuil_intensity = max(seuil_intensity, self.seuil_zero_min_ref)
             inter, _ = filter_network(len(times), N_tot, y_prot, ks, basal, inter, 
                                       samples_data=self.samples_data, 
-                                      seuil_intensity=seuil_intensity, seuil_variations=self.seuil_min_network_variations)
+                                      seuil_intensity=seuil_intensity, seuil_variations=self.seuil_min_network_variations,
+                                      seed=task_seed(self.seed, 2))
 
         error_corrected = self._count_errors_per_sample(y_prot, self.kon_beta, self.proba_traj, ks,
                                                         inter, basal, samples_id=samples_id, samples_data=self.samples_data)
@@ -1724,7 +1834,8 @@ class NetworkModel:
             if self.simulate_full_with_harissa:
                 print("[refine_network_degradations] Training kon correction MLP (Harissa branch)...")
                 self.kon_mlp = train_kon_correction_mlp(
-                    self.prot, self.kon_beta_harissa, self.kon_beta * self.scale_proteins, ns, seuil=self.seuil
+                    self.prot, self.kon_beta_harissa, self.kon_beta * self.scale_proteins, ns, seuil=self.seuil,
+                    seed=task_seed(self.seed, 6)
                 )
 
                 prot_np    = self.prot if isinstance(self.prot, np.ndarray) else self.prot.cpu().numpy()
@@ -1748,22 +1859,31 @@ class NetworkModel:
                 if self.kon_mlp is not None else None
             )  # shape (N, G_genes), same row-indexing as self.prot / self.times_data
 
+            # Subset used by infer_ratio_d0_d1_unitary; d1 inference uses all trajectories
+            # with a random minibatch of batch_size_degradations per interval and step
             cells_to_use = self.select_cells_to_use()
             if not self.use_temporal_degradations:
+                # Single job: torch may use every core
+                import torch
+                n_threads_prev = torch.get_num_threads()
+                torch.set_num_threads(os.cpu_count() or 1)
                 d1, scale_theta = inference_degradation_prot(
-                            self.prot[cells_to_use == 1],
-                            self.times_data[cells_to_use == 1],
+                            self.prot,
+                            self.times_data,
                             basal,   # 3-D (n_samples, G, n_networks) — triggers per-sample ODE
                             inter, ks.T * self.scale_proteins,
                             d=self.d[1], lr=1e-2,
+                            batch_size=self.batch_size_degradations,
                             n_stimuli=ns, stim_schedule=self._stim_schedule,
                             scale_proteins = self.scale_proteins,
-                            samples_data=self.samples_data[cells_to_use == 1],
+                            samples_data=self.samples_data,
+                            strata=self.traj_cell_types,
                             kon_mlp=self.kon_mlp,
                             lambda_scale=self.lambda_scale,
                             lambda_deg=self.lambda_deg1,
                             lambda_mlp=self.lambda_mlp,
-                            g_obs_train=g_obs_all[cells_to_use == 1] if g_obs_all is not None else None)
+                            g_obs_train=g_obs_all)
+                torch.set_num_threads(n_threads_prev)
                 self.d_t[:, 1, :] = np.tile(d1, (len(times)-1, 1))
                 basal *= scale_theta[None, :, None]   # (n_samples, G, n_networks) * (1, G, 1)
                 inter *= scale_theta[None, :, None]
@@ -1778,24 +1898,41 @@ class NetworkModel:
             _sigma = None  # set below in the temporal branch if smoothing is active
 
             if self.use_temporal_degradations:
+                # Split the cores between the interval jobs (torch threads per job)
+                n_cpu = os.cpu_count() or 1
+                n_jobs_deg = max(1, min(len(times) - 1, n_cpu))
+                n_threads_deg = max(1, n_cpu // n_jobs_deg)
+
                 def run_main_inference_degradation_prot(t):
-                    idx = ((self.times_data == times[t]) | (self.times_data == times[t+1])) & (cells_to_use == 1)
+                    import torch
+                    n_threads_prev = torch.get_num_threads()
+                    torch.set_num_threads(n_threads_deg)
+                    idx = (self.times_data == times[t]) | (self.times_data == times[t+1])
+                    try:
+                        return run_degradation_interval(idx)
+                    finally:
+                        torch.set_num_threads(n_threads_prev)
+
+                def run_degradation_interval(idx):
                     return inference_degradation_prot(
                         self.prot[idx], self.times_data[idx],
                         basal,   # 3-D
                         inter, ks.T * self.scale_proteins,
                         d=self.d[1], lr=1e-2,
+                        batch_size=self.batch_size_degradations,
                         n_stimuli=ns, stim_schedule=self._stim_schedule,
                         scale_proteins = self.scale_proteins,
                         samples_data=self.samples_data[idx],
+                        strata=None if self.traj_cell_types is None else self.traj_cell_types[idx],
                         kon_mlp=self.kon_mlp,
                         lambda_scale=self.lambda_scale,
                         lambda_deg=self.lambda_deg1,
                         lambda_mlp=self.lambda_mlp,
                         g_obs_train=g_obs_all[idx] if g_obs_all is not None else None)
 
-                results = Parallel(n_jobs=-1)(
-                    delayed(run_main_inference_degradation_prot)(t) for t in range(0, len(times)-1)
+                results = Parallel(n_jobs=n_jobs_deg)(
+                    delayed(seeded_call)(task_seed(self.seed, 3, t), run_main_inference_degradation_prot, t)
+                    for t in range(0, len(times)-1)
                 )
 
                 # ── Phase 1: collect d1 and scale_theta ──────────────────────
@@ -2062,7 +2199,7 @@ class NetworkModel:
                     )
 
             results = Parallel(n_jobs=-1)(
-            delayed(run_main_loop_for_cell)(n) for n in range(0, N)
+            delayed(seeded_call)(task_seed(self.seed, 4, cnt, n), run_main_loop_for_cell, n) for n in range(0, N)
             )
 
             for idx, n in enumerate(range(0, N)):
@@ -2221,7 +2358,7 @@ class NetworkModel:
                 return sim.p[-1, :], sim.m[-1, :]
 
             results = Parallel(n_jobs=-1)(
-                delayed(run_harissa_cell)(n) for n in range(N)
+                delayed(seeded_call)(task_seed(self.seed, 5, cnt, n), run_harissa_cell, n) for n in range(N)
             )
             for n, (p_end, m_end) in enumerate(results):
                 prot_modified[end_index + n, ns:] = p_end
@@ -2245,6 +2382,7 @@ class NetworkModel:
         """
         Simulate the protein trajectories using the final inferred network.
         """
+        seed_everything(self.seed)
 
         if self.simulate_full_with_harissa:
             self.scale_proteins = 1
@@ -2256,7 +2394,7 @@ class NetworkModel:
             # when simulation times differ from training times (e.g. times_to_simulate.txt).
             self._stim_schedule = self._build_stimulus_schedule(
                 np.sort(np.unique(times)), stimulus_schedule, times_ref=times_train)
-        N = np.sum(self.times_data == 0)
+        N = np.sum(self.times_data == times_train[0])
         ks = (self.a[:-1] / np.max(self.a[:-1], axis=0)).T
 
         samples_data_sim = (self.samples_data[:N]
@@ -2394,6 +2532,7 @@ class NetworkModel:
         transition_rates : DataFrame or array or None
             Cell-type transition rate matrix for OT cost adjustment.
         """
+        seed_everything(self.seed)
         data_rna = self._parse_input(data, time_key)
         if stimulus_schedule is not None or self._stim_schedule is None:
             self._stim_schedule = self._build_stimulus_schedule(
@@ -2479,8 +2618,8 @@ class NetworkModel:
 
         # --- Choose initial cells per sample ---
         init_cells_full = [
-            minimal_repetition_choice(nb_cells[s, 0], N_full[s])
-            for s in range(len(samples_id))
+            minimal_repetition_choice(nb_cells[s, 0], N_full[s], labels=self._t0_cell_types(vect_t, vect_samples_id, sample))
+            for s, sample in enumerate(samples_id)
         ]
 
         # --- Infer trajectories on full simulations given theta ---

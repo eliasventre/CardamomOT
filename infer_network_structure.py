@@ -417,6 +417,12 @@ def main(argv):
     np.save(os.path.join(cardamom_dir, 'degradations'), model.d)
     if model.R_opt is not None:
         np.save(os.path.join(cardamom_dir, 'data_R_opt'), model.R_opt)
+    # Cell type behind each trajectory state (stratifies the batches of infer_network_simul)
+    ct_path = os.path.join(cardamom_dir, 'data_cell_types.npy')
+    if model.traj_cell_types is not None:
+        np.save(ct_path, model.traj_cell_types)
+    elif os.path.exists(ct_path):
+        os.remove(ct_path)
 
     print(f"[infer_network_structure] Successfully saved network inference results to {cardamom_dir}")
 

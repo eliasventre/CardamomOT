@@ -611,9 +611,10 @@ def refine_inference(y_samples, y_proba, y_prot, y_prot_mod, y_kon, inter, basal
     for idx, (v, cap) in enumerate(zip(values, caps)):
         if v != 0.0:
             lo, hi = bounds[idx]
+            # Ratios written without dividing by a near-zero |v| (overflow; the min picks the other term anyway)
             if idx < n_inter_flat and forced[idx]:
-                lo = max(lo, min(seuil_zero_min_ref / abs(v), 1.0))  # keep the forced-sign magnitude
-            bounds[idx] = (lo, max(lo, min(hi, cap / abs(v))))
+                lo = max(lo, 1.0 if abs(v) <= seuil_zero_min_ref else seuil_zero_min_ref / abs(v))  # keep the forced-sign magnitude
+            bounds[idx] = (lo, max(lo, hi if abs(v) * hi <= cap else cap / abs(v)))
 
     loss_fn = partial(objective_refinement,
                       correc_ref=correc_ref, inter=inter, basal=basal,

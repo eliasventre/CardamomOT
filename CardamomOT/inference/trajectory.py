@@ -9,10 +9,16 @@ import multiprocessing as mp
 from joblib import Parallel, delayed
 from .network import main_loss
 from .simulations import simulate_next_prot_ode
+from .seeding import seeded_call, task_seed
+from .sampling import stratified_choice
 
 EPS = 1e-16
 
-def minimal_repetition_choice(N, M, seed=None):
+
+
+def minimal_repetition_choice(N, M, seed=None, labels=None):
+    """M indices in range(N), each repeated as evenly as possible; the remainder is
+    cell-type proportional if labels (length N) is given."""
     if seed is not None:
         np.random.seed(seed)
 
@@ -26,7 +32,7 @@ def minimal_repetition_choice(N, M, seed=None):
         result.append(cycle)
     
     if remainder > 0:
-        remainder_sample = np.random.choice(N, remainder, replace=False)
+        remainder_sample = stratified_choice(np.arange(N), remainder, labels)
         result.append(remainder_sample)
     
     return np.concatenate(result)
@@ -130,15 +136,18 @@ def _kon_per_sample(y_prot, ks, inter, basal, samples_data=None):
 def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, vect_rna_end,
                             vect_proba_init, vect_proba_end, mode_init, mode_end, alpha, s1, ks, d1, delta_t, basal, inter, loss='CE',
                             compute_with_proba=1, n_iter=1, intensity_prior=1, q=.9,
-                            n_stimuli=1, stim_vals=np.ones(1), scale_proteins=1) -> tuple[np.ndarray, np.ndarray]:
+                            n_stimuli=1, stim_vals=np.ones(1), scale_proteins=1) -> np.ndarray:
+    """
+    OT cost between n1 trajectory ends and n2 real cells. Only the cost is
+    returned: the (n1, n2, G) end states are never stored; recompute them
+    with find_next_prot for the sampled pairs.
+    """
     n1, G = vect_rna_init.shape
     n2 = vect_rna_end.shape[0]
     ns = n_stimuli
 
     # Preallocation (important for Numba)
     dist = np.zeros((n1, n2))
-    vect_prot_end = np.ones((n1, n2, G + ns))
-    vect_prot_end[:, :, :ns] = stim_vals * scale_proteins
     log_vect_rna_end = np.log1p(vect_rna_end)
     log_vect_rna_init = np.log1p(vect_rna_init)
 
@@ -154,7 +163,7 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
 
     for i in prange(n1):  # parallelize cell-by-cell
 
-        prot_init_i = vect_prot_init[i]
+        prot_init_i = vect_prot_init[i].copy()
         log_rna_init_i = log_vect_rna_init[i]
         rna_init_i = vect_rna_init[i]
         mode_init_i = mode_init[i]
@@ -164,24 +173,26 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
 
         prot_end_i = np.zeros((n2, G))
         local_dist_i = np.zeros(n2)
+        # Full end states (stimuli + genes) of cell i, for the kon computation
+        prot_full_i = np.empty((n2, G + ns))
+        prot_full_i[:, :ns] = stim_vals * scale_proteins
 
         # --- Loop over target cells j ---
         for j in range(0, n2):
             prot_end_i[j, :] = find_next_prot(d1, prot_init_i, rna_init_i * scale_proteins, vect_rna_end[j] * scale_proteins, mode_init_i, mode_end[j], alpha_i, s1, delta_t)
+        prot_full_i[:, ns:] = prot_end_i
 
-        # --- Storage ---
-        vect_prot_end[i, :, ns:] = prot_end_i[:, :]
-
+        # Per-gene normalisation of the end states and of the initial state
         for g in range(G):
             sorted_prot = np.sort(prot_end_i[:, g])
             idx = int(q * (n2 - 1))
-            scale_prot = sorted_prot[idx]
-            prot_end_i[:, g] /= max(scale_prot, 1)
-            prot_init_i /= max(scale_prot, 1)
+            scale_prot = max(sorted_prot[idx], 1)
+            prot_end_i[:, g] /= scale_prot
+            prot_init_i[g] /= scale_prot
 
         # --- Main loss ---
         if compute_with_proba:
-            sigma = base_kon_vector(basal, inter, vect_prot_end[i])
+            sigma = base_kon_vector(basal, inter, prot_full_i)
             for j in range(0, n2):
                 diff_proba = vect_proba_end[j] - proba_init_i
                 diff_prot = (prot_end_i[j] - prot_init_i) / scale_proteins
@@ -190,7 +201,7 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
                                     main_loss(sigma[j, ns:], vect_proba_end[j], 1, loss) * (1 - weight_init)) +
                                     (0.5 / G) * (np.sum(diff_prot * diff_prot) + np.sum(diff_rna * diff_rna)))
         else:
-            sigma = kon_ref_vector(vect_prot_end[i], ks, inter, basal)
+            sigma = kon_ref_vector(prot_full_i, ks, inter, basal)
             for j in range(0, n2):
                 diff_k = vect_kon_end[j] - kon_init_i
                 diff_prot = (prot_end_i[j] - prot_init_i) / scale_proteins
@@ -201,7 +212,7 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
         
         dist[i, :] = np.minimum(local_dist_i, 100.0)
 
-    return dist, vect_prot_end
+    return dist
 
 
 def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init, y_rna_init,
@@ -238,7 +249,7 @@ def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init
 
 
 def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
-                   seuil_intensity=1e-2, seuil_variations=1e-2, n_order=10, samples_data=None):
+                   seuil_intensity=1e-2, seuil_variations=1e-2, n_order=10, samples_data=None, seed=None):
 
     if seuil_variations <= 0:
         inter = inter_ref * (np.abs(inter_ref) >= seuil_intensity)
@@ -289,7 +300,8 @@ def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
         return inter_t_run
 
     n_order = max(n_order, G)
-    results = Parallel(n_jobs=-1)(delayed(single_run)(i) for i in range(n_order))
+    results = Parallel(n_jobs=-1)(
+        delayed(seeded_call)(task_seed(seed, i), single_run, i) for i in range(n_order))
 
     # Agregation
     stacked = np.stack(results, axis=0)  # (n_order, T, G, G, n_networks)

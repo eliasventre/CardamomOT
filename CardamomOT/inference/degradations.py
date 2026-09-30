@@ -230,6 +230,8 @@ def build_kon_fn(ks, theta_inter, bias, device="cpu"):
 #     return mlp.cpu().eval()
 
 from joblib import Parallel, delayed
+from .seeding import seeded_call, task_seed
+from .sampling import stratified_choice
 
 def _train_single_gene(
     g_idx: int,
@@ -330,6 +332,7 @@ def train_kon_correction_mlp(
     seuil: float = 1e-8,
     fixed_r: float = 10.0,
     n_jobs: int = -1,
+    seed=None,
 ) -> KonCorrectionMLP:
 
     N, G_tot = y_prot.shape
@@ -340,7 +343,8 @@ def train_kon_correction_mlp(
     kh_all = kon_harissa[:, ns:]     # (N, G_genes)
 
     results = Parallel(n_jobs=n_jobs)(
-        delayed(_train_single_gene)(
+        delayed(seeded_call)(
+            task_seed(seed, g), _train_single_gene,
             g, P_all[:, g], kb_all[:, g], kh_all[:, g],
             hidden_dim, n_epochs, lr, fixed_r, seuil
         )
@@ -878,6 +882,13 @@ def infer_ratio_d0_d1_unitary(
 # inference_degradation_prot
 # ---------------------------
 
+def _draw_minibatch(n_cells, batch_size, labels=None):
+    """All rows if batch_size is None or >= n_cells, else batch_size rows (cell-type proportional if labels)."""
+    if batch_size is None:
+        return np.arange(n_cells)
+    return stratified_choice(np.arange(n_cells), batch_size, labels)
+
+
 def inference_degradation_prot(
     X_prot, times, bias, theta_inter, ks, d=None,
     n_epochs=500, lr=1e-2, method="dopri5",
@@ -886,6 +897,7 @@ def inference_degradation_prot(
     n_stimuli=1, stim_schedule=None,
     scale_proteins=1.0,
     samples_data=None,
+    strata=None,
     kon_mlp=None,
     lambda_scale=1e3,
     lambda_deg=0.0,
@@ -899,6 +911,11 @@ def inference_degradation_prot(
     one ODE module is created per sample with its own bias while ``d_param`` and
     ``scale_param`` are shared, so a single optimizer refines the shared kinetics
     from all samples jointly.
+
+    ``batch_size``: trajectories drawn at random per interval at each optimizer
+    step (one step per epoch); None uses every trajectory at each step.
+    ``strata``: per-row cell types (same indexing as X_prot) or None; minibatches
+    are then cell-type proportional at the start time of each interval.
 
     Returns:
         ``d_learned``: Learned degradation rates, shape (G,).
@@ -967,7 +984,8 @@ def inference_degradation_prot(
                 stim0, stim1 = stim0*scale_proteins, stim1*scale_proteins
                 n_p = min(len(X0_np), len(X1_np))
                 if n_p > 0:
-                    all_pairs.append((s_idx, t0, t1, X0_np[:n_p], X1_np[:n_p], stim0, stim1))
+                    lab0 = None if strata is None else np.asarray(strata)[mask_s][t_s == unique_t[ti]][:n_p]
+                    all_pairs.append((s_idx, t0, t1, X0_np[:n_p], X1_np[:n_p], stim0, stim1, lab0))
 
         # ── Pre-compute observed training ratios per (sample, timepoint) ────────
         # g_obs_train (N, G_genes) = kon_beta_harissa[:, ns:] / kon_beta[:, ns:]
@@ -992,7 +1010,7 @@ def inference_degradation_prot(
             optimizer.zero_grad()
             total_loss, total_count = 0.0, 0
 
-            for (s_idx, t0, t1, X0_full, X1_full, stim0, stim1) in all_pairs:
+            for (s_idx, t0, t1, X0_full, X1_full, stim0, stim1, lab0) in all_pairs:
                 ode = ode_funcs[s_idx]
                 ode.stim_vals.copy_(torch.tensor(stim1, dtype=torch.float32))
                 # Apply lambda_mlp mix in forward() for this interval
@@ -1001,22 +1019,18 @@ def inference_degradation_prot(
                     r0 = ratio_obs_persample.get((s_idx, t0), _ones)
                     r1 = ratio_obs_persample.get((s_idx, t1), _ones)
                     ode.set_ratio_interpolation(t0, t1, r0, r1, lam_mlp)
-                n_cells = X0_full.shape[0]
-                cur_bs  = n_cells if batch_size is None else batch_size
-                perm    = np.random.permutation(n_cells)
-                for start in range(0, n_cells, cur_bs):
-                    idxs = perm[start:start + cur_bs]
-                    X0 = torch.tensor(X0_full[idxs], dtype=torch.float32, device=device)
-                    X1 = torch.tensor(X1_full[idxs], dtype=torch.float32, device=device)
-                    X0[:, :ns] = torch.tensor(stim0, dtype=torch.float32)
-                    X1[:, :ns] = torch.tensor(stim1, dtype=torch.float32)
-                    t_span = torch.tensor([t0, t1], dtype=torch.float32, device=device)
-                    X_pred = odeint(ode, X0, t_span, method=method, rtol=rtol, atol=atol)[-1]
-                    X_pred[:, :ns] = torch.tensor(stim1, dtype=torch.float32, device=device)
-                    loss_batch = mse(X_pred, X1)
-                    loss_batch.backward()
-                    total_loss  += loss_batch.item() * len(idxs)
-                    total_count += len(idxs)
+                idxs = _draw_minibatch(X0_full.shape[0], batch_size, lab0)
+                X0 = torch.tensor(X0_full[idxs], dtype=torch.float32, device=device)
+                X1 = torch.tensor(X1_full[idxs], dtype=torch.float32, device=device)
+                X0[:, :ns] = torch.tensor(stim0, dtype=torch.float32)
+                X1[:, :ns] = torch.tensor(stim1, dtype=torch.float32)
+                t_span = torch.tensor([t0, t1], dtype=torch.float32, device=device)
+                X_pred = odeint(ode, X0, t_span, method=method, rtol=rtol, atol=atol)[-1]
+                X_pred[:, :ns] = torch.tensor(stim1, dtype=torch.float32, device=device)
+                loss_batch = mse(X_pred, X1)
+                loss_batch.backward()
+                total_loss  += loss_batch.item() * len(idxs)
+                total_count += len(idxs)
 
             # Regularization: penalize deviation of scale[ns:] from 1 and d from d_init
             if lambda_scale > 0:
@@ -1029,12 +1043,13 @@ def inference_degradation_prot(
 
             optimizer.step()
             loss: float = total_loss / total_count if total_count > 0 else 0.0
+            loss_ema = loss if epoch == 1 else 0.9 * loss_ema + 0.1 * loss
             if verbose and (epoch % print_every == 0 or epoch == 1 or epoch == n_epochs):
                 scale_now = torch.nn.functional.softplus(ode_funcs[0].scale_param[ns:]).detach().cpu().numpy()
-                logger.info(f"[Epoch {epoch}/{n_epochs}] loss = {loss:.6e}  max_scale[ns:] = {scale_now.max():.3e}")
-                if abs(loss - old_loss) < 1e-4:
+                logger.info(f"[Epoch {epoch}/{n_epochs}] loss = {loss_ema:.6e}  max_scale[ns:] = {scale_now.max():.3e}")
+                if abs(loss_ema - old_loss) < 1e-4:
                     break
-                old_loss = loss
+                old_loss = loss_ema
 
         d_learned     = torch.nn.functional.softplus(ode_funcs[0].d_param).detach().cpu().numpy()
         scale_learned = torch.nn.functional.softplus(ode_funcs[0].scale_param).detach().cpu().numpy()
@@ -1052,9 +1067,10 @@ def inference_degradation_prot(
         stim0, stim1 = stim0*scale_proteins, stim1*scale_proteins
         n_pairs: int = min(len(X0_np), len(X1_np))
         if n_pairs > 0:
-            pairs.append((float(t0), float(t1), X0_np[:n_pairs], X1_np[:n_pairs], stim0, stim1))
+            lab0 = None if strata is None else np.asarray(strata)[mask0][:n_pairs]
+            pairs.append((float(t0), float(t1), X0_np[:n_pairs], X1_np[:n_pairs], stim0, stim1, lab0))
 
-    stim_first = pairs[0][-1] if pairs else np.ones(ns, dtype=np.float32) * scale_proteins
+    stim_first = pairs[0][-2] if pairs else np.ones(ns, dtype=np.float32) * scale_proteins
     ode_func: GeneRegulatoryODE_softmax = GeneRegulatoryODE_softmax(
         G, d_init, ks, theta_inter, bias,
         n_stimuli=ns, stim_vals=stim_first, device=device,
@@ -1083,7 +1099,7 @@ def inference_degradation_prot(
         optimizer.zero_grad()
         total_loss, total_count = 0.0, 0
 
-        for (t0, t1, X0_full, X1_full, stim0, stim1) in pairs:
+        for (t0, t1, X0_full, X1_full, stim0, stim1, lab0) in pairs:
             ode_func.stim_vals.copy_(torch.tensor(stim1, dtype=torch.float32))
             # Apply lambda_mlp mix in forward() for this interval
             if kon_mlp is not None and lam_mlp > 0:
@@ -1094,32 +1110,27 @@ def inference_degradation_prot(
                     ratio_obs.get(t1, _ones),
                     lam_mlp,
                 )
-            n_cells = X0_full.shape[0]
-            current_batch_size = n_cells if batch_size is None else batch_size
+            idxs = _draw_minibatch(X0_full.shape[0], batch_size, lab0)
+            X0: torch.Tensor = torch.tensor(X0_full[idxs], dtype=torch.float32, device=device)
+            X1: torch.Tensor = torch.tensor(X1_full[idxs], dtype=torch.float32, device=device)
 
-            perm = np.random.permutation(n_cells)
-            for start in range(0, n_cells, current_batch_size):
-                idxs = perm[start:start + current_batch_size]
-                X0: torch.Tensor = torch.tensor(X0_full[idxs], dtype=torch.float32, device=device)
-                X1: torch.Tensor = torch.tensor(X1_full[idxs], dtype=torch.float32, device=device)
+            X0[:, :ns] = torch.tensor(stim0, dtype=torch.float32)
+            X1[:, :ns] = torch.tensor(stim1, dtype=torch.float32)
 
-                X0[:, :ns] = torch.tensor(stim0, dtype=torch.float32)
-                X1[:, :ns] = torch.tensor(stim1, dtype=torch.float32)
+            t_span: torch.Tensor = torch.tensor([t0, t1], dtype=torch.float32, device=device)
 
-                t_span: torch.Tensor = torch.tensor([t0, t1], dtype=torch.float32, device=device)
+            X_pred_traj = odeint(
+                ode_func, X0, t_span,
+                method=method, rtol=rtol, atol=atol
+            )
+            X_pred = X_pred_traj[-1]
+            X_pred[:, :ns] = torch.tensor(stim1, dtype=torch.float32, device=device)
 
-                X_pred_traj = odeint(
-                    ode_func, X0, t_span,
-                    method=method, rtol=rtol, atol=atol
-                )
-                X_pred = X_pred_traj[-1]
-                X_pred[:, :ns] = torch.tensor(stim1, dtype=torch.float32, device=device)
+            loss_batch = mse(X_pred, X1)
+            loss_batch.backward()
 
-                loss_batch = mse(X_pred, X1)
-                loss_batch.backward()
-
-                total_loss += loss_batch.item() * len(idxs)
-                total_count += len(idxs)
+            total_loss += loss_batch.item() * len(idxs)
+            total_count += len(idxs)
 
         # Regularization: penalize deviation of scale[ns:] from 1 and d from d_init
         if lambda_scale > 0:
@@ -1132,13 +1143,14 @@ def inference_degradation_prot(
 
         optimizer.step()
         loss: float | Any = total_loss / total_count if total_count > 0 else 0.0
+        loss_ema = loss if epoch == 1 else 0.9 * loss_ema + 0.1 * loss
 
         if verbose and (epoch % print_every == 0 or epoch == 1 or epoch == n_epochs):
             scale_now = torch.nn.functional.softplus(ode_func.scale_param[ns:]).detach().cpu().numpy()
-            logger.info(f"[Epoch {epoch}/{n_epochs}] loss = {loss:.6e}  max_scale[ns:] = {scale_now.max():.3e}")
-            if abs(loss - old_loss) < 1e-4:
+            logger.info(f"[Epoch {epoch}/{n_epochs}] loss = {loss_ema:.6e}  max_scale[ns:] = {scale_now.max():.3e}")
+            if abs(loss_ema - old_loss) < 1e-4:
                 break
-            old_loss: float | Any = loss
+            old_loss: float | Any = loss_ema
 
     d_learned = torch.nn.functional.softplus(ode_func.d_param).detach().cpu().numpy()
     scale_learned = torch.nn.functional.softplus(ode_func.scale_param).detach().cpu().numpy()
