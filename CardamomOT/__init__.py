@@ -31,12 +31,6 @@ License
 MIT License
 """
 
-import os
-# Set before numba is imported: TBB warns on every loky worker respawn, OpenMP does not
-# (same speed); KMP_WARNINGS silences the OpenMP deprecation info. Env values win.
-os.environ.setdefault("NUMBA_THREADING_LAYER", "omp")
-os.environ.setdefault("KMP_WARNINGS", "0")
-
 from .logging import configure_logging, get_logger
 from .config import (
     get_project_directories,
@@ -98,11 +92,6 @@ from .tools import (
     estimate_growth_rates,
     combine_growth_rates_with_reference,
 )
-
-# pynndescent (imported by umap above) switches numba from omp to tbb at import;
-# restore the requested layer (chosen only at the first parallel launch)
-import numba
-numba.config.THREADING_LAYER = os.environ["NUMBA_THREADING_LAYER"]
 
 # ============================================================================
 # Public API

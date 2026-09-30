@@ -24,15 +24,15 @@ from sklearn.cluster import MiniBatchKMeans
 from scipy.ndimage import gaussian_filter1d
 from scipy.spatial.distance import cdist
 from ..config import resolve_cell_type_obs, CELL_TYPE_OBS_KEYS
-from ..inference import (inference_network, active_regulators, PrevProt, signed_floor, filter_network,
+from ..inference import (inference_network_multi, active_regulators, PrevProt, signed_floor, filter_network,
                         minimal_repetition_choice, find_next_prot, my_otdistance, count_errors,
-                        kon_ref_vector, inference_alpha,
+                        kon_ref_vector, inference_alpha, inference_alpha_1thread,
                         NegativeBinomialMixtureEM, predict_resp,
                         simulate_next_prot_ode, simulate_next_prot_pdmp,
                         train_kon_correction_mlp, infer_ratio_d0_d1_full, infer_ratio_d0_d1_unitary, inference_degradation_prot,
                         train_proliferation_mlp, fit_scale_theta,
                         seed_everything, seeded_call, task_seed,
-                        stratified_order, stratified_choice, grouped_subsample)
+                        stratified_order, stratified_choice, grouped_partition)
 
 np.set_printoptions(precision=3, suppress=True)
 EPS=1e-16
@@ -128,7 +128,7 @@ class NetworkModel:
         self.scale_pen = 20 # Error that is expected = 1/scale_pen
         self.compute_with_proba = 0 # Determine if compute with proba or kon values in network inference (recommended:1)
         self.weight_prev = .4 # max = .5 to not withdrawn the inference on timepoints, allows the calibration to incorporate some "flow-matching" method
-        self.batch_size_network = 256 # Maximum number of cells used for network calibration in the inference (stratified by time and sample).
+        self.batch_size_network = 256 # Maximum number of cells used for network calibration in the inference (stratified by time and sample); at least 10 x n_genes is used.
         self.n_network_fits = 5 # Theta = mean of min(n_network_fits, 1 + n_states // batch_size_network) fits on independent subsamples, at every network update
         # Inference of alpha = switch moment between each timepoint and modes
         self.update_modes = 1
@@ -853,21 +853,25 @@ class NetworkModel:
                 strata[idx] = km.fit_predict(np.log1p(data_rna[idx, ns:]))
         return strata
 
-    def _fit_theta_averaged(self, fit_fn, times_vec, samples_vec, labels, n_fits):
+    def _network_batch_size(self, n_genes):
+        """Network sub-sample size: batch_size_network, but at least 10 states per gene (parameters per target)."""
+        return max(self.batch_size_network, 10 * n_genes)
+
+    def _fit_theta_averaged(self, fit_fn, times_vec, samples_vec, labels, n_fits, n_genes):
         """
-        Theta from fit_fn(sel) on sub-samples of batch_size_network trajectory states,
+        Theta from fit_fn(sels) (one fit per sub-sample, run jointly) on sub-samples of
+        _network_batch_size(n_genes) trajectory states,
         stratified by (time, sample) and cell type (labels, if not None). Mean over
-        min(n_fits, 1 + n_states // batch_size_network) independent sub-samples (enough to
-        cover every state about once, at most n_fits); a single fit when one sub-sample holds
-        every state.
+        min(n_fits, 1 + n_states // batch_size) disjoint sub-samples (covering every state
+        about once, at most n_fits); a single fit when one sub-sample holds every state.
         Returns (basal, inter, basal_tmp, inter_tmp).
         """
-        sel, full = grouped_subsample([times_vec, samples_vec], self.batch_size_network, labels)
-        fits = [fit_fn(sel)]
-        if not full:
-            n_fits = min(n_fits, 1 + len(times_vec) // self.batch_size_network)
-            for _ in range(max(n_fits, 1) - 1):
-                fits.append(fit_fn(grouped_subsample([times_vec, samples_vec], self.batch_size_network, labels)[0]))
+        batch_size = self._network_batch_size(n_genes)
+        # Disjoint sub-samples covering as many states as possible (a single one if it holds them all)
+        n_fits = max(1, min(n_fits, 1 + len(times_vec) // batch_size))
+        sels, _ = grouped_partition([times_vec, samples_vec], batch_size, n_fits, labels)
+        self._net_batch_info = (int(np.mean([len(sel) for sel in sels])), len(sels), len(times_vec))  # for the iteration log
+        fits = fit_fn(sels)
         return tuple(np.mean([f[i] for f in fits], axis=0) for i in range(4))
 
     def loop_trajectories(
@@ -1002,9 +1006,9 @@ class NetworkModel:
 
         def fit_theta(weight_prev, basal_start, inter_start, n_fits):
             # Network fit(s) on (time, sample, cell type)-stratified subsamples of the trajectories
-            def fit_on(_sel):
-                return inference_network(
-                    y_samples[_sel], y_kon[_sel], y_proba[_sel], y_prot[_sel], y_prot_prev.select_cells(_sel),
+            def fit_on(sels):
+                return inference_network_multi(
+                    sels, y_samples, y_kon, y_proba, y_prot, y_prot_prev,
                     ks, n_stimuli=ns, samples_id=samples_id,
                     ref_network=self.ref_network, basal_init=basal_start, inter_init=inter_start,
                     basal_ref=basal_ref, inter_ref=inter_ref,
@@ -1013,7 +1017,7 @@ class NetworkModel:
                     final=0, constrain_basal_uniform=self.constrain_basal_uniform,
                     hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
                     seuil_zero_min_ref=self.seuil_zero_min_ref)
-            return self._fit_theta_averaged(fit_on, vect_t_sim, y_samples, traj_cell_types(), n_fits)
+            return self._fit_theta_averaged(fit_on, vect_t_sim, y_samples, traj_cell_types(), n_fits, y_prot.shape[1])
 
         # Stratum of each real cell, for balanced OT batches; real cells at t0 per sample
         strata = self._traj_strata(data_rna, vect_t, vect_samples_id, times, samples_id)
@@ -1141,6 +1145,13 @@ class NetworkModel:
 
             if verb:
                 print(f"{n_iter}", f"{count_end} | Errors (before, after): {error:.5f}, {error_2:.5f} | alpha mean: {np.mean(y_alpha[0]):.4f}")
+                one = len(N_samples) == 1
+                traj_bs, traj_tot = (N_samples[0], N_full[0]) if one else (list(N_samples), list(N_full))
+                net_log = ""
+                if compute_theta and len(times) > 1:
+                    net_bs, n_net, net_tot = self._net_batch_info
+                    net_log = f"; net = {net_bs}" + (f" x{n_net} fits" if n_net > 1 else "") + f" (tot = {net_tot})"
+                print(f"  n_cells per batch: traj = {traj_bs} (tot = {traj_tot}){net_log}")
 
             # --- Update counts for stopping condition if n_iter is high enough ---
             if count_end >= 1:
@@ -1162,8 +1173,10 @@ class NetworkModel:
             # --- Update alphas ---
             modes = self.adaptive_shrinkage(y_rna[:, ns:] * s1, y_kon[:, ns:]) / s1
             if len(times) > 1:
-                for cnt, time in enumerate(times[:-1]):
-                    y_alpha[cnt] = inference_alpha(
+                # Intervals are independent: one parallel task each (numba on 1 thread per task)
+                alpha_fn = inference_alpha_1thread if len(times) > 2 else inference_alpha
+                def alpha_task(cnt, time):
+                    return delayed(alpha_fn)(
                             self.d[1, ns:], s1,
                             y_alpha[cnt],
                             y_kon[vect_t_sim == time],
@@ -1182,6 +1195,10 @@ class NetworkModel:
                             stim_vals=np.asarray(self._stim_schedule[times[cnt + 1]], dtype=float),
                             scale_proteins=self.scale_proteins
                         )
+                alphas = Parallel(n_jobs=min(len(times) - 1, os.cpu_count() or 1))(
+                    alpha_task(cnt, time) for cnt, time in enumerate(times[:-1]))
+                for cnt, alpha_cnt in enumerate(alphas):
+                    y_alpha[cnt] = alpha_cnt
             
             # --- Update kon_theta values for modes ---
             # y_prot_formodes is indexed like the original data (shape = N_original_cells),
@@ -1747,10 +1764,10 @@ class NetworkModel:
         # inference_network returns (n_samples, G_tot, n_networks) for basal
         _final_call = 0 if (self.hard_forcing_ref or self.inter_simul_ref is not None) else 1
 
-        def fit_on(_sel):
-            return inference_network(
-                self.samples_data[_sel], self.kon_beta[_sel], self.proba_traj[_sel],
-                y_prot[_sel], y_prot_prev.select_cells(_sel), ks, n_stimuli=ns, proba=self.compute_with_proba,
+        def fit_on(sels):
+            return inference_network_multi(
+                sels, self.samples_data, self.kon_beta, self.proba_traj,
+                y_prot, y_prot_prev, ks, n_stimuli=ns, proba=self.compute_with_proba,
                 ref_network=self.ref_network, basal_init=basal_ref, inter_init=inter_ref,
                 basal_ref=basal_ref, inter_ref=inter_ref,
                 scale=self.scale_pen * 2, # # slightly stronger regularization for network
@@ -1763,7 +1780,7 @@ class NetworkModel:
 
         # Mean theta over fits on (time, sample, cell type)-stratified subsamples (single fit if one holds all)
         basal, inter, _, _ = self._fit_theta_averaged(
-            fit_on, self.times_data, self.samples_data, self.traj_cell_types, self.n_network_fits)
+            fit_on, self.times_data, self.samples_data, self.traj_cell_types, self.n_network_fits, y_prot.shape[1])
 
         ### filter_edges
         if self.filter_network:

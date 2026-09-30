@@ -4,6 +4,7 @@ Core functions for the inference of trajectories, mainly used in loop_trajectori
 """
 
 import numpy as np
+import numba
 from numba import njit, prange
 import multiprocessing as mp
 from joblib import Parallel, delayed
@@ -38,7 +39,7 @@ def minimal_repetition_choice(N, M, seed=None, labels=None):
     return np.concatenate(result)
 
 
-@njit
+@njit(cache=True)
 def base_kon_vector(theta_basal, theta_inter, y_prot) -> np.ndarray:
     n_cells, G = y_prot.shape
     Gm1, n_net = theta_basal.shape[0], theta_basal.shape[1]
@@ -65,7 +66,7 @@ def base_kon_vector(theta_basal, theta_inter, y_prot) -> np.ndarray:
 
 
 
-@njit
+@njit(cache=True)
 def find_next_prot_mixed(d1, P0, M0, M1, mode_init, mode_end, alpha, s, delta_t):
     """
     Deterministic flow interpolating between two points
@@ -75,7 +76,7 @@ def find_next_prot_mixed(d1, P0, M0, M1, mode_init, mode_end, alpha, s, delta_t)
     return (P_int - s * (mode_end + (mode_end - M1) / d1)) * np.exp(-d1 * delta_t * (1-alpha)) + s * (mode_end + (M1 - mode_end) * ((1-alpha) * delta_t * d1 - 1) / d1)
 
 
-@njit
+@njit(cache=True)
 def find_next_prot(d1, P0, M0, M1, mode_init, mode_end, alpha, s, delta_t):
     """
     Deterministic flow interpolating between two points
@@ -98,7 +99,7 @@ def count_errors(vect_prot, vect_kon, vect_proba, ks, Y, X, loss='CE', compute_w
     return cnt_errors/(N*(G-ns))
 
 
-@njit(fastmath=True, parallel=True)
+@njit(fastmath=True, parallel=True, cache=True)
 def kon_ref_vector(y_prot, kz, theta_inter, theta_basal) -> np.ndarray:
     sigma = base_kon_vector(theta_basal, theta_inter, y_prot)
     out = np.zeros(sigma.shape[:2])  # shape: (n_cells, Gm1)
@@ -108,6 +109,18 @@ def kon_ref_vector(y_prot, kz, theta_inter, theta_basal) -> np.ndarray:
             for k in prange(sigma.shape[2]):
                 out[i, j] += kz[j, k] * sigma[i, j, k]
 
+    return out
+
+
+@njit(fastmath=True, cache=True)
+def _kon_ref_vector_serial(y_prot, kz, theta_inter, theta_basal) -> np.ndarray:
+    # Same as kon_ref_vector without prange: for calls inside a prange (no nested parallelism)
+    sigma = base_kon_vector(theta_basal, theta_inter, y_prot)
+    out = np.zeros(sigma.shape[:2])
+    for i in range(sigma.shape[0]):
+        for j in range(sigma.shape[1]):
+            for k in range(sigma.shape[2]):
+                out[i, j] += kz[j, k] * sigma[i, j, k]
     return out
 
 
@@ -132,7 +145,7 @@ def _kon_per_sample(y_prot, ks, inter, basal, samples_data=None):
     return out
 
     
-@njit(fastmath=True, parallel=True)
+@njit(fastmath=True, parallel=True, cache=True)
 def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, vect_rna_end,
                             vect_proba_init, vect_proba_end, mode_init, mode_end, alpha, s1, ks, d1, delta_t, basal, inter, loss='CE',
                             compute_with_proba=1, n_iter=1, intensity_prior=1, q=.9,
@@ -201,7 +214,7 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
                                     main_loss(sigma[j, ns:], vect_proba_end[j], 1, loss) * (1 - weight_init)) +
                                     (0.5 / G) * (np.sum(diff_prot * diff_prot) + np.sum(diff_rna * diff_rna)))
         else:
-            sigma = kon_ref_vector(prot_full_i, ks, inter, basal)
+            sigma = _kon_ref_vector_serial(prot_full_i, ks, inter, basal)
             for j in range(0, n2):
                 diff_k = vect_kon_end[j] - kon_init_i
                 diff_prot = (prot_end_i[j] - prot_init_i) / scale_proteins
@@ -246,6 +259,16 @@ def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init
         t += 1 / n_pas
 
     return alpha
+
+
+def inference_alpha_1thread(*args, **kwargs):
+    """inference_alpha with numba on one thread: joblib task over intervals, without oversubscription."""
+    n_threads = numba.get_num_threads()
+    numba.set_num_threads(1)
+    try:
+        return inference_alpha(*args, **kwargs)
+    finally:
+        numba.set_num_threads(n_threads)
 
 
 def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,

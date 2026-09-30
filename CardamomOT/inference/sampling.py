@@ -28,6 +28,35 @@ def stratified_choice(idx, n, labels=None):
     return stratified_order(idx, np.asarray(labels))[:n]
 
 
+def grouped_partition(groups, budget, n_parts, labels=None):
+    """
+    n_parts sub-samples of ~budget rows: equal quota per group (e.g. time x sample),
+    cell-type proportional within each group, and jointly covering as many rows as
+    possible (disjoint when a group holds >= n_parts x quota rows, otherwise the
+    repetitions are spread evenly). groups is a list of per-row key arrays.
+    Returns (list of row arrays, full) with full = True when one sub-sample holds
+    every row (then a single sub-sample is returned).
+    """
+    keys = np.stack([np.asarray(g) for g in groups], axis=1)
+    uniq, inv = np.unique(keys, axis=0, return_inverse=True)
+    inv = inv.ravel()
+    per_group = 1 + budget // len(uniq)
+    members = [np.flatnonzero(inv == k) for k in range(len(uniq))]
+    if all(len(idx) <= per_group for idx in members):
+        return [np.concatenate(members)], True
+    parts = [[] for _ in range(n_parts)]
+    for idx in members:
+        q = min(per_group, len(idx))
+        L = n_parts * q
+        reps = int(np.ceil(L / len(idx)))
+        # Consecutive chunks of stratified orders: disjoint parts, proportional in cell types
+        order = np.concatenate([stratified_order(idx, labels[idx]) if labels is not None
+                                else np.random.permutation(idx) for _ in range(reps)])[:L]
+        for k in range(n_parts):
+            parts[k].append(np.unique(order[k * q:(k + 1) * q]))
+    return [np.concatenate(p) for p in parts], False
+
+
 def grouped_subsample(groups, budget, labels=None):
     """
     Sub-sample of at most ~budget rows: equal quota per group (e.g. time x sample),

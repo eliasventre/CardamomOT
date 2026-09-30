@@ -766,7 +766,52 @@ class PrevProt:
         return self.values[g] if len(src) == len(cols) else self.values[g][:, pos]
 
 
-def inference_network(y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, n_stimuli=1, proba=0,
+def _infer_gene(g_tgt, G, active_src, y_samples, y_proba_g, yp, ypm, y_kon_g, ti_g, tr_g,
+                ks_g, n_networks, n_samples, proba, l_gen, scale, rn, free_mask_g, gene_kw):
+    """
+    Network inference for one target gene (worker task of inference_network).
+    yp / ypm / rn are already restricted to the active regulators active_src
+    (full when every regulator is active).
+    """
+    K_g = len(active_src)
+    if K_g == G:
+        # Dense path: no sub-selection
+        return main_loop_inference(
+            g_tgt, y_samples, y_proba_g, yp, ypm, y_kon_g, ti_g, tr_g,
+            ks_g, G, n_networks, n_samples, proba, l_gen, scale,
+            np.zeros((G, n_networks)), np.zeros((n_samples, n_networks)),
+            np.zeros((G, n_networks)), np.zeros((n_samples, n_networks)),
+            rn, basal_free_mask=free_mask_g, **gene_kw,
+        )
+
+    # Sparse path: sub-select to K_g active regulators. K_g == 0: no interaction
+    # to infer, only the per-sample basal is fitted (O(N_cells) problem).
+    # Sub-select theta rows: active_src rows + per-sample basal rows (G..G+n_samples-1)
+    theta_init_sub = np.concatenate([ti_g[active_src], ti_g[G:]], axis=0)  # (K_g + n_samples, n_networks)
+    theta_ref_sub  = np.concatenate([tr_g[active_src], tr_g[G:]], axis=0)  # (K_g + n_samples, n_networks)
+
+    # Position of g_tgt in active_src (sentinel K_g = "no self-regulation")
+    g_sub_matches = np.where(active_src == g_tgt)[0]
+    g_sub = int(g_sub_matches[0]) if len(g_sub_matches) > 0 else K_g
+
+    basal_r, inter_sub_r, basal_tmp_r, inter_tmp_sub_r = main_loop_inference(
+        g_sub, y_samples, y_proba_g, yp, ypm, y_kon_g,
+        theta_init_sub, theta_ref_sub,
+        ks_g, K_g, n_networks, n_samples, proba, l_gen, scale,
+        np.zeros((K_g, n_networks)), np.zeros((n_samples, n_networks)),
+        np.zeros((K_g, n_networks)), np.zeros((n_samples, n_networks)), rn,
+        basal_free_mask=free_mask_g, **gene_kw,
+    )
+
+    # Expand interaction results back to full G-dimensional space
+    inter_full     = np.zeros((G, n_networks))
+    inter_tmp_full = np.zeros((G, n_networks))
+    inter_full[active_src]     = inter_sub_r
+    inter_tmp_full[active_src] = inter_tmp_sub_r
+    return basal_r, inter_full, basal_tmp_r, inter_tmp_full
+
+
+def inference_network_multi(subsets, y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, n_stimuli=1, proba=0,
                       ref_network=None,
                       basal_init=None, inter_init=None,
                       basal_ref=None, inter_ref=None,
@@ -777,11 +822,13 @@ def inference_network(y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, n_stimu
                       seuil_zero_min_ref=1e-2) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Joint network inference: interactions shared across samples, basal per sample.
+    One independent fit per row subset in subsets (index arrays, None = all rows);
+    all fits x target genes are run in a single parallel pool.
 
     y_prot_mod : PrevProt built on active_regulators(ref_network, inter_ref,
         hard_forcing_ref), or a dense (G, N_cells, G) array.
 
-    Returns (basal, inter, basal_tmp, inter_tmp).
+    Returns a list with, per subset, (basal, inter, basal_tmp, inter_tmp).
     basal shape: (n_samples, G, n_networks)
 
     constrain_basal_uniform : float >= 0
@@ -859,83 +906,43 @@ def inference_network(y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, n_stimu
         free_mask_2d = np.ones((n_samples, G), dtype=bool)
 
     l_gen: int = (1 + proba)
-    inter_tmp = np.zeros((G, G, n_networks))
-    basal_tmp  = np.zeros((n_samples, G, n_networks))
-    inter      = np.zeros((G, G, n_networks))
-    basal      = np.zeros((n_samples, G, n_networks))
 
-    def run_main_loop_for_gene(g_tgt):
-        # Find active (non-zero) regulators for this target gene
+    gene_kw = dict(weight_prev=weight_prev, loss=loss, final=final,
+                   constrain_basal_uniform=constrain_basal_uniform,
+                   hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
+                   seuil_zero_min_ref=seuil_zero_min_ref)
+
+    def gene_args(rows, g_tgt):
+        # Only the rows and regulators target g_tgt needs are sent to the worker (built lazily)
+        rows = slice(None) if rows is None else rows
         active_src = active_cols[g_tgt]
-        K_g = len(active_src)
+        dense = len(active_src) == G
+        return (g_tgt, G, active_src, y_samples[rows], y_proba[rows, g_tgt],
+                y_prot[rows] if dense else y_prot[rows][:, active_src], prev_prot(g_tgt, active_src)[rows],
+                y_kon[rows, g_tgt], theta_init_mat[:, g_tgt, :], theta_ref_mat[:, g_tgt, :],
+                ks[g_tgt], n_networks, n_samples, proba, l_gen, scale,
+                ref_network[:, g_tgt, :] if dense else ref_network[active_src, g_tgt, :],
+                free_mask_2d[:, g_tgt], gene_kw)
 
-        if K_g == G:
-            # Dense path: no sub-selection
-            return main_loop_inference(
-                g_tgt, y_samples, y_proba[:, g_tgt], y_prot,
-                prev_prot(g_tgt, active_src), y_kon[:, g_tgt],
-                theta_init_mat[:, g_tgt, :], theta_ref_mat[:, g_tgt, :],
-                ks[g_tgt], G, n_networks, n_samples, proba, l_gen, scale,
-                inter_tmp[:, g_tgt, :], basal_tmp[:, g_tgt, :],
-                inter[:, g_tgt, :], basal[:, g_tgt, :],
-                ref_network[:, g_tgt, :],
-                weight_prev=weight_prev, loss=loss, final=final,
-                constrain_basal_uniform=constrain_basal_uniform,
-                basal_free_mask=free_mask_2d[:, g_tgt],
-                hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
-                seuil_zero_min_ref=seuil_zero_min_ref,
-            )
-
-        # Sparse path: sub-select to K_g active regulators. K_g == 0: no interaction
-        # to infer, only the per-sample basal is fitted (O(N_cells) problem).
-        yp_sub  = y_prot[:, active_src]                    # (N_cells, K_g)
-        ypm_sub = prev_prot(g_tgt, active_src)             # (N_cells, K_g)
-        rn_sub  = ref_network[active_src, g_tgt, :]        # (K_g, n_networks)
-
-        # Sub-select theta rows: active_src rows + per-sample basal rows (G..G+n_samples-1)
-        ti_g = theta_init_mat[:, g_tgt, :]
-        theta_init_sub = np.concatenate([ti_g[active_src], ti_g[G:]], axis=0)  # (K_g + n_samples, n_networks)
-        tr_g = theta_ref_mat[:, g_tgt, :]
-        theta_ref_sub  = np.concatenate([tr_g[active_src], tr_g[G:]], axis=0)  # (K_g + n_samples, n_networks)
-
-        # Position of g_tgt in active_src (sentinel K_g = "no self-regulation")
-        g_sub_matches = np.where(active_src == g_tgt)[0]
-        g_sub = int(g_sub_matches[0]) if len(g_sub_matches) > 0 else K_g
-
-        # Local arrays for the reduced sub-problem
-        inter_sub_loc     = np.zeros((K_g, n_networks))
-        basal_sub_loc     = np.zeros((n_samples, n_networks))
-        inter_tmp_sub_loc = np.zeros((K_g, n_networks))
-        basal_tmp_sub_loc = np.zeros((n_samples, n_networks))
-
-        basal_r, inter_sub_r, basal_tmp_r, inter_tmp_sub_r = main_loop_inference(
-            g_sub, y_samples, y_proba[:, g_tgt], yp_sub, ypm_sub, y_kon[:, g_tgt],
-            theta_init_sub, theta_ref_sub,
-            ks[g_tgt], K_g, n_networks, n_samples, proba, l_gen, scale,
-            inter_tmp_sub_loc, basal_tmp_sub_loc, inter_sub_loc, basal_sub_loc, rn_sub,
-            weight_prev=weight_prev, loss=loss, final=final,
-            constrain_basal_uniform=constrain_basal_uniform,
-            basal_free_mask=free_mask_2d[:, g_tgt],
-            hard_forcing_ref=hard_forcing_ref,
-            ref_constraint_pct=ref_constraint_pct, seuil_zero_min_ref=seuil_zero_min_ref,
-        )
-
-        # Expand interaction results back to full G-dimensional space
-        inter_full     = np.zeros((G, n_networks))
-        inter_tmp_full = np.zeros((G, n_networks))
-        inter_full[active_src]     = inter_sub_r
-        inter_tmp_full[active_src] = inter_tmp_sub_r
-
-        return basal_r, inter_full, basal_tmp_r, inter_tmp_full
-
+    genes = range(n_stimuli, G)
+    tasks = [(k, g) for k in range(len(subsets)) for g in genes]
     if Parallel is not None:
         results = Parallel(n_jobs=-1)(
-            delayed(run_main_loop_for_gene)(g) for g in range(n_stimuli, G)
+            delayed(_infer_gene)(*gene_args(subsets[k], g)) for k, g in tasks
         )
     else:
-        results = [run_main_loop_for_gene(g) for g in range(n_stimuli, G)]
+        results = [_infer_gene(*gene_args(subsets[k], g)) for k, g in tasks]
 
-    for idx, g in enumerate(range(n_stimuli, G)):
-        basal[:, g, :], inter[:, g, :], basal_tmp[:, g, :], inter_tmp[:, g, :] = results[idx]
+    fits = []
+    for k in range(len(subsets)):
+        basal, basal_tmp = np.zeros((n_samples, G, n_networks)), np.zeros((n_samples, G, n_networks))
+        inter, inter_tmp = np.zeros((G, G, n_networks)), np.zeros((G, G, n_networks))
+        for idx, g in enumerate(genes):
+            basal[:, g, :], inter[:, g, :], basal_tmp[:, g, :], inter_tmp[:, g, :] = results[k * len(genes) + idx]
+        fits.append((basal, inter, basal_tmp, inter_tmp))
+    return fits
 
-    return basal, inter, basal_tmp, inter_tmp
+
+def inference_network(y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, **kwargs):
+    """Single joint network fit on all rows (see inference_network_multi). Returns (basal, inter, basal_tmp, inter_tmp)."""
+    return inference_network_multi([None], y_samples, y_kon, y_proba, y_prot, y_prot_mod, ks, **kwargs)[0]

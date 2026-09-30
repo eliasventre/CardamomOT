@@ -23,7 +23,7 @@ from CardamomOT.logging import get_logger
 logger = get_logger(__name__)
 
 
-@njit
+@njit(cache=True)
 def base_kon_vector(theta_basal, theta_inter, y_prot) -> np.ndarray:
     n_cells, G = y_prot.shape
     Gm1, n_net = theta_basal.shape[0], theta_basal.shape[1]
@@ -49,7 +49,7 @@ def base_kon_vector(theta_basal, theta_inter, y_prot) -> np.ndarray:
     return result
 
 
-@njit
+@njit(cache=True)
 def kon_ref(y_prot, kz, theta_inter, theta_basal):
     result = base_kon_vector(theta_basal, theta_inter, y_prot)
     res = np.zeros(theta_basal.shape[0])
@@ -59,7 +59,7 @@ def kon_ref(y_prot, kz, theta_inter, theta_basal):
     return res
 
 
-@njit
+@njit(cache=True)
 def flow(time, d1, P, ns=1):
     """
     Deterministic flow for the bursty model.
@@ -69,7 +69,7 @@ def flow(time, d1, P, ns=1):
         Pnew[s] = P[s]  # preserve stimulus dimensions 0..ns-1
     return Pnew
 
-@njit
+@njit(cache=True)
 def step_ode(d1, ks, inter, basal, dt, scale, P, ns=1):
         """
         Euler step for the deterministic limit model.
