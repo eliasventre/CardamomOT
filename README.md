@@ -43,7 +43,7 @@ pip install -e ".[dev]"
 # For Jupyter notebooks:
 pip install -e ".[notebooks]"
 
-# Note: neko and omnipath (used by prepare_reference_network) are included in the default install.
+# Note: omnipath (literature prior of the gene selection and build_reference_network) is included in the default install.
 ```
 
 ### 2. Prepare your data
@@ -64,6 +64,8 @@ my_project/
 - `data.obs['cell_type_selection']`: optional override of `cell_type` for DE gene selection
 - `data.obs['cell_type_proliferation']` / `data.obs['cell_type_transition']`: groupings matching the rows of `Data/proliferation_rates` (optional anchor of the literature estimate) / `Data/transition_rates` (structures the OT). They may differ; if only one of the two is defined it is used for both, and if neither is defined `cell_type` is used
 
+
+**Optional run inputs: `Data/CardamomOT_inputs.xlsx`.** All optional information steering a run (genes of interest, stimulus schedules and targets, in-silico perturbations, timepoints, proliferation anchors, transition rates…) lives in one Excel workbook, created with its documented structure at the first run (README sheet + one sheet per input; hover the header cells for their meaning). Empty cells mean "not given": the defaults of CardamomOT apply. Text files of older projects (`genes_queries.txt`, `KO_OV_simulate.txt`, `stimulus_schedule.txt`, …) still present in `Data/` are imported into the workbook at each run, overwriting the corresponding cells (with a warning): older projects run unchanged and get a filled workbook; delete the text files to edit the workbook instead. Large numeric arrays (`reference_network.csv`, `basal_init`/`basal_ref`, `inter_init`/`inter_ref`, `inter_simul_ref`) stay files in `Data/`. The text files named in this documentation correspond to the sheets: genes_queries / signatures → `Gene_lists`; stimulus_schedule_inference → `Stimulus_inference`; stimulus_targets → `Stimulus_targets`; stimulus_schedule_simulate → `Simulation_schedule`; KO_OV_Stim_simulate → `Perturbations`; KO_OV_inference → `KO_OV_inference`; times_to_inference / times_to_simulate → `Times`; proliferation_rates, population_sizes, transition_rates → sheets of the same name. The sheet `Model_parameters` fixes model parameters for the project (`parameter` / `value` / `default` / `description`, the description being the comment of `CardamomOT/model/base.py`): a filled value dominates both the default of `base.py` and the options of the pipeline / CLI (`--stimulus`, `--prior`, `--simulate-proliferation`…); an empty value leaves them unchanged.
 ### 3. Run the full analysis
 
 #### Full pipeline (recommended for beginners)
@@ -93,13 +95,15 @@ python -m CardamomOT.cli pipeline -i my_project -s full -r 0.6 -c 1 -m 0.5
 
 When an optional parameter is omitted, the value defined in `NetworkModel` (`base.py`) is used unchanged. Passing a value explicitly overrides it for that run only.
 
-**By default, the pipeline also estimates a net proliferation rate for every cell** (no configuration needed): the `get_proliferation_rates` step (run first, on the full gene set) scores each cell against built-in proliferation/death marker gene sets of the detected species and writes the result to `adata.obs['proliferation_net_rate']`, which is then used to correct the optimal-transport marginals during network inference. This step always (re)computes and overwrites `adata.obs['proliferation_net_rate']`, even if that column is already present; pass `--no-use-proliferation` (`cardamomot pipeline`) / set `use_proliferation=0` (`run.sh`) to skip it entirely and keep your own values instead. See [Population dynamics](#population-dynamics-proliferation-death-and-cell-type-transition-rates) under Advanced Features to force the species, supply your own marker genes, or anchor the estimate to a known population-level growth rate.
+**The pipeline starts with a per-cell depth diagnostic** (`estimate_cell_depth`, on `Data/data_complete.h5ad` or on `Data/data.h5ad` if it has at least 10,000 genes): when depth differences between cells of the same sample and time dominate the co-variation of genes, a depth factor per cell is stored in `adata.obs['depth_factor']` (unless `model.allow_depth_correction = False`) and used by every later step (counts modelled as NB(k, c / s_i)). See [Per-cell sequencing depth](docs/advanced.md#per-cell-sequencing-depth-estimate_cell_depth-first-step).
 
-Separately, `--compute-proliferation` (`cardamomot pipeline`) / `compute_proliferation=1` (`run.sh`) turns on a different, opt-in feature: learning a `R_opt` MLP from the inferred OT couplings and simulating with branching PDMP trajectories. See [Proliferation-aware simulation](docs/advanced.md#proliferation-aware-simulation---compute-proliferation) under Advanced Features.
+**By default, the pipeline also estimates a net proliferation rate for every cell** (no configuration needed): the `get_proliferation_rates` step (run right after the depth step, on the full gene set) scores each cell against built-in proliferation/death marker gene sets of the detected species and writes the result to `adata.obs['proliferation_net_rate']`, which is then used to correct the optimal-transport marginals during network inference. This step always (re)computes and overwrites `adata.obs['proliferation_net_rate']`, even if that column is already present; pass `--no-use-proliferation` (`cardamomot pipeline`) / set `use_proliferation=0` (`run.sh`) to skip it entirely and keep your own values instead. See [Population dynamics](#population-dynamics-proliferation-death-and-cell-type-transition-rates) under Advanced Features to force the species, supply your own marker genes, or anchor the estimate to a known population-level growth rate.
+
+Separately, `--simulate-proliferation` (`cardamomot pipeline`) / `simulate_proliferation=1` (`run.sh`) turns on a different, opt-in feature: learning a `R_opt` MLP from the inferred OT couplings and simulating with branching PDMP trajectories. See [Proliferation-aware simulation](docs/advanced.md#proliferation-aware-simulation---simulate-proliferation) under Advanced Features.
 
 **`run.sh` script parameters** (positional):
 ```bash
-./run.sh <input_dir> [split=full] [change=0] [rate=0] [mean] [stimulus] [prior] [force_basins] [temporal_basins] [ref] [test] [kov] [compute_proliferation] [use_proliferation]
+./run.sh <input_dir> [split=full] [rate=1] [change=0] [mean] [stimulus] [force_basins] [temporal_basins] [ref=0] [prior] [test=0] [kov=1] [simulate_proliferation=0] [use_proliferation=0]
 ```
 Only `input_dir` is required; all other arguments fall back to their model defaults when omitted. An optional `--species human|mouse` flag can be added anywhere in the argument list; without it, the species is detected from the gene names.
 
@@ -124,7 +128,7 @@ Instead of using the full pipeline, you can run each step individually:
 python -m CardamomOT.cli step get_proliferation_rates -i my_project
 
 # 2. Select differentially expressed genes
-python -m CardamomOT.cli step select_DEgenes_and_split -i my_project -s full -m 0.5
+python -m CardamomOT.cli step select_genes_and_split -i my_project -s full -m 0.5
 
 # 3. Assign literature mRNA/protein degradation rates (hour^-1). The species is detected
 #    from gene names (Gata1 = mouse, GATA1 = human; force it with --species) and each species
@@ -197,16 +201,16 @@ By default the per-sample basals are free to diverge, which gives maximum flexib
 
 ---
 
-### Stimulus / exogenous signal (`n_stimuli`, `stimulus_schedule.txt`)
+### Stimulus / exogenous signal (`n_stimuli`, `stimulus_schedule_inference.txt`)
 
 CARDAMOM supports one or several **exogenous inputs** (stimuli) that are not inferred but act as known regulators of the network. Stimuli occupy the first `n_stimuli` columns of the full gene-plus-stimulus state vector.
 
 **Default behaviour (no file needed):** one stimulus that is `0` at the first timepoint and `1` at all subsequent timepoints.
 
-**Custom schedule:** place `Data/stimulus_schedule.txt` in the project folder. Each row corresponds to a timepoint (in chronological order); each column to one stimulus:
+**Custom schedule:** place `Data/stimulus_schedule_inference.txt` in the project folder. Each row corresponds to a timepoint (in chronological order); each column to one stimulus:
 
 ```
-# stimulus_schedule.txt  (tab or space separated, no header)
+# stimulus_schedule_inference.txt  (tab or space separated, no header)
 # rows = timepoints, cols = stimulus channels
 0.0    0.0
 1.0    0.0
@@ -217,7 +221,7 @@ For a single stimulus channel, a single-column file suffices. Values between 0 a
 
 **Fewer rows than timepoints:** if the file contains fewer rows than the number of unique timepoints in the data, the missing timepoints automatically inherit the value of the **last row**. This is useful when a stimulus reaches a plateau and you only want to specify the transition rows explicitly. Providing *more* rows than timepoints raises an error.
 
-**Simulation-specific schedule:** to use a *different* schedule during forward simulation (e.g. to test a new stimulus protocol after training), place `Data/stimulus_schedule_simul.txt`. `simulate_network.py` and `simulate_network_KOV.py` look for this file first, falling back to `stimulus_schedule.txt` if absent.
+**Simulation schedule:** `Data/stimulus_schedule_simulate.txt` (one row per simulated time) gives the schedules of the simulations: first one column per inference stimulus (e.g. to test a new protocol after training), then one column per perturbation stimulus STIM1, STIM2… of `KO_OV_Stim_simulate.txt`. Without it, the inference schedule is used and the perturbation stimuli are 0 at the first time and 1 after (the old `stimulus_schedule_simul.txt` is still read).
 
 ---
 
@@ -239,7 +243,7 @@ Controls how strongly the **stimulus** regulates genes in the reference network 
 
 ```bash
 # In run.sh (6th positional argument — omit to use model default)
-./run.sh experimental_datasets/Kameneva full 0 0.7 0.5 0.0   # disable stimulus
+./run.sh experimental_datasets/Kameneva full 0.7 0 0.5 0.0   # disable stimulus
 
 # Pass to both inference and simulation scripts:
 python infer_network_structure.py -i my_project -s full --stimulus 0.0
@@ -259,8 +263,9 @@ Controls how strongly the **prior interaction graph** (`ref_network.csv`) penali
 > **Important:** `--prior` must be passed to **both** `infer_network_structure.py` (where it constrains which edges are *learned* during OT inference) and `infer_network_simul.py` (where it sets the *simulation* reference network). Using different values in the two scripts will produce inconsistent results. The `cardamomot pipeline --prior 0.5` command handles this automatically.
 
 ```bash
-# In run.sh (7th positional argument — omit to use model default)
-./run.sh experimental_datasets/Kameneva full 0 0.7 0.5 1.0 0.5   # soft prior
+# In run.sh (10th positional argument, right after ref — omit to use model default)
+./run.sh experimental_datasets/Kameneva full 0.7 1 0.5 1.0 -1 -1 0 0     # gene selection + literature prior as a hard mask (sparse)
+./run.sh experimental_datasets/Kameneva full 0.7 0 0.5 1.0 -1 -1 1 0.5   # build_reference_network + soft prior
 
 # Pass to both inference and simulation scripts:
 python infer_network_structure.py -i my_project -s full --prior 0.5
@@ -272,8 +277,8 @@ python infer_network_simul.py     -i my_project -s full --prior 0.5
 `force_basins` (float in `[0, 1]`) controls how strongly the NB mixture fitting is anchored to the initial mode means: `1.0` = fully constrained to preserve mode positions, `0.0` = free EM with no mean constraint. Intermediate values interpolate between the two. `temporal_basins` (0 or 1) additionally enforces the constraint across timepoints.
 
 ```bash
-# In run.sh (8th and 9th positional arguments — omit to use model defaults)
-./run.sh experimental_datasets/Kameneva full 0 0.7 0.5 1.0 1.0 0.5 0   # relaxed mean constraint, no temporal
+# In run.sh (7th and 8th positional arguments — omit to use model defaults)
+./run.sh experimental_datasets/Kameneva full 0.7 0 0.5 1.0 0.5 0   # relaxed mean constraint, no temporal
 ```
 
 **Affected scripts:** `infer_network_structure.py`, `infer_mixture.py`, `infer_network_simul.py`, `check_sim_to_data.py`, `infer_test.py`, `check_KOV_to_sim.py`. Output file names embed `stimulus` and `prior` values (e.g. `adata_sim_stim1.0_prior0.5.h5ad`) so runs with different settings are kept separate.
@@ -321,12 +326,12 @@ When this file is present, `infer_network_structure.py` replaces `basal_ref` for
 
 ---
 
-### In-silico perturbation simulation (`Data/KO_OV_simulate.txt`)
+### In-silico perturbation simulation (`Data/KO_OV_Stim_simulate.txt`)
 
 After training, you can simulate arbitrary knock-out / over-expression combinations with `simulate_network_KOV.py`. Define the combinations in:
 
 ```
-# KO_OV_simulate.txt  (tab-separated, header required)
+# KO_OV_Stim_simulate.txt  (tab-separated, header required)
 KO	        OV
 CHGA	STMN2           # wild-type (no perturbation)
 POSTN	S100B,STMN2
@@ -341,7 +346,7 @@ If `KO_OV_inference.txt` was used during training and `basal.npy` is therefore 3
 By default a KO silences a gene by setting its basal transcription to −∞ (complete silencing). For a **partial** perturbation of strength X% (0 < X < 100) append `-X` to the gene name:
 
 ```
-# KO_OV_simulate.txt
+# KO_OV_Stim_simulate.txt
 KO	        OV
 CHGA-80	    STMN2-60     # 80 % KO of CHGA # 60 % OV of STMN2
 POSTN	S100B            # full KO / full OV (no suffix = 100 %, existing behaviour)
@@ -366,13 +371,13 @@ CARDAMOM's optimal transport step corrects for cell proliferation/death **by def
 
 #### Net proliferation rate — default behaviour
 
-Every run of `get_proliferation_rates.py` — the **first** step of the standard pipeline, run on the full, unfiltered dataset before any gene selection — estimates a per-cell **net** growth rate (birth − death; CardamomOT only ever uses the difference, never the two terms separately) and writes it to:
+Every run of `get_proliferation_rates.py` — run right after `estimate_cell_depth` in the standard pipeline, on the full, unfiltered dataset before any gene selection — estimates a per-cell **net** growth rate (birth − death; CardamomOT only ever uses the difference, never the two terms separately) and writes it to:
 
 ```python
 adata.obs['proliferation_net_rate']   # float, net proliferation rate per cell (birth − death)
 ```
 
-It runs directly on `Data/data.h5ad` (all genes) rather than after gene selection, because differential-expression filtering could otherwise discard many of the literature marker genes needed to score the signature. Since the rate is stored in `adata.obs` (per-cell, not per-gene), it survives the later gene-subsetting and train/test splitting done by `select_DEgenes_and_split.py` unchanged — no need to re-estimate it per split.
+It runs directly on `Data/data.h5ad` (all genes) rather than after gene selection, because differential-expression filtering could otherwise discard many of the literature marker genes needed to score the signature. Since the rate is stored in `adata.obs` (per-cell, not per-gene), it survives the later gene-subsetting and train/test splitting done by `select_genes_and_split.py` unchanged — no need to re-estimate it per split.
 
 By default this uses built-in **human** proliferation/death marker gene signatures (moscot/Waddington-OT style — see `CardamomOT/tools/estimate_proliferation.py`), scored with `scanpy.tl.score_genes` and mapped to a rate with the same shifted-logistic curve as moscot. `get_proliferation_rates.py` always (re)computes and overwrites `adata.obs['proliferation_net_rate']`, even if that column is already present. If you set it yourself from an external measurement (e.g. EdU staining) and want to keep it, skip the step entirely instead: `--no-use-proliferation` on `cardamomot pipeline`, or `use_proliferation=0` on `run.sh` (both default to running the step).
 
@@ -433,15 +438,15 @@ my_project/
 │   │                              #            proliferation/death signatures if data.h5ad
 │   │                              #            was already gene-filtered; never modified
 │   ├── gene_list.txt              # optional — subset of genes to use
-│   ├── stimulus_schedule.txt      # optional — stimulus values per timepoint
-│   ├── stimulus_schedule_simul.txt# optional — overrides stimulus schedule for simulation only
+│   ├── stimulus_schedule_inference.txt      # optional — stimulus values per timepoint
+│   ├── stimulus_schedule_simulate.txt # optional — schedules of the simulations (inference stimuli, then STIM1, STIM2...)
 │   ├── ref_network.csv            # optional — prior interaction graph (sparsity mask)
 │   ├── basal_init.npy / .csv      # optional — warm-start for basal parameters
 │   ├── inter_init.npy / .csv      # optional — warm-start for interactions
 │   ├── basal_ref.npy / .csv       # optional — regularisation target for basal
 │   ├── inter_ref.npy / .csv       # optional — regularisation target for interactions
 │   ├── KO_OV_inference.txt          # optional — per-sample KO/OV prior (requires dataset_id)
-│   ├── KO_OV_simulate.txt             # optional — in-silico perturbations to simulate
+│   ├── KO_OV_Stim_simulate.txt             # optional — in-silico perturbations to simulate
 │   ├── transition_rates.csv|txt   # optional — cell-type transition cost matrix for OT
 │   ├── proliferation_signatures.csv|txt # optional — custom proliferation marker genes
 │   ├── death_signatures.csv|txt   # optional — custom death marker genes
@@ -520,7 +525,7 @@ python ./utils/old_to_new/add_degradations_to_ad.py -i my_project
 ### Customizing Parameters
 
 See source files to modify:
-- `select_DEgenes_and_split.py`: gene selection criteria
+- `select_genes_and_split.py`: gene selection criteria
 - `infer_mixture.py`: burst kinetics parameters
 - `infer_network_*.py`: network inference algorithms
 

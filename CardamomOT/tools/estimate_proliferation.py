@@ -388,6 +388,7 @@ def score_gene_sets(adata, proliferation_genes=None, death_genes=None,
         )
 
     adata_norm = adata.copy()
+    adata_norm.uns.pop('log1p', None)  # stale record from a log-normalised source (X holds counts here)
     sc.pp.normalize_total(adata_norm)
     sc.pp.log1p(adata_norm)
 

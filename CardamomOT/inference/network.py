@@ -183,6 +183,11 @@ def base_kon(theta_basal, theta_inter, y_prot) -> np.ndarray:
     return result
 
 
+def _kss(ks, s):
+    """Amplitudes of the target gene for sample s: ks is (n_samples, n_modes) if per-sample, else (n_modes,)."""
+    return ks[int(s)] if ks.ndim == 2 else ks
+
+
 def _compute_sigma_per_sample(theta_inter, theta_basal_all, ref_network, yp, ys, us, n_networks):
     """Compute sigma for all cells, using per-sample basal from theta_basal_all.
 
@@ -232,7 +237,7 @@ def objective(X, weights_samples, ys, ypr, yp, ypm, yk, ks, G, g, n_networks, n_
         if proba:
             Q += (1 - weight_prev) * main_loss(sigma[mask], ypr[mask], 1, loss) * weight_s / ns_unique
         else:
-            Q += (1 - weight_prev) * main_loss(np.sum(ks * sigma[mask], axis=-1), yk[mask], 1, loss) * weight_s / ns_unique
+            Q += (1 - weight_prev) * main_loss(np.sum(_kss(ks, s) * sigma[mask], axis=-1), yk[mask], 1, loss) * weight_s / ns_unique
 
     if weight_prev:
         sigma_mod = _compute_sigma_per_sample(theta_inter, theta_basal, ref_network, ypm, ys, us, n_networks)
@@ -242,7 +247,7 @@ def objective(X, weights_samples, ys, ypr, yp, ypm, yk, ks, G, g, n_networks, n_
             if proba:
                 Q += weight_prev * main_loss(sigma_mod[mask], ypr[mask], 1, loss) * weight_s / ns_unique
             else:
-                Q += weight_prev * main_loss(np.sum(ks * sigma_mod[mask], axis=-1), yk[mask], 1, loss) * weight_s / ns_unique
+                Q += weight_prev * main_loss(np.sum(_kss(ks, s) * sigma_mod[mask], axis=-1), yk[mask], 1, loss) * weight_s / ns_unique
 
     d_inter = theta_inter - theta_ref[:G]
     if not final:
@@ -290,7 +295,7 @@ def grad_theta(X, weights_samples, ys, ypr, yp, ypm, yk, ks, G, g, n_networks, n
                 dq[:G, n] += (1 - weight_prev) * ref_network[:, n] * (yp[mask].T @ sum_tmp[:, np.newaxis]).ravel() * weight_s / ns_unique
                 dq[G + s_idx, n] += (1 - weight_prev) * np.sum(sum_tmp) * weight_s / ns_unique
             else:
-                tmp = grad_main_loss(np.sum(ks * sigma[mask], axis=-1), yk[mask], 1, loss) * np.sum(ks * grad_sigma_s, axis=-1)
+                tmp = grad_main_loss(np.sum(_kss(ks, s) * sigma[mask], axis=-1), yk[mask], 1, loss) * np.sum(_kss(ks, s) * grad_sigma_s, axis=-1)
                 res = (yp[mask].T @ tmp[:, None]).reshape(-1)
                 dq[:G, n] += (1 - weight_prev) * ref_network[:, n] * res * weight_s / ns_unique
                 dq[G + s_idx, n] += (1 - weight_prev) * np.sum(tmp) * weight_s / ns_unique
@@ -310,7 +315,7 @@ def grad_theta(X, weights_samples, ys, ypr, yp, ypm, yk, ks, G, g, n_networks, n
                     dq[:G, n] += weight_prev * ref_network[:, n] * (ypm[mask].T @ sum_tmp_mod[:, np.newaxis]).ravel() * weight_s / ns_unique
                     dq[G + s_idx, n] += weight_prev * np.sum(sum_tmp_mod) * weight_s / ns_unique
                 else:
-                    tmp_mod = grad_main_loss(np.sum(ks * sigma_mod[mask], axis=-1), yk[mask], 1, loss) * np.sum(ks * grad_sigma_mod_s, axis=-1)
+                    tmp_mod = grad_main_loss(np.sum(_kss(ks, s) * sigma_mod[mask], axis=-1), yk[mask], 1, loss) * np.sum(_kss(ks, s) * grad_sigma_mod_s, axis=-1)
                     res_mod = (ypm[mask].T @ tmp_mod[:, None]).reshape(-1)
                     dq[:G, n] += weight_prev * ref_network[:, n] * res_mod * weight_s / ns_unique
                     dq[G + s_idx, n] += weight_prev * np.sum(tmp_mod) * weight_s / ns_unique
@@ -365,7 +370,7 @@ def objective_refinement(X, correc_ref, inter, basal, weights_samples, ys, ypr, 
         if proba:
             Q += (1 - weight_prev) * main_loss(sigma[mask], ypr[mask], 1, loss) * weight_s / ns_unique
         else:
-            Q += (1 - weight_prev) * main_loss(np.sum(ks * sigma[mask], axis=-1), yk[mask], 1, loss) * weight_s / ns_unique
+            Q += (1 - weight_prev) * main_loss(np.sum(_kss(ks, s) * sigma[mask], axis=-1), yk[mask], 1, loss) * weight_s / ns_unique
 
     if weight_prev:
         sigma_mod = np.empty((ypm.shape[0], n_networks + 1))
@@ -380,7 +385,7 @@ def objective_refinement(X, correc_ref, inter, basal, weights_samples, ys, ypr, 
             if proba:
                 Q += weight_prev * main_loss(sigma_mod[mask], ypr[mask], 1, loss) * weight_s / ns_unique
             else:
-                Q += weight_prev * main_loss(np.sum(ks * sigma_mod[mask], axis=-1), yk[mask], 1, loss) * weight_s / ns_unique
+                Q += weight_prev * main_loss(np.sum(_kss(ks, s) * sigma_mod[mask], axis=-1), yk[mask], 1, loss) * weight_s / ns_unique
 
     # l_pen: (G, n_networks) per-edge penalty (1/w times the base one, see refine_inference)
     if not final:
@@ -424,7 +429,7 @@ def grad_correc(X, correc_ref, inter, basal, weights_samples, ys, ypr, yp, ypm, 
                 dq[:G, n] += (1 - weight_prev) * inter[:, n] * (yp[mask].T @ sum_tmp[:, np.newaxis]).ravel() * weight_s / ns_unique
                 dq[G + s_idx, n] += (1 - weight_prev) * basal[s_idx, n] * np.sum(sum_tmp) * weight_s / ns_unique
             else:
-                tmp = grad_main_loss(np.sum(ks * sigma[mask], axis=-1), yk[mask], 1, loss) * np.sum(ks * grad_sigma_s, axis=-1)
+                tmp = grad_main_loss(np.sum(_kss(ks, s) * sigma[mask], axis=-1), yk[mask], 1, loss) * np.sum(_kss(ks, s) * grad_sigma_s, axis=-1)
                 res = (yp[mask].T @ tmp[:, None]).reshape(-1)
                 dq[:G, n] += (1 - weight_prev) * inter[:, n] * res * weight_s / ns_unique
                 dq[G + s_idx, n] += (1 - weight_prev) * basal[s_idx, n] * np.sum(tmp) * weight_s / ns_unique
@@ -449,7 +454,7 @@ def grad_correc(X, correc_ref, inter, basal, weights_samples, ys, ypr, yp, ypm, 
                     dq[:G, n] += weight_prev * inter[:, n] * (ypm[mask].T @ sum_tmp_mod[:, np.newaxis]).ravel() * weight_s / ns_unique
                     dq[G + s_idx, n] += weight_prev * basal[s_idx, n] * np.sum(sum_tmp_mod) * weight_s / ns_unique
                 else:
-                    tmp_mod = grad_main_loss(np.sum(ks * sigma_mod[mask], axis=-1), yk[mask], 1, loss) * np.sum(ks * grad_sigma_mod_s, axis=-1)
+                    tmp_mod = grad_main_loss(np.sum(_kss(ks, s) * sigma_mod[mask], axis=-1), yk[mask], 1, loss) * np.sum(_kss(ks, s) * grad_sigma_mod_s, axis=-1)
                     res_mod = (ypm[mask].T @ tmp_mod[:, None]).reshape(-1)
                     dq[:G, n] += weight_prev * inter[:, n] * res_mod * weight_s / ns_unique
                     dq[G + s_idx, n] += weight_prev * basal[s_idx, n] * np.sum(tmp_mod) * weight_s / ns_unique
@@ -662,7 +667,8 @@ def main_loop_inference(g, y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_
     basal_free_mask : (n_samples,) bool — True for samples NOT pinned by basal_ref for gene g
     Returns (basal, inter, basal_tmp, inter_tmp).
     """
-    n_networks_tmp: int = int(1 + np.argmax(ks[1:]))
+    # Active networks from the largest mode amplitudes over samples
+    n_networks_tmp: int = int(1 + np.argmax((ks.max(axis=0) if ks.ndim == 2 else ks)[1:]))
 
     # Interactions are optimised as theta = e / w (w = prior weight), so an edge of weight q
     # costs 1/q more; init and ref are given as effective values e and converted here.
@@ -677,7 +683,7 @@ def main_loop_inference(g, y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_
         theta_init[:, :n_networks_tmp],
         theta_ref[:, :n_networks_tmp],
         ref_network[:, :n_networks_tmp],
-        ks[:n_networks_tmp + 1], G, g, n_networks_tmp, n_samples, proba,
+        ks[..., :n_networks_tmp + 1], G, g, n_networks_tmp, n_samples, proba,
         l_pen1, weight_prev=weight_prev * (1 - final), loss=loss, final=final,
         constrain_basal_uniform=constrain_basal_uniform, basal_free_mask=basal_free_mask,
         hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
@@ -695,7 +701,7 @@ def main_loop_inference(g, y_samples, y_proba, y_prot, y_prot_mod, y_kon, theta_
         y_samples, y_proba[:, :n_networks_tmp + 1], y_prot, y_prot_mod, y_kon,
         inter[:, :n_networks_tmp], basal[:, :n_networks_tmp],
         theta_ref[:, :n_networks_tmp],
-        ks[:n_networks_tmp + 1], G, g, n_networks_tmp, n_samples, proba,
+        ks[..., :n_networks_tmp + 1], G, g, n_networks_tmp, n_samples, proba,
         l_pen2, weight_prev=weight_prev * (1 - final), loss=loss,
         correc_ref=final, final=final, hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
         ref_network=ref_network[:, :n_networks_tmp], seuil_zero_min_ref=seuil_zero_min_ref,
@@ -846,7 +852,7 @@ def inference_network_multi(subsets, y_samples, y_kon, y_proba, y_prot, y_prot_m
         logging.getLogger(__name__).warning("joblib not available; parallel loops will run sequentially")
 
     G: int = np.size(y_prot, 1)
-    n_networks: int = np.size(ks, 1) - 1
+    n_networks: int = ks.shape[-1] - 1  # ks: (G, n_modes) shared or (n_samples, G, n_modes) per sample
     unique_samples = np.asarray(samples_id) if samples_id is not None else np.unique(y_samples)
     n_samples: int = len(unique_samples)
 
@@ -920,7 +926,7 @@ def inference_network_multi(subsets, y_samples, y_kon, y_proba, y_prot, y_prot_m
         return (g_tgt, G, active_src, y_samples[rows], y_proba[rows, g_tgt],
                 y_prot[rows] if dense else y_prot[rows][:, active_src], prev_prot(g_tgt, active_src)[rows],
                 y_kon[rows, g_tgt], theta_init_mat[:, g_tgt, :], theta_ref_mat[:, g_tgt, :],
-                ks[g_tgt], n_networks, n_samples, proba, l_gen, scale,
+                ks[:, g_tgt] if ks.ndim == 3 else ks[g_tgt], n_networks, n_samples, proba, l_gen, scale,
                 ref_network[:, g_tgt, :] if dense else ref_network[active_src, g_tgt, :],
                 free_mask_2d[:, g_tgt], gene_kw)
 

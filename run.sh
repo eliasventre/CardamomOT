@@ -3,22 +3,26 @@
 eval "$(conda shell.bash hook)"
 conda activate cardamom_light
 
-# Usage: ./run.sh <input_dir> <split> <change> <rate> <mean> [stimulus] [prior]
-#                 [force_basins] [temporal_basins] [ref] [test] [kov] [compute_proliferation]
+# Usage: ./run.sh <input_dir> <split> <rate> <change> <mean> [stimulus]
+#                 [force_basins] [temporal_basins] [ref] [prior] [test] [kov] [simulate_proliferation]
 #                 [use_proliferation] [--species human|mouse]
 #
 #   split                 : full | train
-#   change                : 0/1 — differential gene selection
-#   rate                  : float — rate parameter for kinetics
+#   rate                  : float — share of the cells in the train split
+#   change                : 0/1 — gene selection (1: OTVelo network + Steiner tree to Data/genes_queries.txt, budget model.num_max_genes;
+#                            also writes the literature prior cardamomOT/ref_network.csv)
 #   mean_forcing          : float — mean-forcing intensity for NB mixture (model default 0.5, -1 = use model default)
 #   stimulus              : float in [0,1] — penalize stimulus edges (-1 = model default)
-#   prior                 : float in [0,1] — penalize edges absent from prior network (-1 = model default)
 #   force_basins          : float in [0,1] — preserve mode means in NB mixture (-1 = model default)
 #   temporal_basins       : 0 or 1 — enforce temporal mode consistency
-#   ref                   : 0/1 — run prepare_reference_network step (default 0)
+#   ref                   : 0/1 — build the literature prior (default 0). With change=1 the selection builds it;
+#                            with change=1 and prior=0 the gene budget is set by model.max_free_params
+#   prior                 : float in [0,1] — weight of the edges absent from the prior network
+#                            (0 = hard constraint, sparse; 1 = prior ignored; -1 = model default)
 #   test                  : 0/1 — run infer_test + check_test_to_train (default 0)
 #   kov                   : 0/1 — run simulate_network_KOV + check_KOV (default 1)
-#   compute_proliferation : 0/1 — learn R_opt MLP and simulate with branching (default 0)
+#   simulate_proliferation : 0/1 — simulate with proliferation/death (branching; trains the R(P) MLP
+#                            in infer_network_simul, used only by the simulations) (default 0)
 #   use_proliferation     : 0/1 — run get_proliferation_rates to (re)estimate
 #                            obs['proliferation_net_rate'] from literature gene
 #                            signatures (default 1)
@@ -45,33 +49,36 @@ rate="${3:-1}"
 change="${4:-0}"
 mean_forcing="${5:--1}"
 stimulus="${6:--1}"
-prior="${7:--1}"
-force_basins="${8:--1}"
-temporal_basins="${9:--1}"
-ref="${10:-0}"
+force_basins="${7:--1}"
+temporal_basins="${8:--1}"
+ref="${9:-0}"
+prior="${10:--1}"
 test="${11:-0}"
 kov="${12:-1}"
-compute_proliferation="${13:-0}"
+simulate_proliferation="${13:-0}"
 use_proliferation="${14:-0}"
 
-# Build --compute-proliferation flag string used by infer_network_simul, simulate_network, simulate_network_KOV
+# Build --simulate-proliferation flag string used by infer_network_simul, simulate_network, simulate_network_KOV
 prolif_flag=""
-if [ "$compute_proliferation" = "1" ]; then
-    prolif_flag="--compute-proliferation"
+if [ "$simulate_proliferation" = "1" ]; then
+    prolif_flag="--simulate-proliferation"
 fi
+
+echo "Estimate cell depth"
+python estimate_cell_depth.py -i "${input_dir}"
 
 if [ "$use_proliferation" = "1" ]; then
     echo "Get proliferation rates"
     python get_proliferation_rates.py -i "${input_dir}" ${species:+--species "${species}"}
 fi
 
-echo "Select DE genes and split cells"
-python select_DEgenes_and_split.py -i "${input_dir}" -s "${split}" -r "${rate}" -c "${change}" --mean-forcing "${mean_forcing}"
+echo "Select genes and split cells"
+python select_genes_and_split.py -i "${input_dir}" -s "${split}" -r "${rate}" -c "${change}" --mean-forcing "${mean_forcing}" --prior "${prior}" --ref "${ref}"
 
-
-if [ "$ref" = "1" ]; then
-    echo "Compute prior network"
-    python prepare_reference_network.py -i "${input_dir}" -d 4
+# With change=1 the selection already wrote the literature prior (same computation)
+if [ "$ref" = "1" ] && [ "$change" != "1" ]; then
+    echo "Build prior network"
+    python build_reference_network.py -i "${input_dir}" ${species:+--species "${species}"}
 fi
 
 echo "Get degradation rates"
@@ -103,7 +110,7 @@ python check_sim_to_data.py -i "${input_dir}" -s "${split}" --stimulus "${stimul
 if [ "$test" = "1" ]; then
     echo "Infer and simulate test"
     python infer_test.py -i "${input_dir}" --stimulus "${stimulus}" --prior "${prior}" --force-basins "${force_basins}" --temporal-basins "${temporal_basins}"
-    python check_test_to_train.py -i "${input_dir}" -s "${split}"
+    python check_test_to_train.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}"
 fi
 
 if [ "$kov" = "1" ]; then
@@ -112,5 +119,8 @@ if [ "$kov" = "1" ]; then
     echo "Check KOV"
     python check_KOV_to_sim.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}"
 fi
+
+echo "Final report"
+python report_results.py -i "${input_dir}" -s "${split}" --stimulus "${stimulus}" --prior "${prior}"
 
 echo "All scripts executed !"

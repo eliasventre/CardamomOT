@@ -53,6 +53,12 @@ def _get_device_from_module(module) -> torch.device:
             return torch.device("cpu")
 
 
+def _ks_sample(ks, s_idx):
+    """Amplitudes (n_modes, G) of sample s_idx: ks is per-sample (S, n_modes, G) when 3-D, else shared."""
+    ks = np.asarray(ks)
+    return ks[min(s_idx, ks.shape[0] - 1)] if ks.ndim == 3 else ks
+
+
 def build_kon_fn(ks, theta_inter, bias, device="cpu"):
     """
     Return a function kon(X_numpy_or_torch) -> numpy array (batch, G)
@@ -540,9 +546,11 @@ def fit_scale_theta(X_prot, kon_beta, bias, theta_inter, ks, ns, samples_data=No
 
     G       = X_prot.shape[1]
     N       = X_prot.shape[0]
-    n_modes = ks.shape[0]
+    n_modes = ks.shape[-2]
 
     per_sample = (bias.ndim == 3 and samples_data is not None)
+    if ks.ndim == 3 and not per_sample:
+        raise ValueError('per-sample ks needs a 3-D bias and samples_data')
 
     # Pre-compute all per-gene inputs before optimisation.
     if per_sample:
@@ -557,15 +565,15 @@ def fit_scale_theta(X_prot, kon_beta, bias, theta_inter, ks, ns, samples_data=No
                     continue
                 bias_s = bias[min(s_idx, bias.shape[0] - 1)]
                 A_g_s  = X_prot[mask_s] @ theta_inter[:, g, :] + bias_s[g, :]
-                sample_data_g.append((mask_s, A_g_s))
-            gene_data.append((kon_beta[:, g], ks[:, g], sample_data_g))
+                sample_data_g.append((mask_s, A_g_s, _ks_sample(ks, s_idx)[:, g]))
+            gene_data.append((kon_beta[:, g], sample_data_g))
 
         def _total_loss(log_s):
             s = np.exp(log_s)
             total = 0.0
-            for target, ks_g, sample_data_g in gene_data:
+            for target, sample_data_g in gene_data:
                 pred = np.zeros(N)
-                for mask_s_, A_g_s_ in sample_data_g:
+                for mask_s_, A_g_s_, ks_g in sample_data_g:
                     N_s = int(mask_s_.sum())
                     Z   = np.zeros((N_s, n_modes))
                     Z[:, 1:] = s * A_g_s_
@@ -703,7 +711,7 @@ def infer_ratio_d0_d1_unitary(
     G: int   = X_prot.shape[1]
 
     assert d_learned_temporal.shape[0] == T - 1, "d_learned_temporal must have (T-1, G)"
-    assert k1_vec.shape[0] == G
+    assert k1_vec.shape[-1] == G
 
     # ── Prior for ε = d1/d0 (used by regularisation) ────────────────────────
     r_prior = (
@@ -731,118 +739,119 @@ def infer_ratio_d0_d1_unitary(
         if dt <= 0:
             continue
 
-        mask0 = times == unique_times[cnt]
-        mask1 = times == unique_times[cnt + 1]
-        X0_np = X_prot[mask0]
-        X1_np = X_prot[mask1]
-        if len(X0_np) == 0 or len(X1_np) == 0:
-            continue
-
-        # Pair cells at t0 with cells at t1 (arbitrary but consistent)
-        n_pairs = min(len(X0_np), len(X1_np))
-        X0_np = X0_np[:n_pairs]
-        X1_np = X1_np[:n_pairs]
-
-        stim0 = np.asarray(stim_schedule[t0] if stim_schedule else np.ones(ns), dtype=np.float32)
-        stim1 = np.asarray(stim_schedule[t1] if stim_schedule else np.ones(ns), dtype=np.float32)
-        stim0, stim1 = stim0*scale, stim1*scale
-
-        # ── Select per-interval bias / theta ─────────────────────────────────
-        bias_np  = np.asarray(bias,         dtype=np.float32)
-        theta_np = np.asarray(theta_inter,  dtype=np.float32)
-
-        # Support 3-D bias (T-1, G, nets) and 4-D (T-1, n_samples, G, nets)
-        if bias_np.ndim == 3:
-            bias_cnt  = bias_np[cnt]                         # (G, n_nets)
-        elif bias_np.ndim == 4:
-            # Use the sample of the first cell in this interval
-            if samples_data is not None:
-                s_idx = int(np.asarray(samples_data)[mask0][0])
-                bias_cnt = bias_np[cnt, s_idx]
-            else:
-                bias_cnt = bias_np[cnt, 0]                   # fallback: first sample
-        else:
-            bias_cnt = bias_np
-
-        if theta_np.ndim == 4:
-            theta_cnt = theta_np[cnt]                        # (G, G, n_nets)
-        elif theta_np.ndim == 5:
-            s_idx = int(np.asarray(samples_data)[mask0][0]) if samples_data is not None else 0
-            theta_cnt = theta_np[cnt, s_idx]
-        else:
-            theta_cnt = theta_np
-
-        d_param_vec = d_learned_temporal[cnt]                # (G,)
-        k1_i        = k1_vec / float(scale)                 # (G,) — raw max burst rate
-
-        # ── Build ODE and simulate ────────────────────────────────────────────
-        ode = GeneRegulatoryODE_softmax(
-            G, d_param_vec, ks_np, theta_cnt, bias_cnt,
-            n_stimuli=ns,
-            stim_vals=stim1,
-            device=device,
-            kon_mlp=kon_mlp,
-        ).to(device)
-        ode.eval()
-
-        X0_t = torch.tensor(X0_np, dtype=torch.float32)
-        X0_t[:, :ns] = torch.tensor(stim0)
-        t_span = torch.tensor([t0, t1], dtype=torch.float32)
-
-        with torch.no_grad():
-            traj = odeint(ode, X0_t, t_span, method=method, rtol=rtol, atol=atol)
-        X_pred = traj[-1].cpu().numpy()       # (n_pairs, G)
-        X_pred[:, :ns] = stim1
-
-        # ── Compute kon at initial and predicted states ───────────────────────
-        kon_fn = build_kon_fn(ks_np, theta_cnt, bias_cnt, device=device)
-        kon_0 = kon_fn(X0_np)                # (n_pairs, G) in protein units
-        kon_1 = kon_fn(X_pred)
-        if kon_mlp is not None:
-            kon_0 = np.concatenate([
-                kon_0[:, :ns],
-                kon_0[:, ns:] * kon_mlp(X0_np, kon_0[:, ns:]),
-            ], axis=-1)
-            kon_1 = np.concatenate([
-                kon_1[:, :ns],
-                kon_1[:, ns:] * kon_mlp(X_pred, kon_1[:, ns:]),
-            ], axis=-1)
-
-        # Midpoint average of kon over the interval
-        kon_avg = 0.5 * (kon_0 + kon_1)   # (n_pairs, G)
-
-        # ── Residuals and denominator ─────────────────────────────────────────
-        residuals = (X_pred - X1_np) ** 2   # (n_pairs, G)
-
-        # h_{ic} = 2 · dt · scale · d1_i/k1_i · kon_i(P_c), kon_i(P_c) = kon_avg already = kon_true/k1_i
-        # Derived from Campbell's theorem: burst rate=k1·kon_norm·d0, burst size~Exp(k1·d0/(scale·d1))
-        #   Var(ΔP_i) = burst_rate · E[B²] · dt = ε_i · 2·dt·scale·(d1_i/k1_i)·kon_i
-        h_mat = (2.0 * dt * float(scale)) * (d_param_vec / k1_i)[None, :] * kon_avg   # (n_pairs, G)
-        h_mat[:, :ns] = 0.0   # stimuli don't get ε estimated
-
-        # ── Outlier filtering: exclude top (1 - outlier_quantile) per gene ────
-        valid_mask = np.ones(n_pairs, dtype=bool)   # start with all cells
-        if outlier_quantile < 1.0:
-            # Per-gene sum of squared residuals; filter cells with very large total
-            res_sum = residuals.sum(axis=1)
-            q_thresh = np.quantile(res_sum, outlier_quantile)
-            valid_mask = res_sum <= q_thresh
-
-        res_v   = residuals[valid_mask]   # (n_valid, G)
-        h_v     = h_mat[valid_mask]       # (n_valid, G)
-        kon_v   = kon_avg[valid_mask]     # (n_valid, G) — for min_kon filter
-
-        # Per-gene: only cells where kon > min_kon
-        for g in range(ns, G):
-            cell_ok = kon_v[:, g] > min_kon
-            if cell_ok.sum() == 0:
+        mask0_t = times == unique_times[cnt]
+        mask1_t = times == unique_times[cnt + 1]
+        # Each sample with its own cells, basal and mixture (sample index = value of samples_data)
+        sd = np.asarray(samples_data).astype(int) if samples_data is not None else np.zeros(len(times), dtype=int)
+        n_valid_cnt = 0
+        for s_int in np.unique(sd[mask0_t | mask1_t]):
+            mask0 = mask0_t & (sd == s_int)
+            mask1 = mask1_t & (sd == s_int)
+            X0_np = X_prot[mask0]
+            X1_np = X_prot[mask1]
+            if len(X0_np) == 0 or len(X1_np) == 0:
                 continue
-            contrib_num   = float(res_v[cell_ok, g].sum())
-            contrib_denom = float(h_v[cell_ok, g].sum())
-            num_t[cnt, g]   += contrib_num
-            denom_t[cnt, g] += contrib_denom
-            num_g[g]        += contrib_num
-            denom_g[g]      += contrib_denom
+
+            # Pair cells at t0 with cells at t1 (arbitrary but consistent)
+            n_pairs = min(len(X0_np), len(X1_np))
+            X0_np = X0_np[:n_pairs]
+            X1_np = X1_np[:n_pairs]
+
+            stim0 = np.asarray(stim_schedule[t0] if stim_schedule else np.ones(ns), dtype=np.float32)
+            stim1 = np.asarray(stim_schedule[t1] if stim_schedule else np.ones(ns), dtype=np.float32)
+            stim0, stim1 = stim0*scale, stim1*scale
+
+            # ── Select per-interval bias / theta ─────────────────────────────────
+            bias_np  = np.asarray(bias,         dtype=np.float32)
+            theta_np = np.asarray(theta_inter,  dtype=np.float32)
+
+            ks_cnt = _ks_sample(ks_np, s_int)
+            # Support 3-D bias (T-1, G, nets) and 4-D (T-1, n_samples, G, nets)
+            if bias_np.ndim == 3:
+                bias_cnt  = bias_np[cnt]                         # (G, n_nets)
+            elif bias_np.ndim == 4:
+                bias_cnt = bias_np[cnt, min(s_int, bias_np.shape[1] - 1)]
+            else:
+                bias_cnt = bias_np
+
+            if theta_np.ndim == 4:
+                theta_cnt = theta_np[cnt]                        # (G, G, n_nets)
+            elif theta_np.ndim == 5:
+                theta_cnt = theta_np[cnt, min(s_int, theta_np.shape[1] - 1)]
+            else:
+                theta_cnt = theta_np
+
+            d_param_vec = d_learned_temporal[cnt]                # (G,)
+            k1_i        = (k1_vec[min(s_int, len(k1_vec) - 1)] if k1_vec.ndim == 2 else k1_vec) / float(scale)  # (G,) raw max burst rate
+
+            # ── Build ODE and simulate ────────────────────────────────────────────
+            ode = GeneRegulatoryODE_softmax(
+                G, d_param_vec, ks_cnt, theta_cnt, bias_cnt,
+                n_stimuli=ns,
+                stim_vals=stim1,
+                device=device,
+                kon_mlp=kon_mlp,
+            ).to(device)
+            ode.eval()
+
+            X0_t = torch.tensor(X0_np, dtype=torch.float32)
+            X0_t[:, :ns] = torch.tensor(stim0)
+            t_span = torch.tensor([t0, t1], dtype=torch.float32)
+
+            with torch.no_grad():
+                traj = odeint(ode, X0_t, t_span, method=method, rtol=rtol, atol=atol)
+            X_pred = traj[-1].cpu().numpy()       # (n_pairs, G)
+            X_pred[:, :ns] = stim1
+
+            # ── Compute kon at initial and predicted states ───────────────────────
+            kon_fn = build_kon_fn(ks_cnt, theta_cnt, bias_cnt, device=device)
+            kon_0 = kon_fn(X0_np)                # (n_pairs, G) in protein units
+            kon_1 = kon_fn(X_pred)
+            if kon_mlp is not None:
+                kon_0 = np.concatenate([
+                    kon_0[:, :ns],
+                    kon_0[:, ns:] * kon_mlp(X0_np, kon_0[:, ns:]),
+                ], axis=-1)
+                kon_1 = np.concatenate([
+                    kon_1[:, :ns],
+                    kon_1[:, ns:] * kon_mlp(X_pred, kon_1[:, ns:]),
+                ], axis=-1)
+
+            # Midpoint average of kon over the interval
+            kon_avg = 0.5 * (kon_0 + kon_1)   # (n_pairs, G)
+
+            # ── Residuals and denominator ─────────────────────────────────────────
+            residuals = (X_pred - X1_np) ** 2   # (n_pairs, G)
+
+            # h_{ic} = 2 · dt · scale · d1_i/k1_i · kon_i(P_c), kon_i(P_c) = kon_avg already = kon_true/k1_i
+            # Derived from Campbell's theorem: burst rate=k1·kon_norm·d0, burst size~Exp(k1·d0/(scale·d1))
+            #   Var(ΔP_i) = burst_rate · E[B²] · dt = ε_i · 2·dt·scale·(d1_i/k1_i)·kon_i
+            h_mat = (2.0 * dt * float(scale)) * (d_param_vec / k1_i)[None, :] * kon_avg   # (n_pairs, G)
+            h_mat[:, :ns] = 0.0   # stimuli don't get ε estimated
+
+            # ── Outlier filtering: exclude top (1 - outlier_quantile) per gene ────
+            valid_mask = np.ones(n_pairs, dtype=bool)   # start with all cells
+            if outlier_quantile < 1.0:
+                # Per-gene sum of squared residuals; filter cells with very large total
+                res_sum = residuals.sum(axis=1)
+                q_thresh = np.quantile(res_sum, outlier_quantile)
+                valid_mask = res_sum <= q_thresh
+
+            res_v   = residuals[valid_mask]   # (n_valid, G)
+            h_v     = h_mat[valid_mask]       # (n_valid, G)
+            kon_v   = kon_avg[valid_mask]     # (n_valid, G) — for min_kon filter
+
+            # Per-gene: only cells where kon > min_kon
+            for g in range(ns, G):
+                cell_ok = kon_v[:, g] > min_kon
+                if cell_ok.sum() == 0:
+                    continue
+                contrib_num   = float(res_v[cell_ok, g].sum())
+                contrib_denom = float(h_v[cell_ok, g].sum())
+                num_t[cnt, g]   += contrib_num
+                denom_t[cnt, g] += contrib_denom
+                num_g[g]        += contrib_num
+                denom_g[g]      += contrib_denom
 
         if verbose:
             with np.errstate(invalid="ignore", divide="ignore"):
@@ -851,7 +860,7 @@ def infer_ratio_d0_d1_unitary(
             logger.info(
                 "[eps_temporal cnt=%d: t=%.3g→%.3g]  cells=%d  "
                 "mean_ε(genes)=%.3g",
-                cnt, t0, t1, int(valid_mask.sum()),
+                cnt, t0, t1, n_valid_cnt,
                 float(np.nanmean(eps_cnt)),
             )
 
@@ -954,7 +963,7 @@ def inference_degradation_prot(
             stim_first = np.ones(ns, dtype=np.float32) * scale_proteins
         ode_funcs = [
             GeneRegulatoryODE_softmax(
-                G, d_init, ks, theta_inter, bias[s_idx],
+                G, d_init, _ks_sample(ks, s_idx), theta_inter, bias[s_idx],
                 n_stimuli=ns, stim_vals=stim_first, device=device,
                 kon_mlp=kon_mlp, lambda_scale=lambda_scale,
             ).to(device)
@@ -1071,6 +1080,8 @@ def inference_degradation_prot(
             pairs.append((float(t0), float(t1), X0_np[:n_pairs], X1_np[:n_pairs], stim0, stim1, lab0))
 
     stim_first = pairs[0][-2] if pairs else np.ones(ns, dtype=np.float32) * scale_proteins
+    if np.ndim(ks) == 3:
+        raise ValueError('per-sample ks needs a 3-D bias and samples_data')
     ode_func: GeneRegulatoryODE_softmax = GeneRegulatoryODE_softmax(
         G, d_init, ks, theta_inter, bias,
         n_stimuli=ns, stim_vals=stim_first, device=device,
@@ -1346,164 +1357,166 @@ def infer_ratio_d0_d1_full(
         t0 = float(unique_times[cnt])
         t1 = float(unique_times[cnt + 1])
 
-        mask0 = times == unique_times[cnt]
-        X0_np = X_prot[mask0]
-        if len(X0_np) == 0:
-            continue
-
-        stim0 = np.asarray(
-            stim_schedule[t0] if stim_schedule else np.ones(ns), dtype=np.float32
-        )
-        stim1 = np.asarray(
-            stim_schedule[t1] if stim_schedule else np.ones(ns), dtype=np.float32
-        )
-
-        # ── Select bias / theta ──────────────────────────────────────────────
-        # Supported layouts (mirroring infer_ratio_d0_d1_unitary):
-        #   bias : (G, n_nets)                    — constant
-        #          (T-1, G, n_nets)               — time-indexed
-        #          (T-1, n_samples, G, n_nets)    — time + sample indexed
-        #   theta: (G, G, n_nets)                 — constant
-        #          (T-1, G, G, n_nets)            — time-indexed
-        #          (T-1, n_samples, G, G, n_nets) — time + sample indexed
-        if bias_np.ndim == 3:
-            bias_cnt = bias_np[cnt]                                 # (G, n_nets)
-        elif bias_np.ndim == 4:
-            s_idx    = int(np.asarray(samples_data)[mask0][0]) if samples_data is not None else 0
-            bias_cnt = bias_np[cnt, s_idx]                         # (G, n_nets)
-        else:
-            bias_cnt = bias_np                                      # (G, n_nets)
-
-        if theta_np.ndim == 4:
-            theta_cnt = theta_np[cnt]                              # (G, G, n_nets)
-        elif theta_np.ndim == 5:
-            s_idx     = int(np.asarray(samples_data)[mask0][0]) if samples_data is not None else 0
-            theta_cnt = theta_np[cnt, s_idx]                      # (G, G, n_nets)
-        else:
-            theta_cnt = theta_np                                   # (G, G, n_nets)
-
-        bias_t      = torch.tensor(bias_cnt.astype(np.float32))
-        theta_cnt_t = torch.tensor(theta_cnt.astype(np.float32))
-
-        # ── 1. Simulate full trajectory (n_steps+1 evaluation points) ────────
-        d_cnt = d_arr[cnt] if d_arr.ndim == 2 else d_arr
-        d1_t  = torch.tensor(d_cnt, dtype=torch.float32)   # (G,) d1_j for all genes
-        ode = GeneRegulatoryODE_softmax(
-            G, d_cnt, ks, theta_cnt, bias_cnt,
-            n_stimuli=ns, stim_vals=stim1,
-            device=device, kon_mlp=kon_mlp,
-        ).to(device)
-        ode.eval()
-
-        X0_t = torch.tensor(X0_np, dtype=torch.float32)
-        X0_t[:, :ns] = torch.tensor(stim0)
-        N_cells = len(X0_np)
-
-        # linspace includes t0 and t1 → n_steps+1 points
-        t_eval = torch.linspace(t0, t1, n_steps + 1, dtype=torch.float32)
-
-        with torch.no_grad():
-            traj = odeint(ode, X0_t, t_eval, method=method, rtol=rtol, atol=atol)
-        # traj: (n_steps+1, N_cells, G) — fix stimuli for all steps
-        traj[:, :, :ns] = torch.tensor(stim1)
-
-        # ── 2. Batch all timesteps for efficient autograd ────────────────────
-        # (n_steps+1, N_cells, G)  →  (n_ts * N_cells, G)
-        n_ts = n_steps + 1
-        X_batch_np = traj.reshape(n_ts * N_cells, G).cpu().numpy()
-
-        # ── 3. Evaluate g_i = MLP ratio for every state (no grad) ───────────
-        with torch.no_grad():
-            X_tmp = torch.tensor(X_batch_np, dtype=torch.float32)
-            Z_tmp = torch.zeros(n_ts * N_cells, G, n_modes)
-            for k in range(n_modes - 1):
-                Z_tmp[:, :, k + 1] = X_tmp @ theta_cnt_t[:, :, k] + bias_t[:, k]
-            kb_tmp = (torch.softmax(Z_tmp, dim=-1) * ks_t.T.unsqueeze(0)).sum(dim=-1)
-
-        g_batch_np = kon_mlp(X_batch_np, kb_tmp[:, ns:].numpy())   # (n_ts*N, G_genes)
-
-        # ── lambda_mlp mix: blend MLP prediction with linear interpolation ───
-        # of the mean observed ratios at the bracketing training timepoints.
-        # For time t in [t0, t1]:
-        #   alpha       = (t - t0) / (t1 - t0)
-        #   g_interp    = (1-alpha)*ratio_obs[cnt] + alpha*ratio_obs[cnt+1]
-        #   g_eff       = lam_mlp * g_interp + (1-lam_mlp) * g_mlp
-        # The batch is ordered as [t_eval[0]*N_cells, t_eval[1]*N_cells, ...].
-        if lam_mlp > 0.0:
-            alphas = (t_eval.numpy() - t0) / (t1 - t0)          #   (n_ts,)
-            r1 = training_ratios_obs[cnt]                         # (G_genes,)
-            r2 = training_ratios_obs[cnt + 1]                     # (G_genes,)
-            # Interpolated ratio at each timestep: (n_ts, G_genes)
-            g_interp = (1.0 - alphas[:, None]) * r1 + alphas[:, None] * r2
-            # Expand to match batch: each of the n_ts steps has N_cells rows
-            g_interp_batch = np.repeat(g_interp, N_cells, axis=0)  # (n_ts*N, G_genes)
-            a_alpha = 4 * (1 - lam_mlp)
-            lamb_alpha = 1 + a_alpha * alphas * (alphas - 1)
-            lamb_alpha_batch = np.repeat(lamb_alpha, N_cells)[:, None]  # (n_ts*N, 1)
-            g_batch_np = lamb_alpha_batch * g_interp_batch + (1.0 - lamb_alpha_batch) * g_batch_np
-
-        g_batch    = torch.tensor(g_batch_np, dtype=torch.float32)
-
-        # ── 4. Compute h_i via autograd over the full batch ──────────────────
-        X_batch_t = torch.tensor(X_batch_np, dtype=torch.float32, requires_grad=True)
-
-        Z = torch.zeros(n_ts * N_cells, G, n_modes, dtype=torch.float32)
-        for k in range(n_modes - 1):
-            Z[:, :, k + 1] = X_batch_t @ theta_cnt_t[:, :, k] + bias_t[:, k]
-        kon_beta = (torch.softmax(Z, dim=-1) * ks_t.T.unsqueeze(0)).sum(dim=-1)
-
-        # Effective kon — g is detached so autograd only sees ∂kon_beta/∂X
-        kon_eff = torch.cat([
-            kon_beta[:, :ns].detach(),
-            kon_beta[:, ns:].detach() * g_batch,
-        ], dim=-1)
-
-        # Driving force  drive_j = kon_eff_j − X_j  (fully detached)
-        drive = (kon_eff - X_batch_t.detach()).detach()
-        drive[:, :ns] = 0.0   # stimuli do not evolve
-
-        # ── 5. Accumulate LS numerators and denominators ─────────────────────
-        for gene_idx in range(G_genes):
-            i      = ns + gene_idx
-            retain = gene_idx < G_genes - 1
-
-            jac_i = torch.autograd.grad(
-                kon_beta[:, i].sum(), X_batch_t,
-                retain_graph=retain, create_graph=False,
-            )[0].detach()   # (n_ts*N, G)
-
-            ln_jac_i = jac_i / (kon_beta[:, i:i+1].detach() + 1e-10)   # (n_ts*N, G)
-
-            # h_i = Σ_j (∂ ln kon_i / ∂X_j) · (d1_j/d1_i) · drive_j
-            #
-            # Exact derivation (first-order mRNA lag):
-            #   1 - g_i  =  (1/d0_i) · d(ln kon_i)/dt
-            #             =  (1/d0_i) · Σ_j ∂(ln kon_i)/∂X_j · d1_j · drive_j
-            #             =  (d1_i/d0_i) · Σ_j ∂(ln kon_i)/∂X_j · (d1_j/d1_i) · drive_j
-            #                              └────────────────── h_i ──────────────────────┘
-            # No uniform-d1 approximation needed: we weight each term by d1_j/d1_i.
-            d1_i_val  = d1_t[i].clamp(min=1e-10)
-            d1_weight = (d1_t / d1_i_val).unsqueeze(0)          # (1, G)
-            h_i = (ln_jac_i * drive * d1_weight).sum(dim=-1)   # (n_ts*N,)
-            y_i = 1.0 - g_batch[:, gene_idx]               # (n_ts*N,)  y = 1 − g
-
-            # Keep only points that are not near-equilibrium AND where the
-            # sign is consistent with a positive d1/d0.
-            valid = (h_i.abs() > min_h) & (h_i * y_i > 0)
-
-            if valid.sum() == 0:
+        mask0_t = times == unique_times[cnt]
+        # Each sample with its own cells and basal (sample index = value of samples_data)
+        sd = np.asarray(samples_data).astype(int) if samples_data is not None else np.zeros(len(times), dtype=int)
+        for s_int in np.unique(sd[mask0_t]):
+            mask0 = mask0_t & (sd == s_int)
+            X0_np = X_prot[mask0]
+            if len(X0_np) == 0:
                 continue
 
-            h_v = h_i[valid].detach().numpy().astype(np.float64)
-            y_v = y_i[valid].detach().numpy().astype(np.float64)
+            stim0 = np.asarray(
+                stim_schedule[t0] if stim_schedule else np.ones(ns), dtype=np.float32
+            )
+            stim1 = np.asarray(
+                stim_schedule[t1] if stim_schedule else np.ones(ns), dtype=np.float32
+            )
 
-            contrib_num   = float(np.dot(h_v, y_v))
-            contrib_denom = float(np.dot(h_v, h_v))
+            # ── Select bias / theta ──────────────────────────────────────────────
+            # Supported layouts (mirroring infer_ratio_d0_d1_unitary):
+            #   bias : (G, n_nets)                    — constant
+            #          (T-1, G, n_nets)               — time-indexed
+            #          (T-1, n_samples, G, n_nets)    — time + sample indexed
+            #   theta: (G, G, n_nets)                 — constant
+            #          (T-1, G, G, n_nets)            — time-indexed
+            #          (T-1, n_samples, G, G, n_nets) — time + sample indexed
+            if bias_np.ndim == 3:
+                bias_cnt = bias_np[cnt]                                 # (G, n_nets)
+            elif bias_np.ndim == 4:
+                bias_cnt = bias_np[cnt, min(s_int, bias_np.shape[1] - 1)]  # (G, n_nets)
+            else:
+                bias_cnt = bias_np                                      # (G, n_nets)
 
-            num_t[cnt, i]   += contrib_num
-            denom_t[cnt, i] += contrib_denom
-            num_g[i]        += contrib_num
-            denom_g[i]      += contrib_denom
+            if theta_np.ndim == 4:
+                theta_cnt = theta_np[cnt]                              # (G, G, n_nets)
+            elif theta_np.ndim == 5:
+                theta_cnt = theta_np[cnt, min(s_int, theta_np.shape[1] - 1)]  # (G, G, n_nets)
+            else:
+                theta_cnt = theta_np                                   # (G, G, n_nets)
+
+            bias_t      = torch.tensor(bias_cnt.astype(np.float32))
+            theta_cnt_t = torch.tensor(theta_cnt.astype(np.float32))
+
+            # ── 1. Simulate full trajectory (n_steps+1 evaluation points) ────────
+            d_cnt = d_arr[cnt] if d_arr.ndim == 2 else d_arr
+            d1_t  = torch.tensor(d_cnt, dtype=torch.float32)   # (G,) d1_j for all genes
+            ode = GeneRegulatoryODE_softmax(
+                G, d_cnt, ks, theta_cnt, bias_cnt,
+                n_stimuli=ns, stim_vals=stim1,
+                device=device, kon_mlp=kon_mlp,
+            ).to(device)
+            ode.eval()
+
+            X0_t = torch.tensor(X0_np, dtype=torch.float32)
+            X0_t[:, :ns] = torch.tensor(stim0)
+            N_cells = len(X0_np)
+
+            # linspace includes t0 and t1 → n_steps+1 points
+            t_eval = torch.linspace(t0, t1, n_steps + 1, dtype=torch.float32)
+
+            with torch.no_grad():
+                traj = odeint(ode, X0_t, t_eval, method=method, rtol=rtol, atol=atol)
+            # traj: (n_steps+1, N_cells, G) — fix stimuli for all steps
+            traj[:, :, :ns] = torch.tensor(stim1)
+
+            # ── 2. Batch all timesteps for efficient autograd ────────────────────
+            # (n_steps+1, N_cells, G)  →  (n_ts * N_cells, G)
+            n_ts = n_steps + 1
+            X_batch_np = traj.reshape(n_ts * N_cells, G).cpu().numpy()
+
+            # ── 3. Evaluate g_i = MLP ratio for every state (no grad) ───────────
+            with torch.no_grad():
+                X_tmp = torch.tensor(X_batch_np, dtype=torch.float32)
+                Z_tmp = torch.zeros(n_ts * N_cells, G, n_modes)
+                for k in range(n_modes - 1):
+                    Z_tmp[:, :, k + 1] = X_tmp @ theta_cnt_t[:, :, k] + bias_t[:, k]
+                kb_tmp = (torch.softmax(Z_tmp, dim=-1) * ks_t.T.unsqueeze(0)).sum(dim=-1)
+
+            g_batch_np = kon_mlp(X_batch_np, kb_tmp[:, ns:].numpy())   # (n_ts*N, G_genes)
+
+            # ── lambda_mlp mix: blend MLP prediction with linear interpolation ───
+            # of the mean observed ratios at the bracketing training timepoints.
+            # For time t in [t0, t1]:
+            #   alpha       = (t - t0) / (t1 - t0)
+            #   g_interp    = (1-alpha)*ratio_obs[cnt] + alpha*ratio_obs[cnt+1]
+            #   g_eff       = lam_mlp * g_interp + (1-lam_mlp) * g_mlp
+            # The batch is ordered as [t_eval[0]*N_cells, t_eval[1]*N_cells, ...].
+            if lam_mlp > 0.0:
+                alphas = (t_eval.numpy() - t0) / (t1 - t0)          #   (n_ts,)
+                r1 = training_ratios_obs[cnt]                         # (G_genes,)
+                r2 = training_ratios_obs[cnt + 1]                     # (G_genes,)
+                # Interpolated ratio at each timestep: (n_ts, G_genes)
+                g_interp = (1.0 - alphas[:, None]) * r1 + alphas[:, None] * r2
+                # Expand to match batch: each of the n_ts steps has N_cells rows
+                g_interp_batch = np.repeat(g_interp, N_cells, axis=0)  # (n_ts*N, G_genes)
+                a_alpha = 4 * (1 - lam_mlp)
+                lamb_alpha = 1 + a_alpha * alphas * (alphas - 1)
+                lamb_alpha_batch = np.repeat(lamb_alpha, N_cells)[:, None]  # (n_ts*N, 1)
+                g_batch_np = lamb_alpha_batch * g_interp_batch + (1.0 - lamb_alpha_batch) * g_batch_np
+
+            g_batch    = torch.tensor(g_batch_np, dtype=torch.float32)
+
+            # ── 4. Compute h_i via autograd over the full batch ──────────────────
+            X_batch_t = torch.tensor(X_batch_np, dtype=torch.float32, requires_grad=True)
+
+            Z = torch.zeros(n_ts * N_cells, G, n_modes, dtype=torch.float32)
+            for k in range(n_modes - 1):
+                Z[:, :, k + 1] = X_batch_t @ theta_cnt_t[:, :, k] + bias_t[:, k]
+            kon_beta = (torch.softmax(Z, dim=-1) * ks_t.T.unsqueeze(0)).sum(dim=-1)
+
+            # Effective kon — g is detached so autograd only sees ∂kon_beta/∂X
+            kon_eff = torch.cat([
+                kon_beta[:, :ns].detach(),
+                kon_beta[:, ns:].detach() * g_batch,
+            ], dim=-1)
+
+            # Driving force  drive_j = kon_eff_j − X_j  (fully detached)
+            drive = (kon_eff - X_batch_t.detach()).detach()
+            drive[:, :ns] = 0.0   # stimuli do not evolve
+
+            # ── 5. Accumulate LS numerators and denominators ─────────────────────
+            for gene_idx in range(G_genes):
+                i      = ns + gene_idx
+                retain = gene_idx < G_genes - 1
+
+                jac_i = torch.autograd.grad(
+                    kon_beta[:, i].sum(), X_batch_t,
+                    retain_graph=retain, create_graph=False,
+                )[0].detach()   # (n_ts*N, G)
+
+                ln_jac_i = jac_i / (kon_beta[:, i:i+1].detach() + 1e-10)   # (n_ts*N, G)
+
+                # h_i = Σ_j (∂ ln kon_i / ∂X_j) · (d1_j/d1_i) · drive_j
+                #
+                # Exact derivation (first-order mRNA lag):
+                #   1 - g_i  =  (1/d0_i) · d(ln kon_i)/dt
+                #             =  (1/d0_i) · Σ_j ∂(ln kon_i)/∂X_j · d1_j · drive_j
+                #             =  (d1_i/d0_i) · Σ_j ∂(ln kon_i)/∂X_j · (d1_j/d1_i) · drive_j
+                #                              └────────────────── h_i ──────────────────────┘
+                # No uniform-d1 approximation needed: we weight each term by d1_j/d1_i.
+                d1_i_val  = d1_t[i].clamp(min=1e-10)
+                d1_weight = (d1_t / d1_i_val).unsqueeze(0)          # (1, G)
+                h_i = (ln_jac_i * drive * d1_weight).sum(dim=-1)   # (n_ts*N,)
+                y_i = 1.0 - g_batch[:, gene_idx]               # (n_ts*N,)  y = 1 − g
+
+                # Keep only points that are not near-equilibrium AND where the
+                # sign is consistent with a positive d1/d0.
+                valid = (h_i.abs() > min_h) & (h_i * y_i > 0)
+
+                if valid.sum() == 0:
+                    continue
+
+                h_v = h_i[valid].detach().numpy().astype(np.float64)
+                y_v = y_i[valid].detach().numpy().astype(np.float64)
+
+                contrib_num   = float(np.dot(h_v, y_v))
+                contrib_denom = float(np.dot(h_v, h_v))
+
+                num_t[cnt, i]   += contrib_num
+                denom_t[cnt, i] += contrib_denom
+                num_g[i]        += contrib_num
+                denom_g[i]      += contrib_denom
 
         if verbose:
             n_genes_with_data = int((denom_t[cnt, ns:] > 0).sum())

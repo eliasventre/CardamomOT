@@ -3,11 +3,17 @@ infer_test.py
 -------------
 Infer trajectories and simulate on test set using pre-learned model parameters.
 
-Classifies test cells into mixture modes with fixed kinetic parameters, then
-infers protein trajectories with the core inferred network (inter.npy/basal.npy),
-runs a restricted post-processing step (estimate_trajectories + kon_theta only)
-using the simul network, simulates expression dynamics, and builds AnnData output
-objects equivalent to the training pipeline.
+Held-out validation with everything learned on the training cells kept fixed:
+1. basins of the test cells from the training mixture parameters (per sample);
+2. protein trajectories by the inference loop with the core network fixed (inter.npy /
+   basal.npy): OT couplings and basin updates combining EMD and network, continuing the
+   training schedule (last training iteration n_iter_inference.npy: same basin weights and
+   low Sinkhorn regularization as at the end of the training);
+3. trajectories and kon_theta recomputed with the simulation network (*_simul.npy), then
+   simulation from the test cells at the first timepoint;
+4. AnnData objects equivalent to the training ones (compared to Data/data_test.h5ad by
+   check_test_to_train.py and in the final report).
+Per-sample parameters (mixtures, basals) are routed to the cells of each sample, never averaged.
 
 Usage:
     python infer_test.py -i <project_path>
@@ -38,7 +44,11 @@ import numpy as np
 import anndata as ad
 import pandas as pd
 from CardamomOT import NetworkModel as NetworkModel_beta, find_data_file
+from CardamomOT.inputs import input_dir
+from CardamomOT.inference.integration import nb_cell_parameters
+from CardamomOT.inference.depth import state_depth, simulation_depth
 import getopt
+from CardamomOT.config import find_stimulus_schedule, simulation_schedule
 
 
 def main(argv):
@@ -108,17 +118,16 @@ def main(argv):
 
     # ─── STIMULUS SCHEDULES ──────────────────────────────────────────────
     stim_sched = None
-    sched_path = os.path.join(p, 'Data', 'stimulus_schedule.txt')
+    sched_path = (find_stimulus_schedule(input_dir(p))
+                  or os.path.join(input_dir(p), 'stimulus_schedule_inference.txt'))
     if os.path.exists(sched_path):
         stim_sched = np.loadtxt(sched_path)
         print(f"[infer_test] Loaded stimulus schedule from {sched_path}")
 
-    stim_sched_simul = None
-    sched_simul_path = os.path.join(p, 'Data', 'stimulus_schedule_simul.txt')
-    if os.path.exists(sched_simul_path):
-        stim_sched_simul = np.loadtxt(sched_simul_path)
-        print(f"[infer_test] Loaded simulation stimulus schedule from {sched_simul_path}")
-    else:
+    # Inference stimuli in simulation: first columns of stimulus_schedule_simulate.txt
+    _ns = int(np.asarray(stim_sched).shape[1]) if stim_sched is not None and np.ndim(stim_sched) == 2 else 1
+    stim_sched_simul, _ = simulation_schedule(input_dir(p), _ns)
+    if stim_sched_simul is None:
         stim_sched_simul = stim_sched
 
     # ─── DETECT n_stimuli FROM SCHEDULE ─────────────────────────────────
@@ -136,6 +145,7 @@ def main(argv):
         model.force_basins = force_basins
     if temporal_basins >= 0:
         model.temporal_basins = temporal_basins
+    model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
     print(f"[infer_test] Initialized model with {adata.shape[1]} genes, "
           f"stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}, "
           f"force_basins={model.force_basins}, temporal_basins={model.temporal_basins}")
@@ -155,6 +165,31 @@ def main(argv):
     except FileNotFoundError as e:
         print(f"[infer_test] Error: Missing mixture parameter file: {e}")
         sys.exit(1)
+
+    # ─── TRAINING SAMPLES OF THE TEST CELLS (per-sample parameters) ────────
+    # Per-sample arrays follow the sorted dataset_id of the training cells; keep the test samples' rows
+    test_ids = np.sort(adata.obs['dataset_id'].unique()) if 'dataset_id' in adata.obs else np.array([0])
+    train_ids = test_ids
+    train_path = os.path.join(p, 'Data', 'data_train.h5ad')
+    if os.path.exists(train_path) and 'dataset_id' in adata.obs:
+        train_ids = np.sort(ad.read_h5ad(train_path, backed='r').obs['dataset_id'].unique())
+    missing_s = [s for s in test_ids if s not in set(train_ids)]
+    if missing_s:
+        print(f"[infer_test] Error: test samples {missing_s} absent from the training cells")
+        sys.exit(1)
+    rows_s = [int(np.flatnonzero(train_ids == s)[0]) for s in test_ids]
+
+    def _sample_rows(arr, axis=0):
+        # Rows of the test samples when arr has one entry per training sample along axis
+        arr = np.asarray(arr)
+        if arr.ndim > axis and arr.shape[axis] == len(train_ids) and len(train_ids) > 1:
+            return np.take(arr, rows_s, axis=axis)
+        return arr
+
+    if model.a.ndim == 3:
+        model.a = _sample_rows(model.a)
+        pi_zinb = _sample_rows(pi_zinb)
+        model.pi_zinb = pi_zinb
 
     # ─── LOAD CORE NETWORK (raw CardamomOT infer_network output) ────────────
     # inter.npy / basal.npy are the main result of CardamomOT inference and
@@ -184,21 +219,23 @@ def main(argv):
         sys.exit(1)
 
     # ─── SET CORE NETWORK FOR TRAJECTORY INFERENCE ──────────────────────────
-    # infer_test uses the raw inferred network (inter/basal), not the simul ones.
-    # Mean over training samples avoids sample-count mismatch with test cells.
+    # infer_test uses the raw inferred network (inter/basal), not the simul ones;
+    # basal (n_samples, G_tot, n_networks): rows of the test samples
     if inter_core is not None and basal_core is not None:
-        if basal_core.ndim == 3:
-            model.basal = basal_core.mean(axis=0)   # (G_tot, n_networks)
-        else:
-            model.basal = basal_core
+        model.basal = _sample_rows(basal_core)
         model.inter = inter_core
     else:
-        # Fallback: use simul parameters (same as before)
-        if basal_simul.ndim == 3:
-            model.basal = basal_simul.mean(axis=0)
-        else:
-            model.basal = basal_simul
+        model.basal = _sample_rows(basal_simul)
         model.inter = inter_simul
+    basal_simul = _sample_rows(basal_simul)
+    basal_t_simul = _sample_rows(basal_t_simul, axis=1)  # (T-1, n_samples, G_tot, n_networks)
+
+    # Last training iteration: the test loop continues its schedule with the network fixed
+    it_path = os.path.join(cardamom_dir, 'n_iter_inference.npy')
+    n_iter_offset = int(np.load(it_path)[0]) if os.path.exists(it_path) else None
+    if n_iter_offset is None:
+        print("[infer_test] Warning: n_iter_inference.npy not found (older run): "
+              f"test loop starts at iteration {model.min_n_loops}")
 
     # d_t and ratios are needed by estimate_trajectories inside infer_test
     model.ratios = ratios
@@ -214,7 +251,7 @@ def main(argv):
 
     # ─── LOAD OPTIONAL PER-SAMPLE KO/OV PRIOR ───────────────────────────
     basal_ref_test = None
-    kov_path = os.path.join(p, 'Data', 'KO_OV_inference.txt')
+    kov_path = os.path.join(input_dir(p), 'KO_OV_inference.txt')
     if os.path.exists(kov_path) and 'dataset_id' in adata.obs:
         try:
             ns = model.n_stimuli
@@ -259,7 +296,7 @@ def main(argv):
 
     # ─── LOAD OPTIONAL TRANSITION RATES ─────────────────────────────────
     transition_rates_test = None
-    tr_path = find_data_file(os.path.join(p, 'Data'), 'transition_rates')
+    tr_path = find_data_file(input_dir(p), 'transition_rates')
     if tr_path is not None:
         transition_rates_test = pd.read_csv(tr_path, sep=None, engine='python', index_col=0)
         transition_rates_test.index = transition_rates_test.index.astype(str)
@@ -273,7 +310,8 @@ def main(argv):
     try:
         model.infer_test(adata, verb=1, stimulus_schedule=stim_sched,
                          basal_ref=basal_ref_test,
-                         transition_rates=transition_rates_test)  # schedule already built
+                         transition_rates=transition_rates_test,
+                         n_iter_offset=n_iter_offset)
         print(f"[infer_test] Test trajectory inference completed")
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -284,10 +322,7 @@ def main(argv):
     # Trajectory couplings were inferred with the core network; now load the
     # post-processed simul parameters so that estimate_trajectories and
     # kon_theta are computed with the correct unitary-scale network.
-    if basal_simul.ndim == 3:
-        model.basal = basal_simul.mean(axis=0)   # (G_tot, n_networks)
-    else:
-        model.basal = basal_simul
+    model.basal = basal_simul
     model.inter = inter_simul
     model.basal_t = basal_t_simul
     model.inter_t = inter_t_simul
@@ -327,9 +362,10 @@ def main(argv):
     kon_beta_test = model.kon_beta.copy()
     kon_theta_test = model.kon_theta.copy()
     rna_test = model.rna.copy()
+    real_idx_test = np.asarray(model.traj_real_idx).copy()  # test cell behind each trajectory state
 
     # ─── SIMULATION TIMES ────────────────────────────────────────────────
-    times_file = os.path.join(p, 'Data', 'times_to_simulate.txt')
+    times_file = os.path.join(input_dir(p), 'times_to_simulate.txt')
     if os.path.exists(times_file):
         with open(times_file, "r") as f:
             sim_times = [float(line.strip()) for line in f if line.strip()]
@@ -367,21 +403,21 @@ def main(argv):
         ns = model.n_stimuli
         G = adata.shape[1]   # number of genes (no stimulus)
 
-        c = model.a[-1, :]
-        kz = model.a[:-1, :] + 1e-6
 
         vect_kon_beta = kon_beta_test + 1e-6        # (N_traj, G_tot)
         vect_kon_theta = kon_theta_test + 1e-6
         vect_kon_sim = model.kon_theta + 1e-6       # (N_sim, G_tot) after simulation
 
-        # Helper: NB sample matrix of shape (G, N) using pi_zinb sparsity
-        def _nb_sample(kon, times_vec):
+        # Helper: NB sample matrix of shape (G, N) using pi_zinb sparsity (per-sample mixtures if any)
+        def _nb_sample(kon, times_vec, sample_idx=None, depth=None):
             n_cells = kon.shape[0]
-            n_param = (np.max(kz, axis=0) * kon)[:, ns:].T  # (G, N)
-            p_param = (c / (c + 1))[ns:].reshape(G, 1)
+            k1c, cc, pzc = nb_cell_parameters(model.a, pi_zinb, sample_idx)
+            n_param = ((k1c + 1e-6) * kon)[:, ns:].T  # (G, N)
+            sd = 1.0 if depth is None else depth[:, None]  # NB(k, c / s): p = c / (c + s)
+            p_param = (cc / (cc + sd))[:, ns:].T
             n_param = np.maximum(n_param, 1e-6)
             p_param = np.clip(p_param, 1e-6, 1 - 1e-6)
-            zero_mask = np.random.uniform(0, 1, (G, n_cells)) < pi_zinb.reshape(G, 1)
+            zero_mask = np.random.uniform(0, 1, (G, n_cells)) < pzc.T
             counts = np.random.negative_binomial(n_param, p_param)
             counts = np.where(zero_mask, 0, counts)
             out = np.zeros((G + 1, n_cells))
@@ -389,9 +425,16 @@ def main(argv):
             out[1:, :] = counts
             return out
 
-        data_beta = _nb_sample(vect_kon_beta, times_data_test)
-        data_netw_theta = _nb_sample(vect_kon_theta, times_data_test)
-        data_sim = _nb_sample(vect_kon_sim, times_simulation_test)
+        s_test = np.asarray(model.samples_data).astype(int) if model.samples_data is not None else None
+        N0 = int(np.sum(times_simulation_test == times_simulation_test[0]))
+        s_sim = None if s_test is None else np.tile(s_test[:N0], len(times_simulation_test) // N0)
+        # Depth factors: states / simulated cells drawn at the depth of the test cells they mimic
+        depth_cells = adata.obs['depth_factor'].values.astype(float) if 'depth_factor' in adata.obs else None
+        d_tr = state_depth(depth_cells, real_idx_test)
+        d_sim = simulation_depth(depth_cells, real_idx_test, times_data_test, times_simulation_test)
+        data_beta = _nb_sample(vect_kon_beta, times_data_test, s_test[:len(vect_kon_beta)] if s_test is not None else None, d_tr)
+        data_netw_theta = _nb_sample(vect_kon_theta, times_data_test, s_test[:len(vect_kon_theta)] if s_test is not None else None, d_tr)
+        data_sim = _nb_sample(vect_kon_sim, times_simulation_test, s_sim, d_sim)
 
         # RNA trajectory data
         data_rna_traj = np.zeros((G + 1, rna_test.shape[0]))

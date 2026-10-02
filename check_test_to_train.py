@@ -9,8 +9,10 @@ comparison plots between real test data and the inferred/simulated trajectories.
 Usage:
     python check_test_to_train.py -i <project_path> -s <split> [-t <stimulus>] [-p <prior>]
 
+The reference is always the held-out data Data/data_test.h5ad (-s is kept for compatibility).
+
 Required input files (produced by infer_test.py):
-    - Data/data_<split>.h5ad: observed test data
+    - Data/data_test.h5ad: observed test data
     - cardamomOT/adata_beta_test_stim<s>_prior<p>.h5ad
     - cardamomOT/adata_theta_test_stim<s>_prior<p>.h5ad
     - cardamomOT/adata_sim_test_stim<s>_prior<p>.h5ad
@@ -64,15 +66,22 @@ def main(argv):
             print(__doc__)
             sys.exit(0)
 
-    if not inputfile or not split:
-        print("[check_test_to_train] Error: Missing required arguments --input and --split")
+    if not inputfile:
+        print("[check_test_to_train] Error: Missing required argument --input")
         sys.exit(1)
 
+    # Negative values (pipeline sentinel): model defaults, as in infer_test.py
+    from CardamomOT import NetworkModel
     p = '{}/'.format(inputfile)
+    m = NetworkModel(1)
+    m.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
+    stim = stim if (stim >= 0 and not m.overridden('stimulus')) else m.stimulus
+    prior = prior if (prior >= 0 and not m.overridden('prior_network_pen')) else m.prior_network_pen
     cardamom_dir = os.path.join(p, 'cardamomOT')
 
     # ─── LOAD OBSERVED TEST DATA ─────────────────────────────────────────
-    data_path = os.path.join(p, 'Data', 'data_{}.h5ad'.format(split))
+    # Held-out cells, whatever the split of the run (the test predictions are compared to them)
+    data_path = os.path.join(p, 'Data', 'data_test.h5ad')
     try:
         if not os.path.exists(data_path):
             raise FileNotFoundError(f"Test data file not found at {data_path}")

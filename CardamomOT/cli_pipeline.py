@@ -29,6 +29,14 @@ except ImportError:
 # "default": False → unchecked by default (optional step)
 PIPELINE_STEPS = [
     {
+        "id": "estimate_cell_depth",
+        "name": "Cell depth",
+        "script": "estimate_cell_depth.py",
+        "description": "Diagnose per-cell sequencing depth effects on the whole transcriptome and, if "
+                        "needed and allowed, store a depth factor per cell (obs['depth_factor'])",
+        "default": True,
+    },
+    {
         "id": "get_proliferation_rates",
         "name": "Proliferation rates",
         "script": "get_proliferation_rates.py",
@@ -37,16 +45,16 @@ PIPELINE_STEPS = [
         "default": True,
     },
     {
-        "id": "select_DEgenes",
+        "id": "select_genes_and_split",
         "name": "Gene selection",
-        "script": "select_DEgenes_and_split.py",
+        "script": "select_genes_and_split.py",
         "description": "Filter differentially expressed genes and split cells into train/test",
         "default": True,
     },
     {
-        "id": "prepare_reference_network",
+        "id": "build_reference_network",
         "name": "Network constraint (optional)",
-        "script": "prepare_reference_network.py",
+        "script": "build_reference_network.py",
         "description": "Build prior knowledge network from biological databases",
         "default": False,
     },
@@ -128,24 +136,40 @@ PIPELINE_STEPS = [
         "description": "Compare perturbation simulations to wild-type",
         "default": True,
     },
+    {
+        "id": "report_results",
+        "name": "Report — final PDF",
+        "script": "report_results.py",
+        "description": "Write the PDF report (generative model, GRN top regulators, KO/OV predictions)",
+        "default": True,
+    },
 ]
 
 # Default hyperparameters
 DEFAULT_PARAMS = {
+    "estimate_cell_depth": {
+        "-i": "input project path",
+        "--allow": "1/0: apply the depth factor if recommended (default: model.allow_depth_correction)",
+        "--method": "group_median (default), poissonian, or <project>/depth_methods/<name>.py",
+    },
     "get_proliferation_rates": {
         "-i": "input project path",
         "--species": "organism for proliferation/death gene signatures: auto (detected from gene names, default), human or mouse",
     },
-    "select_DEgenes": {
+    "select_genes_and_split": {
         "-i": "input project path",
         "-c": "change flag (default: 0)",
         "-r": "rate parameter (default: 1.0)",
         "-s": "split name (default: 'train')",
         "-m": "mean constraint (default: 1.0)",
+        "--prior": "prior weight of the run (hard prior 0 + --ref 1: gene budget from model.max_free_params)",
+        "--ref": "1 if the literature prior is built (build_reference_network step selected)",
     },
-    "prepare_reference_network": {
+    "build_reference_network": {
         "-i": "input project path",
-        "-d": "network depth to query (default: 3)",
+        "-d": "max literature path length (default: model.literature_depth = 3)",
+        "--species": "auto (detected from gene names, default), human or mouse",
+        "--resources": "extended (default: OmniPath, CollecTRI + less curated resources) or core (OmniPath + CollecTRI)",
     },
     "get_degradation_rates": {
         "-i": "input project path",
@@ -183,6 +207,10 @@ DEFAULT_PARAMS = {
         "-s": "split name (default: 'train')",
     },
     "check_KOV_to_sim": {
+        "-i": "input project path",
+        "-s": "split name (default: 'train')",
+    },
+    "report_results": {
         "-i": "input project path",
         "-s": "split name (default: 'train')",
     },
@@ -284,15 +312,35 @@ def simple_step_selection() -> List[str]:
 
 
 # Steps that consume the branching-simulation MLP (train it, or apply it).
-# --compute-proliferation must be passed consistently to all three, or not
-# at all -- see docs/advanced.md#proliferation-aware-simulation---compute-proliferation.
-STEPS_WITH_COMPUTE_PROLIFERATION = ["infer_network_simul", "simulate_network", "simulate_network_KOV"]
+# --simulate-proliferation must be passed consistently to all three, or not
+# at all -- see docs/advanced.md#proliferation-aware-simulation---simulate-proliferation.
+STEPS_WITH_SIMULATE_PROLIFERATION = ["infer_network_simul", "simulate_network", "simulate_network_KOV"]
+
+# Steps taking --prior (weight of the edges absent from cardamomOT/ref_network.csv); the same
+# value must reach all of them (output file names embed it).
+STEPS_WITH_PRIOR = ["infer_network_structure", "infer_network_simul", "check_sim_to_data", "infer_test",
+                    "check_test_to_train", "check_KOV_to_sim", "report_results"]
 
 
-def prompt_compute_proliferation() -> bool:
+def prompt_prior() -> str:
+    """Ask once for the prior weight; '' keeps the model default."""
+    print("\n" + "=" * 60)
+    print("PRIOR NETWORK (optional)")
+    print("=" * 60)
+    print("  Weight of the edges absent from the literature prior (cardamomOT/ref_network.csv,")
+    print("  written by the gene selection or build_reference_network): 0 = hard constraint")
+    print("  (sparse network), 1 = prior ignored, in between = soft penalty.")
+    if HAS_QUESTIONARY:
+        value = questionary.text("Prior weight in [0, 1] [default: model default]:", default="").ask() or ""
+    else:
+        value = input("  Prior weight in [0, 1] [model default]: ").strip()
+    return value
+
+
+def prompt_simulate_proliferation() -> bool:
     """
     Ask once, up front, whether to enable proliferation-aware simulation
-    (--compute-proliferation) for this run. Off by default, matching
+    (--simulate-proliferation) for this run. Off by default, matching
     run.sh / cardamomot pipeline.
     """
     print("\n" + "=" * 60)
@@ -302,12 +350,13 @@ def prompt_compute_proliferation() -> bool:
     print("  from the inferred optimal-transport couplings, and simulates with")
     print("  branching (birth/death) resampling instead of a fixed cell number.")
     print("  See Advanced Features -> Proliferation-aware simulation for details.")
-    response = input("  Enable proliferation-aware simulation (--compute-proliferation)? [y/N]: ").strip().lower()
+    response = input("  Enable proliferation-aware simulation (--simulate-proliferation)? [y/N]: ").strip().lower()
     return response == "y"
 
 
 def interactive_parameter_input(step_id: str, project_path: str,
-                                 compute_proliferation: bool = False) -> Dict[str, str]:
+                                 simulate_proliferation: bool = False, prior: str = "",
+                                 build_prior: bool = False) -> Dict[str, str]:
     """
     Prompt user for parameter values for a given step.
     Returns dictionary of parameters to pass to the script.
@@ -318,23 +367,31 @@ def interactive_parameter_input(step_id: str, project_path: str,
     params["-i"] = project_path
 
     # Add -s only to steps that use it (not get_proliferation_rates,
-    # prepare_reference_network, or infer_test)
+    # build_reference_network, or infer_test)
     steps_with_split = [
-        "select_DEgenes", "get_degradation_rates", "infer_mixture",
+        "select_genes_and_split", "get_degradation_rates", "infer_mixture",
         "check_mixture_to_data", "infer_network_structure",
         "infer_network_simul", "simulate_network", "check_sim_to_data",
-        "simulate_network_KOV", "check_KOV_to_sim", "check_test_to_train"
+        "simulate_network_KOV", "check_KOV_to_sim", "check_test_to_train",
+        "report_results"
     ]
     if step_id in steps_with_split:
         params["-s"] = "train"  # Default split
 
     # Flag-only parameter (no value) -- forwarded consistently to all three
-    # steps that need it, decided once via prompt_compute_proliferation().
-    if step_id in STEPS_WITH_COMPUTE_PROLIFERATION and compute_proliferation:
-        params["--compute-proliferation"] = ""
+    # steps that need it, decided once via prompt_simulate_proliferation().
+    if step_id in STEPS_WITH_SIMULATE_PROLIFERATION and simulate_proliferation:
+        params["--simulate-proliferation"] = ""
+    if step_id in STEPS_WITH_PRIOR and prior:
+        params["--prior"] = prior
+    # The selection builds the literature prior; with a hard prior its budget is in parameters
+    if step_id == "select_genes_and_split":
+        if prior:
+            params["--prior"] = prior
+        params["--ref"] = "1" if build_prior else "0"
 
     # Step-specific parameters
-    if step_id == "select_DEgenes":
+    if step_id == "select_genes_and_split":
         print("\n" + "=" * 60)
         print("SELECT DE GENES & SPLIT - Parameters")
         print("=" * 60)
@@ -394,9 +451,9 @@ def interactive_parameter_input(step_id: str, project_path: str,
             species = input("Organism for proliferation/death gene signatures (auto/human/mouse) [auto]: ").strip().lower() or "auto"
             params["--species"] = species
 
-    elif step_id == "prepare_reference_network":
+    elif step_id == "build_reference_network":
         print("\n" + "=" * 60)
-        print("PREPARE REFERENCE NETWORK - Parameters")
+        print("BUILD REFERENCE NETWORK - Parameters")
         print("=" * 60)
         
         if HAS_QUESTIONARY:
@@ -431,16 +488,7 @@ def interactive_parameter_input(step_id: str, project_path: str,
         print("INFER NETWORK STRUCTURE - Parameters")
         print("=" * 60)
         
-        if HAS_QUESTIONARY:
-            has_prior = questionary.confirm(
-                "Use prior network from previous step?",
-                default=True,
-            ).ask()
-            if has_prior:
-                print("  ✓ Will use prepared prior network")
-        else:
-            response = input("Use prior network? [Y/n]: ").strip().lower()
-            # If they say no, don't add any special parameters
+        print(f"  → Prior weight: {prior or 'model default'} (cardamomOT/ref_network.csv if present)")
 
     elif step_id == "simulate_network_KOV":
         print("\n" + "=" * 60)
@@ -482,7 +530,7 @@ def run_step(script_name: str, params: Dict[str, str], repo_root: str) -> bool:
     cmd = ["python", str(script_path)]
     for key, value in params.items():
         if value == "":
-            cmd.append(key)  # flag-only parameter, e.g. --compute-proliferation
+            cmd.append(key)  # flag-only parameter, e.g. --simulate-proliferation
         else:
             cmd.extend([key, value])
 
@@ -544,11 +592,21 @@ def run_pipeline_interactive(project_path: str, use_defaults: bool = False):
     # (infer_network_simul, simulate_network, simulate_network_KOV) -- ask once,
     # up front, rather than per-step, so the same choice is applied consistently.
     selected_ids = {step["id"] for step in PIPELINE_STEPS if step["script"] in selected_scripts}
-    compute_proliferation = False
-    if selected_ids & set(STEPS_WITH_COMPUTE_PROLIFERATION):
-        compute_proliferation = prompt_compute_proliferation() if not use_defaults else False
-        if compute_proliferation:
-            print("✓ Proliferation-aware simulation enabled (--compute-proliferation)")
+    simulate_proliferation = False
+    from CardamomOT.inputs import input_dir, project_parameters
+    input_dir(project_path)  # sync Data/CardamomOT_inputs.xlsx
+    fixed = project_parameters(project_path)
+    if 'simulate_with_proliferation' in fixed:
+        # Fixed in the workbook: the scripts read it themselves, no prompt
+        print(f"✓ simulate_with_proliferation = {fixed['simulate_with_proliferation']} (Data/CardamomOT_inputs.xlsx)")
+    elif selected_ids & set(STEPS_WITH_SIMULATE_PROLIFERATION):
+        simulate_proliferation = prompt_simulate_proliferation() if not use_defaults else False
+        if simulate_proliferation:
+            print("✓ Proliferation-aware simulation enabled (--simulate-proliferation)")
+    prior = ""
+    if selected_ids & set(STEPS_WITH_PRIOR) and not use_defaults:
+        prior = prompt_prior()
+    build_prior = "build_reference_network" in selected_ids
 
     # 4. Execute each step
     failed_steps = []
@@ -558,7 +616,8 @@ def run_pipeline_interactive(project_path: str, use_defaults: bool = False):
         print(f"\n[{i}/{len(selected_scripts)}] {step['name']}")
 
         params = interactive_parameter_input(step["id"], project_path,
-                                              compute_proliferation=compute_proliferation)
+                                              simulate_proliferation=simulate_proliferation, prior=prior,
+                                              build_prior=build_prior)
 
         if not run_step(script, params, repo_root):
             failed_steps.append(script)

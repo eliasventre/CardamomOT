@@ -4,13 +4,13 @@ get_proliferation_rates.py
 Estimate per-cell net proliferation rates (birth - death) from literature
 proliferation/death/senescence gene signatures.
 
-Runs BEFORE differential gene selection (select_DEgenes_and_split.py), on the
+Runs BEFORE differential gene selection (select_genes_and_split.py), on the
 full unfiltered dataset — DE gene selection can otherwise discard many of the
 literature marker genes used to score proliferation/death, so scoring happens
 first while the complete gene set is still available. Because the estimate
 is written to `adata.obs`, it is preserved automatically when
-select_DEgenes_and_split.py later subsets genes and splits cells into
-train/test (obs columns are untouched by that subsetting); select_DEgenes_and_split.py
+select_genes_and_split.py later subsets genes and splits cells into
+train/test (obs columns are untouched by that subsetting); select_genes_and_split.py
 only ever reads Data/data.h5ad, never Data/data_complete.h5ad.
 
 If `Data/data.h5ad` was already prepared with a pre-filtered gene set, the
@@ -21,7 +21,10 @@ modified or written back), and the resulting per-cell rates are mapped onto
 the matching cells of `Data/data.h5ad` by cell name (every cell in
 Data/data.h5ad is assumed to also be present in Data/data_complete.h5ad; the
 converse need not hold). If `Data/data_complete.h5ad` is absent,
-`Data/data.h5ad` is used directly for both scoring and output, as before.
+`Data/data.h5ad` is used directly for both scoring and output if it has at
+least MIN_GENES_SCORING (10,000) genes. With fewer, the signatures are not
+scored (warning): the reference rates of Data/proliferation_rates.{csv,txt},
+if given, are assigned uniformly per cell type; otherwise no rate is assigned.
 
 Usage:
     python get_proliferation_rates.py -i <project_path> [--species auto|human|mouse]
@@ -71,15 +74,20 @@ import sys; sys.path += ['../']
 import os
 import getopt
 import anndata as ad
+import numpy as np
 import pandas as pd
 
-from CardamomOT import find_data_file, read_gene_list, resolve_cell_type_obs
+from CardamomOT import find_data_file, read_gene_list, resolve_cell_type_obs, ensure_raw_counts
+from CardamomOT.inputs import input_dir
 from CardamomOT.config import CELL_TYPE_OBS_KEYS
 from CardamomOT.tools.estimate_proliferation import (
     estimate_growth_rates, combine_growth_rates_with_reference,
 )
 from CardamomOT.inference.halflife_db import detect_species
 
+
+# Genes needed in Data/data.h5ad to score the signatures without Data/data_complete.h5ad
+MIN_GENES_SCORING = 10000
 
 def assign_proliferation_rates(adata, prolif_path, species='human', proliferation_genes=None,
                                 death_genes=None, senescence_genes=None, senescence_gating=True):
@@ -123,28 +131,40 @@ def assign_proliferation_rates(adata, prolif_path, species='human', proliferatio
         print(f"{prefix} No Data/proliferation_rates.{{csv,txt}} found; "
               "using literature-only proliferation rate estimate")
         return
+    anchors = read_anchors(adata, prolif_path, "using unanchored literature estimate")
+    if anchors is None:
+        return
+    labels, rates, celltype_col = anchors
+    adata.obs['proliferation_net_rate'] = combine_growth_rates_with_reference(net_lit, labels, rates)
+    print(f"{prefix} Anchored literature proliferation rates to {prolif_path} "
+          f"per '{celltype_col}' ({len(rates)} types)")
 
-    # Anchor only if a cell-type grouping matches the reference rates
+
+def read_anchors(adata, prolif_path, fallback):
+    """
+    Reference rates per cell type (Data/proliferation_rates.{csv,txt}: cell_type, rate per hour),
+    grouped by adata.obs['cell_type_proliferation'], else 'cell_type_transition', else 'cell_type'.
+    Returns (labels per cell, {cell type: rate}, column) or None (message ending with fallback)
+    when no grouping exists or a cell type has no rate (partial anchoring is worse than none).
+    """
+    prefix = "[get_proliferation_rates]"
     celltype_col = resolve_cell_type_obs(adata, 'proliferation')
     if celltype_col is None:
         print(f"{prefix} Warning: found {prolif_path} but adata.obs has none of "
-              f"{list(CELL_TYPE_OBS_KEYS['proliferation'])}; using unanchored literature estimate")
-        return
-    user_rates = pd.read_csv(prolif_path, sep=None, engine='python',
-                              header=None, index_col=0).iloc[:, 0]
-    user_rates.index = user_rates.index.astype(str)
+              f"{list(CELL_TYPE_OBS_KEYS['proliferation'])}; {fallback}")
+        return None
+    user_rates = pd.read_csv(prolif_path, sep=None, engine='python', header=None, index_col=0).iloc[:, 0]
+    user_rates.index = user_rates.index.astype(str).str.strip()
     labels = adata.obs[celltype_col].astype(str).values
-    # Partial anchoring is worse than none: every cell type needs a reference rate
+    # Cell types matched case-insensitively
+    by_lower = {k.lower(): float(v) for k, v in user_rates.items()}
+    user_rates = pd.Series({c: by_lower[c.lower()] for c in set(labels) if c.lower() in by_lower})
     missing = sorted(set(labels) - set(user_rates.index))
     if missing:
         print(f"{prefix} Warning: cell type(s) {missing} of adata.obs['{celltype_col}'] "
-              f"not found in {prolif_path}; using unanchored literature estimate for all cells")
-        return
-    adata.obs['proliferation_net_rate'] = combine_growth_rates_with_reference(
-        net_lit, labels, user_rates.to_dict()
-    )
-    print(f"{prefix} Anchored literature proliferation rates to {prolif_path} "
-          f"per '{celltype_col}' ({len(user_rates)} types)")
+              f"not found in {prolif_path}; {fallback}")
+        return None
+    return labels, user_rates.to_dict(), celltype_col
 
 
 def main(argv):
@@ -190,7 +210,7 @@ def main(argv):
         sys.exit(1)
 
     p = '{}/'.format(inputfile)
-    data_dir = os.path.join(p, 'Data')
+    data_dir = input_dir(p)
 
     # Data/data.h5ad is always the file that gets updated.
     data_path = os.path.join(data_dir, 'data.h5ad')
@@ -215,14 +235,42 @@ def main(argv):
     # never written to.
     complete_path = os.path.join(data_dir, 'data_complete.h5ad')
     using_complete = os.path.exists(complete_path)
-    if using_complete:
-        adata_score = ad.read_h5ad(complete_path)
-        print(f"[get_proliferation_rates] Found {complete_path}; scoring gene signatures on it "
-              f"({adata_score.shape[0]} cells, {adata_score.shape[1]} genes) instead of Data/data.h5ad")
-    else:
-        adata_score = adata_target
+    # Scoring needs raw counts (raw-count layer used if X is log-normalised; files are never modified)
+    try:
+        if using_complete:
+            adata_score = ensure_raw_counts(ad.read_h5ad(complete_path), complete_path)
+            print(f"[get_proliferation_rates] Found {complete_path}; scoring gene signatures on it "
+                  f"({adata_score.shape[0]} cells, {adata_score.shape[1]} genes) instead of Data/data.h5ad")
+        else:
+            adata_score = ensure_raw_counts(adata_target, data_path)
+    except ValueError as e:
+        print(f"[get_proliferation_rates] Error: {e}")
+        sys.exit(1)
 
-    prolif_path = find_data_file(data_dir, 'proliferation_rates')
+    prolif_path = find_data_file(input_dir(p), 'proliferation_rates')
+
+    # Too few genes to score the signatures: no estimate, except the per-cell-type anchors if given
+    if not using_complete and adata_target.shape[1] < MIN_GENES_SCORING:
+        print(f"[get_proliferation_rates] Warning: Data/data.h5ad has only {adata_target.shape[1]} genes "
+              f"(< {MIN_GENES_SCORING}) and there is no Data/data_complete.h5ad: the gene signatures "
+              f"cannot be scored reliably, no literature estimate")
+        anchors = read_anchors(adata_target, prolif_path, "no proliferation rate assigned") \
+            if prolif_path is not None else None
+        if anchors is not None:
+            labels, rates, celltype_col = anchors
+            adata_target.obs['proliferation_net_rate'] = np.array([rates[l] for l in labels], dtype=float)
+            print(f"[get_proliferation_rates] Rates of {prolif_path} assigned uniformly per '{celltype_col}'")
+        elif 'proliferation_net_rate' in adata_target.obs.columns:
+            print("[get_proliferation_rates] Warning: keeping the existing adata.obs['proliferation_net_rate'] "
+                  "(computed beforehand, e.g. by another method)")
+        else:
+            print("[get_proliferation_rates] No Data/proliferation_rates.{csv,txt}: no rate assigned")
+        adata_target.write(data_path)
+        print(f"[get_proliferation_rates] Saved updated dataset to {data_path}")
+        return
+    if not using_complete:
+        print(f"[get_proliferation_rates] No Data/data_complete.h5ad; scoring on Data/data.h5ad "
+              f"({adata_target.shape[1]} genes >= {MIN_GENES_SCORING})")
 
     if species == "auto":
         species, hits = detect_species(adata_score.var_names)
@@ -234,21 +282,21 @@ def main(argv):
           f"{'enabled' if senescence_gating else 'disabled (plain birth - death)'}")
 
     proliferation_genes = None
-    proliferation_genes_path = find_data_file(data_dir, 'proliferation_signatures')
+    proliferation_genes_path = find_data_file(input_dir(p), 'proliferation_signatures')
     if proliferation_genes_path is not None:
         proliferation_genes = read_gene_list(proliferation_genes_path)
         print(f"[get_proliferation_rates] Loaded {len(proliferation_genes)} proliferation marker "
               f"genes from {proliferation_genes_path}")
 
     death_genes = None
-    death_genes_path = find_data_file(data_dir, 'death_signatures')
+    death_genes_path = find_data_file(input_dir(p), 'death_signatures')
     if death_genes_path is not None:
         death_genes = read_gene_list(death_genes_path)
         print(f"[get_proliferation_rates] Loaded {len(death_genes)} death marker genes "
               f"from {death_genes_path}")
 
     senescence_genes = None
-    senescence_genes_path = find_data_file(data_dir, 'senescence_signatures')
+    senescence_genes_path = find_data_file(input_dir(p), 'senescence_signatures')
     if senescence_genes_path is not None:
         senescence_genes = read_gene_list(senescence_genes_path)
         print(f"[get_proliferation_rates] Loaded {len(senescence_genes)} senescence/arrest marker "
@@ -270,6 +318,9 @@ def main(argv):
         ].to_numpy()
         print("[get_proliferation_rates] Mapped proliferation rates from Data/data_complete.h5ad "
               "onto Data/data.h5ad cells")
+    elif adata_score is not adata_target:
+        # Scored on the raw-count layer: only the rates go back to Data/data.h5ad (X untouched)
+        adata_target.obs['proliferation_net_rate'] = adata_score.obs['proliferation_net_rate'].to_numpy()
 
     try:
         adata_target.write(data_path)

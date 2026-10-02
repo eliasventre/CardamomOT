@@ -8,80 +8,35 @@ Usage:
 
 Required input files:
     - Data/data_<split>.h5ad: count matrix with temporal information
-    - Data/KO_OV_simulate.txt: table defining KO/OV combinations (tab-separated)
+    - Data/KO_OV_Stim_simulate.txt (old name KO_OV_simulate.txt): perturbations (tab-separated)
+Optional:
+    - Data/stimulus_schedule_simulate.txt: schedules of the simulation, one row per simulated
+      time: the inference stimuli, then the perturbation stimuli STIM1, STIM2... (default 0 at
+      the first time, 1 after)
     - cardamom/inter_t_simul.npy, basal_simul.npy: inferred parameters
 
 Output files:
     - cardamom/data_prot_simul_KO_*.npy: simulated protein for each perturbation
     - cardamom/data_kon_simul_KO_*.npy: simulated bursting for each perturbation
 
-KO_OV_simulate.txt format:
-    KO          OV
-    gene1       gene2,gene3
-    gene4
+KO_OV_Stim_simulate.txt format (see CardamomOT/tools/perturbations.py):
+    KO          OV            STIM
+    gene1       gene2,gene3   0
+    gene4       0             gene5+gene6-
 """
 import sys; sys.path += ['../']
 import re
 import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta
+from CardamomOT.inputs import input_dir
 import getopt
 import anndata as ad
 import os
 import copy
 import torch
-
-
-def _parse_gene_with_pct(token):
-    """Parse 'GENE-X' → (gene, X) or 'GENE' → (gene, None). X is a float 0–100.
-
-    A trailing '-<number>' suffix is interpreted as a percentage only when
-    the number is strictly between 0 and 100 (exclusive) so that gene names
-    like 'HIF-1A' are not accidentally matched.
-    """
-    token = token.strip()
-    m = re.match(r'^(.+)-(\d+(?:\.\d+)?)$', token)
-    if m:
-        pct = float(m.group(2))
-        if 0.0 < pct < 100.0:
-            return m.group(1).strip(), pct
-    return token, None
-
-
-def load_ko_ov_combinations(file_path):
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"KO/OV list file not found: {file_path}")
-
-    combos = []
-    with open(file_path, "r") as f:
-        lines = f.readlines()
-
-    header = lines[0].strip().split('\t')
-    header = [h.strip().upper() for h in header]
-
-    ko_idx = header.index("KO") if "KO" in header else None
-    ov_idx = header.index("OV") if "OV" in header else None
-
-    if ko_idx is None and ov_idx is None:
-        raise ValueError("KO_OV_simulate.txt must contain 'KO' or 'OV' column")
-
-    for line_num, line in enumerate(lines[1:], start=2):
-        parts = line.rstrip().split('\t')
-
-        def parse(idx):
-            if idx is None or idx >= len(parts):
-                return []
-            cell = parts[idx].strip()
-            if cell.lower() in ('', '0', 'none', 'nan'):
-                return []
-            return [_parse_gene_with_pct(g) for g in cell.split(',') if g.strip()]
-
-        kos = parse(ko_idx)
-        ovs = parse(ov_idx)
-
-        if kos or ovs:
-            combos.append({'KO': kos, 'OV': ovs})
-
-    return combos
+from CardamomOT.tools.perturbations import (find_perturbation_file, load_perturbations, combo_label,
+                                            perturbation_schedule)
+from CardamomOT.config import n_inference_stimuli, simulation_schedule
 
 
 def main(argv):
@@ -95,11 +50,11 @@ def main(argv):
     split = ''
     simulate_with_proliferation = False
     try:
-        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split=", "compute-proliferation"])
+        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split=", "simulate-proliferation"])
     except getopt.GetoptError:
         print("[simulate_network_KOV] Error: Invalid command-line arguments")
         print("[simulate_network_KOV] Usage: python simulate_network_KOV.py -i <project_path> -s <split> "
-              "[--compute-proliferation]")
+              "[--simulate-proliferation]")
         sys.exit(2)
 
     for opt, arg in opts:
@@ -107,7 +62,7 @@ def main(argv):
             inputfile = arg
         elif opt in ("-s", "--split"):
             split = '{}'.format(arg)
-        elif opt == "--compute-proliferation":
+        elif opt == "--simulate-proliferation":
             simulate_with_proliferation = True
         elif opt == "-h":
             print(__doc__)
@@ -119,22 +74,10 @@ def main(argv):
 
     p = f'{inputfile}/'
 
-    # Load KO/OV combinations
-    ko_ov_file = os.path.join(p, "Data", "KO_OV_simulate.txt")
-    try:
-        combos = load_ko_ov_combinations(ko_ov_file)
-    except FileNotFoundError:
-        print(f"[simulate_network_KOV] Error: KO/OV list file not found at {ko_ov_file}")
+    ko_ov_file = find_perturbation_file(input_dir(p))
+    if ko_ov_file is None:
+        print("[simulate_network_KOV] Error: no Data/KO_OV_Stim_simulate.txt")
         sys.exit(1)
-    except ValueError as e:
-        print(f"[simulate_network_KOV] Error: {e}")
-        sys.exit(1)
-
-    if len(combos) == 0:
-        print("[simulate_network_KOV] No KO/OV combinations found in KO_OV_simulate.txt")
-        sys.exit(0)
-
-    print(f"[simulate_network_KOV] Loaded {len(combos)} KO/OV combinations")
 
     # Load gene expression data (for gene count and var_names)
     data_path = os.path.join(p, 'Data', f'data_{split}.h5ad')
@@ -147,22 +90,32 @@ def main(argv):
         print(f"[simulate_network_KOV] Error: {e}")
         sys.exit(1)
 
-    # ─── LOAD STIMULUS SCHEDULE ──────────────────────────────────────────
-    stim_sched = None
-    for sched_name in ('stimulus_schedule_simul.txt', 'stimulus_schedule.txt'):
-        sched_path = os.path.join(p, 'Data', sched_name)
-        if os.path.exists(sched_path):
-            stim_sched = np.loadtxt(sched_path)
-            print(f"[simulate_network_KOV] Loaded stimulus schedule from {sched_path}")
-            break
+    # Load perturbations (STIM targets resolved with the gene names)
+    try:
+        combos = load_perturbations(ko_ov_file, genes=list(adata.var_names))
+    except ValueError as e:
+        print(f"[simulate_network_KOV] Error: {e}")
+        sys.exit(1)
+    if len(combos) == 0:
+        print(f"[simulate_network_KOV] No perturbation found in {ko_ov_file}")
+        sys.exit(0)
+    print(f"[simulate_network_KOV] Loaded {len(combos)} perturbations from {ko_ov_file}")
 
-    # ─── DETECT n_stimuli FROM SCHEDULE ─────────────────────────────────
-    _stim_arr = np.asarray(stim_sched) if stim_sched is not None else None
-    n_stimuli = int(_stim_arr.shape[1]) if (_stim_arr is not None and _stim_arr.ndim == 2) else 1
+    # ─── STIMULUS SCHEDULES (inference stimuli, then perturbation stimuli) ──
+    n_stimuli = n_inference_stimuli(input_dir(p))
+    try:
+        stim_sched, pert_sched = simulation_schedule(input_dir(p), n_stimuli)
+    except ValueError as e:
+        print(f"[simulate_network_KOV] Error: {e}")
+        sys.exit(1)
 
     print(f"[simulate_network_KOV] Data: {adata.shape[1]} genes, n_stimuli={n_stimuli}")
 
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
+    model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
+    if model.overridden('simulate_with_proliferation'):
+        simulate_with_proliferation = model.simulate_with_proliferation
+    model.simulate_with_proliferation = False  # enabled below once the proliferation network is loaded
 
     # Load network model parameters
     print("[simulate_network_KOV] Loading inferred network parameters...")
@@ -193,7 +146,7 @@ def main(argv):
         sys.exit(1)
 
     # Determine simulation timepoints
-    filepath = os.path.join(p, 'Data', 'times_to_simulate.txt')
+    filepath = os.path.join(input_dir(p), 'times_to_simulate.txt')
     if os.path.exists(filepath):
         print("[simulate_network_KOV] Using custom timepoints from times_to_simulate.txt")
         try:
@@ -267,9 +220,6 @@ def main(argv):
 
     ns = model.n_stimuli
 
-    def _gene_label(gene, pct):
-        return f"{gene}pct{int(pct)}" if pct is not None else gene
-
     # Load proliferation network if requested
     if simulate_with_proliferation:
         prolif_path = os.path.join(p, 'cardamomOT', 'prolif_network.pt')
@@ -278,13 +228,14 @@ def main(argv):
             from CardamomOT.inference.proliferations import ProliferationMLP
             n_proteins = int(np.load(n_prot_path)[0])
             prolif_net = ProliferationMLP(n_proteins)
-            prolif_net.load_state_dict(torch.load(prolif_path, map_location='cpu', weights_only=True))
+            # strict=False: networks saved before input standardisation keep identity scaling
+            prolif_net.load_state_dict(torch.load(prolif_path, map_location='cpu', weights_only=True), strict=False)
             prolif_net.eval()
             model.prolif_network = prolif_net
             model.simulate_with_proliferation = True
             print("[simulate_network_KOV] Loaded proliferation network — branching simulation enabled")
         else:
-            print("[simulate_network_KOV] Warning: --compute-proliferation requested but prolif_network.pt not found")
+            print("[simulate_network_KOV] Warning: --simulate-proliferation requested but prolif_network.pt not found")
 
     # Simulate perturbations
     print(f"[simulate_network_KOV] Starting simulation of {len(combos)} perturbations...")
@@ -292,9 +243,7 @@ def main(argv):
         model_combo = copy.deepcopy(model)
         kos = combo['KO']   # list of (gene, pct_or_None)
         ovs = combo['OV']
-        ko_label = '-'.join(_gene_label(g, p) for g, p in kos) if kos else 'none'
-        ov_label = '-'.join(_gene_label(g, p) for g, p in ovs) if ovs else 'none'
-        label = f"KO_{ko_label}_OV_{ov_label}"
+        label = combo_label(combo)
         print(f"\n[simulate_network_KOV] Simulating condition {idx}/{len(combos)}: {label}")
 
         # Reset model to clean (unperturbed) baseline.
@@ -355,6 +304,23 @@ def main(argv):
                     print(f"[simulate_network_KOV]   OV {pct:.0f}%: {gene} (index {ind}), creation ×{factor:.3g}")
             else:
                 print(f"[simulate_network_KOV]   Warning: Gene '{gene}' not found in data")
+
+        # Perturbation stimuli: targets with their sign, own schedules (applied in the simulation)
+        model_combo.perturbation_stimulus = []
+        try:
+            for k, targets in sorted(combo['STIM'].items()):
+                signs = np.zeros(adata.shape[1] + ns)
+                for gene, sign in targets:
+                    if gene in adata.var_names:
+                        signs[ns + adata.var_names.get_loc(gene)] = sign
+                        print(f"[simulate_network_KOV]   Stimulus {k} {'activates' if sign > 0 else 'inhibits'}: {gene}")
+                    else:
+                        print(f"[simulate_network_KOV]   Warning: stimulus {k} target '{gene}' not found in data")
+                model_combo.perturbation_stimulus.append(
+                    dict(signs=signs, schedule=perturbation_schedule(pert_sched, times, k)))
+        except ValueError as e:
+            print(f"[simulate_network_KOV]   Error: {e}")
+            continue
 
         # Simulate dynamics
         try:

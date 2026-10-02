@@ -25,10 +25,51 @@ import numpy as np
 import sys, getopt
 import anndata as ad
 from CardamomOT import NetworkModel, plot_data_umap_altogether, plot_data_distrib
+from CardamomOT.inference.integration import nb_cell_parameters
+from CardamomOT.inference.depth import state_depth, simulation_depth
 import scipy.sparse
 import os
 
 plot_in_script = 0
+
+
+def _sim_sample_idx(samples_traj, times_simulation):
+    """Sample index of each simulated cell: the N initial trajectories, repeated at each simulated time."""
+    if samples_traj is None:
+        return None
+    N = int(np.sum(times_simulation == times_simulation[0]))
+    return np.tile(np.asarray(samples_traj)[:N], len(times_simulation) // N)
+
+
+def growth_log_weights(R_opt, times_data):
+    """
+    Cumulative log mass of each trajectory state, L_n(t_k) = sum_{j<k} R_opt[j, n] dt_j: the growth
+    the OT pass attributes to the path of slot n up to t_k (0 at the first time).
+    """
+    tu = np.sort(np.unique(times_data))
+    T = len(tu)
+    N = len(times_data) // T
+    gain = np.nan_to_num(np.asarray(R_opt, dtype=float)[:T * N].reshape(T, N)[:-1] * np.diff(tu)[:, None])
+    return np.vstack([np.zeros((1, N)), np.cumsum(gain, axis=0)]).ravel()
+
+
+def growth_resample(L, times_data, samples, seed=0):
+    """
+    Indices of the trajectory states drawn with weights exp(L) within each (sample, time): the
+    trajectories with the expansion of their population, i.e. what a simulation with proliferation
+    should reproduce (multinomial resampling, as in the branching simulation).
+    """
+    rng = np.random.default_rng(seed)
+    idx = np.arange(len(L))
+    samples = np.zeros(len(L), dtype=int) if samples is None else np.asarray(samples)[:len(L)]
+    for t in np.unique(times_data):
+        for s in np.unique(samples):
+            g = np.flatnonzero((times_data == t) & (samples == s))
+            if len(g):
+                w = np.exp(L[g] - L[g].max())
+                idx[g] = g[rng.choice(len(g), len(g), replace=True, p=w / w.sum())]
+    return idx
+
 
 def main(argv):
     """
@@ -116,15 +157,16 @@ def main(argv):
         model.stimulus = stimulus
     if prior >= 0:
         model.prior_network_pen = prior
+    model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
     print(f"[check_sim_to_data] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
 
     # Load mixture and simulation parameters
     print("[check_sim_to_data] Loading mixture and simulation parameters...")
     try:
         mixture_parameters = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
-        c = mixture_parameters[-1, :]
-        kz = mixture_parameters[:-1, :] + 1e-6
         pi_zinb = np.load(os.path.join(p, 'cardamomOT', 'pi_zinb.npy'))
+        samples_path = os.path.join(p, 'cardamomOT', 'data_samples.npy')
+        samples_traj = np.load(samples_path).astype(int) if os.path.exists(samples_path) else None
         
         vect_kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta.npy')) + 1e-6
         vect_kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_forsimul.npy')) + 1e-6
@@ -168,6 +210,22 @@ def main(argv):
     data_netw_theta[0, :] = times_data[:]
     data_sim[0, :] = times_simulation[:]
 
+    # NB parameters of each state: its sample's mixture if per-sample (identical otherwise)
+    k1_tr, c_tr, pz_tr = nb_cell_parameters(mixture_parameters, pi_zinb, samples_traj)
+    k1_sim, c_sim, pz_sim = nb_cell_parameters(mixture_parameters, pi_zinb, _sim_sample_idx(samples_traj, times_simulation))
+    k1_tr, k1_sim = k1_tr + 1e-6, k1_sim + 1e-6
+    # Depth factors (estimate_cell_depth.py): each state / simulated cell drawn at the depth of the
+    # real cell it mimics, NB(k, c / s): p = c / (c + s)
+    depth_cells = adata.obs['depth_factor'].values.astype(float) if 'depth_factor' in adata.obs else None
+    idx_path = os.path.join(p, 'cardamomOT', 'data_traj_real_idx.npy')
+    real_idx = np.load(idx_path) if os.path.exists(idx_path) else None
+    s_tr = state_depth(depth_cells, real_idx)
+    s_sim = simulation_depth(depth_cells, real_idx, times_data, times_simulation)
+    s_tr = 1.0 if s_tr is None else s_tr[:, None]
+    s_sim = 1.0 if s_sim is None else s_sim[:, None]
+    if depth_cells is not None:
+        print("[check_sim_to_data] Counts drawn at the depth of the cells mimicked (obs['depth_factor'])")
+
     # Generate data_sim: either directly from Harissa mRNAs or via NB sampling
     if mrna_simul is not None:
         # Harissa mode: mRNAs are already simulated — use them directly
@@ -175,42 +233,65 @@ def main(argv):
         print("[check_sim_to_data] data_sim built from Harissa mRNA simulation (no NB sampling)")
     else:
         # Standard mode: sample counts from the NB burst model
-        zero_mask = (np.random.uniform(0, 1, (data_sim[1:, :].shape)) < pi_zinb.reshape((G, 1)))
+        zero_mask = (np.random.uniform(0, 1, (data_sim[1:, :].shape)) < pz_sim.T)
         zero_ratio_sim = np.sum(zero_mask == 1)/np.size(data_sim[1:, :])
         print(f"[check_sim_to_data] Simulation zero-inflation ratio: {zero_ratio_sim:.4f}")
-        data_sim[1:, :] = np.random.negative_binomial((np.max(kz, 0)*vect_kon_sim)[:, ns:].T, (c / (c+1))[ns:].reshape(G, 1))
+        data_sim[1:, :] = np.random.negative_binomial((k1_sim*vect_kon_sim)[:, ns:].T, (c_sim / (c_sim + s_sim))[:, ns:].T)
         data_sim[1:, :] = np.where(zero_mask, 0, data_sim[1:, :])
 
-    zero_mask = (np.random.uniform(0, 1, (data_beta[1:, :].shape)) < pi_zinb.reshape((G, 1)))
+    zero_mask = (np.random.uniform(0, 1, (data_beta[1:, :].shape)) < pz_tr.T)
     zero_ratio_beta = np.sum(zero_mask == 1)/np.size(data_beta[1:, :])
     print(f"[check_sim_to_data] Beta (mixture) zero-inflation ratio: {zero_ratio_beta:.4f}")
-    data_beta[1:, :] = np.random.negative_binomial((np.max(kz, 0)*vect_kon_beta)[:, ns:].T, (c / (c+1))[ns:].reshape(G, 1))
+    data_beta[1:, :] = np.random.negative_binomial((k1_tr*vect_kon_beta)[:, ns:].T, (c_tr / (c_tr + s_tr))[:, ns:].T)
     data_beta[1:, :] = np.where(zero_mask, 0, data_beta[1:, :])
 
-    zero_mask = (np.random.uniform(0, 1, (data_netw_theta[1:, :].shape)) < pi_zinb.reshape((G, 1)))
+    zero_mask = (np.random.uniform(0, 1, (data_netw_theta[1:, :].shape)) < pz_tr.T)
     zero_ratio_theta = np.sum(zero_mask == 1)/np.size(data_netw_theta[1:, :])
     print(f"[check_sim_to_data] Theta (network) zero-inflation ratio: {zero_ratio_theta:.4f}")
-    data_netw_theta[1:, :] = np.random.negative_binomial((np.max(kz, 0)*vect_kon_theta)[:, ns:].T, (c / (c+1))[ns:].reshape(G, 1))
+    data_netw_theta[1:, :] = np.random.negative_binomial((k1_tr*vect_kon_theta)[:, ns:].T, (c_tr / (c_tr + s_tr))[:, ns:].T)
     data_netw_theta[1:, :] = np.where(zero_mask, 0, data_netw_theta[1:, :])
 
     cardamom_dir = os.path.join(p, 'cardamomOT')
 
+    # Growth of the trajectories: the OT selection removes the proliferation (one descendant per
+    # ancestor); a simulation with proliferation is compared with the growth-weighted trajectories
+    flag_path = os.path.join(cardamom_dir, 'simulation_with_proliferation.npy')
+    sim_prolif = bool(np.load(flag_path)[0]) if os.path.exists(flag_path) else False
+    R_opt_path = os.path.join(cardamom_dir, 'data_R_opt.npy')
+    R_opt = np.load(R_opt_path) if os.path.exists(R_opt_path) else None
+    L_growth = growth_log_weights(R_opt, times_data) if (R_opt is not None and len(R_opt) == len(times_data)) else None
+    growth_idx = growth_resample(L_growth, times_data, samples_traj, seed=model.seed or 0) if L_growth is not None else None
+    if sim_prolif:
+        print("[check_sim_to_data] Simulation with proliferation: growth-weighted trajectories written "
+              + ("(adata_*_growth_*.h5ad)" if growth_idx is not None else "— skipped, data_R_opt.npy missing"))
+
+    def _write_states(X, name, var_names=None):
+        # Trajectory-state AnnData (+ growth weights), and its growth-resampled version if needed
+        A = ad.AnnData(X=X)
+        A.var = adata.var.copy()
+        A.obs['time'] = times_data
+        if L_growth is not None:
+            A.obs['growth_log_weight'] = L_growth
+        A.write(os.path.join(cardamom_dir, f'adata_{name}_{tag}.h5ad'))
+        if sim_prolif and growth_idx is not None:
+            B = A[growth_idx].copy()
+            B.obs_names_make_unique()
+            B.obs['state'] = growth_idx
+            B.uns['growth_resampled'] = True
+            B.write(os.path.join(cardamom_dir, f'adata_{name}_growth_{tag}.h5ad'))
+
+    tag = f'stim{model.stimulus}_prior{model.prior_network_pen}'
+
     # Save comparison datasets
     print("[check_sim_to_data] Saving comparison datasets...")
     try:
-        adata_beta = ad.AnnData(X=data_beta[1:, ].T)
-        adata_beta.var = adata.var.copy()
-        adata_beta.obs['time'] = times_data
-        adata_beta.write(os.path.join(cardamom_dir, f'adata_beta_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
-
-        adata_theta = ad.AnnData(X=data_netw_theta[1:, ].T)
-        adata_theta.var = adata.var.copy()
-        adata_theta.obs['time'] = times_data
-        adata_theta.write(os.path.join(cardamom_dir, f'adata_theta_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
+        _write_states(data_beta[1:, ].T, 'beta')
+        _write_states(data_netw_theta[1:, ].T, 'theta')
 
         adata_sim = ad.AnnData(X=data_sim[1:, ].T)
         adata_sim.var = adata.var.copy()
         adata_sim.obs['time'] = times_simulation
+        adata_sim.uns['proliferation'] = sim_prolif
         adata_sim.write(os.path.join(cardamom_dir, f'adata_sim_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
 
         adata_rna_traj = ad.AnnData(X=data_real[1:, :].T)
@@ -219,10 +300,7 @@ def main(argv):
         adata_rna_traj.write(os.path.join(cardamom_dir, f'adata_rna_traj_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
 
         data_prot_traj = np.load(os.path.join(cardamom_dir, 'data_prot_forsimul.npy'))
-        adata_prot_traj = ad.AnnData(X=data_prot_traj[:, ns:])
-        adata_prot_traj.var = adata.var.copy()
-        adata_prot_traj.obs['time'] = times_data
-        adata_prot_traj.write(os.path.join(cardamom_dir, f'adata_prot_traj_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
+        _write_states(data_prot_traj[:, ns:], 'prot_traj')
 
         data_prot_simul = np.load(os.path.join(cardamom_dir, 'data_prot_simul.npy'))
         adata_prot_simul = ad.AnnData(X=data_prot_simul[:, ns:])

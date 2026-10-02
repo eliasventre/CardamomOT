@@ -24,13 +24,14 @@ from sklearn.cluster import MiniBatchKMeans
 from scipy.ndimage import gaussian_filter1d
 from scipy.spatial.distance import cdist
 from ..config import resolve_cell_type_obs, CELL_TYPE_OBS_KEYS
+from ..inference.trajectory import ks_of, s1_of, s1_rows
 from ..inference import (inference_network_multi, active_regulators, PrevProt, signed_floor, filter_network,
                         minimal_repetition_choice, find_next_prot, my_otdistance, count_errors,
                         kon_ref_vector, inference_alpha, inference_alpha_1thread,
                         NegativeBinomialMixtureEM, predict_resp,
                         simulate_next_prot_ode, simulate_next_prot_pdmp,
                         train_kon_correction_mlp, infer_ratio_d0_d1_full, infer_ratio_d0_d1_unitary, inference_degradation_prot,
-                        train_proliferation_mlp, fit_scale_theta,
+                        train_proliferation_mlp, quadrature, fit_scale_theta,
                         seed_everything, seeded_call, task_seed,
                         stratified_order, stratified_choice, grouped_partition)
 
@@ -68,6 +69,8 @@ class NetworkModel:
         self.kon_theta = None
         self.a = None
         self.ref_network = None
+        self.stimulus_targets = None  # (n_stimuli, n_genes) allowed stimulus -> gene edges (Data/stimulus_targets.txt)
+        self.perturbation_stimulus = None  # KO/OV/Stim simulations: list of dict(signs=(G_tot,), schedule=t -> value)
         self.basal = None
         self.inter = None
         self.inter_t = None
@@ -97,6 +100,11 @@ class NetworkModel:
         self.transform_proba = 0 # Do we want to force probas to be steep for compatibility with sigmoid model?
         self.seuil = 1e-2 # minimum for beta mixture parameters (second parameters)
         self.batch_size_mixture = 1024 # Maximum number of cells per time used for mixture calibration in the inference.
+        self.allow_depth_correction = True  # estimate_cell_depth: apply the per-cell depth factor s_i when the diagnostic recommends it
+        self.depth_method = 'poissonian'  # depth factor: 'group_median', 'poissonian' (Fang & Pachter, 2025), or <project>/depth_methods/<name>.py
+        self.depth_method_params = {}       # parameters of the depth method
+        self.depth_by_cell_type = False     # estimate s_i within (sample, time, cell type) groups; False = (sample, time) only:
+                                            # cell types derive from expression, normalising within them pulls cells to their type (circular)
         self.published_version = False # NB mixture as published (Sinkhorn argmax basins, posterior-sum target masses)
         self.soft_em_refinement = False # NB mixture: refine (ks, c) by soft EM with fixed basin masses (ignored if published_version)
         self.use_scBoolSeq = False # If True, initialize NB mixture with scBoolSeq binarization instead of hard EM
@@ -113,8 +121,8 @@ class NetworkModel:
         self.max_iter = 40 # max iteration for main loop
         # Trajectory inference with OT
         self.stopThr_init = 1e-7 # initial tolerance for sinkhorn algorithm
-        self.batch_size_traj = 512 # Maximum number of cells used per time point per sample for solving EOT problems in the inference.
-        self.batch_size_traj_exp = 512 # Target size of the real (experimental) cell batches matched against each reconstruction batch; decoupled from batch_size_traj so the OT target pool can stay well-sized even when batch_size_traj is kept small for cost.
+        self.batch_size_traj = 1024 # Maximum number of cells used per time point per sample for solving EOT problems in the inference.
+        self.batch_size_traj_exp = 1024 # Target size of the real (experimental) cell batches matched against each reconstruction batch; decoupled from batch_size_traj so the OT target pool can stay well-sized even when batch_size_traj is kept small for cost.
         self.n_strata_traj = 10 # Real-cell batches are stratified by cell type if available, else by this number of k-means clusters (0 = uniform batches)
         self.unbalanced_reg = 5 # Unbalanced regularization parameter for UOT if > 0, OT if 0
         self.init_entropic_noise = 1.5 # Initial entropic penalization for OT
@@ -169,11 +177,47 @@ class NetworkModel:
         self.kon_beta_harissa = None  # continuous adaptive_shrinkage burst-rate estimates (set by loop_trajectories)
         self.kon_mlp = None           # KonCorrectionMLP trained in refine_network_degradations (Harissa branch)
 
+        ## Gene selection (select_genes_and_split.py, change=1): terminals + global network + directed Steiner tree
+        self.num_max_genes = 100         # budget: number of selected genes (stimuli excluded)
+        self.n_query_genes = 40          # at most this many genes of Data/genes_queries.txt (round robin over time/cell-type DE groups)
+        self.n_entropy_genes = 30        # at least this many entropy genes (Gandrillon KD & MDE), same round robin; n_query + n_entropy < num_max_genes
+        self.n_top_entropy = 400         # top genes per transition for KD and for MDE (Gandrillon's TOP_N)
+        self.n_cells_entropy = 1000      # cells per timepoint for the BUB entropy (its matrices are (N+1)^2)
+        self.n_hvg_selection = 5000      # highly variable genes forming the network universe (terminals always kept)
+        self.network_method = 'otvelo_granger'  # global network: 'otvelo_granger', 'otvelo_corr', or <project>/network_methods/<name>.py
+        self.network_method_params = {}  # parameters of the network method (otvelo: n_cells, n_pcs, eps, alpha; granger: + k_candidates, en_alpha, l1_ratio)
+        self.k_in_steiner = 20           # strongest incoming edges kept per gene in the Steiner graph
+        self.k_stim_steiner = 20         # direct targets kept per stimulus in the Steiner graph
+        self.min_edge_prob = 0.05        # edges with probability (1 - FDR against the permuted-data network) below are dropped
+        self.edge_prior = 0.9            # each Steiner edge costs -log(prob * edge_prior): favours short paths among equally probable ones
+        self.null_network = 'hybrid'     # edge probabilities vs permuted data: 'hybrid' (gene edges within (sample, time), stimulus all cells), 'within_time', 'all_cells'
+        self.closure_min = 0.5           # closure: add the gene bringing the most probable regulation (sum of w) to the selection while >= this
+        self.literature_selection = True  # reweight edge probabilities by OmniPath feasibility and write the literature prior (ref_network.csv)
+        self.literature_depth = 3        # max path length in the literature graph (last edge TF -> target)
+        self.literature_weight = 1.0     # exponent on the data-calibrated literature likelihood ratio (0 = data only)
+        self.min_entropy_change = 0.1    # variability floor of the selection: max BUB-entropy change between consecutive times (bits, Gandrillon MDE)
+        self.min_nb_separation = 0.15    # ... and separation of the extreme NB modes at the mixture initialization (times / cell types, batch_size_mixture cells per time)
+        self.max_free_params = 10000     # change=1 with ref=1 and prior 0 (hard prior): gene budget set so that the literature prior leaves this many free network parameters
+        self.literature_resources = 'extended'  # 'extended' (OmniPath, CollecTRI + PathwayExtra, KinaseExtra, LigRecExtra, DoRothEA A-D, TFtarget) or 'core' (OmniPath + CollecTRI)
+
+        ## Multi-sample integration of the mixture (obs['dataset_id']; no effect with a single sample)
+        self.integrate_samples = 1.0             # in [0, 1]: per-sample mixtures pushed towards the common target (1 = equal parameters, 0 = own fits)
+        self.ref_sample_integration = None       # dataset_id of the reference sample; None = cell-weighted average of mode means (keeps total counts)
+        self.min_cells_integration = 200         # smaller samples are not fitted alone (raw counts, classified with global modes)
+        self.min_mode_weight_integration = 0.01  # a sample mode is supported if its weight is at least this...
+        self.min_mode_ratio_integration = 1.0    # ...and the ON/OFF mean ratio at least this; else the gene is not integrated for that sample
+        self.integration = None                  # per-sample parameters and integrated genes, set by fit_mixture_samples
+
         ## Proliferation
         self.recompute_proliferations = False    # train a ProliferationMLP on R_opt in refine_network_degradations
         self.simulate_with_proliferation = False # apply branching process in simulate_trajectories_unitary
+        self.prolif_uses_stimulus = True         # inference stimuli are inputs of the ProliferationMLP, R(u, P) (no effect if constant over the intervals)
         self.prolif_network = None               # ProliferationMLP trained in refine_network_degradations
-        self.R_opt = None                        # per-cell optimal proliferation rates from OT coupling marginals
+        self.R_opt = None                        # net growth rate of each trajectory state over the next interval (NaN at last time), from the final growth OT pass
+        self.growth_reg_source = 2.0             # source-marginal relaxation (x log G) of the growth OT pass: small = data-driven but noisy, large = prior kept
+        self.n_growth_iter = 1                   # WOT-style growth iterations (source weights <- row marginals); more iterations amplify the noise
+        self.n_growth_nodes = 5                  # quadrature nodes per interval to integrate R along paths (MLP training and branching simulation)
+        self.population_sizes = None             # optional {time: total cell number}: absolute population growth per interval (else the prior one)
         self.inter_simul_ref = None              # optional inter reference for refine_network_degradations (forces final=0)
 
         if n_genes is not None:
@@ -190,7 +234,9 @@ class NetworkModel:
             self.ref_network = np.ones((G, G, 1))
         
 
-    def _parse_input(self, data, time_key='time'):
+    def _parse_input(self, data, time_key='time', scale_depth=False):
+        """(N, 1 + G_tot) array [time, stimuli padding, counts]; scale_depth: counts divided by the
+        per-cell depth factors (obs['depth_factor']), i.e. brought to the reference depth."""
         try:
             import anndata
             import scipy.sparse
@@ -199,6 +245,9 @@ class NetworkModel:
                 vect_t = (data.obs[time_key].values.astype(float) if time_key in data.obs
                           else np.zeros(data.n_obs))
                 X = data.X.toarray() if scipy.sparse.issparse(data.X) else np.asarray(data.X, dtype=float)
+                depth = self._depth_factors(data) if scale_depth else None
+                if depth is not None:
+                    X = X / depth[:, None]
                 if self.n_stimuli > 1:
                     X = np.hstack([np.zeros((X.shape[0], self.n_stimuli - 1), dtype=float), X])
                 return np.column_stack([vect_t, X])
@@ -214,6 +263,92 @@ class NetworkModel:
             return None
         key = resolve_cell_type_obs(data, 'transition')
         return None if key is None else obs[key].values.astype(str)
+
+    def apply_project_parameters(self, project, verb=True):
+        """
+        Override attributes with the values filled in the Model_parameters sheet of
+        Data/CardamomOT_inputs.xlsx; call it after the command-line options so that the
+        workbook dominates them. Values are cast to the type of the current value.
+        Returns the set of overridden attributes.
+        """
+        import ast
+        from ..inputs import project_parameters
+        values = project_parameters(project)
+        done = {}
+        for name, v in values.items():
+            if not hasattr(self, name):
+                print(f"[CardamomOT] Warning: Model_parameters: unknown parameter '{name}' ignored")
+                continue
+            cur = getattr(self, name)
+            try:
+                if isinstance(cur, bool):
+                    val = v if isinstance(v, bool) else str(v).strip().lower() in ('true', '1', 'yes')
+                elif isinstance(cur, int) and not isinstance(cur, bool):
+                    val = int(float(v))
+                elif isinstance(cur, float):
+                    val = float(v)
+                elif isinstance(cur, str):
+                    val = str(v)
+                else:  # None, dict, list...: Python literal, else string
+                    try:
+                        val = ast.literal_eval(v) if isinstance(v, str) else v
+                    except (ValueError, SyntaxError):
+                        val = v
+            except (TypeError, ValueError):
+                print(f"[CardamomOT] Warning: Model_parameters: invalid value {v!r} for '{name}', ignored")
+                continue
+            setattr(self, name, val)
+            done[name] = val
+        self._project_overrides = set(done)
+        if done and verb and not getattr(NetworkModel, '_printed_overrides', False):
+            print(f"[CardamomOT] Parameters of Data/CardamomOT_inputs.xlsx (override defaults and options): {done}")
+            NetworkModel._printed_overrides = True
+        return set(done)
+
+    def overridden(self, name):
+        """True if the attribute was set by the Model_parameters sheet of the project."""
+        return name in getattr(self, '_project_overrides', set())
+
+    def _add_perturbation_stimulus(self, basal_t, inter_t, times):
+        """
+        Perturbation stimuli of the KO/OV/Stim simulations (self.perturbation_stimulus = list of
+        dict(signs=(G_tot,) in {-1, 0, 1}, schedule=t -> value)): on each simulated interval, the
+        value of each stimulus at the end of the interval times w_g is added to the input of each
+        of its targets g, with w_g = sign_g (100 + sum of the |interactions| received by g), i.e.
+        stimuli whose interactions dominate the others (as a KO/OV), each with its own schedule;
+        their effects add up.
+        """
+        perts = getattr(self, 'perturbation_stimulus', None) or []
+        if isinstance(perts, dict):
+            perts = [perts]
+        for pert in perts:
+            signs = np.asarray(pert['signs'], dtype=float)
+            targets = np.flatnonzero(signs)
+            for cnt in range(len(times) - 1):
+                u = float(pert['schedule'](times[cnt + 1]))
+                if u == 0 or not len(targets):
+                    continue
+                w = signs[targets][:, None] * (100 + np.abs(inter_t[cnt][:, targets, :]).sum(axis=0))  # (n_targets, n_networks)
+                if basal_t.ndim == 4:
+                    basal_t[cnt][:, targets, :] += u * w[None]
+                else:
+                    basal_t[cnt][targets, :] += u * w
+
+    def _apply_stimulus_targets(self):
+        """Forbid the stimulus -> gene edges outside self.stimulus_targets ((n_stimuli, n_genes) mask)."""
+        mask = getattr(self, 'stimulus_targets', None)
+        if mask is None:
+            return
+        ns = self.n_stimuli
+        self.ref_network[:ns, ns:] = self.ref_network[:ns, ns:] * np.asarray(mask, dtype=float)[:, :, None]
+
+    @staticmethod
+    def _depth_factors(data):
+        """Per-cell depth factors s_i (obs['depth_factor'], estimate_cell_depth.py), or None."""
+        obs = getattr(data, 'obs', None)
+        if obs is None or 'depth_factor' not in obs:
+            return None
+        return np.asarray(obs['depth_factor'].values, dtype=float)
 
     def _t0_cell_types(self, vect_t, vect_samples_id, sample):
         """Cell types of the first-timepoint cells of a sample (None if unavailable)."""
@@ -368,12 +503,15 @@ class NetworkModel:
 
 
     def core_binarization(self, data_rna, gene_names, vect_t, G_tot, min_components=1, max_components=5, refilter=0, max_iter_kinetics=100,
-                          verb=True, kov_cell_mask=None, scboolseq_matrix=None, scboolseq_dropouts=None, strata=None):
+                          verb=True, kov_cell_mask=None, scboolseq_matrix=None, scboolseq_dropouts=None, strata=None,
+                          depth=None):
         """
         Parameters
         ----------
         strata : (N_cells,) array or None
             Cell types stratifying the per-timepoint sub-sample of the mixture fit.
+        depth : (N_cells,) array or None
+            Per-cell depth factors: counts modelled as NB(k, c / s_i), parameters at the reference depth.
         kov_cell_mask : (N_cells, G_tot) int8 array or None
             Per-cell KO/OV constraints derived from KO_OV_inference.
 
@@ -417,7 +555,7 @@ class NetworkModel:
                         np.sum(_valid & (scbs_labels == 1)) < _min_n):
                     scbs_labels = None
                     scbs_dropout = None
-            model = kinetics.fit(x, vect_t=vect_t, seuil=self.seuil,
+            model = kinetics.fit(x, vect_t=vect_t, vect_celltypes=strata, seuil=self.seuil, s=depth,
                                  batch_size_mixture=self.batch_size_mixture, strata=strata,
                                  scboolseq_labels=scbs_labels,
                                  scboolseq_dropout=scbs_dropout)
@@ -539,24 +677,333 @@ class NetworkModel:
                                         kov_cell_mask=kov_cell_mask,
                                         scboolseq_matrix=scboolseq_matrix,
                                         scboolseq_dropouts=scboolseq_dropouts,
-                                        strata=self._cell_type_labels(data))
+                                        strata=self._cell_type_labels(data),
+                                        depth=self._depth_factors(data))
 
         self.pi_zinb = pi_zeros
         self.modes = frequency_modes_smooth
         self.proba_init = frequency_proba_init
         self.proba = frequency_proba_modif
-        n_components = np.size(self.a[:-1], 0)
+        self._finalize_components(G_tot)
+
+    def _finalize_components(self, G_tot):
+        """Number of networks from the number of mixture components (or components merged by quantiles)."""
+        n_components = self.a.shape[-2] - 1  # a: (M+1, G) shared or (S, M+1, G) per sample
         if self.adapt_size_network:
             self.n_networks = n_components - 1
         else:
             if n_components > self.n_networks+1:
-                a_new = np.zeros((self.n_networks+2, G_tot))
                 qs = np.linspace(0, 1, self.n_networks+1)
-                for g in range(G_tot):
-                    l_max = len(np.unique(self.modes[:, g]))
-                    a_new[:-1, g] = np.quantile(self.a[:l_max, g], qs)
-                a_new[-1, :] = self.a[-1, :]
-                self.a = a_new.copy()
+
+                def merge(a):
+                    a_new = np.zeros((self.n_networks+2, G_tot))
+                    for g in range(G_tot):
+                        l_max = len(np.unique(self.modes[:, g]))
+                        a_new[:-1, g] = np.quantile(a[:l_max, g], qs)
+                    a_new[-1, :] = a[-1, :]
+                    return a_new
+                self.a = np.stack([merge(a) for a in self.a]) if self.a.ndim == 3 else merge(self.a)
+
+    def _shared_mixture(self, arr):
+        """Per-sample mixture term collapsed to its shared value (Harissa paths): only when all samples are equal."""
+        if np.ndim(self.a) < 3 or np.ndim(arr) < np.ndim(self.a) - 1:
+            return arr
+        if not np.allclose(self.a, self.a[:1]):
+            raise NotImplementedError("Sample-specific mixtures (integrate_samples < 1) are not supported "
+                                      "with simulate_full_with_harissa")
+        return arr[0]
+
+    def _mixture_terms(self):
+        """
+        Normalised mixture amplitudes ks (G, M), mRNA-to-protein factors s1 (G - ns,) and max burst
+        rates k1 (G,) from self.a; with per-sample mixtures (a 3-D), each gets a leading sample axis.
+        """
+        ns = self.n_stimuli
+        kz, c = self.a[..., :-1, :], self.a[..., -1, :]
+        k1 = np.max(kz, axis=-2)
+        ks = np.swapaxes(kz / np.clip(k1[..., None, :], EPS, None), -1, -2)
+        s1 = self.fact_simple * c[..., ns:] / np.maximum(k1[..., ns:], EPS)
+        return ks, s1, k1
+
+    def _steepen_proba(self, proba, G_tot):
+        """Same post-processing of mixture responsibilities as core_binarization: (proba_init, proba)."""
+        proba = proba.copy()
+        n = proba.shape[1]
+        if self.transform_proba:
+            tmp = np.exp(self.transform_proba * (n - 1) * np.log(G_tot) * (proba - 1 / n))
+            tmp /= (1 + tmp)
+            tmp /= np.sum(tmp, 1, keepdims=True)
+            keep = np.max(proba, axis=1) > np.max(tmp, axis=1)
+            tmp[keep] = proba[keep]
+            proba = tmp.copy()
+        tmp = proba.copy()
+        if self.update_modes or self.loss_norm == 'CE':
+            tmp = np.zeros_like(proba)
+            tmp[np.arange(len(proba)), np.argmax(proba, axis=1)] = 1
+        return proba, tmp
+
+    def fit_mixture_samples(self, data, sample_key='dataset_id', kov_genes=None, stimulus_schedule=None,
+                            time_key='time', verb=True, **kwargs):
+        """
+        Mixture fit with several samples (>= 2 in obs[sample_key]); with a single sample,
+        identical to fit_mixture.
+
+        Each sample (>= min_cells_integration cells) gets its own mixture fit, i.e. identifies its
+        own modes. Per gene, the common target comes from the reference sample
+        (ref_sample_integration, a dataset_id), or is the cell-weighted average of the sample mode
+        means recalibrated to keep the mean and, when possible, the variance of the gene over all
+        cells; it uses the samples whose modes are supported (see integration.supported_modes) and
+        where the gene is not perturbed (kov_genes: {dataset_id: set of genes}).
+
+        integrate_samples = lam in [0, 1] (True = 1, False = 0): the parameters of these (sample,
+        gene) pairs are interpolated from the sample's own fit (lam = 0) to the target (lam = 1)
+        (integration.interpolate_parameters, recalibrated when the target is the average), and
+        their counts quantile-matched accordingly (unchanged at lam = 0); the other pairs keep raw
+        counts and the target parameters, and are classified with them (genes never supported
+        anywhere take the pooled fit). self.a is always (S, M+1, G) and self.pi_zinb (S, G - ns),
+        samples ordered as np.unique(obs[sample_key]) (= sample index of fit_network); at lam = 1
+        all samples share the same parameters.
+
+        Returns the integrated count matrix (N, n_genes), or None if counts were not changed (lam = 0).
+        """
+        from ..inference.integration import (supported_modes, consistent_modes, global_parameters,
+                                             interpolate_parameters, integrate_counts)
+        self.integration = None
+        samples = data.obs[sample_key].values if sample_key in data.obs else None
+        sample_ids = list(np.unique(samples)) if samples is not None else []
+        if len(sample_ids) < 2:
+            self.fit_mixture(data, stimulus_schedule=stimulus_schedule, time_key=time_key, verb=verb, **kwargs)
+            return None
+        lam = float(np.clip(float(self.integrate_samples), 0.0, 1.0))
+
+        ns = self.n_stimuli
+        data_rna = self._parse_input(data, time_key)
+        N, G_tot = data_rna.shape
+        vect_t = data_rna[:, 0]
+        times_all = np.sort(np.unique(vect_t))
+        sched_full = self._build_stimulus_schedule(times_all, stimulus_schedule)
+        gene_names = list(data.var_names)
+
+        # --- 1. Independent fit per sample ---
+        fits = []
+        for s in sample_ids:
+            m = samples == s
+            if m.sum() < self.min_cells_integration:
+                if verb:
+                    print(f"[integration] sample {s}: {m.sum()} cells < {self.min_cells_integration}, not fitted alone")
+                continue
+            if verb:
+                print(f"[integration] Fitting the mixture of sample {s} ({m.sum()} cells)")
+            sub = data[m]
+            t_sub = np.sort(np.unique(vect_t[m]))
+            self.fit_mixture(sub, stimulus_schedule=np.array([sched_full[t] for t in t_sub]),
+                             time_key=time_key, verb=verb, **kwargs)
+            fits.append(dict(id=s, mask=m, a=self.a.copy(), proba_init=self.proba_init.copy(),
+                             proba=self.proba.copy(), pi_init=self.pi_init,
+                             pi0=np.concatenate([np.zeros(ns), self.pi_zinb])))
+        if not fits:
+            self.fit_mixture(data, stimulus_schedule=stimulus_schedule, time_key=time_key, verb=verb, **kwargs)
+            return None
+
+        # Same number of modes for all samples (pad mode rows before the dispersion row)
+        M = max(f['a'].shape[0] - 1 for f in fits)
+        for f in fits:
+            k = f['a'].shape[0] - 1
+            if k < M:
+                f['a'] = np.vstack([f['a'][:-1], np.full((M - k, G_tot), self.seuil / 10), f['a'][-1:]])
+                f['proba_init'] = np.concatenate([f['proba_init'], np.zeros((f['mask'].sum(), G_tot, M - k))], axis=2)
+                f['proba'] = np.concatenate([f['proba'], np.zeros((f['mask'].sum(), G_tot, M - k))], axis=2)
+        S = len(fits)
+        a_samples = np.stack([f['a'] for f in fits])
+        pi0_samples = np.stack([f['pi0'] for f in fits])
+
+        # --- 2. Eligible (sample, gene) pairs and global parameters ---
+        eligible = np.zeros((S, G_tot), dtype=bool)
+        for i, f in enumerate(fits):
+            eligible[i] = supported_modes(f['a'], f['proba_init'], ns, self.min_mode_weight_integration,
+                                          self.min_mode_ratio_integration)
+            for gene in (kov_genes or {}).get(str(f['id']), ()):
+                if gene in gene_names:
+                    eligible[i, ns + gene_names.index(gene)] = False
+        eligible[:, :ns] = False
+        eligible = consistent_modes(a_samples, [f['proba_init'] for f in fits], eligible, ns)
+        ref = None
+        if self.ref_sample_integration is not None:
+            ids = [str(f['id']) for f in fits]
+            if str(self.ref_sample_integration) in ids:
+                ref = ids.index(str(self.ref_sample_integration))
+            elif verb:
+                print(f"[integration] Warning: reference sample {self.ref_sample_integration} not among the fitted "
+                      f"samples {ids}; using the average of the samples")
+        a, pi0, has = global_parameters(a_samples, pi0_samples, [f['proba_init'] for f in fits], eligible, ref)
+
+        # Genes supported in no sample: parameters of the pooled fit
+        no_global = np.flatnonzero(~has[ns:]) + ns
+        if len(no_global):
+            if verb:
+                print(f"[integration] {len(no_global)} genes supported in no sample: pooled mixture parameters")
+            self.fit_mixture(data, stimulus_schedule=stimulus_schedule, time_key=time_key, verb=verb, **kwargs)
+            k = min(M, self.a.shape[0] - 1)
+            a[:, no_global] = self.seuil / 10
+            a[:k, no_global] = self.a[:k, no_global]
+            a[-1, no_global] = self.a[-1, no_global]
+            pi0[no_global] = np.concatenate([np.zeros(ns), self.pi_zinb])[no_global]
+        a[:, :ns] = 1
+        # Target recalibrated (average target only), then per-sample parameters at level lam
+        proba_fits = [f['proba_init'] for f in fits]
+        if ref is None:
+            a1, p1 = interpolate_parameters(a_samples, pi0_samples, proba_fits, eligible, a, pi0, 1.0, True, ns)
+            for g in np.flatnonzero(eligible.any(axis=0)):
+                e0 = np.flatnonzero(eligible[:, g])[0]
+                a[:, g], pi0[g] = a1[e0, :, g], p1[e0, g]
+        a_lam, pi_lam = interpolate_parameters(a_samples, pi0_samples, proba_fits, eligible, a, pi0, lam, ref is None, ns)
+        n_modes = np.full(G_tot, M)
+        for g in range(ns, G_tot):
+            n_modes[g] = max(2, int(np.sum(a[:-1, g] > self.seuil / 10 + EPS))) if np.all(np.isfinite(a[:, g])) else M
+
+        # --- 3. Integrated counts and global responsibilities ---
+        rng = np.random.default_rng(self.seed)
+        depth = self._depth_factors(data)
+        X = data_rna.copy()
+        proba_init = np.zeros((N, G_tot, M))
+        proba = np.zeros((N, G_tot, M))
+        fitted = np.zeros(N, dtype=bool)
+        for i, f in enumerate(fits):
+            m = f['mask']
+            fitted |= m
+            for g in range(ns, G_tot):
+                if eligible[i, g]:
+                    z = np.argmax(f['proba_init'][:, g, :], axis=1)
+                    if lam > 0:
+                        X[m, g] = integrate_counts(data_rna[m, g], z, (a_samples[i, :-1, g], a_samples[i, -1, g], pi0_samples[i, g]),
+                                                   (a_lam[i, :-1, g], a_lam[i, -1, g], pi_lam[i, g]), rng,
+                                                   s=None if depth is None else depth[m])
+                    proba_init[m, g] = f['proba_init'][:, g]
+                    proba[m, g] = f['proba'][:, g]
+        # Raw (sample, gene) pairs: classify the raw counts with the global modes
+        for g in range(ns, G_tot):
+            ng = n_modes[g]
+            raw = ~fitted.copy()
+            for i, f in enumerate(fits):
+                if not eligible[i, g]:
+                    raw |= f['mask']
+            if raw.any():
+                resp, _ = predict_resp(data_rna[raw, g], a[:ng, g], a[-1, g],
+                                       pi_zero=pi0[g] if pi0[g] > 0 else None, zi=True if pi0[g] > 0 else None,
+                                       s=None if depth is None else depth[raw])
+                proba_init[raw, g, :ng], proba[raw, g, :ng] = self._steepen_proba(resp, G_tot)
+        for s in range(ns):
+            for t in times_all:
+                mt = vect_t == t
+                proba_init[mt, s, :] = 0
+                proba_init[mt, s, 0 if sched_full[t][s] < 0.5 else -1] = 1
+        proba[:, :ns] = proba_init[:, :ns]
+
+        # --- 4. Mixture outputs, as fit_mixture would give on the integrated data ---
+        self._stim_schedule = sched_full
+        # Per-sample parameters at level lam; target ones for unsupported/perturbed pairs and unfitted samples
+        a_per = np.repeat(a[None], len(sample_ids), axis=0)
+        pi0_per = np.repeat(pi0[None], len(sample_ids), axis=0)
+        for i, f in enumerate(fits):
+            k = sample_ids.index(f['id'])
+            a_per[k][:, eligible[i]] = a_lam[i][:, eligible[i]]
+            pi0_per[k][eligible[i]] = pi_lam[i][eligible[i]]
+        self.a = a_per
+        self.pi_zinb = pi0_per[:, ns:]
+        a_cells = a_per
+        pos = np.searchsorted(np.asarray(sample_ids), samples)
+        # Modes in units of the max burst rate of each cell's sample
+        kz_cells = a_cells[pos, :-1]                                   # (N, M, G)
+        modes = np.einsum('ngm,nmg->ng', proba, kz_cells) / np.maximum(kz_cells.max(axis=1), EPS)
+        for t in times_all:
+            modes[vect_t == t, :ns] = sched_full[t]
+        self.modes = modes
+        self.proba_init = proba_init
+        self.proba = proba
+        self.pi_init = []
+        for g in range(ns, G_tot):
+            ng = n_modes[g]
+            pi_g = {}
+            for t in times_all:
+                p = proba_init[vect_t == t, g, :ng].mean(axis=0)
+                pi_g[t] = p / (p.sum() + EPS)
+            self.pi_init.append(pi_g)
+        self._finalize_components(G_tot)
+
+        # Per-sample parameters, kept to integrate other files of the same samples
+        self.integration = dict(
+            sample_ids=[f['id'] for f in fits], a_samples=a_samples, pi0_samples=pi0_samples,
+            pi_init_samples=[f['pi_init'] for f in fits], eligible=eligible, a=a, pi0=pi0,
+            n_modes=n_modes, ref=None if ref is None else fits[ref]['id'], sample_key=sample_key,
+            lam=lam, a_dst=a_lam, pi0_dst=pi_lam, all_sample_ids=sample_ids)
+        if verb:
+            n_int = eligible[:, ns:].sum(axis=1)
+            print(f"[integration] integrate_samples = {lam:g}; genes with sample-specific parameters per sample: "
+                  + ", ".join(f"{f['id']}: {n}/{G_tot - ns}" for f, n in zip(fits, n_int)))
+        return X[:, ns:] if lam > 0 else None
+
+    def integrate_data(self, data, time_key='time'):
+        """
+        Integrated counts (N, n_genes) of another AnnData of the same samples (e.g. data_test):
+        each cell is classified with the mixture of its own sample, then quantile-matched as in
+        fit_mixture_samples. Cells of unfitted samples and non-integrated genes keep raw counts.
+        """
+        from ..inference.integration import integrate_counts
+        info = self.integration
+        ns = self.n_stimuli
+        data_rna = self._parse_input(data, time_key)
+        X = data_rna.copy()
+        vect_t = data_rna[:, 0]
+        key = info['sample_key']
+        if key not in data.obs:
+            return X[:, ns:]
+        samples = data.obs[key].values.astype(str)
+        depth = self._depth_factors(data)
+        rng = np.random.default_rng(None if self.seed is None else self.seed + 1)
+        for i, sid in enumerate(info['sample_ids']):
+            m = samples == str(sid)
+            if not m.any():
+                continue
+            a_s, pi0_s = info['a_samples'][i], info['pi0_samples'][i]
+            if info['lam'] == 0:
+                continue
+            a_d, pi_d = info['a_dst'][i], info['pi0_dst'][i]
+            for g in np.flatnonzero(info['eligible'][i]):
+                ng = info['n_modes'][g]
+                pi_t = info['pi_init_samples'][i][g - ns]
+                z = np.zeros(m.sum(), dtype=int)
+                for t in np.unique(vect_t[m]):
+                    mt = vect_t[m] == t
+                    prior = np.asarray(pi_t[t], dtype=float)[:ng] if t in pi_t else None
+                    resp, _ = predict_resp(data_rna[m, g][mt], a_s[:ng, g], a_s[-1, g], pi=prior,
+                                           pi_zero=pi0_s[g] if pi0_s[g] > 0 else None,
+                                           zi=True if pi0_s[g] > 0 else None,
+                                           s=None if depth is None else depth[m][mt])
+                    z[mt] = np.argmax(resp, axis=1)
+                X[m, g] = integrate_counts(data_rna[m, g], z, (a_s[:-1, g], a_s[-1, g], pi0_s[g]),
+                                           (a_d[:-1, g], a_d[-1, g], pi_d[g]), rng,
+                                           s=None if depth is None else depth[m])
+        return X[:, ns:]
+
+    def integration_report(self, gene_names):
+        """DataFrame (sample, gene): mode means of the sample and global ones, and whether the pair was integrated."""
+        import pandas as pd
+        info = self.integration
+        ns = self.n_stimuli
+        rows = []
+        for i, sid in enumerate(info['sample_ids']):
+            a_s = info['a_samples'][i]
+            for g in range(ns, a_s.shape[1]):
+                ng = info['n_modes'][g]
+                row = {'sample': sid, 'gene': gene_names[g - ns], 'integrated': bool(info['eligible'][i, g]),
+                       'integrate_samples': info['lam']}
+                a_d = info['a_dst'][i] if info['eligible'][i, g] else info['a']
+                for z in range(ng):
+                    row[f'mean_mode{z}_sample'] = a_s[z, g] / a_s[-1, g]
+                    row[f'mean_mode{z}_global'] = info['a'][z, g] / info['a'][-1, g]
+                    row[f'mean_mode{z}_used'] = a_d[z, g] / a_d[-1, g]
+                rows.append(row)
+        return pd.DataFrame(rows)
 
 
     def adaptive_shrinkage(self, x, mu, fact=2, p=2):
@@ -593,7 +1040,8 @@ class NetworkModel:
                                       alpha_old, vect_samples_id_modified,
                                       basal, inter, s1, ks, init_cells, R_opt_traj, to_keep_for_update, offset_init=[0],
                                       n_iter=1, N_full=[100], N_samples=[100], intensity_prior=10,
-                                      real_cell_batches=None, batch_idx=None, sim_real_idx=None):
+                                      real_cell_batches=None, batch_idx=None, sim_real_idx=None,
+                                      growth_only=False):
         """
         Infer the protein trajectories when d1 is known and theta is not.
 
@@ -604,6 +1052,8 @@ class NetworkModel:
         batch_idx : current batch index per sample (into real_cell_batches[s_idx]).
         sim_real_idx : (T * N_total,) int array or None, updated in place with the real
             cell behind each trajectory state (-1 = not yet assigned).
+        growth_only : if True, trajectories are left untouched and only R_opt_traj is
+            filled, from the growth OT pass (see _growth_log_mass) on the same costs.
         """
 
         G = vect_rna.shape[1]
@@ -622,37 +1072,41 @@ class NetworkModel:
         if sim_real_idx is None:
             sim_real_idx = np.full(rna_modified.shape[0], -1, dtype=int)
 
-        # Set stimulus values per timepoint (schedule-based)
-        for t_idx, t_i in enumerate(times):
-            sl = slice(t_idx * N_total, (t_idx + 1) * N_total)
-            val = np.asarray(self._stim_schedule[t_i], dtype=float)
-            prot_formodes[vect_t == t_i, :ns] = val * self.scale_proteins
-            rna_modified[sl, :ns] = val * self.scale_mrnas
-            prot_modified[sl, :ns] = val * self.scale_proteins
-            kon_modified[sl, :ns] = (val >= 0.5)
+        # Growth pass: the final trajectories (t = 0 included) are kept as they are
+        if not growth_only:
+            # Set stimulus values per timepoint (schedule-based)
+            for t_idx, t_i in enumerate(times):
+                sl = slice(t_idx * N_total, (t_idx + 1) * N_total)
+                val = np.asarray(self._stim_schedule[t_i], dtype=float)
+                prot_formodes[vect_t == t_i, :ns] = val * self.scale_proteins
+                rna_modified[sl, :ns] = val * self.scale_mrnas
+                prot_modified[sl, :ns] = val * self.scale_proteins
+                kon_modified[sl, :ns] = (val >= 0.5)
 
-        # Fill initial state (t = 0) and initialize sim_real_idx for those cells
-        offset = 0
-        for s, sample in enumerate(samples_id):
-            cell_indices = (vect_t == times[0]) & (vect_samples_id == sample)
-            global_cell_idx = np.flatnonzero(cell_indices)
-            selected_init = init_cells[s]
+            # Fill initial state (t = 0) and initialize sim_real_idx for those cells
+            offset = 0
+            for s, sample in enumerate(samples_id):
+                cell_indices = (vect_t == times[0]) & (vect_samples_id == sample)
+                global_cell_idx = np.flatnonzero(cell_indices)
+                selected_init = init_cells[s]
 
-            kon_modified[offset+offset_init[s]:offset+offset_init[s] + N_samples[s], ns:] = self.modes[cell_indices][selected_init, ns:]
-            if self.compute_with_proba:
-                proba_modified[offset+offset_init[s]:offset+offset_init[s] + N_samples[s]] = self.proba[cell_indices][selected_init]
-            rna_modified[offset+offset_init[s]:offset+offset_init[s] + N_samples[s], ns:] = vect_rna[cell_indices][selected_init, ns:]
-            sim_real_idx[offset+offset_init[s]:offset+offset_init[s] + N_samples[s]] = global_cell_idx[selected_init]
-            # Sample label of every trajectory slot, last timepoint included
-            for t_idx in range(T):
-                vect_samples_id_modified[N_total * t_idx + offset:N_total * t_idx + offset + N_full[s]] = s
+                kon_modified[offset+offset_init[s]:offset+offset_init[s] + N_samples[s], ns:] = self.modes[cell_indices][selected_init, ns:]
+                if self.compute_with_proba:
+                    proba_modified[offset+offset_init[s]:offset+offset_init[s] + N_samples[s]] = self.proba[cell_indices][selected_init]
+                rna_modified[offset+offset_init[s]:offset+offset_init[s] + N_samples[s], ns:] = vect_rna[cell_indices][selected_init, ns:]
+                sim_real_idx[offset+offset_init[s]:offset+offset_init[s] + N_samples[s]] = global_cell_idx[selected_init]
+                # Sample label of every trajectory slot, last timepoint included
+                for t_idx in range(T):
+                    vect_samples_id_modified[N_total * t_idx + offset:N_total * t_idx + offset + N_full[s]] = s
 
-            offset += N_full[s]
+                offset += N_full[s]
 
-        prot_modified[:N_total, ns:] = self.adaptive_shrinkage_init(rna_modified[:N_total, ns:] * s1, kon_modified[:N_total, ns:])
-        if n_iter == 1: 
-            N_cells_0 = np.sum(vect_t == times[0])
-            prot_formodes[:N_cells_0, ns:] = self.adaptive_shrinkage_init(vect_rna[:N_cells_0, ns:] * s1, self.modes[:N_cells_0, ns:])
+            prot_modified[:N_total, ns:] = self.adaptive_shrinkage_init(
+                rna_modified[:N_total, ns:] * s1_rows(s1, vect_samples_id_modified[:N_total]), kon_modified[:N_total, ns:])
+            if n_iter == 1:
+                N_cells_0 = np.sum(vect_t == times[0])
+                prot_formodes[:N_cells_0, ns:] = self.adaptive_shrinkage_init(
+                    vect_rna[:N_cells_0, ns:] * s1_rows(s1, vect_samples_id)[:N_cells_0], self.modes[:N_cells_0, ns:])
 
         for t_idx, time in enumerate(times[:-1]):
             offset = 0
@@ -681,8 +1135,9 @@ class NetworkModel:
 
                     prot_init = prot_modified[current_indices, ns:]
                     alpha_init = alpha_modified[t_idx, alpha_indices]
-                    mode_init = self.adaptive_shrinkage(rna_modified[current_indices, ns:] * s1, kon_modified[current_indices, ns:]) / s1
-                    mode_end = self.adaptive_shrinkage(vect_rna[cell_idx, ns:] * s1, self.modes[cell_idx, ns:]) / s1
+                    s1_s, ks_s = s1_of(s1, s_idx), ks_of(ks, s_idx)
+                    mode_init = self.adaptive_shrinkage(rna_modified[current_indices, ns:] * s1_s, kon_modified[current_indices, ns:]) / s1_s
+                    mode_end = self.adaptive_shrinkage(vect_rna[cell_idx, ns:] * s1_s, self.modes[cell_idx, ns:]) / s1_s
 
                     basal_s = basal[min(s_idx, basal.shape[0] - 1)] if basal.ndim == 3 else basal
                     pairwise_dist = my_otdistance(
@@ -692,7 +1147,7 @@ class NetworkModel:
                         proba_modified[current_indices, ns:], self.proba[cell_idx, ns:, :],
                         mode_init, mode_end,
                         alpha_init,
-                        s1, ks, self.d[1, ns:], times[t_idx + 1] - time, basal_s, inter, loss=self.loss_norm,
+                        s1_s, ks_s, self.d[1, ns:], times[t_idx + 1] - time, basal_s, inter, loss=self.loss_norm,
                         n_iter=n_iter, intensity_prior=intensity_prior,
                         compute_with_proba=self.compute_with_proba,
                         n_stimuli=ns, stim_vals=np.asarray(self._stim_schedule[times[t_idx + 1]], dtype=np.float64),
@@ -740,6 +1195,14 @@ class NetworkModel:
                             penalty = pairwise_dist.max() * 1e3 + 1e6
                             pairwise_dist = np.where(mismatch, pairwise_dist + penalty, pairwise_dist)
 
+                    tmp = np.log(G)
+                    reg = max(self.init_entropic_noise * tmp * (1 / n_iter)**(1 - 1/n_iter), .01)
+                    if growth_only:
+                        R_opt_traj[start_index:start_index + N_sample] = self._growth_log_mass(
+                            pairwise_dist, src_real, delta_t, reg, tmp, time, times[t_idx + 1]) / delta_t
+
+                # Trajectory update (skipped by the growth pass)
+                if N_sample and N_cells and not growth_only:
                     # --- Growth-weighted OT marginals ---
                     # WOT convention (Schiebinger et al. 2019): both the source AND
                     # target marginals are corrected by exp(±R·Δt/2), not just the
@@ -754,47 +1217,8 @@ class NetworkModel:
                         mu = np.ones(N_sample) / N_sample
                         nu = np.ones(N_cells) / N_cells
 
-                    tmp = np.log(G)
-                    reg = max(self.init_entropic_noise * tmp * (1 / n_iter)**(1 - 1/n_iter), .01)
-                    stopThr, numItermax = self.stopThr_init, int(10000 / min(1, reg))
-                    if not self.unbalanced_reg:
-                        while stopThr <= self.stopThr_init*100:
-                            try:
-                                coupling = ot.bregman.sinkhorn(
-                                    mu, nu, pairwise_dist,
-                                    reg=reg,
-                                    numItermax=numItermax,
-                                    stopThr=stopThr
-                                )
-                                break
-                            except Exception:
-                                stopThr *= 2
-                                numItermax *= 2
-                        else:
-                            print('Warning, main Sinkhorn did not converge')
-                    else:
-                        reg_m = np.array([1e3, self.unbalanced_reg*tmp])
-                        while stopThr <= self.stopThr_init*100:
-                            try:
-                                coupling = ot.unbalanced.sinkhorn_unbalanced(
-                                    mu, nu, pairwise_dist,
-                                    reg=reg,
-                                    reg_m=reg_m,
-                                    numItermax=numItermax,
-                                    stopThr=stopThr
-                                )
-                                break
-                            except Exception:
-                                stopThr *= 2
-                                numItermax *= 2
-                        else:
-                            print('Warning, main Sinkhorn did not converge')
-
-                    row_marginals = coupling.sum(axis=1)
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        log_m = np.log(np.maximum(row_marginals, EPS))
-                        R_n = (2.0 / delta_t) * (log_m - log_m.mean())
-                    R_opt_traj[start_index:start_index + N_sample] = R_n
+                    reg_m = np.array([1e3, self.unbalanced_reg * tmp]) if self.unbalanced_reg else None
+                    coupling = self._solve_ot(mu, nu, pairwise_dist, reg, reg_m)
 
                     # Draw one target per trajectory from its coupling row (inverse CDF)
                     cdf = np.cumsum(coupling, axis=1)
@@ -805,7 +1229,7 @@ class NetworkModel:
                     # End states recomputed for the sampled pairs only
                     next_prot = find_next_prot(
                         self.d[1, ns:], prot_init, rna_modified[current_indices, ns:],
-                        vect_rna[tgt, ns:], mode_init, mode_end[m_idx], alpha_init, s1, delta_t)
+                        vect_rna[tgt, ns:], mode_init, mode_end[m_idx], alpha_init, s1_s, delta_t)
 
                     kon_modified[next_indices] = self.modes[tgt]
                     if self.compute_with_proba:
@@ -828,6 +1252,48 @@ class NetworkModel:
         return prot_modified, prot_formodes, rna_modified, kon_modified, \
                 proba_modified, alpha_modified, vect_samples_id_modified, \
                   R_opt_traj, to_keep_for_update
+
+    def _solve_ot(self, mu, nu, C, reg, reg_m=None):
+        """Entropic OT plan (unbalanced if reg_m is given), relaxing the tolerance until Sinkhorn succeeds."""
+        stopThr, numItermax = self.stopThr_init, int(10000 / min(1, reg))
+        while stopThr <= self.stopThr_init * 100:
+            try:
+                if reg_m is None:
+                    return ot.bregman.sinkhorn(mu, nu, C, reg=reg, numItermax=numItermax, stopThr=stopThr)
+                return ot.unbalanced.sinkhorn_unbalanced(mu, nu, C, reg=reg, reg_m=reg_m,
+                                                         numItermax=numItermax, stopThr=stopThr)
+            except Exception:
+                stopThr *= 2
+                numItermax *= 2
+        print('Warning, main Sinkhorn did not converge')
+        if reg_m is None:
+            return ot.bregman.sinkhorn(mu, nu, C, reg=reg, numItermax=numItermax, stopThr=stopThr)
+        return ot.unbalanced.sinkhorn_unbalanced(mu, nu, C, reg=reg, reg_m=reg_m,
+                                                 numItermax=numItermax, stopThr=stopThr)
+
+    def _growth_log_mass(self, C, src_real, delta_t, reg, log_G, t_from, t_to):
+        """
+        Log mass gain of each source state over one interval (Waddington-OT growth
+        estimation): the source marginal starts from the prior growth exp(R_prior·Δt)
+        and is relaxed (growth_reg_source) while the target (observed cells) stays
+        nearly hard; n_growth_iter times, source weights <- row marginals. The mean
+        population growth is set by population_sizes if given, else by the prior.
+        """
+        N_src, N_tgt = C.shape
+        r = getattr(self, '_prolif_net_rate', None)
+        log_prior = r[src_real] * delta_t if r is not None else np.zeros(N_src)
+        mu = np.exp(log_prior - log_prior.max())
+        mu /= mu.sum()
+        nu = np.ones(N_tgt) / N_tgt
+        reg_m = np.array([self.growth_reg_source * log_G, 1e3])
+        for _ in range(max(1, self.n_growth_iter)):
+            row = np.maximum(self._solve_ot(mu, nu, C, reg, reg_m).sum(axis=1), EPS)
+            mu = row / row.sum()
+        log_m = np.log(mu * N_src)  # relative gain: mean(exp(log_m)) = 1
+        sizes = self.population_sizes
+        if sizes is not None and t_from in sizes and t_to in sizes:
+            return log_m + np.log(sizes[t_to] / sizes[t_from])
+        return log_m + np.log(np.mean(np.exp(log_prior)))
 
     def _traj_strata(self, data_rna, vect_t, vect_samples_id, times, samples_id):
         """
@@ -906,9 +1372,15 @@ class NetworkModel:
         kov_cell_mask=None,
         hard_forcing_ref=False,
         ref_constraint_pct=0.1,
+        n_iter_offset=None,
     ):
         """
         Alternating optimization of trajectories and network (theta).
+
+        n_iter_offset : int or None
+            Iterations already done (test set: those of the training inference), added to the
+            counter of the Sinkhorn regularization and of the basin-update weight, so that a fixed
+            network is used with the final formulas of the training. None: training schedule.
 
         basal_init / inter_init : (G_tot, n_networks) / (G_tot, G_tot, n_networks) or None
             Starting point for theta. Zeros if None.
@@ -924,6 +1396,10 @@ class NetworkModel:
         errors = [1e12]
         count_end = 0
         N_tot = np.sum(N_full)
+        # Iteration counter of the OT regularization and of the basin weights
+        it_shift = (n_iter_offset if n_iter_offset is not None
+                    else min_n_loops * min(1, 1 - compute_theta + hard_forcing_ref))
+        it_basins = n_iter_offset or 0
 
         n_samples_local = len(samples_id)
         if compute_theta:
@@ -987,10 +1463,13 @@ class NetworkModel:
             int(np.ceil(N_full[s] / N_samples[s])) if N_samples[s] > 0 else 1
             for s in range(n_samples_local)
         ]
+        # Trajectory states carry sample indices (y_samples), not dataset_id labels
+        sample_idx = np.arange(len(samples_id))
 
         def refresh_prev_prot():
             # Flow-matching states at t+1 from the current trajectories and alphas
-            modes = self.adaptive_shrinkage(y_rna[:, ns:] * s1, y_kon[:, ns:]) / s1
+            s1r = s1_rows(s1, y_samples)
+            modes = self.adaptive_shrinkage(y_rna[:, ns:] * s1r, y_kon[:, ns:]) / s1r
             for cnt, time in enumerate(times[:-1]):
                 idx_prev = slice(N_tot * cnt, N_tot * (cnt + 1))
                 idx_next = slice(N_tot * (cnt + 1), N_tot * (cnt + 2))
@@ -999,7 +1478,7 @@ class NetworkModel:
                     self.d[1, ns:], y_prot[idx_prev, ns:],
                     y_rna[idx_prev, ns:] * self.scale_proteins,
                     y_rna[idx_next, ns:] * self.scale_proteins,
-                    modes[idx_prev], modes[idx_next], s1)
+                    modes[idx_prev], modes[idx_next], s1r[idx_prev] if np.ndim(s1r) == 2 else s1r)
 
         # Real cell behind each trajectory state, and its cell type (None if unavailable)
         y_real = np.full(len(vect_t_sim), -1, dtype=int)
@@ -1121,7 +1600,7 @@ class NetworkModel:
                         R_opt_traj, to_keep_for_update,
                         offset_init=offset_init,
                         N_full=N_full, N_samples=N_tmp,
-                        n_iter=n_iter + min_n_loops * min(1, 1 - compute_theta + hard_forcing_ref),
+                        n_iter=n_iter + it_shift,
                         intensity_prior=intensity_prior * compute_theta * (1 - hard_forcing_ref),
                         real_cell_batches=real_cell_batches, batch_idx=batch_idx,
                         sim_real_idx=y_real
@@ -1133,11 +1612,10 @@ class NetworkModel:
                 for c, v in zip(y_prot_prev.cols, y_prot_prev.values):
                     is_gene = c >= ns
                     v[:N_tot, is_gene] = y_prot[:N_tot, c[is_gene]]
-            self.R_opt = R_opt_traj
-    
+
             # --- Evaluate error before and after inference ---
             error = self._count_errors_per_sample(y_prot, y_kon, y_proba, ks, inter, basal,
-                                                   samples_id=samples_id, samples_data=y_samples)
+                                                   samples_id=sample_idx, samples_data=y_samples)
             if compute_theta and len(times) > 1:
                 if self.weight_prev > 0:
                     refresh_prev_prot()
@@ -1145,7 +1623,7 @@ class NetworkModel:
                 basal, inter, basal_tmp, inter_tmp = fit_theta(weight_prev, basal, inter, self.n_network_fits)
 
             error_2 = self._count_errors_per_sample(y_prot, y_kon, y_proba, ks, inter, basal,
-                                                    samples_id=samples_id, samples_data=y_samples)
+                                                    samples_id=sample_idx, samples_data=y_samples)
             errors.append(error_2)
             self.loss_trajectory.append(error_2)
             self.theta_trajectory.append(inter_tmp)
@@ -1175,10 +1653,11 @@ class NetworkModel:
 
             # --- Update kon_theta for alpha ---
             kon_vector = y_kon.copy()
-            kon_vector[:, ns:] = self._kon_ref_per_sample(y_prot, ks, inter, basal, samples_id=samples_id, samples_data=y_samples)[:, ns:]
+            kon_vector[:, ns:] = self._kon_ref_per_sample(y_prot, ks, inter, basal, samples_id=sample_idx, samples_data=y_samples)[:, ns:]
 
             # --- Update alphas ---
-            modes = self.adaptive_shrinkage(y_rna[:, ns:] * s1, y_kon[:, ns:]) / s1
+            s1r = s1_rows(s1, y_samples)
+            modes = self.adaptive_shrinkage(y_rna[:, ns:] * s1r, y_kon[:, ns:]) / s1r
             if len(times) > 1:
                 # Intervals are independent: one parallel task each (numba on 1 thread per task)
                 alpha_fn = inference_alpha_1thread if len(times) > 2 else inference_alpha
@@ -1219,9 +1698,14 @@ class NetworkModel:
             # --- Update modes ---
             if self.update_modes:
                 n_cells = self.proba_init.shape[0]
-                weight_prob = max(.96**(n_iter-1), .1) # the weight of the network increases slowly because it aims to get the right attribution given probabilities that are close
+                weight_prob = max(.96**(n_iter + it_basins - 1), .1) # the weight of the network increases slowly because it aims to get the right attribution given probabilities that are close
                 # Mass constraint grows from the argmax masses (lam=0: plain argmax) to nu (lam=1: full OT) by min_n_loops
                 lam = min(1.0, (n_iter - 1) / max(min_n_loops - 1, 1)) if compute_theta else 1.0
+
+                # Mode amplitudes of each real cell's sample (per-sample mixtures), and their max
+                ks_cells = (ks[np.searchsorted(np.asarray(samples_id), vect_samples_id)]
+                            if ks.ndim == 3 else None)
+                ks_max = ks.max(axis=0) if ks.ndim == 3 else ks
 
                 def assign_basins(mu, nu, dist):
                     # EMD with target masses interpolated between those of the argmax and nu
@@ -1230,9 +1714,9 @@ class NetworkModel:
                     return np.argmax(coupling, axis=1)
                 
                 def run_main_loop_for_gene(g, temporal=self.temporal_basins):
-                    l_max = 1 + np.argmax(ks[g, :])
+                    l_max = 1 + np.argmax(ks_max[g, :])
                     obj = np.zeros((n_cells, l_max), dtype=float)
-                    obj[:, :] = ks[g, :l_max][None, :]
+                    obj[:, :] = ks_cells[:, g, :l_max] if ks_cells is not None else ks[g, :l_max][None, :]
                     tmp_proba = np.zeros_like(self.proba[:, g])
                     tmp_modes = np.zeros_like(self.modes[:, g])
                     if temporal:
@@ -1290,17 +1774,49 @@ class NetworkModel:
                 # ── Force KO/OV cells to the correct mode after update ────────
                 if kov_cell_mask is not None:
                     for g in range(ns, G_tot):
-                        l_max = 1 + int(np.argmax(ks[g, :]))
+                        l_max = 1 + int(np.argmax(ks_max[g, :]))
                         ko_cells = kov_cell_mask[:, g] < 0
                         ov_cells = kov_cell_mask[:, g] > 0
                         if np.any(ko_cells):
                             self.proba[ko_cells, g, :] = 0
                             self.proba[ko_cells, g, 0] = 1
-                            self.modes[ko_cells, g] = ks[g, 0]
+                            self.modes[ko_cells, g] = ks_cells[ko_cells, g, 0] if ks_cells is not None else ks[g, 0]
                         if np.any(ov_cells):
                             self.proba[ov_cells, g, :] = 0
                             self.proba[ov_cells, g, l_max - 1] = 1
-                            self.modes[ov_cells, g] = ks[g, l_max - 1]
+                            self.modes[ov_cells, g] = ks_cells[ov_cells, g, l_max - 1] if ks_cells is not None else ks[g, l_max - 1]
+
+        # --- Growth pass: net growth of the final trajectories given the final network ---
+        # Done once, out of the loop: the growth correction is not fed back into the inference
+        R_opt_traj = np.full(len(vect_t_sim), np.nan)
+        if len(times) > 1:
+            offset_init = [0] * len(samples_id)
+            while not np.array_equal(offset_init, N_full):
+                N_tmp = [min(N_samples[s], N_full[s] - offset_init[s]) for s in range(len(samples_id))]
+                init_cells = [init_cells_full[s][offset_init[s]:offset_init[s] + N_tmp[s]] for s in range(len(samples_id))]
+                batch_idx = [
+                    min(offset_init[s] // N_samples[s], n_batches_per_sample[s] - 1) if N_samples[s] > 0 else 0
+                    for s in range(len(samples_id))
+                ]
+                R_opt_traj = self.estimate_trajectories_given_model(
+                    vect_t, times, vect_samples_id, samples_id,
+                    data_rna, y_prot, y_prot_formodes, y_kon, y_rna, y_proba, y_alpha, y_samples,
+                    basal, inter, s1, ks, init_cells,
+                    R_opt_traj, to_keep_for_update,
+                    offset_init=offset_init,
+                    N_full=N_full, N_samples=N_tmp,
+                    n_iter=n_iter - 1 + it_shift,
+                    intensity_prior=intensity_prior * compute_theta * (1 - hard_forcing_ref),
+                    real_cell_batches=real_cell_batches, batch_idx=batch_idx,
+                    sim_real_idx=y_real, growth_only=True
+                )[7]
+                offset_init = [offset_init[s] + N_tmp[s] for s in range(len(samples_id))]
+            if verb:
+                print(f"[fit_network] Growth pass: net rate per state in "
+                      f"[{np.nanmin(R_opt_traj):.3g}, {np.nanmax(R_opt_traj):.3g}], mean {np.nanmean(R_opt_traj):.3g}")
+        self.R_opt = R_opt_traj
+        # Last iteration of the basin weights (continued by the test-set inference)
+        self.n_iter_final = n_iter - 1 + it_basins
 
         # --- Updating the networks ---
         if compute_theta:
@@ -1326,7 +1842,7 @@ class NetworkModel:
         # refine_network_degradations in place of discrete mode assignments (kon_beta).
         self.kon_beta_harissa = y_kon.copy()
         self.kon_beta_harissa[:, ns:] = (
-            self.adaptive_shrinkage(y_rna[:, ns:] * s1, y_kon[:, ns:]) 
+            self.adaptive_shrinkage(y_rna[:, ns:] * s1_rows(s1, y_samples), y_kon[:, ns:])
         )
 
 
@@ -1407,7 +1923,7 @@ class NetworkModel:
         seed_everything(self.seed)
 
         # --- Initialization ---
-        data_rna = self._parse_input(data, time_key)
+        data_rna = self._parse_input(data, time_key, scale_depth=True)  # counts at the reference depth
         if stimulus_schedule is not None or self._stim_schedule is None:
             self._stim_schedule = self._build_stimulus_schedule(
                 np.sort(np.unique(data_rna[:, 0])), stimulus_schedule)
@@ -1418,12 +1934,13 @@ class NetworkModel:
         # --- Adapt ref_network ---
         self.ref_network = signed_floor(self.ref_network, self.prior_network_pen)  # keeps signed priors
         self.ref_network[:ns, :] = self.stimulus
+        self._apply_stimulus_targets()
         print(self._stim_schedule)
         for g in range(ns, G_tot):
             l_max = len(np.unique(self.modes[:, g]))
             if l_max < 2:
                 self.ref_network[g, :], self.ref_network[:, g] = 0, 0
-            if l_max > len(np.unique(self.a[:-1, g])):
+            if l_max > len(np.unique(self.a[..., :-1, g])):
                 self.compute_with_proba = 0
 
         # Auto-extract vect_samples_id from AnnData if not provided
@@ -1474,8 +1991,7 @@ class NetworkModel:
         ]
 
         # --- Extract kinetic parameters ---
-        ks = (self.a[:-1] / np.clip(np.max(self.a[:-1], axis=0), EPS, None)).T
-        s1 = self.fact_simple * (self.a[-1, ns:] / np.maximum(np.max(self.a[:-1, ns:], axis=0), EPS))
+        ks, s1, _ = self._mixture_terms()
 
         # --- Normalize init/ref arrays to (n_samples, G_tot, n_networks) / (G_tot, G_tot, n_networks) ---
         n_samples = len(samples_id)
@@ -1564,7 +2080,7 @@ class NetworkModel:
             prev.values[g][idx_next, is_gene] = find_next_prot(
                 d1[r], P0[:, r], M0[:, r], M1[:, r], mode_init[:, r], mode_end[:, r],
                 np.minimum(alpha[:, r] / alpha_mod, 1),
-                s[r] if np.ndim(s) else s, delta_t * alpha_mod)
+                s[..., r] if np.ndim(s) else s, delta_t * alpha_mod)
 
     def estimate_trajectories(self, y_prot, times, d1, N=100, kon_beta=None, s=None, prev_cols=None):
         """
@@ -1654,7 +2170,7 @@ class NetworkModel:
         assembles the result using samples_data (or self.samples_data) as the
         routing key so that each cell uses its own sample's basal.
         """
-        if basal.ndim < 3:
+        if basal.ndim < 3 and ks.ndim < 3:
             return kon_ref_vector(y_prot, ks, inter, basal)
         sd = samples_data if samples_data is not None else self.samples_data
         if samples_id is None:
@@ -1664,8 +2180,8 @@ class NetworkModel:
             mask = (sd == s)
             if not np.any(mask):
                 continue
-            basal_s = basal[min(s_idx, basal.shape[0] - 1)]
-            out[mask] = kon_ref_vector(y_prot[mask], ks, inter, basal_s)
+            basal_s = basal[min(s_idx, basal.shape[0] - 1)] if basal.ndim == 3 else basal
+            out[mask] = kon_ref_vector(y_prot[mask], ks_of(ks, s_idx), inter, basal_s)
         return out
 
     def _count_errors_per_sample(self, y_prot, kon_beta, proba_traj, ks, inter, basal,
@@ -1676,7 +2192,7 @@ class NetworkModel:
 
         samples_data : per-cell sample assignment; defaults to self.samples_data.
         """
-        if basal.ndim < 3:
+        if basal.ndim < 3 and ks.ndim < 3:
             return count_errors(y_prot, kon_beta, proba_traj, ks, basal, inter,
                                 loss=self.loss_norm,
                                 compute_with_proba=self.compute_with_proba,
@@ -1691,9 +2207,9 @@ class NetworkModel:
             n_s = int(mask.sum())
             if n_s == 0:
                 continue
-            basal_s = basal[min(s_idx, basal.shape[0] - 1)]
+            basal_s = basal[min(s_idx, basal.shape[0] - 1)] if basal.ndim == 3 else basal
             err_s = count_errors(y_prot[mask], kon_beta[mask], proba_traj[mask],
-                                 ks, basal_s, inter,
+                                 ks_of(ks, s_idx), basal_s, inter,
                                  loss=self.loss_norm,
                                  compute_with_proba=self.compute_with_proba,
                                  n_stimuli=self.n_stimuli)
@@ -1726,11 +2242,13 @@ class NetworkModel:
             l_max = len(np.unique(self.modes[:, g]))
             if l_max < 2: # If only one mode
                 self.ref_network[g, :], self.ref_network[:, g] = 0, 0
-            if l_max > len(np.unique(self.a[:-1, g])): # compute with proba = 0 si more modes than ks
+            if l_max > len(np.unique(self.a[..., :-1, g])): # compute with proba = 0 si more modes than ks
                 self.compute_with_proba = 0
 
-        k1 = np.max(self.a[:-1], axis=0)
-        ks = (self.a[:-1] / k1).T
+        ks, _, k1 = self._mixture_terms()
+        if self.simulate_full_with_harissa:
+            ks, k1 = self._shared_mixture(ks), self._shared_mixture(k1)
+        ksT = np.swapaxes(ks, -1, -2)  # (n_modes, G) or (S, n_modes, G) for the degradation inference
         # basal: (n_samples, G_tot, n_networks); inter: (G_tot, G_tot, n_networks)
         basal, inter = self.basal.copy(), self.inter.copy()
 
@@ -1810,7 +2328,7 @@ class NetworkModel:
         # Pre-scale basal/inter to best fit kon_beta across all cells before ODE inference.
         scale_theta_pre = fit_scale_theta(
             y_prot, self.kon_beta, basal, inter,
-            ks.T * self.scale_proteins, ns, samples_data=self.samples_data,
+            ksT * self.scale_proteins, ns, samples_data=self.samples_data,
         )
         basal *= scale_theta_pre       
         inter *= scale_theta_pre  
@@ -1822,12 +2340,13 @@ class NetworkModel:
         kon_vector[:, ns:] = self._kon_ref_per_sample(y_prot, ks, inter, basal, samples_data=self.samples_data)[:, ns:]
         self.kon_theta = kon_vector
 
-        # --- Train proliferation MLP on R_opt (after prot recomputation) ---
+        # --- Train proliferation MLP along the paths of the recomputed trajectories ---
         if self.recompute_proliferations and self.R_opt is not None:
             if verb:
                 print("[refine_network_degradations] Training ProliferationMLP on R_opt...")
             self.prolif_network = train_proliferation_mlp(
-                self.prot, self.R_opt, ns=ns, verb=verb,
+                self.prot, self.R_opt, self.times_data, ns=ns,
+                n_nodes=self.n_growth_nodes, with_stim=self.prolif_uses_stimulus, seed=self.seed, verb=verb,
             )
             if verb:
                 print("[refine_network_degradations] ProliferationMLP training done.")
@@ -1886,7 +2405,7 @@ class NetworkModel:
                             self.prot,
                             self.times_data,
                             basal,   # 3-D (n_samples, G, n_networks) — triggers per-sample ODE
-                            inter, ks.T * self.scale_proteins,
+                            inter, ksT * self.scale_proteins,
                             d=self.d[1], lr=1e-2,
                             batch_size=self.batch_size_degradations,
                             n_stimuli=ns, stim_schedule=self._stim_schedule,
@@ -1932,7 +2451,7 @@ class NetworkModel:
                     return inference_degradation_prot(
                         self.prot[idx], self.times_data[idx],
                         basal,   # 3-D
-                        inter, ks.T * self.scale_proteins,
+                        inter, ksT * self.scale_proteins,
                         d=self.d[1], lr=1e-2,
                         batch_size=self.batch_size_degradations,
                         n_stimuli=ns, stim_schedule=self._stim_schedule,
@@ -2018,7 +2537,7 @@ class NetworkModel:
                     self.times_data,
                     basal_t,
                     inter_t,
-                    ks.T,   # ks    : (n_modes, G)
+                    ksT,   # ks    : (n_modes, G)
                     d_learned=self.d_t[:, 1, :],  # (T-1, G) — per-interval like epsilon branch
                     k1_vec=k1,
                     kon_mlp=self.kon_mlp,
@@ -2045,7 +2564,7 @@ class NetworkModel:
                     self.times_data[cells_to_use == 1],
                     basal_t,
                     inter_t,
-                    ks.T * self.scale_proteins,
+                    ksT * self.scale_proteins,
                     self.d_t[:, 1, :],              # (T-1, G) learned d1 per interval
                     k1 * self.scale_proteins,       # (G,) max burst rate × scale
                     n_stimuli=ns,
@@ -2143,11 +2662,13 @@ class NetworkModel:
             self.ratios[cnt] = ratios_train[index]
             basal_t[cnt]    = basal_t_train[index]
             inter_t[cnt]    = inter_t_train[index]
+        self._add_perturbation_stimulus(basal_t, inter_t, times)
 
-        ### Rescale kz
-        rescale = np.ones(prot_modified.shape[1])
-        rescale[ns:] = np.max(self.a[:-1, ns:], axis=0)
-        kz = ks * rescale.reshape(ks.shape[0], 1)
+        ### Rescale kz (per sample with per-sample mixtures: rescale (S, G), kz (S, G, n_modes))
+        _, _, k1 = self._mixture_terms()
+        rescale = np.ones_like(k1)
+        rescale[..., ns:] = k1[..., ns:]
+        kz = ks * rescale[..., None]
 
         # Determine per-cell basal strategy once before the loop.
         # If basal_t is 4-D (per-sample) but no samples_data was provided, that means
@@ -2160,14 +2681,24 @@ class NetworkModel:
                   "Falling back to sample index 0 for all cells.")
             samples_data = np.zeros(N, dtype=int)
         _basal_is_per_sample = (samples_data is not None and basal_t.ndim == 4)
+        if ks.ndim == 3 and samples_data is None:
+            raise ValueError("Per-sample mixtures need samples_data (data_samples.npy) to simulate")
+        # Sample index of each simulated cell (as for the per-sample basal)
+        s_cells = np.asarray(samples_data)[:N].astype(int) if samples_data is not None else np.zeros(N, dtype=int)
 
-        # Proliferation: build a callable wrapper around self.prolif_network once.
+        # Proliferation: R(P) integrated along each simulated path (states recorded at the quadrature nodes)
         _prolif_fn = None
         if self.simulate_with_proliferation and self.prolif_network is not None:
-            _prolif_fn = self.prolif_network.predict  # (1, n_proteins) -> (1,)
+            _prolif_fn = self.prolif_network.predict  # (..., n_proteins), stimuli of the interval -> (...)
+            u_growth, w_growth = quadrature(self.n_growth_nodes)
+            # Resampling groups: cells of a sample only replace cells of the same sample
+            groups = ([np.flatnonzero(np.asarray(samples_data)[:N] == s) for s in np.unique(np.asarray(samples_data)[:N])]
+                      if samples_data is not None else [np.arange(N)])
 
         for cnt, time in enumerate(times[start_time:-1], start=start_time):
             delta_t = times[cnt + 1] - time
+            # Recording times within the interval (end state last)
+            t_rec = delta_t * u_growth[1:] if _prolif_fn is not None else delta_t
 
             degradations = self.d_t[cnt].copy()
             if self.simulation_stochastic:
@@ -2196,19 +2727,20 @@ class NetworkModel:
             def run_main_loop_for_cell(n, _basal_cells=basal_cells, _basal_t_cnt=basal_t[cnt], 
                                        _stim_vals=cur_stim_vals):
                 basal_n = _basal_cells[n] if _basal_cells is not None else _basal_t_cnt
+                s_n = s_cells[n]
                 if self.simulation_stochastic:
                     return simulate_next_prot_pdmp(
                             degradations[1, :],
-                            kz * degradations[0][:, None],
-                            rescale * (degradations[0, :] / degradations[1, :]),
-                            basal_n, inter_t[cnt], delta_t,
+                            ks_of(kz, s_n) * degradations[0][:, None],
+                            s1_of(rescale, s_n) * (degradations[0, :] / degradations[1, :]),
+                            basal_n, inter_t[cnt], t_rec,
                             self.scale_proteins, P0=prot_modified[start_index + n, :],
                             ns=ns, stim_vals=_stim_vals,
                         )
                 else:
                     return simulate_next_prot_ode(
-                        degradations[1, :], ks,
-                        basal_n, inter_t[cnt], delta_t,
+                        degradations[1, :], ks_of(ks, s_n),
+                        basal_n, inter_t[cnt], t_rec,
                         self.scale_proteins, P0=prot_modified[start_index + n, :],
                         ns=ns, stim_vals=_stim_vals
                     )
@@ -2223,30 +2755,29 @@ class NetworkModel:
                 # For ns>1, indices 1..ns-1 are stim2..stimN — skip them.
                 prot_modified[end_index + n, ns:] = results[idx].p[-1][ns - 1:]
 
-            # --- Branching process resampling (trapezoidal forward+backward) ---
-            # Trapezoidal rule: log_weight_n = (R(P_start_n) + R(P_end_n)) / 2 * delta_t
-            # R_opt was estimated with factor 2 (WOT corrects both source AND target
-            # marginals). During simulation we know both endpoints, so we replicate
-            # the same forward+backward structure: each endpoint contributes R·Δt/2.
-            # Multinomial resampling avoids the catastrophic variance of Poisson(λ≈1)
-            # which kills ~37% of cells per step even for R ≈ 0.
+            # --- Branching process resampling ---
+            # log_weight_n = ∫ R(P_n(s)) ds over the simulated path (trapezoidal rule on the
+            # recorded states), the same quadrature as in the MLP training. Multinomial
+            # resampling within each sample keeps N cells (no Poisson extinction at R ≈ 0).
             if _prolif_fn is not None:
-                P_start = prot_modified[start_index:start_index + N, ns:]
-                P_end   = prot_modified[end_index:end_index + N, ns:]
-                R_start = _prolif_fn(P_start)  # (N,)
-                R_end   = _prolif_fn(P_end)    # (N,)
-                log_weights = (R_start + R_end) * 0.5 * delta_t
-                weights = np.exp(log_weights - log_weights.max())  # numerically stable
-                weights /= weights.sum()
-                src_for_new = np.random.choice(N, N, replace=True, p=weights)
-                prot_modified[end_index:end_index + N, ns:] = P_end[src_for_new]
+                path = np.stack([prot_modified[start_index:start_index + N, ns:]]
+                                + [np.array([results[n].p[q][ns - 1:] for n in range(N)])
+                                   for q in range(len(t_rec))], axis=1)       # (N, Q, G)
+                log_weights = (_prolif_fn(path, cur_stim_vals) * w_growth).sum(axis=1) * delta_t
+                P_end = prot_modified[end_index:end_index + N, ns:].copy()
+                for grp in groups:
+                    weights = np.exp(log_weights[grp] - log_weights[grp].max())
+                    src = grp[np.random.choice(len(grp), len(grp), replace=True, p=weights / weights.sum())]
+                    prot_modified[end_index + grp, ns:] = P_end[src]
 
             # Set stim values at step boundary from schedule (authoritative source).
             prot_modified[end_index:end_index + N, :ns] = cur_stim_vals
 
-            basal_t_cnt_2d = basal_t[cnt].mean(axis=0) if basal_t.ndim == 4 else basal_t[cnt]
-            kon_vector[end_index:end_index+N, ns:] = kon_ref_vector(
-                prot_modified[end_index:end_index+N, :], ks, inter_t[cnt], basal_t_cnt_2d)[:, ns:]
+            # Each cell with its own sample's basal and mixture (index-based, as basal_cells)
+            n_samp = basal_t.shape[1] if basal_t.ndim == 4 else (ks.shape[0] if ks.ndim == 3 else 1)
+            kon_vector[end_index:end_index+N, ns:] = self._kon_ref_per_sample(
+                prot_modified[end_index:end_index+N, :], ks, inter_t[cnt], basal_t[cnt],
+                samples_id=np.arange(n_samp), samples_data=s_cells)[:, ns:]
 
             if verb:
                 print(f'timepoints {cnt} done', delta_t, time)
@@ -2271,6 +2802,7 @@ class NetworkModel:
         kon_vector    : (N * len(times), G_tot)
         times_simulation : (N * len(times),)
         """
+        ks = self._shared_mixture(ks)
         try:
             from harissa.model import NetworkModel as HarissaNetworkModel
         except ImportError:
@@ -2292,7 +2824,7 @@ class NetworkModel:
         # Build Harissa model — kinetic params (a, d[0]) are constant over time;
         # basal, inter and d[1] will be updated at each interval inside the loop.
         h_model = HarissaNetworkModel(G_genes)
-        h_model.a  = self.a      
+        h_model.a  = self._shared_mixture(self.a)
 
         # --- Mirror simulate_trajectories_unitary initialisation ---
         prot_modified = np.ones((N * len(times), G_tot))
@@ -2341,9 +2873,10 @@ class NetworkModel:
             self.ratios[cnt]  = ratios_train[index]
             basal_t[cnt]     = basal_t_train[index]
             inter_t[cnt]     = inter_t_train[index]
+        self._add_perturbation_stimulus(basal_t, inter_t, times)
 
         rescale = np.ones(G_tot)
-        rescale[ns:] = np.max(self.a[:-1, ns:], axis=0)
+        rescale[ns:] = self._shared_mixture(self._mixture_terms()[2])[ns:]
 
         # Simulation loop
         for cnt, time in enumerate(times[start_time:-1], start=start_time):
@@ -2410,11 +2943,11 @@ class NetworkModel:
             self._stim_schedule = self._build_stimulus_schedule(
                 np.sort(np.unique(times)), stimulus_schedule, times_ref=times_train)
         N = np.sum(self.times_data == times_train[0])
-        ks = (self.a[:-1] / np.max(self.a[:-1], axis=0)).T
+        ks, _, _ = self._mixture_terms()
 
         samples_data_sim = (self.samples_data[:N]
-                            if (self.basal is not None and self.basal.ndim == 3
-                                and self.samples_data is not None)
+                            if (self.samples_data is not None
+                                and ((self.basal is not None and self.basal.ndim == 3) or self.a.ndim == 3))
                             else None)
 
         # Harissa PDMP always forces stimulus=1; only use it when the schedule is the
@@ -2443,7 +2976,7 @@ class NetworkModel:
 
 
 
-    def fit_mixture_test(self, data_rna, ks, c, verb=False):
+    def fit_mixture_test(self, data_rna, ks, c, verb=False, depth=None):
         """Classify test cells into mixture modes using fixed kinetic parameters.
 
         Sets self.modes, self.proba, self.proba_init, and self.pi_init so that
@@ -2491,8 +3024,10 @@ class NetworkModel:
                         pi_prior = arr / (s + EPS) if s > 0 else np.ones(ng) / ng
                 proba[idx_t], _ = predict_resp(
                     data_rna[idx_t, g], ks[:ng, g], c[g],
-                    pi=pi_prior, pi_zero=pi_zero_g, zi=zi_flag
+                    pi=pi_prior, pi_zero=pi_zero_g, zi=zi_flag,
+                    s=None if depth is None else depth[idx_t]
                 )
+            tmp = proba
             if self.transform_proba:
                 tmp = np.exp(self.transform_proba * ((len(ks)-1))*np.log(G_tot)*(proba - 1/len(ks))) # self.transform_proba is the typical size of parameters that are expected, np.log(G) the number of regulators), and the difference to the mean max proba scales the protein level
                 tmp /= (1 + tmp)
@@ -2537,10 +3072,39 @@ class NetworkModel:
 
 
 
+    def _fit_mixture_test_per_sample(self, data_rna, vect_samples_id, samples_id, depth=None):
+        """fit_mixture_test with per-sample mixtures (a 3-D): each sample's cells with its own parameters."""
+        a3, pz3, pi_train = self.a, self.pi_zinb, self.pi_init
+        N, G_tot = data_rna.shape
+        M = a3.shape[1] - 1
+        modes, proba, proba_init = np.zeros((N, G_tot)), np.zeros((N, G_tot, M)), np.zeros((N, G_tot, M))
+        vect_t = data_rna[:, 0]
+        times = np.sort(np.unique(vect_t))
+        pi_sum = None
+        for s_idx, sid in enumerate(samples_id):
+            m = vect_samples_id == sid
+            self.a, self.pi_zinb, self.pi_init = a3[min(s_idx, len(a3) - 1)], pz3[min(s_idx, len(pz3) - 1)], pi_train
+            self.fit_mixture_test(data_rna[m], self.a[:-1], self.a[-1], depth=None if depth is None else depth[m])
+            modes[m], proba[m], proba_init[m] = self.modes, self.proba, self.proba_init
+            # Mode proportions per time, weighted by the cells of each sample
+            w = {t: np.sum(vect_t[m] == t) for t in times}
+            if pi_sum is None:
+                pi_sum = [{t: np.zeros(M) for t in times} for _ in self.pi_init]
+            for g, pi_g in enumerate(self.pi_init):
+                for t in times:
+                    if t in pi_g:
+                        p = np.asarray(pi_g[t], dtype=float)
+                        pi_sum[g][t][:len(p)] += w[t] * p
+        self.a, self.pi_zinb = a3, pz3
+        self.modes, self.proba, self.proba_init = modes, proba, proba_init
+        self.pi_init = [{t: p / (p.sum() + EPS) for t, p in pi_g.items()} for pi_g in pi_sum]
+
     def infer_test(self, data, vect_samples_id=None, verb=True, stimulus_schedule=None,
-                   basal_ref=None, transition_rates=None, time_key='time'):
+                   basal_ref=None, transition_rates=None, time_key='time', n_iter_offset=None):
         """
-        Run inference pipeline on test data: kon estimation, trajectory inference, and alpha initialization.
+        Run inference pipeline on test data with the network fixed: basins of the test cells from
+        the mixture, then trajectory loop (OT + basin updates combining EMD and network) continuing
+        the training schedule (n_iter_offset: last training iteration, see loop_trajectories).
 
         basal_ref : (n_samples, G_tot, n_networks) array or None
             Per-sample KO/OV prior (±100 entries) used to build kov_cell_mask.
@@ -2567,17 +3131,22 @@ class NetworkModel:
         self._load_ot_constraints(data, transition_rates)
 
         times = np.sort(np.unique(vect_t))
-        kz = self.a[:-1]
-        c = self.a[-1]
+        samples_id = np.sort(np.unique(vect_samples_id))
 
-        self.fit_mixture_test(data_rna, kz, c)
+        if self.a.ndim == 3:
+            self._fit_mixture_test_per_sample(data_rna, vect_samples_id, samples_id, depth=self._depth_factors(data))
+        else:
+            self.fit_mixture_test(data_rna, self.a[:-1], self.a[-1], depth=self._depth_factors(data))
+        # Trajectories on counts at the reference depth (the basins above used the raw counts and s)
+        if self._depth_factors(data) is not None:
+            data_rna = self._parse_input(data, time_key, scale_depth=True)
 
         print('[infer_test] Mean proba = ', np.mean(np.max(self.proba[:, ns:, :], axis=-1)))
 
-        ks = (kz / np.max(self.a[:-1], axis=0)).T
-        s1 = self.fact_simple * self.a[-1, ns:] / np.maximum(np.max(self.a[:-1, ns:], axis=0), EPS)
-
-        samples_id = np.sort(np.unique(vect_samples_id))
+        ks, s1, _ = self._mixture_terms()
+        # Mode amplitudes of each test cell's sample (per-sample mixtures)
+        ks_cells = ks[np.searchsorted(samples_id, vect_samples_id)] if ks.ndim == 3 else None
+        ks_max = ks.max(axis=0) if ks.ndim == 3 else ks
 
         # --- Build per-cell KO/OV mask and apply initial mode forcing ---
         kov_cell_mask = None
@@ -2597,17 +3166,17 @@ class NetworkModel:
                     kov_cell_mask = cm
                     # Force initial modes from fit_mixture_test
                     for g in range(ns, G_tot):
-                        l_max = 1 + int(np.argmax(ks[g, :]))
+                        l_max = 1 + int(np.argmax(ks_max[g, :]))
                         ko_cells = kov_cell_mask[:, g] < 0
                         ov_cells = kov_cell_mask[:, g] > 0
                         if np.any(ko_cells):
                             self.proba[ko_cells, g, :] = 0
                             self.proba[ko_cells, g, 0] = 1
-                            self.modes[ko_cells, g] = ks[g, 0]
+                            self.modes[ko_cells, g] = ks_cells[ko_cells, g, 0] if ks_cells is not None else ks[g, 0]
                         if np.any(ov_cells):
                             self.proba[ov_cells, g, :] = 0
                             self.proba[ov_cells, g, l_max - 1] = 1
-                            self.modes[ov_cells, g] = ks[g, l_max - 1]
+                            self.modes[ov_cells, g] = ks_cells[ov_cells, g, l_max - 1] if ks_cells is not None else ks[g, l_max - 1]
 
         nb_cells = np.zeros((len(samples_id), len(times)), dtype=int)
         for s, sid in enumerate(samples_id):
@@ -2659,6 +3228,7 @@ class NetworkModel:
             compute_theta=False,
             initialize_alpha=True,
             kov_cell_mask=kov_cell_mask,
+            n_iter_offset=n_iter_offset if n_iter_offset is not None else self.min_n_loops,
         )
 
 

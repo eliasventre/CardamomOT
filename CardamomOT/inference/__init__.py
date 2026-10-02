@@ -7,7 +7,7 @@ from .mixture import NegativeBinomialMixtureEM, predict_resp
 from .simulations import simulate_next_prot_ode, simulate_next_prot_pdmp
 from .pretreatment import select_DEgenes, extract_degradation_rates
 from .degradations import compare_trajectories_umap, train_kon_correction_mlp, infer_ratio_d0_d1_full, infer_ratio_d0_d1_unitary, inference_degradation_prot, fit_scale_theta
-from .proliferations import train_proliferation_mlp
+from .proliferations import train_proliferation_mlp, quadrature, interval_stimulus
 from .seeding import seed_everything, seeded_call, task_seed
 from .sampling import stratified_order, stratified_choice, grouped_subsample, grouped_partition
 
@@ -19,6 +19,6 @@ __all__ = ['inference_network', 'inference_network_multi', 'active_regulators', 
            'select_DEgenes', 'extract_degradation_rates',
            'inference_degradation_prot', 'compare_trajectories_umap',
            'train_kon_correction_mlp', 'infer_ratio_d0_d1_full', 'infer_ratio_d0_d1_unitary',
-           'train_proliferation_mlp', 'fit_scale_theta',
+           'train_proliferation_mlp', 'quadrature', 'interval_stimulus', 'fit_scale_theta',
            'seed_everything', 'seeded_call', 'task_seed',
            'stratified_choice', 'grouped_subsample', 'grouped_partition']

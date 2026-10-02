@@ -8,18 +8,65 @@ scRNA-seq data.
 
 Usage:
     python infer_mixture.py -i <project_path> -s <split> [-m <mean_threshold>] [--published-version] [--soft-em-refinement]
+                            [--integrate-samples <0..1>] [--no-integrate-samples] [--ref-sample <dataset_id>]
+
+Several samples (obs['dataset_id'] with >= 2 samples): the mixture is fitted per sample and kept per
+sample (mixture_parameters.npy (S, M+1, G)); --integrate-samples lam in [0, 1] (default 1) pushes
+the parameters of each sample towards a common target (reference sample, or average of the samples
+keeping the mean and variance of each gene), and counts are quantile-matched accordingly.
+With lam > 0, Data/data_{full,train,test}.h5ad are rewritten with integrated counts in X and the raw
+counts in layers['counts_raw'] (a rerun always restarts from the raw counts); lam = 0 restores them.
+Genes listed for a sample in Data/KO_OV_inference.txt are never integrated for that sample.
 """
 
 import sys
 sys.path += ['../']
 import numpy as np
+import pandas as pd
+import scipy.sparse
 from CardamomOT import NetworkModel as NetworkModel_beta, check_stationary
+from CardamomOT.inputs import input_dir
 import anndata as ad
 import getopt
+from CardamomOT.config import find_stimulus_schedule
 import os
 import pickle
 
 verb = 1
+RAW_LAYER = 'counts_raw'
+
+
+def _restore_raw(adata):
+    """X <- raw counts if a previous integration stored them."""
+    if RAW_LAYER in adata.layers:
+        adata.X = adata.layers[RAW_LAYER].copy()
+    return adata
+
+
+def _write_counts(adata, X, path):
+    """Write integrated counts in X (same sparsity as the raw ones) and keep the raw counts in a layer."""
+    if RAW_LAYER not in adata.layers:
+        adata.layers[RAW_LAYER] = adata.X.copy()
+    X = X.astype(np.float32)
+    adata.X = scipy.sparse.csr_matrix(X) if scipy.sparse.issparse(adata.layers[RAW_LAYER]) else X
+    adata.write(path)
+
+
+def _load_kov_genes(p, gene_names):
+    """{dataset_id: set of genes} perturbed per sample in Data/KO_OV_inference.txt (sample_id | KO | OV)."""
+    path = os.path.join(input_dir(p), 'KO_OV_inference.txt')
+    if not os.path.exists(path):
+        return {}
+    df = pd.read_csv(path, sep='\t', dtype=str).fillna('')
+    df.columns = [c.strip().upper() for c in df.columns]
+    df = df.rename(columns={'DATASET_ID': 'SAMPLE_ID'})
+    upper = {g.upper(): g for g in gene_names}
+    out = {}
+    for _, row in df.iterrows():
+        genes = [upper[g.strip().upper()] for col in ('KO', 'OV') for g in str(row.get(col, '')).split(',')
+                 if g.strip().upper() in upper]
+        out.setdefault(str(row.get('SAMPLE_ID', '')).strip(), set()).update(genes)
+    return out
 
 
 def main(argv):
@@ -36,10 +83,13 @@ def main(argv):
     temporal_basins = -1
     published_version = False
     soft_em_refinement = False
+    integrate_samples = None
+    ref_sample = None
 
     try:
         opts, args = getopt.getopt(argv, "hi:s:m:f:b:", ["input=", "split=", "mean-forcing=", "force-basins=", "temporal-basins=",
-                                                        "published-version", "soft-em-refinement"])
+                                                        "published-version", "soft-em-refinement",
+                                                        "integrate-samples=", "no-integrate-samples", "ref-sample="])
     except getopt.GetoptError:
         print("Error: Invalid arguments. Use: infer_mixture.py -i <project> -s <split> [-m <mean_forcing>] [-f <force_basins>] [-b <temporal_basins>]")
         sys.exit(2)
@@ -58,12 +108,18 @@ def main(argv):
             published_version = True
         if opt == "--soft-em-refinement":
             soft_em_refinement = True
+        if opt == "--integrate-samples":
+            integrate_samples = float(arg)
+        if opt == "--no-integrate-samples":
+            integrate_samples = 0.0
+        if opt == "--ref-sample":
+            ref_sample = arg
 
     p = '{}/'.format(inputfile)
 
     data_path = os.path.join(p, 'Data', 'data_{}.h5ad'.format(split))
     if os.path.exists(data_path):
-        adata = ad.read_h5ad(data_path)
+        adata = _restore_raw(ad.read_h5ad(data_path))
         if verb:
             print(f"[infer_mixture] Loaded data from {data_path}")
     else:
@@ -83,7 +139,8 @@ def main(argv):
 
     # ─── LOAD STIMULUS SCHEDULE (optional) ──────────────────────────────
     stim_sched = None
-    sched_path = os.path.join(p, 'Data', 'stimulus_schedule.txt')
+    sched_path = (find_stimulus_schedule(input_dir(p))
+                  or os.path.join(input_dir(p), 'stimulus_schedule_inference.txt'))
     if os.path.exists(sched_path):
         stim_sched = np.loadtxt(sched_path)
         if verb:
@@ -109,12 +166,18 @@ def main(argv):
         model.mean_forcing_em = mean_forcing
         if verb:
             print(f"[infer_mixture] Mean forcing threshold set to {mean_forcing}")
+    if integrate_samples is not None:
+        model.integrate_samples = integrate_samples
+    if ref_sample is not None:
+        model.ref_sample_integration = ref_sample
+    model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
 
     if verb:
         print(f"[infer_mixture] Starting mixture model inference ({adata.shape[1]} genes)...")
 
-    model.fit_mixture(
+    X_int = model.fit_mixture_samples(
         adata,
+        kov_genes=_load_kov_genes(p, list(adata.var_names)),
         gene_names=list(adata.var_names),
         min_components=2,
         max_components=2,
@@ -122,6 +185,33 @@ def main(argv):
         verb=verb,
         stimulus_schedule=stim_sched,
     )
+
+    # ─── WRITE INTEGRATED DATA (or restore raw counts) ──────────────────
+    other_files = [os.path.join(p, 'Data', f'data_{s}.h5ad') for s in ('full', 'train', 'test') if s != split]
+    if X_int is not None:
+        _write_counts(adata, X_int, data_path)
+        if verb:
+            print(f"[infer_mixture] Integrated counts written to {data_path} (raw counts in layers['{RAW_LAYER}'])")
+        for path in other_files:
+            if not os.path.exists(path):
+                continue
+            other = _restore_raw(ad.read_h5ad(path))
+            if list(other.var_names) != list(adata.var_names):
+                print(f"[infer_mixture] Warning: {path} has other genes than data_{split}; not integrated")
+                continue
+            _write_counts(other, model.integrate_data(other), path)
+            if verb:
+                print(f"[infer_mixture] Integrated counts written to {path}")
+    else:
+        # No integration (single sample or disabled): undo a previous one
+        for path in [data_path] + other_files:
+            if os.path.exists(path):
+                d = ad.read_h5ad(path)
+                if RAW_LAYER in d.layers:
+                    _restore_raw(d)
+                    del d.layers[RAW_LAYER]
+                    d.write(path)
+                    print(f"[infer_mixture] Raw counts restored in {path}")
 
     # ─── SAVE RESULTS ───────────────────────────────────────────────────
     out_dir = os.path.join(p, 'cardamomOT')
@@ -140,6 +230,15 @@ def main(argv):
 
     with open(os.path.join(out_dir, 'pi_init.pkl'), 'wb') as f:
         pickle.dump(model.pi_init, f)
+
+    # Per-sample mixtures of the integration (removed if no integration)
+    for name in ('mixture_parameters_samples.npy', 'integration_report.csv'):
+        if os.path.exists(os.path.join(out_dir, name)):
+            os.remove(os.path.join(out_dir, name))
+    if model.integration is not None:
+        np.save(os.path.join(out_dir, 'mixture_parameters_samples'), model.integration['a_samples'])
+        model.integration_report(list(adata.var_names)).to_csv(
+            os.path.join(out_dir, 'integration_report.csv'), index=False)
 
     if verb:
         print("[infer_mixture] Inference complete. Results saved.")

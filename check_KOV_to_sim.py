@@ -12,7 +12,7 @@ Usage:
 
 Required input files:
     - Data/data_<split>.h5ad: observed count matrix (wildtype)
-    - Data/KO_OV_simulate.txt: perturbation combinations
+    - Data/KO_OV_Stim_simulate.txt (old name KO_OV_simulate.txt): perturbations
     - cardamomOT/data_prot_simul_KO_*.npy: simulated proteins for each perturbation
     - cardamomOT/data_kon_simul_KO_*.npy: simulated bursting for each perturbation
 
@@ -25,60 +25,28 @@ import numpy as np
 import sys, getopt
 import anndata as ad
 from CardamomOT import NetworkModel
+from CardamomOT.inputs import input_dir
+from CardamomOT.inference.integration import nb_cell_parameters
+from CardamomOT.inference.depth import simulation_depth
 import scipy.sparse
 import os
 
 
-def _parse_gene_with_pct(token):
-    """Parse 'GENE-X' → (gene, X) or 'GENE' → (gene, None). X is a float 0–100."""
-    token = token.strip()
-    m = re.match(r'^(.+)-(\d+(?:\.\d+)?)$', token)
-    if m:
-        pct = float(m.group(2))
-        if 0.0 < pct < 100.0:
-            return m.group(1).strip(), pct
-    return token, None
+# Shared loader (KO / OV / STIM columns), kept under the old names for other scripts
+from CardamomOT.tools.perturbations import (find_perturbation_file, load_perturbations, combo_label,
+                                            parse_gene_with_pct as _parse_gene_with_pct, gene_label as _gene_label)
 
 
-def _gene_label(gene, pct):
-    return f"{gene}pct{int(pct)}" if pct is not None else gene
+def load_ko_ov_combinations(file_path, genes=None):
+    return load_perturbations(file_path, genes)
 
 
-def load_ko_ov_combinations(file_path):
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"KO/OV list file not found: {file_path}")
-
-    combos = []
-    with open(file_path, "r") as f:
-        lines = f.readlines()
-
-    header = lines[0].strip().split('\t')
-    header = [h.strip().upper() for h in header]
-
-    ko_idx = header.index("KO") if "KO" in header else None
-    ov_idx = header.index("OV") if "OV" in header else None
-
-    if ko_idx is None and ov_idx is None:
-        raise ValueError("KO_OV_simulate.txt must contain 'KO' or 'OV' column")
-
-    for line in lines[1:]:
-        parts = line.rstrip().split('\t')
-
-        def parse(idx):
-            if idx is None or idx >= len(parts):
-                return []
-            cell = parts[idx].strip()
-            if cell.lower() in ('', '0', 'none', 'nan'):
-                return []
-            return [_parse_gene_with_pct(g) for g in cell.split(',') if g.strip()]
-
-        kos = parse(ko_idx)
-        ovs = parse(ov_idx)
-
-        if kos or ovs:
-            combos.append({'KO': kos, 'OV': ovs})
-
-    return combos
+def _sim_sample_idx(samples_traj, times_simulation):
+    """Sample index of each simulated cell: the N initial trajectories, repeated at each simulated time."""
+    if samples_traj is None:
+        return None
+    N = int(np.sum(times_simulation == times_simulation[0]))
+    return np.tile(np.asarray(samples_traj)[:N], len(times_simulation) // N)
 
 
 def main(argv):
@@ -127,12 +95,14 @@ def main(argv):
 
     p = '{}/'.format(inputfile)
 
-    # Load KO/OV combinations
-    ko_ov_file = os.path.join(p, "Data", "KO_OV_simulate.txt")
+    # Load perturbations (KO / OV / STIM)
+    ko_ov_file = find_perturbation_file(input_dir(p))
     try:
-        combos = load_ko_ov_combinations(ko_ov_file)
+        # Gene names (to read stimulus targets as in simulate_network_KOV)
+        _genes = list(ad.read_h5ad(os.path.join(p, 'Data', f'data_{split}.h5ad'), backed='r').var_names)
+        combos = load_ko_ov_combinations(ko_ov_file, _genes)
         if len(combos) == 0:
-            print("[check_KOV_to_sim] No KO/OV combinations found in KO_OV_simulate.txt")
+            print(f"[check_KOV_to_sim] No perturbation found in {ko_ov_file}")
             sys.exit(0)
         print(f"[check_KOV_to_sim] Loaded {len(combos)} KO/OV combinations")
     except FileNotFoundError as e:
@@ -177,9 +147,9 @@ def main(argv):
     # Load model parameters
     try:
         mixture_parameters = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
-        c = mixture_parameters[-1, :]
-        kz = mixture_parameters[:-1, :]
         pi_zinb = np.load(os.path.join(p, 'cardamomOT', 'pi_zinb.npy'))
+        samples_path = os.path.join(p, 'cardamomOT', 'data_samples.npy')
+        samples_traj = np.load(samples_path).astype(int) if os.path.exists(samples_path) else None
         times_simulation = np.load(os.path.join(p, 'cardamomOT', 'simulation_times.npy'))
         t_simul = list(set(times_simulation))
         t_simul.sort()
@@ -193,13 +163,23 @@ def main(argv):
 
     G = np.size(data_real, 0) - 1
     # n_stimuli inferred from mixture_parameters: columns 0..ns-1 are stimulus slots
-    ns = mixture_parameters.shape[1] - G
+    ns = mixture_parameters.shape[-1] - G
+    # NB parameters of each simulated cell: its sample's mixture if per-sample (identical otherwise)
+    k1_sim, c_sim, pz_sim = nb_cell_parameters(mixture_parameters, pi_zinb, _sim_sample_idx(samples_traj, times_simulation))
+    # Depth factors: each simulated cell drawn at the depth of the real cell it mimics (p = c / (c + s))
+    depth_cells = adata.obs['depth_factor'].values.astype(float) if 'depth_factor' in adata.obs else None
+    idx_path = os.path.join(p, 'cardamomOT', 'data_traj_real_idx.npy')
+    times_path = os.path.join(p, 'cardamomOT', 'data_times.npy')
+    s_sim = (simulation_depth(depth_cells, np.load(idx_path), np.load(times_path), times_simulation)
+             if depth_cells is not None and os.path.exists(idx_path) and os.path.exists(times_path) else None)
+    s_sim = 1.0 if s_sim is None else s_sim[:, None]
 
     model = NetworkModel(G)
     if stimulus >= 0:
         model.stimulus = stimulus
     if prior >= 0:
         model.prior_network_pen = prior
+    model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
     print(f"[check_KOV_to_sim] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
 
     # Create AnnData objects for each perturbation combination
@@ -209,9 +189,7 @@ def main(argv):
         kos = combo["KO"]
         ovs = combo["OV"]
 
-        ko_label = '-'.join(_gene_label(g, p) for g, p in kos) if kos else 'none'
-        ov_label = '-'.join(_gene_label(g, p) for g, p in ovs) if ovs else 'none'
-        label = f"KO_{ko_label}_OV_{ov_label}"
+        label = combo_label(combo)
         print(f"[check_KOV_to_sim] Processing combination {idx}/{len(combos)}: {label}")
         
         file_prefix = os.path.join(p, f"cardamomOT/data_kon_simul_{label}.npy")
@@ -232,12 +210,12 @@ def main(argv):
         data_sim[0, :] = times_simulation[:]
 
         # Generate negative binomial noise + sparsity
-        zero_mask = (np.random.uniform(0, 1, data_sim[1:, :].shape) < pi_zinb.reshape((G, 1)))
+        zero_mask = (np.random.uniform(0, 1, data_sim[1:, :].shape) < pz_sim.T)
         print(f'[check_KOV_to_sim] New zeros ratio for {label}: {np.sum(zero_mask == 1)/np.size(data_sim[1:, :]):.3f}')
 
         data_sim[1:, :] = np.random.negative_binomial(
-            (np.max(kz, 0) * vect_kon_sim)[:, ns:].T,
-            (c / (c + 1))[ns:].reshape(G, 1)
+            (k1_sim * vect_kon_sim)[:, ns:].T,
+            (c_sim / (c_sim + s_sim))[:, ns:].T
         )
         data_sim[1:, :] = np.where(zero_mask, 0, data_sim[1:, :])
 

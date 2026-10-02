@@ -101,11 +101,11 @@ cardamomot pipeline \
 
 | Flag | Step(s) triggered | Behaviour without flag | Behaviour with flag |
 |---|---|---|---|
-| `--ref` | `prepare_reference_network` | skipped | enabled |
+| `--ref` | `build_reference_network` | skipped | enabled |
 | `--ref-depth N` | *(used with `--ref`)* | `3` (default) | path length set to `N` |
 | `--test` | `infer_test` + `check_test_to_train` | skipped | enabled |
 | `--no-kov` | `simulate_network_KOV` + `check_KOV_to_sim` | enabled | skipped |
-| `--compute-proliferation` | `infer_network_simul` + `simulate_network` + `simulate_network_KOV` | standard simulation | learn R_opt MLP; simulate with proliferation/death resampling |
+| `--simulate-proliferation` | `infer_network_simul` + `simulate_network` + `simulate_network_KOV` | standard simulation | learn R_opt MLP; simulate with proliferation/death resampling |
 | `--no-use-proliferation` | `get_proliferation_rates` | enabled — (re)estimates `obs['proliferation_net_rate']` | skipped — keeps whatever is already in `obs['proliferation_net_rate']` |
 
 ## Run individual steps
@@ -120,11 +120,11 @@ Each step can be run independently with `cardamomot step <script_name> [args]`, 
 cardamomot step get_proliferation_rates -i my_project
 
 # ── Gene selection and cell split ─────────────────────────────────────────────
-cardamomot step select_DEgenes_and_split \
+cardamomot step select_genes_and_split \
     -i my_project -s full -r 1 -c 0 --mean-forcing 0.5 --force-basins 1.0 --temporal-basins 1
 
 # ── Optional: prior network (run after gene selection) ────────────────────────
-cardamomot step prepare_reference_network -i my_project -d 3
+cardamomot step build_reference_network -i my_project -d 3
 
 # ── Kinetics ──────────────────────────────────────────────────────────────────
 # Literature mRNA/protein degradation rates (hour^-1) in adata.var['d0'/'d1'], from the
@@ -146,17 +146,22 @@ cardamomot step infer_network_structure \
     -i my_project -s full --stimulus 1.0 --prior 1.0 --force-basins 1.0 --temporal-basins 1
 cardamomot step infer_network_simul \
     -i my_project -s full --stimulus 1.0 --prior 1.0
-# Add --compute-proliferation to learn a ProliferationMLP from the inferred R_opt values:
-#   cardamomot step infer_network_simul -i my_project -s full --stimulus 1.0 --prior 1.0 --compute-proliferation
+# Add --simulate-proliferation to learn a ProliferationMLP from the inferred R_opt values:
+#   cardamomot step infer_network_simul -i my_project -s full --stimulus 1.0 --prior 1.0 --simulate-proliferation
 
 # ── Simulation ────────────────────────────────────────────────────────────────
 cardamomot step simulate_network -i my_project -s full
-# Add --compute-proliferation to resample trajectories according to the learned R(P) network:
-#   cardamomot step simulate_network -i my_project -s full --compute-proliferation
+# Add --simulate-proliferation to resample trajectories according to the learned R(P) network:
+#   cardamomot step simulate_network -i my_project -s full --simulate-proliferation
 cardamomot step check_sim_to_data \
     -i my_project -s full --stimulus 1.0 --prior 1.0
 
 # ── Optional: test set (requires -s train) ────────────────────────────────────
+# Held-out validation, everything learned on the train cells fixed: test cells classified into basins
+# with the training mixtures (per sample), trajectory loop with the network fixed continuing the training
+# schedule (same EMD + network basin weights, low Sinkhorn regularization), simulation from the test cells
+# at t0, compared to Data/data_test.h5ad (Check/ and section 6 of the final report). The split caps the
+# test cells of each (time, sample) at the number of train cells.
 cardamomot step infer_test \
     -i my_project --stimulus 1.0 --prior 1.0 --force-basins 1.0 --temporal-basins 1
 cardamomot step check_test_to_train \
@@ -164,8 +169,8 @@ cardamomot step check_test_to_train \
 
 # ── Perturbations (default) ───────────────────────────────────────────────────
 cardamomot step simulate_network_KOV -i my_project -s full
-# Add --compute-proliferation to apply proliferation/death resampling to perturbation simulations too:
-#   cardamomot step simulate_network_KOV -i my_project -s full --compute-proliferation
+# Add --simulate-proliferation to apply proliferation/death resampling to perturbation simulations too:
+#   cardamomot step simulate_network_KOV -i my_project -s full --simulate-proliferation
 cardamomot step check_KOV_to_sim \
     -i my_project -s full --stimulus 1.0 --prior 1.0
 ```

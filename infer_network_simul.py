@@ -26,9 +26,11 @@ Output files:
 """
 import sys; sys.path += ['../']
 import numpy as np
-from CardamomOT import NetworkModel as NetworkModel_beta
+from CardamomOT import NetworkModel as NetworkModel_beta, read_stimulus_targets, stimulus_target_mask
+from CardamomOT.inputs import input_dir
 from CardamomOT.inference import signed_floor
 import getopt
+from CardamomOT.config import find_stimulus_schedule
 import anndata as ad
 import pandas as pd
 import os
@@ -50,11 +52,11 @@ def main(argv):
     recompute_proliferations = False
     try:
         opts, args = getopt.getopt(argv, "hi:s:t:p:",
-                                   ["input=", "split=", "stimulus=", "prior=", "compute-proliferation"])
+                                   ["input=", "split=", "stimulus=", "prior=", "simulate-proliferation"])
     except getopt.GetoptError:
         print("[infer_network_simul] Error: Invalid command-line arguments")
         print("[infer_network_simul] Usage: python infer_network_simul.py -i <project_path> -s <split> "
-              "[--stimulus <float>] [--prior <float>] [--compute-proliferation]")
+              "[--stimulus <float>] [--prior <float>] [--simulate-proliferation]")
         sys.exit(2)
 
     for opt, arg in opts:
@@ -66,7 +68,7 @@ def main(argv):
             stimulus = float(arg)
         elif opt in ("-p", "--prior"):
             prior = float(arg)
-        elif opt == "--compute-proliferation":
+        elif opt == "--simulate-proliferation":
             recompute_proliferations = True
         elif opt == "-h":
             print(__doc__)
@@ -91,7 +93,8 @@ def main(argv):
 
     # ─── LOAD STIMULUS SCHEDULE (optional) ──────────────────────────────
     stim_sched = None
-    sched_path = os.path.join(p, 'Data', 'stimulus_schedule.txt')
+    sched_path = (find_stimulus_schedule(input_dir(p))
+                  or os.path.join(input_dir(p), 'stimulus_schedule_inference.txt'))
     if os.path.exists(sched_path):
         stim_sched = np.loadtxt(sched_path)
         print(f"[infer_network_simul] Loaded stimulus schedule from {sched_path}")
@@ -108,6 +111,9 @@ def main(argv):
         model.stimulus = stimulus
     if prior >= 0:
         model.prior_network_pen = prior
+    model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
+    if model.overridden('simulate_with_proliferation'):
+        recompute_proliferations = model.simulate_with_proliferation
     print(f"[infer_network_simul] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
 
     # Load inferred network parameters
@@ -181,6 +187,10 @@ def main(argv):
 
     model.ref_network = signed_floor(model.ref_network, model.prior_network_pen)  # keeps signed priors
     model.ref_network[:ns, :] = model.stimulus
+    # Possible targets of the stimuli (Data/stimulus_targets.txt)
+    model.stimulus_targets = stimulus_target_mask(read_stimulus_targets(input_dir(p)),
+                                                  list(adata.var_names), ns)
+    model._apply_stimulus_targets()
 
     # ─── LOAD INTER_SIMUL_REF (optional) ────────────────────────────────
     # Data/inter_simul_ref.npy or .csv — used as inter_ref in
@@ -288,6 +298,11 @@ def main(argv):
                        os.path.join(cardamom_dir, 'prolif_network.pt'))
             np.save(os.path.join(cardamom_dir, 'prolif_network_n_proteins'),
                     np.array([model.prolif_network.net[0].in_features]))
+            diag = getattr(model.prolif_network, 'diagnostics', None)
+            if diag is not None:
+                import json
+                with open(os.path.join(cardamom_dir, 'prolif_network_diagnostics.json'), 'w') as fh:
+                    json.dump(diag, fh, indent=1)
             print("[infer_network_simul] Saved proliferation network to prolif_network.pt")
         print(f"[infer_network_simul] Successfully saved adapted parameters to {cardamom_dir}")
     except Exception as e:

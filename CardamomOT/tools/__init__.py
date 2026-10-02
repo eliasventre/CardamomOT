@@ -20,6 +20,7 @@ from .estimate_proliferation import (
     score_gene_sets, scores_to_rates, estimate_growth_rates,
     combine_growth_rates_with_reference,
 )
+from .report import generate_report
 
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     'analyse_reseau', 'reseau_top_regulateurs', 'plot_network',
     'score_gene_sets', 'scores_to_rates', 'estimate_growth_rates',
     'combine_growth_rates_with_reference',
+    'generate_report',
 ]

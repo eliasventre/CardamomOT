@@ -20,7 +20,7 @@ from typing import Any
 
 import numpy as np
 from numpy import floating
-from scipy.special import gammaln, logsumexp, psi, polygamma
+from scipy.special import gammaln, logsumexp, psi, polygamma, zeta
 from scipy.stats import nbinom
 from scipy.optimize import minimize
 import ot
@@ -67,9 +67,11 @@ def estim_gamma_poisson(x, mod=0, a_init=0, b_init=0):
     return a, b
 
 
-def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=100, seuil=0.001, tol=1e-6, verb=False) -> tuple[Any, Any]:
+def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=100, seuil=0.001, tol=1e-6, verb=False,
+                            s=None) -> tuple[Any, Any]:
     """
     Original version used for initialization with discrete timepoints.
+    s: per-cell depth factors (counts NB(a, b / s_i)); None = 1.
     """
     t = np.sort(list(set(times)))
     m: int = t.size
@@ -77,33 +79,43 @@ def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=10
     a = np.zeros(m)
     b = np.zeros(m)
     
+    # Distinct counts and their multiplicities per group: sums over cells become sums over values
+    vals, mult = [], []
     for i in range(m):
         cells = (times == t[i])
         n[i] = np.sum(cells)
-        a[i], b[i] = estim_gamma_poisson(x[cells], mod=(i==m)-(i==0), 
+        a[i], b[i] = estim_gamma_poisson(x[cells] if s is None else x[cells] / s[cells], mod=(i==m)-(i==0),
                                          a_init=a_init[i], b_init=b_init)
+        v, w = np.unique(x[cells], return_counts=True)
+        vals.append(v); mult.append(w)
     b = np.mean(b)
+    # Groups as rows of a padded (m, n_values) table; zero multiplicity on the padding
+    V = np.zeros((m, max(len(v) for v in vals)))
+    Wm = np.zeros_like(V)
+    for i in range(m):
+        V[i, :len(vals[i])], Wm[i, :len(vals[i])] = vals[i], mult[i]
     
     # Σ x_i / s_i  (denominator for b)
-    sx: float = max(np.sum(x), EPS)
+    sx: float = max(np.sum(x if s is None else x / s), EPS)
+    gidx = np.searchsorted(t, times) if s is not None else None
 
     k, c = 0, 0
     while (k == 0) or (k < max_iter and c > tol):
-        da = np.zeros(m)
-        for i in range(m):
-            if a[i] > 0:
-                cells = (times == t[i])
-                z = a[i] + x[cells]
-                p0 = np.sum(psi(z))
-                p1 = np.sum(polygamma(1, z))
-
-                # gradient : Σ_i [ψ(x_i+a) + log(b/s_i) - log(1+b/s_i) - ψ(a)]
-                log_b   = np.log(b)
-                log_1pb = np.log(1 + b)
-                d = p0 + n[i] * (log_b - log_1pb) - n[i] * psi(a[i])
-                h = p1 - n[i] * polygamma(1, a[i])
-                if h != 0:
-                    da[i] = -d / h
+        # Newton step on every a_i > 0 at once (trigamma = zeta(2, .)):
+        # gradient Σ_i [ψ(x_i+a) + log(b/s_i) - log(1+b/s_i) - ψ(a)]
+        pos = a > 0
+        a_s = np.where(pos, a, 1.0)
+        z = a_s[:, None] + V
+        p0 = np.sum(Wm * psi(z), axis=1)
+        p1 = np.sum(Wm * zeta(2, z), axis=1)
+        if s is None:
+            lb = n * (np.log(b) - np.log(1 + b))
+        else:  # Σ_i log(b / (b + s_i)) per group
+            lb = np.bincount(gidx, weights=np.log(b) - np.log(b + s), minlength=m)
+        d = p0 + lb - n * psi(a_s)
+        h = p1 - n * zeta(2, a_s)
+        ok = pos & (h != 0)
+        da = np.where(ok, -d / np.where(ok, h, 1.0), 0.0)
         
         a += np.maximum(da, -a)
         b = np.sum(n*a)/sx
@@ -133,9 +145,49 @@ def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=10
     return a, b
 
 
+def nb_separation(kmin, kmax, c):
+    """Separation of two NB modes of shapes kmin, kmax sharing the rate c (mean k / c, variance
+    k (1 + c) / c^2): gap between the means over their pooled standard deviation."""
+    return (kmax - kmin) * np.sqrt(2 / max((kmin + kmax) * (c + 1), EPS))
+
+
+# Groups smaller than this are left out of the initialization (their extreme modes may be chance)
+MIN_GROUP_CELLS, MIN_GROUP_FRAC = 50, 0.05
+
+
+def large_groups(groups):
+    """Cells of the groups holding at least MIN_GROUP_CELLS cells and MIN_GROUP_FRAC of the cells."""
+    labels, inv, counts = np.unique(groups, return_inverse=True, return_counts=True)
+    ok = counts >= max(MIN_GROUP_CELLS, MIN_GROUP_FRAC * len(groups))
+    return ok[inv]
+
+
+def group_init(x, groups_list, seuil=0.001, s=None):
+    """
+    Initialization of the mixture from labelled groups of cells (times, cell types): for each
+    labelling, one NB shape per group with a common rate (infer_kinetics_temporal), small groups
+    left out (large_groups); the labelling whose extreme modes are the most separated
+    (nb_separation) is kept.
+    Returns (kmin, kmax, c, separation, index of the labelling kept).
+    """
+    best = None
+    for i, groups in enumerate(groups_list):
+        if groups is None:
+            continue
+        keep = large_groups(groups)
+        if len(np.unique(groups[keep])) <= 1:
+            continue
+        a, b = infer_kinetics_temporal(x[keep], groups[keep], seuil=seuil, max_iter=1e5,
+                                       s=None if s is None else s[keep])
+        cand = (np.min(a), np.max(a), b, nb_separation(np.min(a), np.max(a), b), i)
+        if best is None or cand[3] > best[3]:
+            best = cand
+    return best
+
+
 def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=None, b_init=None,
                                    tol=1e-6, max_iter=100,  
-                                   damping=0.7, verb=False) -> tuple[Any, Any]:
+                                   damping=0.7, verb=False, s=None) -> tuple[Any, Any]:
     """
     Adapted version of ``infer_kinetics_temporal`` for EM when
     *preserve_mean_values* assignments are used.
@@ -179,7 +231,7 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
         # initialize by weighted mean
         a = np.zeros(K)
         for k in range(K):
-            weighted_mean = np.sum(resp[:, k] * x) / n[k]
+            weighted_mean = np.sum(resp[:, k] * (x if s is None else x / s)) / n[k]
             a[k] = max(seuil, weighted_mean)
     else:
         a = np.array(a_init).copy()
@@ -190,7 +242,7 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
         b = float(b_init)
     
     # weighted total sum (for updating b)
-    sx: np.bool_ | float = max(np.sum(resp * x[:, None]), EPS)
+    sx: np.bool_ | float = max(np.sum(resp * (x if s is None else x / s)[:, None]), EPS)
     
     # Newton-Raphson with damping
     iteration, conv_metric = 0, 0
@@ -208,7 +260,10 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
                 p0 = np.sum(resp[:, k] * psi(z))
                 p1: np.bool_ = np.sum(resp[:, k] * polygamma(1, z))
                 
-                gradient = n[k] * (np.log(b) - np.log(b + 1) - psi(a[k])) + p0
+                if s is None:
+                    gradient = n[k] * (np.log(b) - np.log(b + 1) - psi(a[k])) + p0
+                else:  # Σ_i r_ik log(b / (b + s_i))
+                    gradient = np.sum(resp[:, k] * (np.log(b) - np.log(b + s))) - n[k] * psi(a[k]) + p0
                 hessian = p1 - n[k] * polygamma(1, a[k])
                 
                 # Newton step avec damping
@@ -246,7 +301,7 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
     return a, b
 
 
-def nb_logpmf_vectorized(x, ks, c):
+def nb_logpmf_vectorized(x, ks, c, s=None):
     """
     Vectorized log-PMF of a Negative Binomial.
 
@@ -271,14 +326,17 @@ def nb_logpmf_vectorized(x, ks, c):
 
     ln_c: np.ndarray[Any, np.dtype[Any]]   = np.log(c + EPS)               # scalar
     ln_1pc: np.ndarray[Any, np.dtype[Any]] = np.log(1.0 + c + EPS)         # scalar
+    if s is not None:  # NB(k, c / s_i): rate c / s_i per cell
+        s = np.asarray(s, dtype=float).reshape(-1, 1)
+        ln_c, ln_1pc = np.log(c / s + EPS), np.log(1.0 + c / s + EPS)
 
     return (gammaln(X + K) - gammaln(K) - gammaln(X + 1.0)
             + K * ln_c - (X + K) * ln_1pc)
 
 
-def zinb_logpmf_vectorized(x, ks, c, pi_zero):
+def zinb_logpmf_vectorized(x, ks, c, pi_zero, s=None):
     """ZINB log-pmf matrix."""
-    log_nb = nb_logpmf_vectorized(x, ks, c)
+    log_nb = nb_logpmf_vectorized(x, ks, c, s)
     X = np.asarray(x)
     zeros_mask = (X == 0)
     N: int = X.size
@@ -311,7 +369,7 @@ def zinb_logpmf_vectorized(x, ks, c, pi_zero):
     return logpmf
 
 
-def predict_resp(x, ks, c, pi=None, pi_zero=None, zi=None, forcing=1.0) -> tuple[Any, Any]:
+def predict_resp(x, ks, c, pi=None, pi_zero=None, zi=None, forcing=1.0, s=None) -> tuple[Any, Any]:
         """
         Compute the responsibilities.
         """
@@ -331,9 +389,9 @@ def predict_resp(x, ks, c, pi=None, pi_zero=None, zi=None, forcing=1.0) -> tuple
             pi = pi / (pi.sum() + EPS)
 
         if zi is None:
-            logpmf = nb_logpmf_vectorized(x, ks, c)
+            logpmf = nb_logpmf_vectorized(x, ks, c, s)
         else:
-            logpmf = zinb_logpmf_vectorized(x, ks, c, pi_zero)
+            logpmf = zinb_logpmf_vectorized(x, ks, c, pi_zero, s)
 
         log_joint    = logpmf + np.log(pi + EPS)[None, :]
         log_evidence = logsumexp(log_joint, axis=1, keepdims=True)
@@ -344,7 +402,7 @@ def predict_resp(x, ks, c, pi=None, pi_zero=None, zi=None, forcing=1.0) -> tuple
 
 
 def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=200,
-            basins_temporal=None, vect_t=None, preserve_mean_values=0, mean_forcing=1.0, published=False):
+            basins_temporal=None, vect_t=None, preserve_mean_values=0, mean_forcing=1.0, published=False, s=None):
     """
     Hard EM for a Negative Binomial mixture with temporal constraints.
     
@@ -359,19 +417,19 @@ def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=
     ks, c = ks_init.copy(), c_init
     
     # Initialisation
-    resp, log_proba = predict_resp(data, ks, c)
+    resp, log_proba = predict_resp(data, ks, c, s=s)
     basins, pi = _assign_basins(resp, data, ks, c, vect_t, preserve_mean_values, n_components, mean_forcing,
-                                published=published)
+                                published=published, s=s)
 
     if len(np.unique(basins)) < n_components:
-        basins, pi = _assign_basins(resp, data, ks, c, vect_t, 0, n_components, mean_forcing, published=published)
+        basins, pi = _assign_basins(resp, data, ks, c, vect_t, 0, n_components, mean_forcing, published=published, s=s)
     
     log_likelihood_old = np.sum([log_proba[cell, basins[cell]] for cell in range(n_cells)])
     
     for it in range(max_iter_loop):
         # M-step: update parameters
         ks_new, c_new = infer_kinetics_temporal(data, basins, a_init=ks, b_init=c,
-                                                 seuil=seuil, max_iter=1e5, tol=tol)
+                                                 seuil=seuil, max_iter=1e5, tol=tol, s=s)
 
         if np.size(ks_new) != n_components:
             # All cells collapsed into fewer basins, so ks shrank: keep the last consistent fit.
@@ -379,15 +437,16 @@ def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=
 
         # parameter constraints based on basins_temporal
         if basins_temporal is not None:
-            ks_new = _apply_temporal_constraints(data, basins_temporal, ks_new, c_new, n_components)
+            ks_new = _apply_temporal_constraints(data if s is None else data / s, basins_temporal, ks_new, c_new,
+                                                 n_components)
         
         # E-step: reassign
         resp_new, log_proba = predict_resp(
-            data, ks_new, c_new, pi=pi, forcing=mean_forcing
+            data, ks_new, c_new, pi=pi, forcing=mean_forcing, s=s
             )
         basins_new, pi_new = _assign_basins(resp_new, data, ks_new, c_new, 
                                             vect_t, preserve_mean_values, 
-                                            n_components, mean_forcing, published=published)
+                                            n_components, mean_forcing, published=published, s=s)
         
         if len(np.unique(basins_new)) < n_components:
             return ks, c, pi, basins
@@ -413,7 +472,7 @@ def _ot_assign(mu, nu, cost, published=False):
 
 
 def _assign_basins(resp, data, ks, c, vect_t, preserve_mean_values, n_components, mean_forcing, final=False,
-                   published=False):
+                   published=False, s=None):
     """Assign cells to basins with optional temporal constraints."""
     
     n_cells = data.size
@@ -424,7 +483,7 @@ def _assign_basins(resp, data, ks, c, vect_t, preserve_mean_values, n_components
     if vect_t is None:
         mu = np.ones(n_cells) / n_cells
         nu = _compute_nu_with_temporal_constraint(
-            resp, data, ks, c, n_components, mean_forcing, published=published
+            resp, data, ks, c, n_components, mean_forcing, published=published, s=s
         )
         return _ot_assign(mu, nu, -np.log(resp), published), nu
     
@@ -442,7 +501,8 @@ def _assign_basins(resp, data, ks, c, vect_t, preserve_mean_values, n_components
         
         # Compute nu with temporal constraint
         nu = _compute_nu_with_temporal_constraint(
-            resp_i, data[indices], ks, c, n_components, mean_forcing, published=published
+            resp_i, data[indices], ks, c, n_components, mean_forcing, published=published,
+            s=None if s is None else s[indices]
         )
         
         # Transport optimal
@@ -454,7 +514,7 @@ def _assign_basins(resp, data, ks, c, vect_t, preserve_mean_values, n_components
     return basins, pi
 
 
-def _compute_nu_with_temporal_constraint(resp_i, data_t, ks, c, n_components, mean_forcing, published=False):
+def _compute_nu_with_temporal_constraint(resp_i, data_t, ks, c, n_components, mean_forcing, published=False, s=None):
     """
     Compute the target distribution nu by balancing likelihood and a temporal
     mean constraint.
@@ -468,7 +528,7 @@ def _compute_nu_with_temporal_constraint(resp_i, data_t, ks, c, n_components, me
     # proportions based on the mean constraint
     means_components = ks / c  # Moyenne de chaque NB
     nu = _solve_mean_constraint(means_components, data_t, ks, c, nu_likelihood, n_components, mean_forcing,
-                                published=published)
+                                published=published, s=s)
     nu = np.clip(nu, EPS, 1)  # avoid zero values
     nu /= np.sum(nu)
     
@@ -476,6 +536,7 @@ def _compute_nu_with_temporal_constraint(resp_i, data_t, ks, c, n_components, me
 
 
 def neg_log_likelihood_logits(logits, data, r, p):
+    # p: scalar, or per-cell (depth factors: p_i = c / (c + s_i))
     """
     logits : array (K,)
     data   : array (n,)
@@ -562,14 +623,17 @@ def ks_statistic(data_full, nu, r, p, repet=10, n_cells_init=200) -> Any | float
     return stat / repet
 
 
-def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_components, mean_forcing, published=False):
+def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_components, mean_forcing, published=False,
+                           s=None):
     """
     while minimizing the distance to the uniform distribution_k) = target_mean
     while minimizing the distance to the uniform distribution.
     
     Solves a constrained quadratic optimization problem.
     """
-    mean_t = np.mean(data_t)
+    # Depth factors: mean at the reference depth, p_i = c / (c + s_i) per cell
+    mean_t = np.mean(data_t if s is None else data_t / s)
+    p_cells = c / (1 + c) if s is None else c / (c + np.asarray(s, dtype=float))
 
     # Size everything from the actual components, not a possibly stale n_components.
     n_components = len(means_components)
@@ -579,10 +643,11 @@ def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_component
     # Adjust the level of regularization
     nu_star = compute_nu_star(data=data_t,
                             r_components=ks,
-                            p_components=c/(1 + c),
+                            p_components=p_cells,
                             nu_init=nu_init
                             )
-    stat_KS = ks_statistic(data_t, nu_star, ks , c / (1 + c))
+    # KS statistic at the reference depth (counts rescaled by s and rounded)
+    stat_KS = ks_statistic(data_t if s is None else np.rint(data_t / s), nu_star, ks, c / (1 + c))
     if mean_forcing > 0: alpha_reg = np.clip(stat_KS / mean_forcing, 0.0, 1.0)
     else: alpha_reg = 1.0
 
@@ -636,7 +701,7 @@ def _apply_temporal_constraints(data, basins_temporal, ks, c, n_components):
 
 def em_vectorized_nb_zinb(x, ks_init, c_init, pi_init=None, pi_zero_init=None,
                         zi_mode=None, max_iter=200, tol=1e-6, seuil=0.01, 
-                        damping=0.7, verbose=False) -> Any:
+                        damping=0.7, verbose=False, s=None) -> Any:
     """
     EM for NB/ZINB mixture with ANALYTICAL M-step via Newton-Raphson.
     
@@ -675,9 +740,9 @@ def em_vectorized_nb_zinb(x, ks_init, c_init, pi_init=None, pi_zero_init=None,
         # E-STEP (unchanged)
         # ==================
         if zi_mode is None:
-            logpmf = nb_logpmf_vectorized(x, ks, c)
+            logpmf = nb_logpmf_vectorized(x, ks, c, s)
         else:
-            logpmf = zinb_logpmf_vectorized(x, ks, c, pi_zero)
+            logpmf = zinb_logpmf_vectorized(x, ks, c, pi_zero, s)
 
         logpi: np.ndarray[Any, np.dtype[Any]] = np.log(pi + EPS)[None, :]
         log_joint = logpmf + logpi
@@ -716,20 +781,22 @@ def em_vectorized_nb_zinb(x, ks_init, c_init, pi_init=None, pi_zero_init=None,
             tol=tol,
             max_iter=1e5,  # Newton-Raphson sub-iterations
             damping=damping,
-            verb=verbose
+            verb=verbose,
+            s=s
         )
 
         # 3) Update pi_zero (ZINB only)
         if zi_mode == 'global':
             frac_zeros = np.mean(x == 0)
-            log_nb0 = nb_logpmf_vectorized(np.array([0]), ks, c).ravel()
-            nb0 = np.exp(log_nb0)
+            # P(NB = 0) per component, averaged over the cells' depth factors
+            nb0 = (np.exp(nb_logpmf_vectorized(np.array([0]), ks, c).ravel()) if s is None else
+                   np.exp(nb_logpmf_vectorized(np.zeros(N), ks, c, s)).mean(axis=0))
             expected_nb_zero = (pi * nb0).sum()
             pi_zero = float(np.clip(frac_zeros - expected_nb_zero, 0.0, 0.95))
             
         elif zi_mode == 'component':
-            log_nb0 = nb_logpmf_vectorized(np.array([0]), ks, c).ravel()
-            nb0 = np.exp(log_nb0)
+            nb0 = (np.exp(nb_logpmf_vectorized(np.array([0]), ks, c).ravel()) if s is None else
+                   np.exp(nb_logpmf_vectorized(np.zeros(N), ks, c, s)).mean(axis=0))
             if np.any(x == 0):
                 frac_zeros_j = resp[x == 0].sum(axis=0) / (N + EPS)
             else:
@@ -738,9 +805,9 @@ def em_vectorized_nb_zinb(x, ks_init, c_init, pi_init=None, pi_zero_init=None,
 
     # Final likelihood
     if zi_mode is None:
-        final_logpmf = nb_logpmf_vectorized(x, ks, c)
+        final_logpmf = nb_logpmf_vectorized(x, ks, c, s)
     else:
-        final_logpmf = zinb_logpmf_vectorized(x, ks, c, pi_zero)
+        final_logpmf = zinb_logpmf_vectorized(x, ks, c, pi_zero, s)
     
     final_joint = final_logpmf + np.log(pi + EPS)[None, :]
     final_logev = logsumexp(final_joint, axis=1)
@@ -758,7 +825,7 @@ def _per_cell_log_masses(pi, vect_t, n_cells):
     return np.tile(np.log(np.asarray(pi, dtype=float) + EPS), (n_cells, 1))
 
 
-def soft_em_fixed_masses(x, vect_t, ks, c, pi, seuil=0.001, max_iter=50, tol=1e-6):
+def soft_em_fixed_masses(x, vect_t, ks, c, pi, seuil=0.001, max_iter=50, tol=1e-6, s=None):
     """
     EM on the NB parameters (ks, c) with the basin masses pi kept fixed.
 
@@ -770,10 +837,10 @@ def soft_em_fixed_masses(x, vect_t, ks, c, pi, seuil=0.001, max_iter=50, tol=1e-
     log_masses = _per_cell_log_masses(pi, vect_t, x.size)
     ks = np.asarray(ks, dtype=float).copy()
     for _ in range(max_iter):
-        log_joint = nb_logpmf_vectorized(x, ks, c) + log_masses
+        log_joint = nb_logpmf_vectorized(x, ks, c, s) + log_masses
         resp = np.exp(log_joint - logsumexp(log_joint, axis=1, keepdims=True))
         ks_new, c_new = infer_kinetics_preserve_mean_values_assignment(
-            x, resp, seuil=seuil, a_init=ks.copy(), b_init=c, max_iter=200)
+            x, resp, seuil=seuil, a_init=ks.copy(), b_init=c, max_iter=200, s=s)
         converged = np.max(np.abs(ks_new / c_new - ks / c) / (ks / c + EPS)) < tol
         ks, c = ks_new, c_new
         if converged:
@@ -785,13 +852,13 @@ def soft_em_fixed_masses(x, vect_t, ks, c, pi, seuil=0.001, max_iter=50, tol=1e-
 # Fonction pour calculer l'AIC
 # ---------------------------
 
-def compute_aic_for_params(x, ks, c, pi, pi_zero, zi_mode) -> tuple[Any, floating[Any]]:
+def compute_aic_for_params(x, ks, c, pi, pi_zero, zi_mode, s=None) -> tuple[Any, floating[Any]]:
     """Compute the AIC for a given set of parameters."""
     if zi_mode is None:
-        logpmf = nb_logpmf_vectorized(x, ks, c)
+        logpmf = nb_logpmf_vectorized(x, ks, c, s)
         num_params: int = len(ks) + 1 + (len(ks) - 1)
     else:
-        logpmf = zinb_logpmf_vectorized(x, ks, c, pi_zero)
+        logpmf = zinb_logpmf_vectorized(x, ks, c, pi_zero, s)
         if zi_mode == 'global':
             num_params: int = len(ks) + 1 + (len(ks) - 1) + 1
         else:  # component
@@ -855,9 +922,11 @@ class NegativeBinomialMixtureEM:
         self.best_model = None
 
 
-    def _init_for_K(self, x, K, vect_t=None, vect_celltypes=None, quant_init=None, seuil=0.01):
-        mean = np.mean(x)
-        var = np.var(x)
+    def _init_for_K(self, x, K, vect_t=None, vect_celltypes=None, quant_init=None, seuil=0.01, s=None):
+        # Moments at the reference depth (depth factors s)
+        xr = x if s is None else x / s
+        mean = np.mean(xr)
+        var = np.var(xr)
         
         if mean <= 0:
             k_glob = 1.0
@@ -869,17 +938,17 @@ class NegativeBinomialMixtureEM:
                 k_glob = max(1e-3, (mean**2) / (var - mean))
             c_glob = max(1e-6, k_glob / (mean + 1e-16))
 
-        if vect_t is not None:
-            if vect_celltypes is None or (vect_celltypes is not None and len(np.unique(vect_celltypes)) <= 1):
-                a_per_time, b_est = infer_kinetics_temporal(x, vect_t, seuil=seuil, max_iter=1e5)
-                ks_init = np.linspace(np.min(a_per_time), np.max(a_per_time), K)
-                c_init = b_est
-            else:
-                a_per_time, b_time = infer_kinetics_temporal(x, vect_t, seuil=seuil, max_iter=1e5)
-                a_per_type, b_type = infer_kinetics_temporal(x, vect_celltypes, seuil=seuil, max_iter=1e5)
-                ks_init = np.linspace(min(np.min(a_per_time/b_time), np.min(a_per_type/b_type)), max(np.max(a_per_time/b_time), np.max(a_per_type/b_type)), K)
-                c_init = (b_time + b_type)/2
-                ks_init *= c_init
+        self._init_groups = 'time'
+        init = group_init(x, [vect_t, vect_celltypes], seuil, s) if vect_t is not None else None
+        if init is not None:
+            # Extreme modes of the most diverse labelling (times or cell types), common rate
+            kmin, kmax, c_init, _, i = init
+            ks_init = np.linspace(kmin, kmax, K)
+            self._init_groups = ('time', 'celltype')[i]
+        elif vect_t is not None:
+            a_per_time, b_est = infer_kinetics_temporal(x, vect_t, seuil=seuil, max_iter=1e5, s=s)
+            ks_init = np.linspace(np.min(a_per_time), np.max(a_per_time), K)
+            c_init = b_est
         else:
             if vect_celltypes is None or (vect_celltypes is not None and len(np.unique(vect_celltypes)) <= 1):
                 if quant_init is None:
@@ -914,8 +983,8 @@ class NegativeBinomialMixtureEM:
         n = 1/2
         m, M = np.min(ks_init), np.max(ks_init)
         while (len(np.unique((ks_init/c_init).astype(int))) < K) and (n > 1/x.size):
-            mn = min(m, np.quantile(seuil + x*c_init, n))
-            Mn = max(M, np.quantile(seuil + x*c_init, 1-n))
+            mn = min(m, np.quantile(seuil + xr*c_init, n))
+            Mn = max(M, np.quantile(seuil + xr*c_init, 1-n))
             ks_init = np.linspace(mn, Mn, K)
             n /= 2
         # A zero rate makes nbinom.logpmf/cdf return NaN.
@@ -1107,7 +1176,7 @@ class NegativeBinomialMixtureEM:
         return best_model
 
     def fit(self, x, vect_t=None, vect_celltypes=None, quant_init=None, seuil=0.001,
-            batch_size_mixture=None, scboolseq_labels=None, scboolseq_dropout=None, strata=None):
+            batch_size_mixture=None, scboolseq_labels=None, scboolseq_dropout=None, strata=None, s=None):
         """
         Fit the NB mixture model to data ``x``.
 
@@ -1122,6 +1191,8 @@ class NegativeBinomialMixtureEM:
                with the learned parameters.
         strata : (N,) cell types or None
                If given, the sub-sample is cell-type proportional within each timepoint.
+        s      : (N,) per-cell depth factors or None: counts modelled as NB(k, c / s_i), the
+               parameters ks, c being those of a cell at the reference depth (s = 1).
         """
         # ── Keep full-data references for the final resp computation ────────
         x_all: np.ndarray[Any, np.dtype[Any]] = np.asarray(x).astype(int)
@@ -1155,6 +1226,9 @@ class NegativeBinomialMixtureEM:
 
         x: np.ndarray[Any, np.dtype[Any]] = x_all[cells_to_use]
         vect_t   = vect_t_all[cells_to_use]   if vect_t_all is not None else None
+        vect_celltypes = np.asarray(vect_celltypes)[cells_to_use] if vect_celltypes is not None else None
+        s_all = None if s is None else np.asarray(s, dtype=float)
+        s = None if s_all is None else s_all[cells_to_use]
         x_init = x
 
         best_aic: float = np.inf
@@ -1164,14 +1238,17 @@ class NegativeBinomialMixtureEM:
             if self.verbose:
                 logger.info("=== Trying K_init = %s ===", K_try)
             ks_init, c_init, pi_init, pi_zero_init = self._init_for_K(
-                x_init, K_try, vect_t=vect_t, vect_celltypes=vect_celltypes, quant_init=quant_init, seuil=seuil
+                x_init, K_try, vect_t=vect_t, vect_celltypes=vect_celltypes, quant_init=quant_init, seuil=seuil, s=s
             )
 
             if self.hard_em:
                 if vect_t is not None:
-                    basins_temporal = np.ones_like(vect_t) * K_try
-                    list_t = np.unique(vect_t)
-                    mean_list: list[floating[Any]] = [np.mean(x[vect_t == time]) for time in list_t]
+                    # Extreme groups of the labelling kept at initialization bound the extreme modes
+                    grp = vect_celltypes if getattr(self, '_init_groups', 'time') == 'celltype' else vect_t
+                    basins_temporal = np.ones(len(grp), dtype=int) * K_try
+                    big = large_groups(grp)
+                    list_t = np.unique(grp[big]) if len(np.unique(grp[big])) > 1 else np.unique(grp)
+                    mean_list: list[floating[Any]] = [np.mean(x[grp == time]) for time in list_t]
                     ml: np.signedinteger[Any] = np.argmin(mean_list)
                     Ml: np.signedinteger[Any] = np.argmax(mean_list)
                     if ml == Ml and len(list_t) > 1:
@@ -1185,19 +1262,19 @@ class NegativeBinomialMixtureEM:
                         # K_try-1 are never simultaneously empty when at
                         # least two timepoints exist.
                         ml, Ml = 0, len(list_t) - 1
-                    basins_temporal[vect_t == list_t[ml]] = 0
-                    basins_temporal[vect_t == list_t[Ml]] = K_try - 1
+                    basins_temporal[grp == list_t[ml]] = 0
+                    basins_temporal[grp == list_t[Ml]] = K_try - 1
                     ks_init, c_init, pi_init, basins = hard_em(
                         x, K_try, ks_init, c_init, seuil, tol=self.tol,
                         basins_temporal=basins_temporal, vect_t=vect_t,
                         preserve_mean_values=self.preserve_mean_values,
-                        mean_forcing=self.mean_forcing_em, published=self.published_version
+                        mean_forcing=self.mean_forcing_em, published=self.published_version, s=s
                     )
                 else:
                     ks_init, c_init, pi_init, basins = hard_em(
                         x, K_try, ks_init, c_init, seuil, tol=self.tol,
                         preserve_mean_values=self.preserve_mean_values,
-                        mean_forcing=self.mean_forcing_em, published=self.published_version
+                        mean_forcing=self.mean_forcing_em, published=self.published_version, s=s
                     )
 
             if (self.refilter > 0.0) and (ks_init.size > 1):
@@ -1212,7 +1289,7 @@ class NegativeBinomialMixtureEM:
             # ── AIC de l'initialisation ───────────────────────────────────
             if self.compare_init_aic:
                 aic_init, loglik_init = compute_aic_for_params(
-                    x, ks_init, c_init, pi_init, pi_zero_init, self.zi
+                    x, ks_init, c_init, pi_init, pi_zero_init, self.zi, s
                 )
                 if self.verbose:
                     logger.info("Init AIC: %.3f, loglik: %.3f", aic_init, loglik_init)
@@ -1233,7 +1310,7 @@ class NegativeBinomialMixtureEM:
                         x, ks_final, c_final, pi_final, pi_zero_final,
                         zi_mode=self.zi, max_iter=self.max_iter_em,
                         tol=self.tol, seuil=seuil, damping=self.damping,
-                        verbose=self.verbose
+                        verbose=self.verbose, s=s
                     )
 
                 if self.verbose:
@@ -1274,10 +1351,10 @@ class NegativeBinomialMixtureEM:
                     K_final      = ks_init.size
                     # Recalculer resp
                     if self.zi is None:
-                        logpmf = nb_logpmf_vectorized(x, ks_final, c_final)
+                        logpmf = nb_logpmf_vectorized(x, ks_final, c_final, s)
                     else:
                         logpmf = zinb_logpmf_vectorized(
-                            x, ks_final, c_final, pi_zero_final
+                            x, ks_final, c_final, pi_zero_final, s
                         )
                     log_joint    = logpmf + np.log(pi_final + EPS)[None, :]
                     log_evidence = logsumexp(log_joint, axis=1, keepdims=True)
@@ -1290,12 +1367,12 @@ class NegativeBinomialMixtureEM:
                 # Recompute resp and basins on ALL cells (not just the mini-batch)
                 resp_final, _ = predict_resp(
                     x_all, ks_final, c_final,
-                    pi_zero=pi_zero_final, zi=self.zi, pi=pi_final, forcing=self.mean_forcing_em
+                    pi_zero=pi_zero_final, zi=self.zi, pi=pi_final, forcing=self.mean_forcing_em, s=s_all
                 )
                 basins, pi_final = _assign_basins(
                     resp_final, x_all, ks_final, c_final, vect_t_all,
                     self.preserve_mean_values, len(ks_final),
-                    self.mean_forcing_em, final=True, published=self.published_version
+                    self.mean_forcing_em, final=True, published=self.published_version, s=s_all
                 )
                 best_aic = aic_final
                 best_model = {
@@ -1325,11 +1402,11 @@ class NegativeBinomialMixtureEM:
                 self.best_model = best_model
                 return best_model
             ks_r, c_r = soft_em_fixed_masses(x, vect_t, best_model['ks'], best_model['c'],
-                                             best_model['pi'], seuil=seuil)
+                                             best_model['pi'], seuil=seuil, s=s)
             # Keep the hard-EM solution if soft EM degenerates (k -> 0, c on its bound)
             # or does not improve the likelihood
             def _loglik(ks_, c_):
-                return np.sum(logsumexp(nb_logpmf_vectorized(x, ks_, c_) + log_masses, axis=1))
+                return np.sum(logsumexp(nb_logpmf_vectorized(x, ks_, c_, s) + log_masses, axis=1))
             degenerate = (not np.all(np.isfinite(ks_r)) or not np.isfinite(c_r) or np.min(ks_r) <= 0
                           or c_r <= seuil * (1 + 1e-6) or c_r >= (1 / seuil) * (1 - 1e-6))
             if degenerate or _loglik(ks_r, c_r) < _loglik(best_model['ks'], best_model['c']):
@@ -1339,10 +1416,10 @@ class NegativeBinomialMixtureEM:
                 return best_model
             pi_glob = np.exp(_per_cell_log_masses(best_model['pi'], vect_t_all, N_all)).mean(axis=0)
             resp_r, _ = predict_resp(x_all, ks_r, c_r, pi_zero=best_model['pi_zero'], zi=self.zi,
-                                     pi=pi_glob, forcing=self.mean_forcing_em)
+                                     pi=pi_glob, forcing=self.mean_forcing_em, s=s_all)
             basins_r, pi_r = _assign_basins(resp_r, x_all, ks_r, c_r, vect_t_all, self.preserve_mean_values,
-                                            len(ks_r), self.mean_forcing_em, final=True)
-            aic_r, loglik_r = compute_aic_for_params(x_all, ks_r, c_r, pi_glob, best_model['pi_zero'], self.zi)
+                                            len(ks_r), self.mean_forcing_em, final=True, s=s_all)
+            aic_r, loglik_r = compute_aic_for_params(x_all, ks_r, c_r, pi_glob, best_model['pi_zero'], self.zi, s_all)
             best_model.update(ks=ks_r, c=c_r, pi=pi_r, basins=basins_r, resp=resp_r,
                               loglik=float(loglik_r), aic=float(aic_r))
 

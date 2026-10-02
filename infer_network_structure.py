@@ -22,8 +22,11 @@ Output files:
 import sys; sys.path += ['../']
 import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta, find_data_file
+from CardamomOT.inputs import input_dir
 from CardamomOT import check_stationary, STATIONARY_EXIT_CODE, STATIONARY_MESSAGE
+from CardamomOT import read_stimulus_targets, stimulus_target_mask
 import getopt
+from CardamomOT.config import find_stimulus_schedule
 import anndata as ad
 import pandas as pd
 import os
@@ -88,7 +91,8 @@ def main(argv):
 
     # ─── LOAD STIMULUS SCHEDULE (optional) ──────────────────────────────
     stim_sched = None
-    sched_path = os.path.join(p, 'Data', 'stimulus_schedule.txt')
+    sched_path = (find_stimulus_schedule(input_dir(p))
+                  or os.path.join(input_dir(p), 'stimulus_schedule_inference.txt'))
     if os.path.exists(sched_path):
         stim_sched = np.loadtxt(sched_path)
         print(f"[infer_network_structure] Loaded stimulus schedule from {sched_path}")
@@ -109,6 +113,7 @@ def main(argv):
             model.force_basins = force_basins
         if temporal_basins >= 0:
             model.temporal_basins = temporal_basins
+        model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
         print(f"[infer_network_structure] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}, "
               f"force_basins={model.force_basins}, temporal_basins={model.temporal_basins}")
         model.modes = np.load(os.path.join(p, 'cardamomOT', 'modes.npy'))
@@ -131,6 +136,9 @@ def main(argv):
     G_tot = adata.shape[1] + model.n_stimuli
     ns = model.n_stimuli
     model.ref_network = np.ones((G_tot, G_tot, model.n_networks))
+    # Possible targets of the stimuli (Data/stimulus_targets.txt), applied in fit_network
+    model.stimulus_targets = stimulus_target_mask(read_stimulus_targets(input_dir(p)),
+                                                  list(adata.var_names), ns)
     stim_labels = ['Stimulus'] if ns == 1 else [f'Stimulus_{i}' for i in range(ns)]
     genes_list = stim_labels + [g.upper() for g in adata.var_names]
     genes_only = [g.upper() for g in adata.var_names]   # no stimulus prefix
@@ -155,7 +163,7 @@ def main(argv):
 
     # ─── LOAD USER-PROVIDED reference_network.csv FROM Data/ ─────────────
     # Users can place Data/reference_network.csv to override or supplement the
-    # structural prior without running prepare_reference_network.py.
+    # structural prior without running build_reference_network.py.
     data_ref_path = os.path.join(p, 'Data', 'reference_network.csv')
     if os.path.exists(data_ref_path):
         _ref_df = pd.read_csv(data_ref_path, index_col=0)
@@ -329,7 +337,7 @@ def main(argv):
     # KO genes get basal_ref = -100 (forced OFF), OV genes get +100 (forced ON).
     # Also saves basal_ref_mask.npy: bool (n_samples, G_tot) for downstream
     # simulate_network_KOV clean-basal computation.
-    kov_path = os.path.join(p, 'Data', 'KO_OV_inference.txt')
+    kov_path = os.path.join(input_dir(p), 'KO_OV_inference.txt')
     if os.path.exists(kov_path):
         try:
             df_kov = pd.read_csv(kov_path, sep='\t', dtype=str).fillna('')
@@ -380,13 +388,21 @@ def main(argv):
 
     # ─── LOAD TRANSITION RATES (optional) ───────────────────────────────────
     transition_rates = None
-    tr_path = find_data_file(os.path.join(p, 'Data'), 'transition_rates')
+    tr_path = find_data_file(input_dir(p), 'transition_rates')
     if tr_path is not None:
         transition_rates = pd.read_csv(tr_path, sep=None, engine='python', index_col=0)
         transition_rates.index = transition_rates.index.astype(str)
         transition_rates.columns = transition_rates.columns.astype(str)
         print(f"[infer_network_structure] Loaded transition rates from {tr_path} "
               f"shape={transition_rates.shape}")
+
+    # ─── LOAD POPULATION SIZES (optional) ───────────────────────────────────
+    # Two columns, no header: time, total cell number. Sets the absolute growth of the growth OT pass.
+    ps_path = find_data_file(input_dir(p), 'population_sizes')
+    if ps_path is not None:
+        ps = pd.read_csv(ps_path, sep=None, engine='python', header=None)
+        model.population_sizes = {float(t): float(n) for t, n in zip(ps.iloc[:, 0], ps.iloc[:, 1])}
+        print(f"[infer_network_structure] Loaded population sizes from {ps_path}: {model.population_sizes}")
 
     model.fit_network(adata, intensity_prior=100, verb=1, stimulus_schedule=stim_sched,
                       basal_init=basal_init, inter_init=inter_init,
@@ -414,9 +430,12 @@ def main(argv):
     if model.kon_beta_harissa is not None:
         np.save(os.path.join(cardamom_dir, 'data_kon_beta_harissa'), model.kon_beta_harissa)
     np.save(os.path.join(cardamom_dir, 'alpha'), model.alpha)
+    np.save(os.path.join(cardamom_dir, 'n_iter_inference'), np.array([model.n_iter_final]))
     np.save(os.path.join(cardamom_dir, 'degradations'), model.d)
     if model.R_opt is not None:
         np.save(os.path.join(cardamom_dir, 'data_R_opt'), model.R_opt)
+    # Real cell (row of data_<split>.h5ad) behind each trajectory state, -1 if none
+    np.save(os.path.join(cardamom_dir, 'data_traj_real_idx'), model.traj_real_idx)
     # Cell type behind each trajectory state (stratifies the batches of infer_network_simul)
     ct_path = os.path.join(cardamom_dir, 'data_cell_types.npy')
     if model.traj_cell_types is not None:

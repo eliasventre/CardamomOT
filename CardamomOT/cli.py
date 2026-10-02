@@ -177,17 +177,23 @@ def _pipeline(args: argparse.Namespace) -> None:
 
     species_flag = ['--species', args.species] if args.species else []
 
+    _run_script('estimate_cell_depth.py', ['-i', inp])
+
     if args.use_proliferation:
         _run_script('get_proliferation_rates.py', ['-i', inp] + species_flag)
 
-    _run_script('select_DEgenes_and_split.py',
+    _run_script('select_genes_and_split.py',
                 ['-i', inp, '-s', sp, '-r', args.rate, '-c', args.change,
-                 '-m', args.mean, '--force-basins', fb, '--temporal-basins', tb])
+                 '-m', args.mean, '--force-basins', fb, '--temporal-basins', tb,
+                 '--prior', prior, '--ref', '1' if args.ref else '0'])
 
-    if args.ref:
-        _run_script('prepare_reference_network.py', ['-i', inp, '-d', str(args.ref_depth)])
+    # With change=1 the selection already wrote the literature prior (same computation)
+    if args.ref and str(args.change) != '1':
+        _run_script('build_reference_network.py',
+                    ['-i', inp] + (['-d', str(args.ref_depth)] if args.ref_depth is not None else [])
+                    + (['--resources', args.ref_resources] if args.ref_resources else []) + species_flag)
 
-    prolif_flag = ['--compute-proliferation'] if args.compute_proliferation else []
+    prolif_flag = ['--simulate-proliferation'] if args.simulate_proliferation else []
 
     _run_script('get_degradation_rates.py', ['-i', inp, '-s', sp] + species_flag)
     _run_script('infer_mixture.py',
@@ -210,6 +216,8 @@ def _pipeline(args: argparse.Namespace) -> None:
         _run_script('simulate_network_KOV.py', ['-i', inp, '-s', sp] + prolif_flag)
         _run_script('check_KOV_to_sim.py',
                     ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior])
+
+    _run_script('report_results.py', ['-i', inp, '-s', sp, '--stimulus', stim, '--prior', prior])
 
     print("\nPipeline complete.")
 
@@ -248,23 +256,29 @@ def main() -> None:
     p_pipe.add_argument('--stimulus', default='-1',
                         help='stimulus-edge penalisation in [0,1] (-1=model default)')
     p_pipe.add_argument('--prior', default='-1',
-                        help='prior-network weighting in [0,1] (-1=model default)')
+                        help='weight of the edges absent from the prior network cardamomOT/ref_network.csv '
+                             '(0 = hard constraint, sparse; 1 = prior ignored; -1 = model default)')
     p_pipe.add_argument('--force-basins', default='-1', dest='force_basins',
                         help='preserve NB mode means in [0,1] (-1=model default)')
     p_pipe.add_argument('--temporal-basins', default='-1', dest='temporal_basins',
                         help='enforce temporal mode consistency (0 or 1)')
     p_pipe.add_argument('--ref', action='store_true', default=False,
-                        help='run prepare_reference_network (default: off)')
-    p_pipe.add_argument('--ref-depth', type=int, default=3, dest='ref_depth',
-                        help='path length for prepare_reference_network (default: 3)')
+                        help='build the literature prior (default: off); with -c 1 the selection builds it, '
+                             'and with --prior 0 the gene budget is set by model.max_free_params')
+    p_pipe.add_argument('--ref-depth', type=int, default=None, dest='ref_depth',
+                        help='max literature path length for build_reference_network, -c 0 only '
+                             '(default: model.literature_depth = 3)')
+    p_pipe.add_argument('--ref-resources', default=None, choices=['extended', 'core'], dest='ref_resources',
+                        help='literature resources for build_reference_network, -c 0 only '
+                             '(default: model.literature_resources = extended)')
     p_pipe.add_argument('--test', action='store_true', default=False,
                         help='run test-set inference steps (default: off)')
     p_pipe.add_argument('--no-kov', action='store_true', default=False,
                         help='skip KO/OV perturbation steps (default: run them)')
-    p_pipe.add_argument('--compute-proliferation', action='store_true', default=False,
-                        dest='compute_proliferation',
-                        help='learn R_opt MLP and simulate with branching PDMP trajectories '
-                             '(forwarded as --compute-proliferation to infer_network_simul, '
+    p_pipe.add_argument('--simulate-proliferation', action='store_true', default=False,
+                        dest='simulate_proliferation',
+                        help='simulate with proliferation/death: learn the R(P) MLP and simulate branching PDMP trajectories '
+                             '(forwarded as --simulate-proliferation to infer_network_simul, '
                              'simulate_network, simulate_network_KOV; default: off)')
     p_pipe.add_argument('--no-use-proliferation', action='store_false', default=True,
                         dest='use_proliferation',

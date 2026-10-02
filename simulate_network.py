@@ -19,7 +19,9 @@ Output files:
 import sys; sys.path += ['../']
 import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta
+from CardamomOT.inputs import input_dir
 import getopt
+from CardamomOT.config import n_inference_stimuli, simulation_schedule
 import anndata as ad
 import os
 import torch
@@ -35,11 +37,11 @@ def main(argv):
     split = ''
     simulate_with_proliferation = False
     try:
-        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split=", "compute-proliferation"])
+        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split=", "simulate-proliferation"])
     except getopt.GetoptError:
         print("[simulate_network] Error: Invalid command-line arguments")
         print("[simulate_network] Usage: python simulate_network.py -i <project_path> -s <split> "
-              "[--compute-proliferation]")
+              "[--simulate-proliferation]")
         sys.exit(2)
 
     for opt, arg in opts:
@@ -47,7 +49,7 @@ def main(argv):
             inputfile = arg
         elif opt in ("-s", "--split"):
             split = '{}'.format(arg)
-        elif opt == "--compute-proliferation":
+        elif opt == "--simulate-proliferation":
             simulate_with_proliferation = True
         elif opt == "-h":
             print(__doc__)
@@ -72,19 +74,15 @@ def main(argv):
 
     # ─── LOAD STIMULUS SCHEDULE ──────────────────────────────────────────
     # Prefer simulation-specific schedule; fall back to inference schedule
-    stim_sched = None
-    for sched_name in ('stimulus_schedule_simul.txt', 'stimulus_schedule.txt'):
-        sched_path = os.path.join(p, 'Data', sched_name)
-        if os.path.exists(sched_path):
-            stim_sched = np.loadtxt(sched_path)
-            print(f"[simulate_network] Loaded stimulus schedule from {sched_path}")
-            break
-
-    # ─── DETECT n_stimuli FROM SCHEDULE ─────────────────────────────────
-    _stim_arr = np.asarray(stim_sched) if stim_sched is not None else None
-    n_stimuli = int(_stim_arr.shape[1]) if (_stim_arr is not None and _stim_arr.ndim == 2) else 1
+    # Inference stimuli in simulation: first columns of stimulus_schedule_simulate.txt, else inference schedule
+    n_stimuli = n_inference_stimuli(input_dir(p))
+    stim_sched, _ = simulation_schedule(input_dir(p), n_stimuli)
 
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
+    model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
+    if model.overridden('simulate_with_proliferation'):
+        simulate_with_proliferation = model.simulate_with_proliferation
+    model.simulate_with_proliferation = False  # enabled below once the proliferation network is loaded
     print(f"[simulate_network] Data: {adata.shape[1]} genes, {adata.shape[0]} cells, n_stimuli={n_stimuli}")
 
     # Load inferred network parameters
@@ -122,7 +120,7 @@ def main(argv):
         sys.exit(1)
 
     # Determine simulation timepoints
-    times_file = os.path.join(p, 'Data', 'times_to_simulate.txt')
+    times_file = os.path.join(input_dir(p), 'times_to_simulate.txt')
     if os.path.exists(times_file):
         print(f"[simulate_network] Custom timepoints found in {times_file}")
         try:
@@ -151,14 +149,15 @@ def main(argv):
             from CardamomOT.inference.proliferations import ProliferationMLP
             n_proteins = int(np.load(n_prot_path)[0])
             prolif_net = ProliferationMLP(n_proteins)
-            prolif_net.load_state_dict(torch.load(prolif_path, map_location='cpu', weights_only=True))
+            # strict=False: networks saved before input standardisation keep identity scaling
+            prolif_net.load_state_dict(torch.load(prolif_path, map_location='cpu', weights_only=True), strict=False)
             prolif_net.eval()
             model.prolif_network = prolif_net
             model.simulate_with_proliferation = True
             print("[simulate_network] Loaded proliferation network — branching simulation enabled")
         else:
-            print("[simulate_network] Warning: --compute-proliferation requested but prolif_network.pt not found; "
-                  "run infer_network_simul.py --compute-proliferation first")
+            print("[simulate_network] Warning: --simulate-proliferation requested but prolif_network.pt not found; "
+                  "run infer_network_simul.py --simulate-proliferation first")
 
     # Simulate network dynamics
     print("[simulate_network] Starting network simulation...")
@@ -171,6 +170,9 @@ def main(argv):
         np.save(os.path.join(cardamom_dir, 'data_prot_simul'), model.prot)
         np.save(os.path.join(cardamom_dir, 'data_kon_simul'), model.kon_theta)
         np.save(os.path.join(cardamom_dir, 'simulation_times'), model.times_simul)
+        # Whether the cells were resampled by the proliferation MLP (reference used by check_sim_to_data)
+        np.save(os.path.join(cardamom_dir, 'simulation_with_proliferation'),
+                np.array([bool(model.simulate_with_proliferation and model.prolif_network is not None)]))
         if model.simulate_full_with_harissa and hasattr(model, 'mrna_simul') and model.mrna_simul is not None:
             np.save(os.path.join(cardamom_dir, 'data_mrna_simul'), model.mrna_simul)
             print(f"[simulate_network] Saved mRNA simulation to data_mrna_simul.npy")

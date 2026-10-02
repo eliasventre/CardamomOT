@@ -124,15 +124,33 @@ def _kon_ref_vector_serial(y_prot, kz, theta_inter, theta_basal) -> np.ndarray:
     return out
 
 
+def ks_of(ks, s_idx):
+    """Mixture amplitudes of sample s_idx: per-sample when ks is 3-D (S, G, n_modes), else shared."""
+    return ks[min(s_idx, ks.shape[0] - 1)] if np.ndim(ks) == 3 else ks
+
+
+def s1_of(s1, s_idx):
+    """mRNA-to-protein factor of sample s_idx: per-sample when s1 is 2-D (S, G), else shared."""
+    return s1[min(s_idx, s1.shape[0] - 1)] if np.ndim(s1) == 2 else s1
+
+
+def s1_rows(s1, samples_data):
+    """s1 for each row (cell) of samples_data (sample positions as in _kon_per_sample)."""
+    if np.ndim(s1) < 2 or samples_data is None:
+        return s1
+    pos = np.searchsorted(np.sort(np.unique(samples_data)), samples_data)
+    return s1[np.minimum(pos, s1.shape[0] - 1)]
+
+
 def _kon_per_sample(y_prot, ks, inter, basal, samples_data=None):
     """
-    kon_ref_vector with per-sample basal support.
+    kon_ref_vector with per-sample basal and mixture support.
 
-    When basal is 2-D (G, n_networks) or samples_data is None, delegates to
-    kon_ref_vector directly.  When basal is 3-D (n_samples, G, n_networks),
-    routes each cell to its sample's basal slice via samples_data.
+    When neither basal is 3-D (n_samples, G, n_networks) nor ks is 3-D (n_samples, G, n_modes),
+    or samples_data is None, delegates to kon_ref_vector directly. Otherwise routes each cell
+    to its sample's slices via samples_data.
     """
-    if basal.ndim < 3 or samples_data is None:
+    if (basal.ndim < 3 and np.ndim(ks) < 3) or samples_data is None:
         return kon_ref_vector(y_prot, ks, inter, basal)
     samples_id = np.sort(np.unique(samples_data))
     out = np.zeros((y_prot.shape[0], y_prot.shape[1]))
@@ -140,8 +158,8 @@ def _kon_per_sample(y_prot, ks, inter, basal, samples_data=None):
         mask = (samples_data == s)
         if not np.any(mask):
             continue
-        basal_s = basal[min(s_idx, basal.shape[0] - 1)]
-        out[mask] = kon_ref_vector(y_prot[mask], ks, inter, basal_s)
+        basal_s = basal[min(s_idx, basal.shape[0] - 1)] if basal.ndim == 3 else basal
+        out[mask] = kon_ref_vector(y_prot[mask], ks_of(ks, s_idx), inter, basal_s)
     return out
 
     
@@ -233,6 +251,7 @@ def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init
                     basal, inter, ks, delta_t, tol=0.6, n_pas=25, samples_data=None, stim_vals=np.ones(1), scale_proteins=1):
     
     ns = len(stim_vals)
+    s1 = s1_rows(s1, samples_data)
     y_prot = np.ones_like(y_rna_end)
     y_prot[:, :ns] = stim_vals * scale_proteins
     diff_kon = np.abs(y_kon_end_true[:, ns:] - y_kon_init_true[:, ns:]) / max(tol, EPS)

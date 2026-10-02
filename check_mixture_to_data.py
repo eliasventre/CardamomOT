@@ -25,6 +25,7 @@ import numpy as np
 import sys, getopt
 import anndata as ad
 from CardamomOT import plot_data_umap_toref, plot_data_distrib, check_stationary
+from CardamomOT.inference.integration import nb_cell_parameters
 import scipy.sparse
 import os
 import ot
@@ -105,8 +106,6 @@ def main(argv):
     print("[check_mixture_to_data] Loading mixture model parameters...")
     try:
         mixture_parameters = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
-        c = mixture_parameters[-1, :]
-        kz = mixture_parameters[:-1, :] + 1e-6
         pi_zinb = np.load(os.path.join(p, 'cardamomOT', 'pi_zinb.npy'))
         vect_kon_beta = np.load(os.path.join(p, 'cardamomOT', 'modes.npy')) + 1e-6
         print("[check_mixture_to_data] Successfully loaded mixture parameters")
@@ -125,18 +124,24 @@ def main(argv):
     print("[check_mixture_to_data] Generating synthetic data from mixture model...")
     G = np.size(data_real, 0)-1
     # n_stimuli inferred from mixture_parameters: columns 0..ns-1 are stimulus slots
-    ns = mixture_parameters.shape[1] - G
+    ns = mixture_parameters.shape[-1] - G
+    # NB parameters of each cell (its sample's mixture if per-sample)
+    ids = adata.obs['dataset_id'].values if 'dataset_id' in adata.obs else None
+    sample_idx = np.searchsorted(np.unique(ids), ids) if ids is not None else None
+    k1c, cc, pzc = nb_cell_parameters(mixture_parameters, pi_zinb, sample_idx)
     print(f"[check_mixture_to_data] n_stimuli inferred: {ns}")
     data_beta = np.zeros((G+1, np.size(vect_kon_beta, 0)))
     data_beta[0, :] = times_data[:]
 
     # Apply zero-inflation
-    zero_mask = (np.random.uniform(0, 1, (data_beta[1:, :].shape)) < pi_zinb.reshape((G, 1)))
+    zero_mask = (np.random.uniform(0, 1, (data_beta[1:, :].shape)) < pzc.T)
     zero_ratio = np.sum(zero_mask == 1)/np.size(data_beta[1:, :])
     print(f"[check_mixture_to_data] Applied zero-inflation with ratio: {zero_ratio:.4f}")
 
     # Sample from negative binomial distribution (exclude stimulus columns ns:)
-    data_beta[1:, :] = np.random.negative_binomial((np.max(kz, 0)*vect_kon_beta)[:, ns:].T, (c / (c+1))[ns:].reshape(G, 1))
+    # Depth factors: each cell drawn at its own depth, NB(k, c / s)
+    s = adata.obs['depth_factor'].values.astype(float)[:, None] if 'depth_factor' in adata.obs else 1.0
+    data_beta[1:, :] = np.random.negative_binomial(((k1c + 1e-6)*vect_kon_beta)[:, ns:].T, (cc / (cc + s))[:, ns:].T)
     data_beta[1:, :] = np.where(zero_mask, 0, data_beta[1:, :])
 
     # Save synthetic data 

@@ -37,6 +37,13 @@ from .config import (
     get_default_parameters,
     find_data_file,
     read_gene_list,
+    ensure_raw_counts,
+    harmonize_obs,
+    read_stimulus_targets,
+    find_stimulus_schedule,
+    n_inference_stimuli,
+    simulation_schedule,
+    stimulus_target_mask,
     resolve_cell_type_obs,
     check_stationary,
     STATIONARY_EXIT_CODE,
@@ -91,6 +98,7 @@ from .tools import (
     score_gene_sets,
     estimate_growth_rates,
     combine_growth_rates_with_reference,
+    generate_report,
 )
 
 # ============================================================================
@@ -145,6 +153,8 @@ __all__ = [
     "score_gene_sets",
     "estimate_growth_rates",
     "combine_growth_rates_with_reference",
+    # Final PDF report
+    "generate_report",
 ]
 
 logger.debug(f"CARDAMOM {__version__} loaded successfully")

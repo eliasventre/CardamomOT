@@ -174,7 +174,8 @@ def plot_data_umap_altogether(data_real_base, data_ref_base, data_beta_base,
     title = 'Sampling beta'
     ax1.annotate('B', xytext=(-11, 6), fontweight='bold', **opt)
     ax1.annotate(title, xytext=(3, 6), **opt)
-    ax1.scatter(x_beta[:, 0], x_beta[:, 1], c=colors_ref, s=2, alpha=1)
+    # Trajectory states may outnumber the reference cells: coloured by their own times
+    ax1.scatter(x_beta[:, 0], x_beta[:, 1], c=[cmap[np.argwhere(times==t)[0,0]] for t in data_beta[0, :]], s=2, alpha=1)
     ax1.set(xlim=ax0.get_xlim(), ylim=ax0.get_ylim())
 
     # C. Inferred network theta
@@ -182,7 +183,7 @@ def plot_data_umap_altogether(data_real_base, data_ref_base, data_beta_base,
     title = 'Sampling theta'
     ax2.annotate('C', xytext=(-11, 6), fontweight='bold', **opt)
     ax2.annotate(title, xytext=(3, 6), **opt)
-    ax2.scatter(x_theta[:, 0], x_theta[:, 1], c=colors_ref, s=2, alpha=1)
+    ax2.scatter(x_theta[:, 0], x_theta[:, 1], c=[cmap[np.argwhere(times==t)[0,0]] for t in data_theta[0, :]], s=2, alpha=1)
     ax2.set(xlim=ax0.get_xlim(), ylim=ax0.get_ylim())
 
     # d. Inferred network sim
