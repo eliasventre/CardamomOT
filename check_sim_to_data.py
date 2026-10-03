@@ -8,7 +8,7 @@ simulated expression dynamics with the real data used for inference. Computes
 zero-inflation adjusted distributions and generates comparison plots.
 
 Usage:
-    python check_sim_to_data.py -i <project_path> -s <split>
+    python check_sim_to_data.py -i <project_path> [--stimulus <float>] [--prior <float>]
 
 Required input files:
     - Data/data_<split>.h5ad: observed count matrix
@@ -22,7 +22,8 @@ Output files:
 """
 
 import numpy as np
-import sys, getopt
+import sys
+from CardamomOT.run_options import parse_step_options, settings, configure
 import anndata as ad
 from CardamomOT import NetworkModel, plot_data_umap_altogether, plot_data_distrib
 from CardamomOT.inference.integration import nb_cell_parameters
@@ -65,7 +66,7 @@ def growth_resample(L, times_data, samples, seed=0):
     for t in np.unique(times_data):
         for s in np.unique(samples):
             g = np.flatnonzero((times_data == t) & (samples == s))
-            if len(g):
+            if len(g) and np.ptp(L[g]) > 1e-12:   # uniform weights (first time): states kept as they are
                 w = np.exp(L[g] - L[g].max())
                 idx[g] = g[rng.choice(len(g), len(g), replace=True, p=w / w.sum())]
     return idx
@@ -80,42 +81,15 @@ def main(argv):
     inference quality. Saves comparison datasets and generates visualizations.
 
     Args:
-        argv: Command-line arguments (--input, --split).
+        argv: Command-line arguments (-i <project> and the options of run_options.STEP_OPTIONS).
     
     Returns:
         None. Saves comparison datasets and comparison plots.
     """
-    inputfile = ''
-    split = ''
-    stimulus = -1.0
-    prior = -1.0
-    try:
-        opts, args = getopt.getopt(argv, "hi:s:t:p:",
-                                   ["input=", "split=", "stimulus=", "prior="])
-    except getopt.GetoptError:
-        print("[check_sim_to_data] Error: Invalid command-line arguments")
-        print("[check_sim_to_data] Usage: python check_sim_to_data.py -i <project_path> -s <split> "
-              "[--stimulus <float>] [--prior <float>]")
-        sys.exit(2)
-
-    for opt, arg in opts:
-        if opt in ("-i", "--input"):
-            inputfile = arg
-        elif opt in ("-s", "--split"):
-            split = '{}'.format(arg)
-        elif opt in ("-t", "--stimulus"):
-            stimulus = float(arg)
-        elif opt in ("-p", "--prior"):
-            prior = float(arg)
-        elif opt == "-h":
-            print(__doc__)
-            sys.exit(0)
-
-    if not inputfile or not split:
-        print("[check_sim_to_data] Error: Missing required arguments --input and --split")
-        sys.exit(1)
-
-    p = '{}/'.format(inputfile)
+    opts = parse_step_options(argv, 'check_sim_to_data', __doc__)
+    p = opts.p
+    split = settings(opts).split
+    inputfile = p  # plots write to <project>/Check
 
     outputfile = 'Check'
     complement1 = 'sim_vs_data'
@@ -153,11 +127,7 @@ def main(argv):
     data_real = np.vstack([times, data_rna_extracted]).astype(float)
     G = np.size(data_real, 0)-1
     model = NetworkModel(G)
-    if stimulus >= 0:
-        model.stimulus = stimulus
-    if prior >= 0:
-        model.prior_network_pen = prior
-    model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
+    configure(model, opts)  # workbook, then the command-line options
     print(f"[check_sim_to_data] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
 
     # Load mixture and simulation parameters
@@ -216,7 +186,8 @@ def main(argv):
     k1_tr, k1_sim = k1_tr + 1e-6, k1_sim + 1e-6
     # Depth factors (estimate_cell_depth.py): each state / simulated cell drawn at the depth of the
     # real cell it mimics, NB(k, c / s): p = c / (c + s)
-    depth_cells = adata.obs['depth_factor'].values.astype(float) if 'depth_factor' in adata.obs else None
+    depth_cells = (adata.obs['depth_factor'].values.astype(float)
+                   if (model.use_depth_factor and 'depth_factor' in adata.obs) else None)
     idx_path = os.path.join(p, 'cardamomOT', 'data_traj_real_idx.npy')
     real_idx = np.load(idx_path) if os.path.exists(idx_path) else None
     s_tr = state_depth(depth_cells, real_idx)
@@ -225,6 +196,9 @@ def main(argv):
     s_sim = 1.0 if s_sim is None else s_sim[:, None]
     if depth_cells is not None:
         print("[check_sim_to_data] Counts drawn at the depth of the cells mimicked (obs['depth_factor'])")
+    # RNA of the trajectories (slot n at t -> slot n at t+1): counts of the real cell behind each state
+    if real_idx is not None and len(real_idx) == data_ref.shape[1] and np.all(real_idx >= 0):
+        data_ref[1:, :] = data_rna_extracted[:, real_idx]
 
     # Generate data_sim: either directly from Harissa mRNAs or via NB sampling
     if mrna_simul is not None:
@@ -292,12 +266,13 @@ def main(argv):
         adata_sim.var = adata.var.copy()
         adata_sim.obs['time'] = times_simulation
         adata_sim.uns['proliferation'] = sim_prolif
+        pop_path = os.path.join(cardamom_dir, 'data_log_population.npy')
+        if sim_prolif and os.path.exists(pop_path):
+            adata_sim.uns['log_population'] = np.load(pop_path)
         adata_sim.write(os.path.join(cardamom_dir, f'adata_sim_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
 
-        adata_rna_traj = ad.AnnData(X=data_real[1:, :].T)
-        adata_rna_traj.var = adata.var.copy()
-        adata_rna_traj.obs['time'] = data_real[0, :]
-        adata_rna_traj.write(os.path.join(cardamom_dir, f'adata_rna_traj_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
+        # Trajectory RNA (without proliferation), and growth-weighted if the simulation has proliferation
+        _write_states(data_ref[1:, :].T, 'rna_traj')
 
         data_prot_traj = np.load(os.path.join(cardamom_dir, 'data_prot_forsimul.npy'))
         _write_states(data_prot_traj[:, ns:], 'prot_traj')
@@ -315,8 +290,11 @@ def main(argv):
     if plot_in_script:
         print("[check_sim_to_data] Generating distribution comparison plots...")
         try:
-            plot_data_distrib(data_real, data_sim, t_data, t_simul, names, inputfile, outputfile, complement1)
-            plot_data_umap_altogether(data_real, data_real, data_beta, data_netw_theta,
+            # Reference equivalent to the simulation: trajectories, growth-weighted with proliferation
+            g = growth_idx if (sim_prolif and growth_idx is not None) else np.arange(data_ref.shape[1])
+            ref_sc, beta_sc, theta_sc = data_ref[:, g], data_beta[:, g], data_netw_theta[:, g]
+            plot_data_distrib(ref_sc, data_sim, t_data, t_simul, names, inputfile, outputfile, complement1)
+            plot_data_umap_altogether(data_real, ref_sc, beta_sc, theta_sc,
                                   data_sim, t_data, t_simul, inputfile, 'Check', 'altogether_sim')
             print("[check_sim_to_data] Plots successfully generated")
         except Exception as e:

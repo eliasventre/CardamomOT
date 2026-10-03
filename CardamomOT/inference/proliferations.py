@@ -100,15 +100,15 @@ def train_proliferation_mlp(
     ns: int = 1,
     n_nodes: int = 5,
     hidden_size: int = 64,
-    n_epochs: int = 300,
+    n_epochs: int = 500,
     lr: float = 1e-3,
     batch_size: int = 256,
     weight_decay: float = 1e-4,
-    lambda_mass: float = 1.0,
+    lambda_mass: float = 10.0,
     n_mass: int = 128,
     with_stim: bool = True,
     val_fraction: float = 0.2,
-    patience: int = 30,
+    patience: int = 50,
     seed: int = 0,
     verb: bool = True,
 ) -> ProliferationMLP:
@@ -116,7 +116,7 @@ def train_proliferation_mlp(
     Fit R(u, P) so that, for each trajectory n and interval k,
         ∫_{t_k}^{t_k+1} R(u_k, P_n(s)) ds  ≈  R_opt[k, n] · Δt_k   (log mass gain),
     the integral being a trapezoidal sum over n_nodes states of the PCHIP path, u_k the
-    inference stimuli over the interval (if with_stim). The residual is divided by Δt_k so
+    inference stimuli over the interval (if with_stim). The residuals are divided by Δt_k so
     that all intervals weigh as rates. A total-mass term (weight lambda_mass, as in
     unbalanced PFM) makes the population growth of each interval, log mean_n exp(∫R), match
     the one of the targets: the pathwise least squares alone fit the mean log gain and
@@ -165,20 +165,23 @@ def train_proliferation_mlp(
         return float(np.log(np.mean(np.exp(v.astype(float)))))
 
     groups_tr, groups_va = groups_of(tr), groups_of(va)
+    # Interval length of each group: the mass residual is divided by it, in rate units as the path term
+    dt_tr = torch.tensor([float(D[g[0]]) for g in groups_tr], dtype=torch.float32)
+    dt_va = torch.tensor([float(D[g[0]]) for g in groups_va], dtype=torch.float32)
     mass_tr = torch.tensor([log_mean_exp(Y[g]) for g in groups_tr], dtype=torch.float32)
     mass_va = torch.tensor([log_mean_exp(Y[g]) for g in groups_va], dtype=torch.float32)
 
     def integral(idx):
         return (model(X_all[idx]) * w_t).sum(dim=1) * D_all[idx]
 
-    def mass_loss(groups, mass_target, sample=True):
+    def mass_loss(groups, mass_target, dt_groups, sample=True):
         # Population growth of the model per interval, on up to n_mass random pairs (all if not sample)
         lme = []
         for g in groups:
             sel = g if (not sample or len(g) <= n_mass) else rng.choice(g, n_mass, replace=False)
             integ = integral(torch.as_tensor(sel))
             lme.append(torch.logsumexp(integ, 0) - np.log(len(sel)))
-        return ((torch.stack(lme) - mass_target) ** 2).mean()
+        return (((torch.stack(lme) - mass_target) / dt_groups) ** 2).mean()
 
     model = ProliferationMLP(G, hidden_size=hidden_size, n_stim=n_stim)
     flat = X[tr].reshape(-1, G)
@@ -202,7 +205,7 @@ def train_proliferation_mlp(
         with torch.no_grad():
             loss = (((integral(torch.as_tensor(va)) - Y_all[va]) / D_all[va]) ** 2).mean()
             if lambda_mass > 0 and groups_va:
-                loss = loss + lambda_mass * mass_loss(groups_va, mass_va, sample=False)
+                loss = loss + lambda_mass * mass_loss(groups_va, mass_va, dt_va, sample=False)
         return float(loss)
 
     best, best_state, best_epoch, wait = np.inf, None, 0, 0
@@ -212,7 +215,7 @@ def train_proliferation_mlp(
         for (ib,) in loader:
             loss = (((integral(ib) - Y_all[ib]) / D_all[ib]) ** 2).mean()
             if lambda_mass > 0:
-                loss = loss + lambda_mass * mass_loss(groups_tr, mass_tr)
+                loss = loss + lambda_mass * mass_loss(groups_tr, mass_tr, dt_tr)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -241,10 +244,12 @@ def train_proliferation_mlp(
         pred = integral(torch.arange(len(Y))).numpy()
 
     def r2(idx):
+        # On the mean rates over the intervals (log gain / Δt), as the training loss
         if len(idx) < 2:
             return float('nan')
-        ss = np.sum((Y[idx] - Y[idx].mean()) ** 2)
-        return float(1 - np.sum((Y[idx] - pred[idx]) ** 2) / ss) if ss > 0 else float('nan')
+        y, p = Y[idx] / D[idx], pred[idx] / D[idx]
+        ss = np.sum((y - y.mean()) ** 2)
+        return float(1 - np.sum((y - p) ** 2) / ss) if ss > 0 else float('nan')
 
     all_idx = np.arange(len(Y))
     model.diagnostics = dict(
@@ -255,6 +260,6 @@ def train_proliferation_mlp(
         interval_start=[float(np.sort(np.unique(times_data))[i]) for i in intervals],
     )
     if verb:
-        print(f"[ProliferationMLP] R² of the log mass gains: train {model.diagnostics['r2_train']:.3f}, "
+        print(f"[ProliferationMLP] R² of the path mean rates: train {model.diagnostics['r2_train']:.3f}, "
               f"held-out {model.diagnostics['r2_val']:.3f}")
     return model

@@ -12,6 +12,7 @@ The first call of input_dir(project) in a process:
 The scripts read their inputs from input_dir(project). Large numeric arrays (reference_network.csv,
 basal_init / basal_ref, inter_init / inter_ref, inter_simul_ref) stay files in Data/.
 """
+import glob
 import os
 import re
 import shutil
@@ -24,12 +25,15 @@ CACHE = os.path.join('cardamomOT', 'inputs')
 
 # Parameters of NetworkModel listed in the Model_parameters sheet (others can be added as rows)
 MODEL_PARAMETERS = [
+    # pipeline: data and steps
+    'split', 'train_rate', 'select_genes', 'build_prior_network', 'estimate_proliferation_rates', 'run_test',
+    'simulate_perturbations', 'species',
     # gene selection
     'num_max_genes', 'n_query_genes', 'n_entropy_genes', 'max_free_params', 'network_method', 'k_in_steiner',
     'closure_min', 'min_entropy_change', 'min_nb_separation', 'literature_selection', 'literature_depth',
     'literature_resources',
     # per-cell depth
-    'allow_depth_correction', 'depth_method', 'depth_by_cell_type',
+    'use_depth_factor', 'compute_depth_factor', 'allow_depth_correction', 'depth_method', 'depth_by_cell_type',
     # mixture and samples
     'mean_forcing_em', 'force_basins', 'temporal_basins', 'batch_size_mixture', 'integrate_samples',
     # network inference
@@ -49,11 +53,12 @@ SHEETS = {
         'command-line options; empty value = default or command-line option.',
         []),
     'Gene_lists': (
-        [('genes_queries', 'Genes of interest for the gene selection (select_genes_and_split -c 1), one per row'),
+        [('genes_queries', 'Genes of interest for the gene selection (select_genes_and_split with select_genes = True), one per row'),
          ('proliferation_signatures', 'Proliferation marker genes (get_proliferation_rates), replace the built-in list'),
          ('death_signatures', 'Death marker genes (get_proliferation_rates), replace the built-in list'),
          ('senescence_signatures', 'Senescence / arrest marker genes (get_proliferation_rates), replace the built-in list')],
-        'Gene lists, one gene per row in each column.',
+        'Gene lists, one gene per row in each column. Any other column is a named gene list usable as a '
+        'RATE target of the Perturbations sheet (exported as gene_list_<name>.txt; legacy Data/gene_list_<name>.txt).',
         ['genes_queries.txt', 'proliferation_signatures', 'death_signatures', 'senescence_signatures']),
     'Stimulus_inference': (
         [('time', 'Timepoint (optional: without times, rows follow the sorted timepoints of the data)'),
@@ -77,6 +82,10 @@ SHEETS = {
         [('KO', 'Knocked-out genes, comma-separated; GENE-X for a partial KO of X%'),
          ('OV', 'Over-expressed genes, comma-separated; GENE-X for a partial OV of X%'),
          ('STIM1', "Perturbation stimulus 1: targets followed by + (activated) or - (inhibited), e.g. CHGA+STMN2-"),
+         ('RATE1', "Effect of stimulus 1 (its schedule, STIM1 may be empty) on the net proliferation rate: "
+                   "TARGET:delta, comma-separated; TARGET = a gene list of Gene_lists, GENE1+GENE2..., a gene or "
+                   "'all'; delta (per time unit) added to R of a cell at the maximal score, e.g. "
+                   "ferroptosis_sensitive:-0.01 (needs the proliferation MLP)"),
          ('comment', 'Free comment (ignored)')],
         'In-silico perturbations simulated by simulate_network_KOV, one condition per row '
         '(add STIM2, STIM3... for several perturbation stimuli; their effects add up).',
@@ -298,6 +307,10 @@ def import_legacy(wb, data_dir):
         if path:
             gl = _set_column(gl, col, _gene_list(path))
             note(path, 'Gene_lists')
+    # Named gene lists (RATE targets)
+    for path in sorted(glob.glob(os.path.join(data_dir, 'gene_list_*.txt'))):
+        gl = _set_column(gl, os.path.basename(path)[len('gene_list_'):-4], _gene_list(path))
+        note(path, 'Gene_lists')
     if imported:
         write_sheet(wb, 'Gene_lists', gl)
 
@@ -344,8 +357,8 @@ def import_legacy(wb, data_dir):
         path = _legacy_path(data_dir, name)
         if path:
             df = _raw_table(path)
-            df.columns = ['STIM1' if c.upper() == 'STIM' else (c.upper() if c.upper() in ('KO', 'OV') or
-                          re.fullmatch(r'STIM\d+', c.upper()) else c) for c in df.columns]
+            df.columns = [{'STIM': 'STIM1', 'RATE': 'RATE1'}.get(c.upper(), c.upper() if c.upper() in ('KO', 'OV') or
+                          re.fullmatch(r'(STIM|RATE)\d+', c.upper()) else c) for c in df.columns]
             df = df.replace({'0': None, '': None})
             write_sheet(wb, 'Perturbations', df)
             note(path, 'Perturbations')
@@ -421,6 +434,11 @@ def export(wb, out_dir):
         genes = _values(gl, col)
         if genes:
             write(name, '\n'.join(map(str, genes)) + '\n')
+    known = {'genes_queries', 'proliferation_signatures', 'death_signatures', 'senescence_signatures'}
+    for col in gl.columns:
+        genes = _values(gl, col) if col not in known and not str(col).startswith('_col') else []
+        if genes:
+            write(f'gene_list_{col}.txt', '\n'.join(map(str, genes)) + '\n')
 
     st = read_sheet(wb, 'Stimulus_inference')
     inf_cols = sorted([c for c in st.columns if c.startswith('stimulus_') and st[c].notna().any()],
@@ -458,7 +476,7 @@ def export(wb, out_dir):
         np.savetxt(os.path.join(out_dir, 'stimulus_schedule_simulate.txt'), np.hstack([inf, pert]), fmt='%g')
 
     pt = read_sheet(wb, 'Perturbations')
-    pcols = [c for c in pt.columns if c in ('KO', 'OV') or re.fullmatch(r'STIM\d+', str(c))]
+    pcols = [c for c in pt.columns if c in ('KO', 'OV') or re.fullmatch(r'(STIM|RATE)\d+', str(c))]
     if pcols and len(pt):
         lines = ['\t'.join(pcols)]
         for _, r in pt.iterrows():
@@ -521,6 +539,14 @@ def project_parameters(project):
     return json.load(open(path)) if os.path.exists(path) else {}
 
 
+def depth_factor_used(project):
+    """use_depth_factor of the project (Model_parameters sheet, else the default of NetworkModel)."""
+    from .model.base import NetworkModel
+    m = NetworkModel(1)
+    m.apply_project_parameters(project, verb=False)
+    return bool(m.use_depth_factor)
+
+
 def input_dir(project):
     """
     Directory of the run inputs of a project (cardamomOT/inputs/), synchronised once per process
@@ -544,6 +570,26 @@ def input_dir(project):
             _style_header(ws, SHEETS['Model_parameters'][0])
             _fill_parameter_rows(ws)
             wb.save(path)
+        else:
+            # Parameters added to CardamomOT since the workbook was made: new rows with empty values (defaults)
+            ws = wb['Model_parameters']
+            present = {str(r[0]).strip() for r in ws.iter_rows(min_row=2, values_only=True) if r and r[0]}
+            new = [n for n in MODEL_PARAMETERS if n not in present]
+            if new:
+                from openpyxl.styles import Alignment
+                docs = parameter_docs()
+                for name in new:
+                    default, comment = docs.get(name, (None, ''))
+                    r = ws.max_row + 1
+                    ws.cell(row=r, column=1, value=name)
+                    ws.cell(row=r, column=3, value=repr(default) if isinstance(default, (dict, list, tuple))
+                            or default is None else default)
+                    ws.cell(row=r, column=4, value=comment).alignment = Alignment(wrap_text=True, vertical='top')
+                try:
+                    wb.save(path)
+                    print(f"[CardamomOT] Model_parameters: new parameters added with empty values (defaults): {new}")
+                except PermissionError:
+                    pass
         if import_legacy(wb, data_dir):
             try:
                 wb.save(path)

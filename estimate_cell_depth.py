@@ -11,11 +11,15 @@ measures within homogeneous groups (sample, time, cell type) the share of the co
 reference genes due to depth and the share of genes whose NB modes are closer than the depth
 spread. If the correction is recommended and model.allow_depth_correction is True, the depth
 factor of model.depth_method (CardamomOT/inference/depth_methods) is written to
-adata.obs['depth_factor'] of Data/data.h5ad (X untouched); the following steps then model counts
-as NB(k, c / s_i) and the simulations draw counts with the s_i of the cells they mimic.
+adata.obs['depth_factor'] of Data/data.h5ad (X untouched). With model.use_depth_factor (default
+False), the following steps then model counts as NB(k, c / s_i) and the simulations draw counts with
+the s_i of the cells they mimic; otherwise the factor is kept but ignored (s_i = 1).
+With model.compute_depth_factor = False, nothing is computed: an existing obs['depth_factor'] is only
+read (summary printed) and never removed, and the previous diagnostic files are left as they are.
 
 Usage:
-    python estimate_cell_depth.py -i <project_path> [--allow 0|1] [--method <name>]
+    python estimate_cell_depth.py -i <project_path>
+(allow_depth_correction, depth_method, compute_depth_factor, use_depth_factor: Model_parameters sheet)
 
 Outputs:
     - cardamomOT/depth_diagnostic.csv: depth per group (cells, median counts, CV, s quantiles)
@@ -25,13 +29,13 @@ Outputs:
 import sys; sys.path += ['../']
 import os
 import json
-import getopt
 import numpy as np
 import anndata as ad
 
 from CardamomOT import NetworkModel, ensure_raw_counts, harmonize_obs, resolve_cell_type_obs
 from CardamomOT.inference.depth import MIN_GENES_DEPTH, library, depth_groups, diagnose_depth
 from CardamomOT.inference.depth_methods import compute_depth
+from CardamomOT.run_options import parse_step_options, configure
 
 TAG = "[estimate_cell_depth]"
 
@@ -58,33 +62,29 @@ def doublet_check(adata):
 
 
 def main(argv):
-    inputfile, allow, method = '', None, None
-    try:
-        opts, _ = getopt.getopt(argv, "hi:", ["input=", "allow=", "method="])
-    except getopt.GetoptError:
-        print(__doc__)
-        sys.exit(2)
-    for opt, arg in opts:
-        if opt == '-h':
-            print(__doc__)
-            sys.exit(0)
-        elif opt in ('-i', '--input'):
-            inputfile = arg
-        elif opt == '--allow':
-            allow = bool(int(arg))
-        elif opt == '--method':
-            method = arg
-    p = os.path.join(inputfile, '')
-    model = NetworkModel(1)
-    model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
-    allow = model.allow_depth_correction if (allow is None or model.overridden('allow_depth_correction')) else allow
-    method = model.depth_method if (method is None or model.overridden('depth_method')) else method
+    opts = parse_step_options(argv, 'estimate_cell_depth', __doc__)
+    p = opts.p
+    model = configure(NetworkModel(1), opts)
+    allow, method = model.allow_depth_correction, model.depth_method
     data_path = os.path.join(p, 'Data', 'data.h5ad')
     complete_path = os.path.join(p, 'Data', 'data_complete.h5ad')
     out_dir = os.path.join(p, 'cardamomOT')
     os.makedirs(out_dir, exist_ok=True)
+    use = 'used' if model.use_depth_factor else 'ignored (use_depth_factor = False)'
 
     target = ad.read_h5ad(data_path)
+    if not model.compute_depth_factor:
+        # Read only: keep any existing factor and the previous diagnostic
+        if 'depth_factor' in target.obs:
+            s = target.obs['depth_factor'].values.astype(float)
+            q05, q95 = np.percentile(s, [5, 95])
+            print(f"{TAG} compute_depth_factor = False: existing obs['depth_factor'] kept (q05-q95 {q05:.2f}-{q95:.2f}, "
+                  f"x{q95 / q05:.2f}), {use}")
+        else:
+            print(f"{TAG} compute_depth_factor = False and no obs['depth_factor'] in Data/data.h5ad: no depth factor")
+        doublet_check(target)
+        return
+    print(f"{TAG} The depth factor will be {use} by the following steps")
     src_path = complete_path if os.path.exists(complete_path) else data_path
     src = target if src_path == data_path else ad.read_h5ad(src_path)
     if src.n_vars < MIN_GENES_DEPTH:

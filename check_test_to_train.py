@@ -7,7 +7,7 @@ Loads the AnnData objects produced by infer_test.py and generates distribution
 comparison plots between real test data and the inferred/simulated trajectories.
 
 Usage:
-    python check_test_to_train.py -i <project_path> -s <split> [-t <stimulus>] [-p <prior>]
+    python check_test_to_train.py -i <project_path> [--stimulus <float>] [--prior <float>]
 
 The reference is always the held-out data Data/data_test.h5ad (-s is kept for compatibility).
 
@@ -24,7 +24,7 @@ Output files:
 """
 import numpy as np
 import sys
-import getopt
+from CardamomOT.run_options import parse_step_options, settings
 import anndata as ad
 from CardamomOT import plot_data_distrib, plot_data_umap_altogether
 import scipy.sparse
@@ -39,44 +39,13 @@ def main(argv):
     and generates comparison plots against real observed test data.
 
     Args:
-        argv: Command-line arguments (--input, --split, --stim, --prior).
+        argv: Command-line arguments (-i <project>, --stimulus, --prior).
     """
-    inputfile = ''
-    split = ''
-    stim = 1.0
-    prior = 1.0
-    try:
-        opts, args = getopt.getopt(argv, "hi:s:t:p:", ["input=", "split=", "stimulus=", "prior="])
-    except getopt.GetoptError:
-        print("[check_test_to_train] Error: Invalid command-line arguments")
-        print("[check_test_to_train] Usage: python check_test_to_train.py -i <project_path>"
-              " -s <split> [-t <stimulus>] [-p <prior>]")
-        sys.exit(2)
-
-    for opt, arg in opts:
-        if opt in ("-i", "--input"):
-            inputfile = arg
-        elif opt in ("-s", "--split"):
-            split = '{}'.format(arg)
-        elif opt in ("-t", "--stimulus"):
-            stim = float(arg)
-        elif opt in ("-p", "--prior"):
-            prior = float(arg)
-        elif opt == "-h":
-            print(__doc__)
-            sys.exit(0)
-
-    if not inputfile:
-        print("[check_test_to_train] Error: Missing required argument --input")
-        sys.exit(1)
-
-    # Negative values (pipeline sentinel): model defaults, as in infer_test.py
-    from CardamomOT import NetworkModel
-    p = '{}/'.format(inputfile)
-    m = NetworkModel(1)
-    m.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
-    stim = stim if (stim >= 0 and not m.overridden('stimulus')) else m.stimulus
-    prior = prior if (prior >= 0 and not m.overridden('prior_network_pen')) else m.prior_network_pen
+    opts = parse_step_options(argv, 'check_test_to_train', __doc__)
+    p = opts.p
+    m = settings(opts)
+    stim, prior = m.stimulus, m.prior_network_pen
+    inputfile = p  # plots write to <project>/Check
     cardamom_dir = os.path.join(p, 'cardamomOT')
 
     # ─── LOAD OBSERVED TEST DATA ─────────────────────────────────────────

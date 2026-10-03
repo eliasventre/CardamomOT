@@ -15,14 +15,15 @@ orthologs) and from biologically related measured genes (paralogs, gene family,
 Gene Ontology function); see CardamomOT/inference/halflife_db.py.
 
 Usage:
-    python get_degradation_rates.py -i <project_path> -s <split> [--species auto|human|mouse] [--overwrite]
+    python get_degradation_rates.py -i <project_path>
+    (split, species, overwrite_degradation_rates: Model_parameters sheet)
 
 Required input files:
     - Data/data_full.h5ad: full count matrix
 
 Output files:
     - Data/data_full.h5ad: updated with d0 (mRNA) and d1 (protein) degradation rates (h⁻¹)
-    - Data/data_train.h5ad, data_test.h5ad: updated with degradation rates (if split != "full")
+    - Data/data_train.h5ad, data_test.h5ad: updated with degradation rates (if split = 'train')
     - Data/degradation_rates_report.csv: per-gene match, half-lives, source and neighbours used
 """
 import sys; sys.path += ['../']
@@ -31,7 +32,7 @@ import numpy as np
 from CardamomOT import extract_degradation_rates
 from CardamomOT.inference.halflife_db import REFERENCES
 import anndata as ad
-import getopt
+from CardamomOT.run_options import parse_step_options, settings
 
 verb = 1
 
@@ -47,7 +48,7 @@ def assign_rates(adata, details, species, overwrite=False):
     assert list(details["gene"]) == [str(g) for g in adata.var_names], "details must follow adata.var_names"
     for col, quantity in (("d0", "mrna"), ("d1", "protein")):
         if col in adata.var.columns and not overwrite:
-            print(f"[get_degradation_rates] {col} already present, skipping (use --overwrite to replace it)")
+            print(f"[get_degradation_rates] {col} already present, skipping (overwrite_degradation_rates = True to replace it)")
             continue
         rates = details[col].to_numpy(dtype=float)
         med = np.median(rates)
@@ -65,44 +66,18 @@ def main(argv):
     Assign literature degradation rates to the genes of a project.
 
     Args:
-        argv: Command-line arguments (--input, --split, --species, --overwrite).
+        argv: Command-line arguments (-i <project>).
 
     Returns:
         None. Updates AnnData files with degradation rates.
     """
-    inputfile = ''
-    split = ''
-    species = 'auto'
-    overwrite = False
-    try:
-        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split=", "species=", "overwrite"])
-    except getopt.GetoptError:
-        print("[get_degradation_rates] Error: Invalid command-line arguments")
-        print("[get_degradation_rates] Usage: python get_degradation_rates.py -i <project_path> -s <split> "
-              "[--species auto|human|mouse] [--overwrite]")
-        sys.exit(2)
-
-    for opt, arg in opts:
-        if opt in ("-i", "--input"):
-            inputfile = arg
-        elif opt in ("-s", "--split"):
-            split = arg
-        elif opt == "--species":
-            species = arg.strip().lower()
-        elif opt == "--overwrite":
-            overwrite = True
-        elif opt == "-h":
-            print(__doc__)
-            sys.exit(0)
-
-    if not inputfile:
-        print("[get_degradation_rates] Error: Missing required argument --input")
-        sys.exit(1)
+    opts = parse_step_options(argv, 'get_degradation_rates', __doc__)
+    p = opts.p
+    cfg = settings(opts)
+    split, species, overwrite = cfg.split, str(cfg.species).strip().lower(), bool(cfg.overwrite_degradation_rates)
     if species not in ("auto", "human", "mouse"):
-        print(f"[get_degradation_rates] Error: --species must be auto, human or mouse (got '{species}')")
+        print(f"[get_degradation_rates] Error: species must be auto, human or mouse (got '{species}')")
         sys.exit(1)
-
-    p = '{}/'.format(inputfile)
 
     # Load full dataset
     data_path = os.path.join(p, 'Data', 'data_full.h5ad')

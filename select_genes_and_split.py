@@ -4,16 +4,16 @@ select_genes_and_split.py
 Select the genes of the model and split data into train/test sets.
 
 Usage:
-    python select_genes_and_split.py -i <project_path> -s <split> -r <rate> -c <change> [-m <mean_forcing>]
-                                     [--prior <float>] [--ref 0|1]
+    python select_genes_and_split.py -i <project_path> [--prior <float>]
+(split, train_rate, select_genes, build_prior_network: Model_parameters sheet)
 
-With change=1, genes are selected from the whole transcriptome of Data/data.h5ad in two steps
+With select_genes = True, genes are selected from the whole transcriptome of Data/data.h5ad in two steps
 (CardamomOT.inference.gene_selection): a coarse global GRN with OTVelo-Corr on log(x+1) counts
 (highly variable, protein-coding, non mito/ribo genes), then a directed Steiner tree linking the
 stimulus to the genes of Data/genes_queries.txt and to the highest-entropy genes, within a budget
-of model.num_max_genes genes. With change=0 all genes are kept. The selection also writes the
-literature prior of the selected genes (cardamomOT/ref_network.csv). With --ref 1 and a hard prior
-(--prior 0, or model.prior_network_pen = 0 if --prior is not given), selection and prior are built
+of model.num_max_genes genes. With select_genes = False all genes are kept. The selection also writes
+the literature prior of the selected genes (cardamomOT/ref_network.csv). With build_prior_network and a
+hard prior (--prior 0, or model.prior_network_pen = 0 if --prior is not given), selection and prior are built
 together: the gene budget is set so that the prior leaves model.max_free_params free network
 parameters.
 
@@ -25,7 +25,7 @@ Optional:
 
 Output files:
     - Data/data_full.h5ad: dataset restricted to the selected genes
-    - Data/data_train.h5ad, data_test.h5ad: train/test split (if split="train")
+    - Data/data_train.h5ad, data_test.h5ad: train/test split (if split = 'train', train_rate per sample and time)
     - cardamomOT/gene_selection_report.csv: role of each selected gene (query, entropy, Steiner) and its parent
     - cardamomOT/global_network.npz: global network C, its null C_null, edge probabilities W, genes (stimuli first)
     - cardamomOT/ref_network.csv: literature prior of the selected genes
@@ -38,7 +38,7 @@ from CardamomOT.inputs import input_dir
 from CardamomOT.inference.gene_selection import select_genes
 from CardamomOT import check_stationary, read_gene_list, resolve_cell_type_obs, ensure_raw_counts, harmonize_obs, read_stimulus_targets
 import anndata as ad
-import getopt
+from CardamomOT.run_options import parse_step_options, settings, configure
 from CardamomOT.config import find_stimulus_schedule
 import pandas as pd
 
@@ -78,53 +78,14 @@ def main(argv):
     Select differentially expressed genes and split data.
 
     Args:
-        argv: Command-line arguments (--input, --change, --rate, --split, --mean).
+        argv: Command-line arguments (-i <project>, --prior).
     """
-    inputfile = ''
-    change = ''
-    rate = ''
-    split = ''
-    mean_forcing = -1
-    force_basins = -1
-    temporal_basins = -1
-    prior = -1
-    ref = 0
-    try:
-        opts, args = getopt.getopt(argv, "hi:c:r:s:m:f:b:",
-                                   ["input=", "change=", "rate=", "split=",
-                                    "mean-forcing=", "force-basins=", "temporal-basins=", "prior=", "ref="])
-    except getopt.GetoptError:
-        print("[select_genes_and_split] Error: Invalid command-line arguments")
-        sys.exit(2)
-
-    for opt, arg in opts:
-        if opt in ("-i", "--input"):
-            inputfile = arg
-        elif opt in ("-c", "--change"):
-            change = '{}'.format(arg)
-        elif opt in ("-r", "--rate"):
-            rate = '{}'.format(arg)
-        elif opt in ("-s", "--split"):
-            split = '{}'.format(arg)
-        elif opt in ("-m", "--mean-forcing"):
-            mean_forcing = float(arg)
-        elif opt in ("-f", "--force-basins"):
-            force_basins = float(arg)
-        elif opt in ("-b", "--temporal-basins"):
-            temporal_basins = int(arg)
-        elif opt == "--prior":
-            prior = float(arg)
-        elif opt == "--ref":
-            ref = int(arg)
-        elif opt == "-h":
-            print(__doc__)
-            sys.exit(0)
-
-    if not inputfile:
-        print("[select_genes_and_split] Error: Missing required argument --input")
-        sys.exit(1)
-
-    p = '{}/'.format(inputfile)
+    opts = parse_step_options(argv, 'select_genes_and_split', __doc__)
+    p = opts.p
+    cfg = settings(opts)
+    change, rate, split, ref = cfg.select_genes, cfg.train_rate, cfg.split, cfg.build_prior_network
+    print(f"[select_genes_and_split] select_genes={change}, split={split}, train_rate={rate}, "
+          f"build_prior_network={ref}")
 
     # Load input dataset
     data_path = os.path.join(p, 'Data', 'data.h5ad')
@@ -150,25 +111,17 @@ def main(argv):
         print(f"[select_genes_and_split] Found {len(np.unique(times))} unique timepoints: {sorted(np.unique(times))}")
 
     def _make_model(n_genes):
-        m = NetworkModel_beta(n_genes)
-        if mean_forcing >= 0:
-            m.mean_forcing_em = mean_forcing
-        if force_basins >= 0:
-            m.force_basins = force_basins
-        if temporal_basins >= 0:
-            m.temporal_basins = temporal_basins
-        m.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
-        return m
+        return configure(NetworkModel_beta(n_genes), opts)
 
     genes_list_init = list(adata.var_names.values)
     genes_list_init.sort()
     genes_list_final = genes_list_init
 
-    if int(change):
+    if change:
         model = _make_model(adata.shape[1])
         queries = load_queries(p)
         # Hard prior to be built (ref=1, prior 0): budget of free network parameters instead of genes
-        prior_pen = prior if (prior >= 0 and not model.overridden('prior_network_pen')) else model.prior_network_pen
+        prior_pen = model.prior_network_pen
         max_free = model.max_free_params if (ref and prior_pen == 0 and model.literature_selection) else None
         budget = f"{max_free} free network parameters" if max_free else f"{model.num_max_genes} genes"
         print(f"[select_genes_and_split] Gene selection: {model.n_query_genes} queries (of {len(queries)}) + "
@@ -195,7 +148,8 @@ def main(argv):
             literature_resources=model.literature_resources, max_free_params=max_free,
             min_entropy_change=model.min_entropy_change, min_nb_separation=model.min_nb_separation,
             n_cells_mixture=model.batch_size_mixture, seuil_mixture=model.seuil, n_cells_network=model.batch_size_mixture,
-            forced_genes=perturbed_genes(p, list(adata.var_names)), stimulus_targets=read_stimulus_targets(input_dir(p)), seed=model.seed)
+            forced_genes=perturbed_genes(p, list(adata.var_names)), stimulus_targets=read_stimulus_targets(input_dir(p)),
+            use_depth_factor=model.use_depth_factor, seed=model.seed)
 
         out_dir = os.path.join(p, 'cardamomOT')
         os.makedirs(out_dir, exist_ok=True)

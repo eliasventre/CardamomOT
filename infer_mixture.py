@@ -7,11 +7,11 @@ This script infers the burst kinetics parameters (mixture model) from temporal
 scRNA-seq data.
 
 Usage:
-    python infer_mixture.py -i <project_path> -s <split> [-m <mean_threshold>] [--published-version] [--soft-em-refinement]
-                            [--integrate-samples <0..1>] [--no-integrate-samples] [--ref-sample <dataset_id>]
+    python infer_mixture.py -i <project_path> [--mean-forcing <float>]
+(split, soft_em_refinement, integrate_samples, ref_sample_integration: Model_parameters sheet)
 
 Several samples (obs['dataset_id'] with >= 2 samples): the mixture is fitted per sample and kept per
-sample (mixture_parameters.npy (S, M+1, G)); --integrate-samples lam in [0, 1] (default 1) pushes
+sample (mixture_parameters.npy (S, M+1, G)); integrate_samples lam in [0, 1] (default 1) pushes
 the parameters of each sample towards a common target (reference sample, or average of the samples
 keeping the mean and variance of each gene), and counts are quantile-matched accordingly.
 With lam > 0, Data/data_{full,train,test}.h5ad are rewritten with integrated counts in X and the raw
@@ -27,7 +27,7 @@ import scipy.sparse
 from CardamomOT import NetworkModel as NetworkModel_beta, check_stationary
 from CardamomOT.inputs import input_dir
 import anndata as ad
-import getopt
+from CardamomOT.run_options import parse_step_options, settings, configure
 from CardamomOT.config import find_stimulus_schedule
 import os
 import pickle
@@ -74,48 +74,11 @@ def main(argv):
     Main function to run the mixture model inference pipeline.
 
     Args:
-        argv: Command-line arguments (--input, --split, --mean, --force, --temporal).
+        argv: Command-line arguments (-i <project>, --mean-forcing).
     """
-    inputfile  = ''
-    split      = ''
-    mean_forcing = -1
-    force_basins = -1
-    temporal_basins = -1
-    published_version = False
-    soft_em_refinement = False
-    integrate_samples = None
-    ref_sample = None
-
-    try:
-        opts, args = getopt.getopt(argv, "hi:s:m:f:b:", ["input=", "split=", "mean-forcing=", "force-basins=", "temporal-basins=",
-                                                        "published-version", "soft-em-refinement",
-                                                        "integrate-samples=", "no-integrate-samples", "ref-sample="])
-    except getopt.GetoptError:
-        print("Error: Invalid arguments. Use: infer_mixture.py -i <project> -s <split> [-m <mean_forcing>] [-f <force_basins>] [-b <temporal_basins>]")
-        sys.exit(2)
-    for opt, arg in opts:
-        if opt in ("-i", "--input"):
-            inputfile = arg
-        if opt in ("-s", "--split"):
-            split = '{}'.format(arg)
-        if opt in ("-m", "--mean-forcing"):
-            mean_forcing = float(arg)
-        if opt in ("-f", "--force-basins"):
-            force_basins = float(arg)
-        if opt in ("-b", "--temporal-basins"):
-            temporal_basins = int(arg)
-        if opt == "--published-version":
-            published_version = True
-        if opt == "--soft-em-refinement":
-            soft_em_refinement = True
-        if opt == "--integrate-samples":
-            integrate_samples = float(arg)
-        if opt == "--no-integrate-samples":
-            integrate_samples = 0.0
-        if opt == "--ref-sample":
-            ref_sample = arg
-
-    p = '{}/'.format(inputfile)
+    opts = parse_step_options(argv, 'infer_mixture', __doc__)
+    p = opts.p
+    split = settings(opts).split
 
     data_path = os.path.join(p, 'Data', 'data_{}.h5ad'.format(split))
     if os.path.exists(data_path):
@@ -154,23 +117,10 @@ def main(argv):
 
     # ─── INFER MIXTURE MODEL ────────────────────────────────────────────
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
-    if force_basins >= 0:
-        model.force_basins = force_basins
-    if temporal_basins >= 0:
-        model.temporal_basins = temporal_basins
-    model.published_version = published_version
-    model.soft_em_refinement = soft_em_refinement
+    configure(model, opts)
     if verb:
-        print(f"[infer_mixture] force_basins={model.force_basins}, temporal_basins={model.temporal_basins}")
-    if mean_forcing >= 0:
-        model.mean_forcing_em = mean_forcing
-        if verb:
-            print(f"[infer_mixture] Mean forcing threshold set to {mean_forcing}")
-    if integrate_samples is not None:
-        model.integrate_samples = integrate_samples
-    if ref_sample is not None:
-        model.ref_sample_integration = ref_sample
-    model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
+        print(f"[infer_mixture] mean_forcing_em={model.mean_forcing_em}, "
+              f"soft_em_refinement={model.soft_em_refinement}, integrate_samples={model.integrate_samples}")
 
     if verb:
         print(f"[infer_mixture] Starting mixture model inference ({adata.shape[1]} genes)...")

@@ -14,22 +14,20 @@ This dataset captures the earliest bifurcation in the mouse blastocyst inner cel
 ```bash
 cardamomot pipeline \
     -i experimental_datasets/Semrau \
-    -s full \
-    -r 0.7 \
-    -c 0 \
-    --mean-forcing 1.0 \
     --stimulus 1.0 \
     --prior 1.0 \
+    --mean-forcing 1.0 \
     --force-basins 1.0 \
     --temporal-basins 1
-
 ```
 
+with, in the `Model_parameters` sheet of `Data/CardamomOT_inputs.xlsx`: `split = full`, `select_genes = False`.
+
 Key choices:
-- `-m 1.0` sets the mean expression threshold to 1 (appropriate for this low-gene-count dataset).
+- `--mean-forcing 1.0` sets the mean forcing of the NB mixture to 1 (appropriate for this low-gene-count dataset).
 - `--force-basins 1.0 --temporal-basins 1` enforces temporal consistency of NB modes across time points.
 - `--prior 1.0` uses full prior-network weighting for the network constraint.
-- KO/OV perturbation steps run by default (`--no-kov` would disable them).
+- KO/OV perturbation steps run by default (`simulate_perturbations = False` would disable them).
 
 ## Results
 

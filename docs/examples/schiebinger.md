@@ -20,22 +20,21 @@ The time schedule of reprogramming factor expression must be provided alongside 
 ```bash
 cardamomot pipeline \
     -i experimental_datasets/Schiebinger \
-    -s train \
-    -r 0.3 \
-    -c 0 \
-    --mean-forcing 0.5 \
     --stimulus 1.0 \
     --prior 1.0 \
+    --mean-forcing 0.5 \
     --force-basins 0.0 \
-    --temporal-basins 0 \
-    --test
+    --temporal-basins 0
 ```
 
+with, in the `Model_parameters` sheet of `Data/CardamomOT_inputs.xlsx`: `split = train`, `train_rate = 0.3`,
+`select_genes = False`, `run_test = True`, `species = mouse`.
+
 Key differences from the other datasets:
-- `-s train` splits cells into train/test sets, enabling held-out evaluation.
-- `-r 0.3` uses a lower rate parameter suited to the longer time range (18 days).
+- `split = train` splits cells into train/test sets, enabling held-out evaluation.
+- `train_rate = 0.3` keeps 30 % of the cells of each (sample, time) for training (long time range, 18 days).
 - `--force-basins 0.0 --temporal-basins 0` disables NB mode forcing, appropriate for the continuous reprogramming dynamics.
-- `--test` activates the test-set inference steps (`infer_test` + `check_test_to_train`).
+- `run_test = True` activates the test-set inference steps (`infer_test` + `check_test_to_train`).
 
 Pre-computed outputs for both `--prior 0.5` and `--prior 1.0` are stored in `experimental_datasets/Schiebinger/cardamomOT/`.
 

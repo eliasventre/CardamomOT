@@ -11,12 +11,26 @@ CardamomOT/cli.py:main()
     ├── cardamomot run      → CardamomOT/cli.py:_run_pipeline_interactive()
     │                          → CardamomOT/cli_pipeline.py:run_pipeline_interactive()
     │
-    ├── cardamomot pipeline → CardamomOT/cli.py:_pipeline()
-    │                          [Legacy: runs all old scripts sequentially]
+    ├── cardamomot pipeline → CardamomOT/cli.py:_pipeline()   (run.sh calls it)
+    │                          [steps from the project parameters: cli.pipeline_steps]
     │
     └── cardamomot step     → CardamomOT/cli.py:_run_script()
-                              [Legacy: runs individual script by name]
+                              [runs an individual script by name]
 ```
+
+## Options and parameters (CardamomOT/run_options.py)
+
+- Every step takes `-i <project>` and, among the hard-to-calibrate parameters (in this order
+  `--stimulus`, `--prior`, `--mean-forcing`, `--force-basins`, `--temporal-basins`), only those it uses
+  (`STEP_OPTIONS`); `parse_step_options` rejects the others, and names the workbook parameter replacing a
+  removed option (`REMOVED_OPTIONS`).
+- Everything else (split, train_rate, select_genes, build_prior_network, estimate_proliferation_rates,
+  run_test, simulate_perturbations, simulate_with_proliferation, species, step settings) is a NetworkModel
+  parameter (`CardamomOT/model/base.py`), fixed per project in the Model_parameters sheet of
+  `Data/CardamomOT_inputs.xlsx`.
+- `configure(model, opts)`: workbook, then command line — precedence default < workbook < command line.
+  `settings(opts)` returns a configured NetworkModel(1) to read the pipeline parameters before a step's model;
+  `step_arguments(step, p, values)` builds the command line of a step for the runners.
 
 ## Module Responsibilities
 
@@ -88,7 +102,7 @@ Flow:
 ### Traditional Pipeline (Legacy)
 ```bash
 # Direct parameter specification, no interaction
-cardamomot pipeline -i /path/to/project -s train -r 1.0 -m 0.5
+cardamomot pipeline -i /path/to/project --stimulus 1 --prior 1 --mean-forcing 0.5
 ```
 
 Flow:

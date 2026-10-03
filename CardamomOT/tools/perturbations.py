@@ -10,6 +10,14 @@ STIM1); one condition per row, '0' or empty for nothing; '#' lines are comments:
   like a KO/OV, scaled by the value of the stimulus, which follows its own schedule (column k of
   the perturbation stimuli in Data/stimulus_schedule_simulate.txt, after the inference stimuli;
   default 0 at the first simulated time and 1 after). Several stimuli add their effects.
+- RATEk: effect of perturbation stimulus k on the net proliferation rate (same schedule as STIMk,
+  which may be empty): comma-separated 'TARGET:delta' entries, delta (per time unit, e.g. -0.01)
+  being added to the rate R of a cell at the maximal score of TARGET, in proportion to its score:
+  TARGET = a gene list of the Gene_lists sheet (any extra column, e.g. ferroptosis_sensitive),
+  genes joined by '+' (e.g. FTH1+FTL+TFRC), a single gene, or 'all' (every cell, score 1). The score
+  of a cell is the mean over the genes of its protein level divided by the 99th percentile of the
+  trajectories, clipped to [0, 1]. Applied in the branching simulation (proliferation MLP), along
+  each simulated path; the population size of each condition is recorded.
 """
 import os
 import re
@@ -70,8 +78,49 @@ def parse_stim(cell, genes=None):
     return [(g, 1 if sign == '+' else -1) for g, sign in re.findall(r'(.+?)([+-])', s)]
 
 
+def parse_rate(cell):
+    """Net-rate effects of a RATE cell: [(target, delta)] from 'TARGET:delta, ...'."""
+    s = re.sub(r'\s+', '', str(cell))
+    if s.lower() in ('', '0', 'none', 'nan'):
+        return []
+    out = []
+    for tok in filter(None, s.split(',')):
+        if ':' not in tok:
+            raise ValueError(f"RATE entry '{tok}' must be TARGET:delta (e.g. ferroptosis_sensitive:-0.01)")
+        target, delta = tok.rsplit(':', 1)
+        out.append((target, float(delta)))
+    return out
+
+
+def rate_target_genes(target, genes, input_dir=None):
+    """
+    Genes of a RATE target among `genes` (model genes): None for 'all', else the genes of the gene list
+    gene_list_<target>.txt of the run inputs (Gene_lists sheet), of a '+'-joined list, or the gene itself.
+    """
+    if target.lower() == 'all':
+        return None
+    upper = {str(g).upper(): str(g) for g in genes}
+    path = os.path.join(input_dir, f'gene_list_{target}.txt') if input_dir else None
+    if path and os.path.exists(path):
+        from ..config import read_gene_list
+        names = read_gene_list(path)
+    else:
+        names = target.split('+')
+    found = [upper[n.upper()] for n in names if n.upper() in upper]
+    if not found:
+        raise ValueError(f"RATE target '{target}': no gene of the model (gene list gene_list_{target}.txt "
+                         f"absent or no overlap)")
+    missing = len(names) - len(found)
+    if missing:
+        print(f"[CardamomOT] RATE target '{target}': {len(found)} genes of the model used, {missing} absent")
+    return found
+
+
 def load_perturbations(file_path, genes=None):
-    """Conditions [{'KO': [(gene, pct)], 'OV': [(gene, pct)], 'STIM': {k: [(gene, sign)]}}] of the table."""
+    """
+    Conditions [{'KO': [(gene, pct)], 'OV': [(gene, pct)], 'STIM': {k: [(gene, sign)]},
+    'RATE': {k: [(target, delta)]}}] of the table.
+    """
     if file_path is None or not os.path.exists(file_path):
         raise FileNotFoundError(f"Perturbation table not found: {file_path}")
     with open(file_path) as f:
@@ -81,8 +130,11 @@ def load_perturbations(file_path, genes=None):
     # Perturbation stimuli: STIM (= STIM1), STIM1, STIM2...
     stim_cols = {(1 if h == 'STIM' else int(h[4:])): j for j, h in enumerate(header)
                  if h == 'STIM' or re.fullmatch(r'STIM\d+', h)}
-    if not idx and not stim_cols:
-        raise ValueError(f"{os.path.basename(file_path)} must contain a 'KO', 'OV' or 'STIM' column")
+    # Net-rate effects: RATE (= RATE1), RATE1, RATE2... (schedule of the stimulus of same index)
+    rate_cols = {(1 if h == 'RATE' else int(h[4:])): j for j, h in enumerate(header)
+                 if h == 'RATE' or re.fullmatch(r'RATE\d+', h)}
+    if not idx and not stim_cols and not rate_cols:
+        raise ValueError(f"{os.path.basename(file_path)} must contain a 'KO', 'OV', 'STIM' or 'RATE' column")
     combos = []
     for line in lines[1:]:
         parts = line.split('\t')
@@ -90,8 +142,10 @@ def load_perturbations(file_path, genes=None):
         gene_list = lambda c: ([] if c.lower() in ('', '0', 'none', 'nan')
                                else [parse_gene_with_pct(g) for g in c.split(',') if g.strip()])
         stims = {k: parse_stim(parts[j].strip() if j < len(parts) else '', genes) for k, j in sorted(stim_cols.items())}
-        combo = dict(KO=gene_list(cell('KO')), OV=gene_list(cell('OV')), STIM={k: v for k, v in stims.items() if v})
-        if combo['KO'] or combo['OV'] or combo['STIM']:
+        rates = {k: parse_rate(parts[j].strip() if j < len(parts) else '') for k, j in sorted(rate_cols.items())}
+        combo = dict(KO=gene_list(cell('KO')), OV=gene_list(cell('OV')), STIM={k: v for k, v in stims.items() if v},
+                     RATE={k: v for k, v in rates.items() if v})
+        if combo['KO'] or combo['OV'] or combo['STIM'] or combo['RATE']:
             combos.append(combo)
     return combos
 
@@ -107,6 +161,8 @@ def combo_label(combo):
     label = f"KO_{ko}_OV_{ov}"
     for k, targets in sorted(combo.get('STIM', {}).items()):
         label += f'_STIM{k}_' + '-'.join(f"{g}{'up' if s > 0 else 'dn'}" for g, s in targets)
+    for k, effects in sorted(combo.get('RATE', {}).items()):
+        label += f'_RATE{k}_' + '-'.join(f"{t.replace('+', '.')}{d:+g}" for t, d in effects)
     return label
 
 
@@ -120,6 +176,8 @@ def combo_description(combo):
         parts.append('OV ' + ' + '.join(fmt(g, p) for g, p in combo['OV']))
     for k, targets in sorted(combo.get('STIM', {}).items()):
         parts.append(f'Stimulus {k}: ' + ' '.join(f"{g}{'+' if s > 0 else '-'}" for g, s in targets))
+    for k, effects in sorted(combo.get('RATE', {}).items()):
+        parts.append(f'Rate {k}: ' + ' '.join(f"{t} {d:+g}" for t, d in effects))
     return ' · '.join(parts)
 
 

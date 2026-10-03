@@ -402,7 +402,7 @@ def predict_resp(x, ks, c, pi=None, pi_zero=None, zi=None, forcing=1.0, s=None) 
 
 
 def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=200,
-            basins_temporal=None, vect_t=None, preserve_mean_values=0, mean_forcing=1.0, published=False, s=None):
+            basins_temporal=None, vect_t=None, preserve_mean_values=0, mean_forcing=1.0, s=None):
     """
     Hard EM for a Negative Binomial mixture with temporal constraints.
     
@@ -419,10 +419,10 @@ def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=
     # Initialisation
     resp, log_proba = predict_resp(data, ks, c, s=s)
     basins, pi = _assign_basins(resp, data, ks, c, vect_t, preserve_mean_values, n_components, mean_forcing,
-                                published=published, s=s)
+                                s=s)
 
     if len(np.unique(basins)) < n_components:
-        basins, pi = _assign_basins(resp, data, ks, c, vect_t, 0, n_components, mean_forcing, published=published, s=s)
+        basins, pi = _assign_basins(resp, data, ks, c, vect_t, 0, n_components, mean_forcing, s=s)
     
     log_likelihood_old = np.sum([log_proba[cell, basins[cell]] for cell in range(n_cells)])
     
@@ -446,7 +446,7 @@ def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=
             )
         basins_new, pi_new = _assign_basins(resp_new, data, ks_new, c_new, 
                                             vect_t, preserve_mean_values, 
-                                            n_components, mean_forcing, published=published, s=s)
+                                            n_components, mean_forcing, s=s)
         
         if len(np.unique(basins_new)) < n_components:
             return ks, c, pi, basins
@@ -463,16 +463,13 @@ def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=
     return ks, c, pi, basins
 
 
-def _ot_assign(mu, nu, cost, published=False):
-    """Hard assignment of cells to basins with target masses nu: exact OT (EMD), or in the
-    published version argmax of Sinkhorn(reg=1), which biases masses toward the majority basin."""
-    if not published:
-        return np.argmax(ot.emd(mu, nu, cost, numItermax=int(1e7)), axis=1)
-    return np.argmax(ot.bregman.sinkhorn(mu, nu, cost, reg=1), axis=1)
+def _ot_assign(mu, nu, cost):
+    """Hard assignment of cells to basins with target masses nu by exact OT (EMD)."""
+    return np.argmax(ot.emd(mu, nu, cost, numItermax=int(1e7)), axis=1)
 
 
 def _assign_basins(resp, data, ks, c, vect_t, preserve_mean_values, n_components, mean_forcing, final=False,
-                   published=False, s=None):
+                   s=None):
     """Assign cells to basins with optional temporal constraints."""
     
     n_cells = data.size
@@ -483,9 +480,9 @@ def _assign_basins(resp, data, ks, c, vect_t, preserve_mean_values, n_components
     if vect_t is None:
         mu = np.ones(n_cells) / n_cells
         nu = _compute_nu_with_temporal_constraint(
-            resp, data, ks, c, n_components, mean_forcing, published=published, s=s
+            resp, data, ks, c, n_components, mean_forcing, s=s
         )
-        return _ot_assign(mu, nu, -np.log(resp), published), nu
+        return _ot_assign(mu, nu, -np.log(resp)), nu
     
     # Soft clustering with temporal constraints
     basins: np.ndarray[Any, np.dtype[Any]] = np.zeros(n_cells, dtype=int)
@@ -501,12 +498,12 @@ def _assign_basins(resp, data, ks, c, vect_t, preserve_mean_values, n_components
         
         # Compute nu with temporal constraint
         nu = _compute_nu_with_temporal_constraint(
-            resp_i, data[indices], ks, c, n_components, mean_forcing, published=published,
+            resp_i, data[indices], ks, c, n_components, mean_forcing,
             s=None if s is None else s[indices]
         )
         
         # Transport optimal
-        basins[indices] = _ot_assign(mu, nu, -np.log(resp_i), published)
+        basins[indices] = _ot_assign(mu, nu, -np.log(resp_i))
         pi_final[t_i] = nu
         pi += nu * n_cells_i / n_cells
     
@@ -514,7 +511,7 @@ def _assign_basins(resp, data, ks, c, vect_t, preserve_mean_values, n_components
     return basins, pi
 
 
-def _compute_nu_with_temporal_constraint(resp_i, data_t, ks, c, n_components, mean_forcing, published=False, s=None):
+def _compute_nu_with_temporal_constraint(resp_i, data_t, ks, c, n_components, mean_forcing, s=None):
     """
     Compute the target distribution nu by balancing likelihood and a temporal
     mean constraint.
@@ -528,7 +525,7 @@ def _compute_nu_with_temporal_constraint(resp_i, data_t, ks, c, n_components, me
     # proportions based on the mean constraint
     means_components = ks / c  # Moyenne de chaque NB
     nu = _solve_mean_constraint(means_components, data_t, ks, c, nu_likelihood, n_components, mean_forcing,
-                                published=published, s=s)
+                                s=s)
     nu = np.clip(nu, EPS, 1)  # avoid zero values
     nu /= np.sum(nu)
     
@@ -623,8 +620,7 @@ def ks_statistic(data_full, nu, r, p, repet=10, n_cells_init=200) -> Any | float
     return stat / repet
 
 
-def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_components, mean_forcing, published=False,
-                           s=None):
+def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_components, mean_forcing, s=None):
     """
     while minimizing the distance to the uniform distribution_k) = target_mean
     while minimizing the distance to the uniform distribution.
@@ -651,10 +647,9 @@ def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_component
     if mean_forcing > 0: alpha_reg = np.clip(stat_KS / mean_forcing, 0.0, 1.0)
     else: alpha_reg = 1.0
 
-    # Likelihood term: maximum-likelihood masses (published version: sums of posteriors, which
-    # are pulled toward uniform when components overlap, e.g. at zero counts of sparse genes)
-    if not published:
-        nu_init = nu_star
+    # Likelihood term: maximum-likelihood masses (sums of posteriors are pulled toward uniform
+    # when components overlap, e.g. at zero counts of sparse genes)
+    nu_init = nu_star
 
     # Objective function: distance to the uniform distribution
     def objective(nu):
@@ -879,8 +874,7 @@ def compute_aic_for_params(x, ks, c, pi, pi_zero, zi_mode, s=None) -> tuple[Any,
 class NegativeBinomialMixtureEM:
     def __init__(self, min_components=1, max_components=3, zi=None, refilter=0.0, hard_em=1, mean_forcing_em=1.0,
                  tol=1e-5, max_iter_em=200, verbose=False, preserve_mean_values=0,
-                 compare_init_aic=True, damping=1.0, use_scBoolSeq=False, published_version=False,
-                 soft_em_refinement=False) -> None:
+                 compare_init_aic=True, damping=1.0, use_scBoolSeq=False, soft_em_refinement=False) -> None:
         """
         NB/ZINB mixture with optimal analytical M-step.
 
@@ -895,12 +889,8 @@ class NegativeBinomialMixtureEM:
             call infer_kinetics_temporal once on labeled (non-NaN) cells,
             compute pi from label proportions, compute resp via predict_resp,
             and return. Always uses K=2 components.
-        published_version : bool
-            If True, reproduce the published method: basins assigned by argmax of
-            Sinkhorn(reg=1) and no soft-EM refinement. If False (default), basins are
-            assigned by exact OT with maximum-likelihood target masses.
         soft_em_refinement : bool
-            If True (and not published_version), (ks, c) are refined by soft EM with the
+            If True, (ks, c) are refined by soft EM with the
             basin masses kept fixed, which removes the bias of hard assignments on c.
         """
         assert min_components >= 1 and max_components >= min_components
@@ -917,7 +907,6 @@ class NegativeBinomialMixtureEM:
         self.compare_init_aic: bool = compare_init_aic
         self.damping: float = damping
         self.use_scBoolSeq: bool = use_scBoolSeq
-        self.published_version: bool = published_version
         self.soft_em_refinement: bool = soft_em_refinement
         self.best_model = None
 
@@ -1145,7 +1134,7 @@ class NegativeBinomialMixtureEM:
 
         basins, pi_final = _assign_basins(
             resp, x_all, ks, c, vect_t_all,
-            self.preserve_mean_values, K, self.mean_forcing_em, published=self.published_version
+            self.preserve_mean_values, K, self.mean_forcing_em
         )
 
         resp_final, _ = predict_resp(
@@ -1155,7 +1144,7 @@ class NegativeBinomialMixtureEM:
 
         basins, pi_final = _assign_basins(
             resp, x_all, ks, c, vect_t_all,
-            self.preserve_mean_values, K, self.mean_forcing_em, final=True, published=self.published_version
+            self.preserve_mean_values, K, self.mean_forcing_em, final=True
         )
 
         aic, loglik = compute_aic_for_params(x_all, ks, c, pi, 0, None)
@@ -1268,13 +1257,13 @@ class NegativeBinomialMixtureEM:
                         x, K_try, ks_init, c_init, seuil, tol=self.tol,
                         basins_temporal=basins_temporal, vect_t=vect_t,
                         preserve_mean_values=self.preserve_mean_values,
-                        mean_forcing=self.mean_forcing_em, published=self.published_version, s=s
+                        mean_forcing=self.mean_forcing_em, s=s
                     )
                 else:
                     ks_init, c_init, pi_init, basins = hard_em(
                         x, K_try, ks_init, c_init, seuil, tol=self.tol,
                         preserve_mean_values=self.preserve_mean_values,
-                        mean_forcing=self.mean_forcing_em, published=self.published_version, s=s
+                        mean_forcing=self.mean_forcing_em, s=s
                     )
 
             if (self.refilter > 0.0) and (ks_init.size > 1):
@@ -1372,7 +1361,7 @@ class NegativeBinomialMixtureEM:
                 basins, pi_final = _assign_basins(
                     resp_final, x_all, ks_final, c_final, vect_t_all,
                     self.preserve_mean_values, len(ks_final),
-                    self.mean_forcing_em, final=True, published=self.published_version, s=s_all
+                    self.mean_forcing_em, final=True, s=s_all
                 )
                 best_aic = aic_final
                 best_model = {
@@ -1389,8 +1378,8 @@ class NegativeBinomialMixtureEM:
                 }
 
         # Refine (ks, c) by soft EM with the basin masses kept fixed, then recompute
-        # posteriors and basins on all cells (skipped in the published version)
-        if (self.soft_em_refinement and not self.published_version and best_model is not None
+        # posteriors and basins on all cells
+        if (self.soft_em_refinement and best_model is not None
                 and best_model['n_components'] > 1):
             log_masses = _per_cell_log_masses(best_model['pi'], vect_t, x.size)
             # Too sparse genes (fewer expressing cells than the mass of the highest mode):

@@ -5,16 +5,17 @@ Weight of an edge A -> B: 1 when OmniPath holds a path A -> ... -> B of at most 
 last edge is transcriptional (TF -> target) and whose intermediates are not among the genes, or when
 the literature does not cover the pair; 1 / (k + 1) when every such path goes through k observed
 genes; 0 without any path (raised to prior_network_pen during inference). Same computation as the
-prior written by the gene selection (select_genes_and_split -c 1, see CardamomOT/inference/
+prior written by the gene selection (select_genes_and_split with select_genes, see CardamomOT/inference/
 literature.py): this script is only needed for a gene list chosen without it.
 
 Usage:
-    python build_reference_network.py -i <project_path> [-d <depth>] [--species auto|human|mouse] [--resources extended|core]
-    (defaults: model.literature_depth = 3, model.literature_resources = 'extended')
+    python build_reference_network.py -i <project_path>
+    (literature_depth, literature_resources, species: Model_parameters sheet; run by the pipeline when
+    build_prior_network is True and select_genes is False)
 """
 import sys; sys.path += ['../']
 import os
-import getopt
+from CardamomOT.run_options import parse_step_options, settings
 import numpy as np
 import pandas as pd
 import anndata as ad
@@ -24,32 +25,11 @@ from CardamomOT.inference.halflife_db import detect_species
 
 
 def main(argv):
-    # Defaults: those of the gene selection (NetworkModel), so that both priors are identical
-    from CardamomOT import NetworkModel
-    m = NetworkModel(1)
-    inputfile, depth, species, resources = '', m.literature_depth, 'auto', m.literature_resources
-    try:
-        opts, _ = getopt.getopt(argv, "hi:d:", ["input=", "depth=", "species=", "resources="])
-    except getopt.GetoptError:
-        print(__doc__)
-        sys.exit(2)
-    for opt, arg in opts:
-        if opt == '-h':
-            print(__doc__)
-            sys.exit(0)
-        if opt in ("-i", "--input"):
-            inputfile = arg
-        if opt in ("-d", "--depth"):
-            depth = int(arg)
-        if opt == "--species":
-            species = arg.lower()
-        if opt == "--resources":
-            resources = arg.lower()
-
-    p = inputfile
-    m.apply_project_parameters(os.path.join(p, ''))  # Data/CardamomOT_inputs.xlsx dominates the options
-    depth = m.literature_depth if m.overridden('literature_depth') else depth
-    resources = m.literature_resources if m.overridden('literature_resources') else resources
+    # Parameters of the gene selection (NetworkModel), so that both priors are identical
+    opts = parse_step_options(argv, 'build_reference_network', __doc__)
+    p = opts.p
+    m = settings(opts)
+    depth, species, resources = int(m.literature_depth), str(m.species).lower(), str(m.literature_resources).lower()
     for name in ('data_full.h5ad', 'data_train.h5ad'):
         data_path = os.path.join(p, 'Data', name)
         if os.path.exists(data_path):

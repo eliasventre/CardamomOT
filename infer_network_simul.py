@@ -8,7 +8,8 @@ simulation of gene expression dynamics. Handles reference network loading
 and parameter transformation for downstream simulation steps.
 
 Usage:
-    python infer_network_simul.py -i <project_path> -s <split>
+    python infer_network_simul.py -i <project_path> [--stimulus <float>] [--prior <float>]
+(simulate_with_proliferation: trains the proliferation MLP; Model_parameters sheet)
 
 Required input files:
     - Data/data_<split>.h5ad: count matrix with temporal information
@@ -29,7 +30,7 @@ import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta, read_stimulus_targets, stimulus_target_mask
 from CardamomOT.inputs import input_dir
 from CardamomOT.inference import signed_floor
-import getopt
+from CardamomOT.run_options import parse_step_options, settings, configure
 from CardamomOT.config import find_stimulus_schedule
 import anndata as ad
 import pandas as pd
@@ -43,42 +44,11 @@ def main(argv):
     Adapt inferred network parameters for simulation.
 
     Args:
-        argv: Command-line arguments (--input, --split).
+        argv: Command-line arguments (-i <project> and the options of run_options.STEP_OPTIONS).
     """
-    inputfile = ''
-    split = ''
-    stimulus = -1.0
-    prior = -1.0
-    recompute_proliferations = False
-    try:
-        opts, args = getopt.getopt(argv, "hi:s:t:p:",
-                                   ["input=", "split=", "stimulus=", "prior=", "simulate-proliferation"])
-    except getopt.GetoptError:
-        print("[infer_network_simul] Error: Invalid command-line arguments")
-        print("[infer_network_simul] Usage: python infer_network_simul.py -i <project_path> -s <split> "
-              "[--stimulus <float>] [--prior <float>] [--simulate-proliferation]")
-        sys.exit(2)
-
-    for opt, arg in opts:
-        if opt in ("-i", "--input"):
-            inputfile = arg
-        elif opt in ("-s", "--split"):
-            split = '{}'.format(arg)
-        elif opt in ("-t", "--stimulus"):
-            stimulus = float(arg)
-        elif opt in ("-p", "--prior"):
-            prior = float(arg)
-        elif opt == "--simulate-proliferation":
-            recompute_proliferations = True
-        elif opt == "-h":
-            print(__doc__)
-            sys.exit(0)
-
-    if not inputfile or not split:
-        print("[infer_network_simul] Error: Missing required arguments --input and --split")
-        sys.exit(1)
-
-    p = '{}/'.format(inputfile)
+    opts = parse_step_options(argv, 'infer_network_simul', __doc__)
+    p = opts.p
+    split = settings(opts).split
 
     # Load gene expression data
     data_path = os.path.join(p, 'Data', 'data_{}.h5ad'.format(split))
@@ -107,13 +77,8 @@ def main(argv):
     print(f"[infer_network_simul] n_stimuli detected: {n_stimuli}")
 
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
-    if stimulus >= 0:
-        model.stimulus = stimulus
-    if prior >= 0:
-        model.prior_network_pen = prior
-    model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
-    if model.overridden('simulate_with_proliferation'):
-        recompute_proliferations = model.simulate_with_proliferation
+    configure(model, opts)  # workbook, then the command-line options
+    recompute_proliferations = bool(model.simulate_with_proliferation)  # trains the proliferation MLP
     print(f"[infer_network_simul] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
 
     # Load inferred network parameters

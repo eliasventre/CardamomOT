@@ -170,9 +170,15 @@ def _celltype_legend(fig, color_map, y=0.01):
 
 
 def _page_title(fig, title, subtitle=None):
-    fig.suptitle(title, fontsize=14, fontweight='bold', x=0.04, ha='left', y=0.985)
+    # Long titles shrink to fit the page width; subtitles wrap on at most 2 lines
+    size = 14 if len(title) <= 90 else max(9.0, 14 * 90 / len(title))
+    fig.suptitle(title, fontsize=size, fontweight='bold', x=0.04, ha='left', y=0.985)
     if subtitle:
-        fig.text(0.04, 0.945, subtitle, fontsize=8.5, color='#555555', ha='left')
+        lines = textwrap.wrap(subtitle, 160)
+        if len(lines) > 1:
+            lines = textwrap.wrap(subtitle, 165, max_lines=2, placeholder=" …")
+        fig.text(0.04, 0.955, '\n'.join(lines), fontsize=8.5 if len(lines) == 1 else 7.5, color='#555555',
+                 ha='left', va='top', linespacing=1.3)
 
 
 def _error_page(pdf, title, msg):
@@ -286,8 +292,13 @@ class _ReportData:
         self.tag = tag
 
         self.adata_data = ad.read_h5ad(os.path.join(p, 'Data', f'data_{split}.h5ad'))
+        from ..inputs import depth_factor_used
+        self.use_depth = depth_factor_used(p)
         self.genes = list(self.adata_data.var_names)
+        # Data = observed cells; Reference = RNA of the trajectories (one state per ancestor: without
+        # proliferation), growth-weighted below if the simulation used the proliferation MLP
         self.stages = {
+            'Data': self.adata_data,
             'Reference': _read(os.path.join(cdir, f'adata_rna_traj_{tag}.h5ad')),
             'NB mixture': _read(os.path.join(cdir, f'adata_beta_{tag}.h5ad')),
             'Network': _read(os.path.join(cdir, f'adata_theta_{tag}.h5ad')),
@@ -306,8 +317,10 @@ class _ReportData:
         self.growth_ref = False
         if bool(self.stages['Simulation'].uns.get('proliferation', False)):
             growth = {k: _read(os.path.join(cdir, f'adata_{n}_growth_{tag}.h5ad'))
-                      for k, n in (('NB mixture', 'beta'), ('Network', 'theta'), ('Trajectories', 'prot_traj'))}
+                      for k, n in (('Reference', 'rna_traj'), ('NB mixture', 'beta'), ('Network', 'theta'),
+                                   ('Trajectories', 'prot_traj'))}
             if all(v is not None for v in growth.values()):
+                self.stages['Reference'] = growth['Reference']
                 self.stages['NB mixture'], self.stages['Network'] = growth['NB mixture'], growth['Network']
                 self.prot['Trajectories'] = growth['Trajectories']
                 self.growth_ref = True
@@ -327,7 +340,7 @@ class _ReportData:
             self.categories = self.adata_data.obs[LABEL_KEY].astype(str).unique().tolist()
             self.color_map = _cell_type_colors(self.categories)
             clf = train_classifier(self.adata_data, label_key=LABEL_KEY)
-            for A in list(self.stages.values()) + [a for _, _, a in self.perturbations if a is not None]:
+            for A in [a for k, a in self.stages.items() if k != 'Data'] + [a for _, _, a in self.perturbations if a is not None]:
                 predict_cell_types(A, clf, label_key=LABEL_KEY)
             self.clf = clf
         else:
@@ -402,18 +415,23 @@ def _cover_page(pdf, R, info, perturbations_status):
     fig.text(0.06, y + 0.02, 'Run', fontsize=13, fontweight='bold')
     for k, v in rows:
         y -= 0.033
-        fig.text(0.07, y, k, fontsize=9, fontweight='bold')
-        fig.text(0.25, y, '\n'.join(textwrap.wrap(v, 75)) if len(v) > 75 else v, fontsize=9, va='top' if len(v) > 75 else 'baseline')
+        lines = textwrap.wrap(v, 55) or ['']
+        fig.text(0.07, y, k, fontsize=9, fontweight='bold', va='top')
+        fig.text(0.25, y, '\n'.join(lines), fontsize=9, va='top', linespacing=1.3)
+        y -= 0.022 * (len(lines) - 1)
 
     x0 = 0.60
-    fig.text(x0, 0.75, 'Perturbations (Data/KO_OV_Stim_simulate.txt)', fontsize=13, fontweight='bold')
+    fig.text(x0, 0.75, 'Perturbations (KO_OV_Stim_simulate)', fontsize=13, fontweight='bold')
     y = 0.72
     if not perturbations_status:
         fig.text(x0 + 0.01, y - 0.03, 'No KO_OV_Stim_simulate.txt / no perturbation listed.', fontsize=9, color='#777777')
-    for label, desc, ok in perturbations_status[:22]:
+    for i, (label, desc, ok) in enumerate(perturbations_status[:22], start=1):
         y -= 0.03
-        fig.text(x0 + 0.01, y, '✓' if ok else '✗', fontsize=10, color='#27AE60' if ok else '#C0392B', fontweight='bold')
-        fig.text(x0 + 0.035, y, desc, fontsize=9)
+        lines = textwrap.wrap(f'P{i}  {desc}', 62)
+        fig.text(x0 + 0.01, y, '✓' if ok else '✗', fontsize=10, color='#27AE60' if ok else '#C0392B',
+                 fontweight='bold', va='top')
+        fig.text(x0 + 0.035, y, '\n'.join(lines), fontsize=8.5, va='top', linespacing=1.25)
+        y -= 0.02 * (len(lines) - 1)
         if not ok:
             fig.text(x0 + 0.035, y - 0.017, 'not simulated: run simulate_network_KOV + check_KOV_to_sim', fontsize=6.5, color='#C0392B')
             y -= 0.012
@@ -422,11 +440,11 @@ def _cover_page(pdf, R, info, perturbations_status):
 
     fig.text(0.06, 0.22, 'Contents', fontsize=13, fontweight='bold')
     fig.text(0.07, 0.04,
-             '1. Generative model — UMAPs of data, NB mixture, network modes and simulation; cell-type proportions; gene-pair correlations; proteins\n'
+             '1. Generative model — UMAPs of data, trajectories, NB mixture, network modes and simulation; cell-type proportions; gene-pair correlations; proteins\n'
              '2. Gene regulatory network — regulatory power (violin plots) and top-10 regulators' + (' + stimulus' if info['show_stim'] else '') + '\n'
              '3. In-silico perturbations — overview across KO/OV, then one page per perturbation\n'
              '4. Proliferation — prior vs learned net rates, population growth, proteins driving growth\n'
-             '5. Learned dynamics — mRNA and protein velocity fields (mechanistic and along trajectories)'
+             '5. Learned dynamics — mRNA and protein velocity fields (mechanistic and along trajectories), summary on mRNA'
              + ('\n6. Held-out test cells — predictions with the network fixed vs the test data' if R.test else ''),
              fontsize=9, va='bottom', linespacing=1.6)
     pdf.savefig(fig); plt.close(fig)
@@ -440,14 +458,17 @@ def _model_pages(pdf, R):
     # Page: UMAPs by time and cell type
     fig = plt.figure(figsize=A4_LANDSCAPE)
     _page_title(fig, '1. Generative model — trajectories and simulation',
-                'Joint UMAP of the observed data (Reference), NB mixture, network-driven modes and full simulation.'
-                + (' Simulation with proliferation: NB mixture and network stages growth-weighted (trajectories '
-                   'resampled by their expansion, exp ∫R_opt).' if R.growth_ref else ''))
-    gs = gridspec.GridSpec(2, 4, figure=fig, left=0.04, right=0.96, top=0.89, bottom=0.12, hspace=0.18, wspace=0.06)
+                'Joint UMAP of the observed data, the trajectories (Reference: one state per ancestor, i.e. '
+                + ('growth-weighted by exp ∫R_opt, as the simulation has proliferation)' if R.growth_ref
+                   else 'without proliferation, as the simulation)')
+                + ', NB mixture and network-driven modes along them, and the full simulation.')
+    gs = gridspec.GridSpec(2, len(names), figure=fig, left=0.03, right=0.96, top=0.89, bottom=0.12, hspace=0.12,
+                           wspace=0.05)
     sca = None
     for j, k in enumerate(names):
         A = R.stages[k]
-        sca = _umap_time(fig.add_subplot(gs[0, j]), R.umap[k], R.times(A, R.sub[k]), vmin, vmax, k)
+        sca = _umap_time(fig.add_subplot(gs[0, j]), R.umap[k], R.times(A, R.sub[k]), vmin, vmax,
+                         'Data (observed)' if k == 'Data' else k)
         ax = fig.add_subplot(gs[1, j])
         if R.has_ct:
             _umap_celltype(ax, R.umap[k], R.labels(A, R.sub[k]), R.color_map, '')
@@ -460,7 +481,9 @@ def _model_pages(pdf, R):
 
     # Page: cell-type proportions, gene-pair correlations, proteins
     fig = plt.figure(figsize=A4_LANDSCAPE)
-    _page_title(fig, '1. Generative model — quantitative checks')
+    _page_title(fig, '1. Generative model — quantitative checks',
+                'Reference = RNA of the trajectories equivalent to the simulation '
+                + ('(growth-weighted: simulation with proliferation).' if R.growth_ref else '(without proliferation).'))
     gs = gridspec.GridSpec(2, 3, figure=fig, left=0.06, right=0.97, top=0.88, bottom=0.12, hspace=0.45, wspace=0.3)
     if R.has_ct:
         prop = pd.DataFrame({k: _proportions(R.stages[k], R.categories) for k in names}).T
@@ -651,6 +674,7 @@ def _depth_page(pdf, R, diag, per_group):
         decision = ('applied' if diag['applied'] else
                     'recommended, not allowed' if diag['recommended'] else 'not needed')
         lines = [('Source', os.path.basename(diag['source'])), ('Method', diag['method']), ('Decision', decision),
+                 ('Used by the model', 'yes' if R.use_depth else 'no (use_depth_factor = False)'),
                  ('Spread of s (q95/q05)', f"x{diag['depth_spread_q95_q05']:.2f}"),
                  ('Median CV of depth', f"{diag['median_cv']:.2f}"),
                  ('Extrinsic noise (median of groups)', f"{diag.get('median_extrinsic_noise', np.nan):.2f}"),
@@ -858,24 +882,35 @@ def _perturbation_pages(pdf, R):
     sim = R.stages['Simulation']
     t_sim = R.times(sim)
     t_last = np.max(t_sim)
+    # Short ids P1, P2... (as on the cover page) for the overview panels
+    pid = {l: f'P{i}' for i, (l, _, _) in enumerate(R.perturbations, start=1)}
     X_sim = _dense(sim.X).astype(float)
+
+    # Population sizes of the branching simulations (proliferation MLP and RATE effects)
+    pops = {pid[l]: np.asarray(A.uns['log_population'], dtype=float) for l, _, A in done if 'log_population' in A.uns}
+    if pops and 'log_population' in sim.uns:
+        pops = {'WT': np.asarray(sim.uns['log_population'], dtype=float), **pops}
 
     # Overview page across all perturbations
     if R.has_ct:
         fig = plt.figure(figsize=A4_LANDSCAPE)
         _page_title(fig, '3. In-silico perturbations — overview',
-                    'Cell types predicted by a random forest trained on the observed data.')
-        gs = gridspec.GridSpec(1, 2, figure=fig, left=0.07, right=0.97, top=0.86, bottom=0.25, wspace=0.3)
-        prop = pd.DataFrame({'Reference': _proportions(R.stages['Reference'], R.categories),
-                             'Simulation WT': _proportions(sim, R.categories),
-                             **{d: _proportions(A, R.categories) for _, d, A in done}}).T
+                    'Cell types predicted by a random forest trained on the observed data.'
+                    + (' Population sizes from the branching simulation (proliferation MLP + RATE effects).'
+                       if pops else ''))
+        gs = gridspec.GridSpec(1, 3 if pops else 2, figure=fig, left=0.06, right=0.97, top=0.86, bottom=0.36,
+                               wspace=0.55, width_ratios=[1.1, 1.1, 1] if pops else None)
+        prop = pd.DataFrame({'Data': _proportions(R.stages['Data'], R.categories),
+                             'Reference': _proportions(R.stages['Reference'], R.categories),
+                             'WT': _proportions(sim, R.categories),
+                             **{pid[l]: _proportions(A, R.categories) for l, _, A in done}}).T
         ax = fig.add_subplot(gs[0, 0]); _stacked_bars(ax, prop, R.color_map, 'Cell-type proportions (all times)')
         _panel_label(ax, 'A', -0.12)
 
         # Shift vs WT at the last simulated time point
         wt_last = _proportions(sim[t_sim == t_last], R.categories)
-        delta = pd.DataFrame({d: _proportions(A[R.times(A) == t_last], R.categories) - wt_last
-                              for _, d, A in done}).T
+        delta = pd.DataFrame({pid[l]: _proportions(A[R.times(A) == t_last], R.categories) - wt_last
+                              for l, _, A in done}).T
         ax = fig.add_subplot(gs[0, 1])
         vmax = max(float(np.abs(delta.values).max()), 1.0)
         im = ax.imshow(delta.values, cmap='RdBu_r', vmin=-vmax, vmax=vmax, aspect='auto')
@@ -886,24 +921,53 @@ def _perturbation_pages(pdf, R):
                     color='white' if abs(v) > 0.6 * vmax else 'black')
         cb = fig.colorbar(im, ax=ax, fraction=0.04); cb.set_label('Δ % vs WT', fontsize=8); cb.ax.tick_params(labelsize=7)
         ax.set_title(f'Cell-type shift vs WT simulation at t = {t_last:g}', fontsize=9)
-        _panel_label(ax, 'B', -0.3)
+        _panel_label(ax, 'B', -0.15)
+        if pops:
+            ax = fig.add_subplot(gs[0, 2])
+            t_u = np.sort(np.unique(t_sim))
+            cmap_p = plt.get_cmap('tab10')
+            for i, (name, lp) in enumerate(pops.items()):
+                if len(lp) != len(t_u):
+                    continue
+                wt = name == 'WT'
+                ax.plot(t_u, np.exp(lp), color='k' if wt else cmap_p(i % 10), lw=2 if wt else 1.2,
+                        marker='o', ms=2.5, label=name)
+                ax.annotate(name, (t_u[-1], np.exp(lp[-1])), xytext=(3, 0), textcoords='offset points',
+                            fontsize=6, va='center', color='k' if wt else cmap_p(i % 10))
+            ax.set_yscale('log'); ax.set_xlabel('time', fontsize=8)
+            ax.set_ylabel('population size (relative to t0)', fontsize=8); ax.tick_params(labelsize=7)
+            ax.set_title('Population size', fontsize=9)
+            for sp in ('top', 'right'):
+                ax.spines[sp].set_visible(False)
+            _panel_label(ax, 'C', -0.2)
+        # Key of the perturbation ids
+        key_lines = [f'{pid[l]}  {d}' for l, d, _ in done]
+        half = (len(key_lines) + 1) // 2
+        for j, chunk in enumerate((key_lines[:half], key_lines[half:])):
+            fig.text(0.06 + 0.47 * j, 0.25, '\n'.join(textwrap.shorten(x, 95) for x in chunk), fontsize=6.5,
+                     va='top', family='monospace', linespacing=1.35)
         _celltype_legend(fig, R.color_map, y=0.02)
         pdf.savefig(fig); plt.close(fig)
 
-    t_all = np.concatenate([R.times(R.stages['Reference'], R.sub['Reference']), R.times(sim, R.sub['Simulation'])])
+    t_all = np.concatenate([R.times(R.stages['Data'], R.sub['Data']), R.times(sim, R.sub['Simulation'])])
     vmin, vmax = float(t_all.min()), float(t_all.max())
-    bg = R.umap['Reference']
+    bg = R.umap['Data']
 
     for label, desc, A in done:
         fig = plt.figure(figsize=A4_LANDSCAPE)
-        _page_title(fig, f'3. Perturbation — {desc}',
-                    f'{label}. UMAP: perturbed simulation projected on the WT embedding (grey = observed data).')
+        pop_txt = ''
+        if pid[label] in pops and 'WT' in pops:
+            pop_txt = (f' Population at t = {t_last:g}: ×{np.exp(pops[pid[label]][-1] - pops["WT"][-1]):.2f} '
+                       f'vs WT.')
+        _page_title(fig, f'3. Perturbation {pid[label]} — {desc}',
+                    f'{label}. UMAP: perturbed simulation projected on the WT embedding (grey = observed data).'
+                    + pop_txt)
         gs = gridspec.GridSpec(2, 1, figure=fig, left=0.05, right=0.97, top=0.9, bottom=0.08,
                                hspace=0.3, height_ratios=[1.15, 1])
         g_top = gs[0].subgridspec(2, 3, hspace=0.12, wspace=0.05)
-        cols = [('Reference', R.umap['Reference'], R.stages['Reference'], R.sub['Reference'], None),
+        cols = [('Data (observed)', R.umap['Data'], R.stages['Data'], R.sub['Data'], None),
                 ('Simulation WT', R.umap['Simulation'], sim, R.sub['Simulation'], bg),
-                (desc, R.pert_umap[label], A, R.pert_sub[label], bg)]
+                (f'{pid[label]} (perturbed)', R.pert_umap[label], A, R.pert_sub[label], bg)]
         sca = None
         for j, (name, emb, B, idx, back) in enumerate(cols):
             sca = _umap_time(fig.add_subplot(g_top[0, j]), emb, R.times(B, idx), vmin, vmax, name, bg=back)
@@ -917,7 +981,8 @@ def _perturbation_pages(pdf, R):
 
         g_bot = gs[1].subgridspec(1, 3, wspace=0.35, width_ratios=[0.8, 1.2, 1.1])
         if R.has_ct:
-            prop = pd.DataFrame({'Reference': _proportions(R.stages['Reference'], R.categories),
+            prop = pd.DataFrame({'Data': _proportions(R.stages['Data'], R.categories),
+                                 'Reference': _proportions(R.stages['Reference'], R.categories),
                                  'Sim. WT': _proportions(sim, R.categories),
                                  'Perturbed': _proportions(A, R.categories)}).T
             _stacked_bars(fig.add_subplot(g_bot[0, 0]), prop, R.color_map, 'Cell-type proportions')
@@ -1130,7 +1195,7 @@ def _proliferation_pages(pdf, R, D):
     has_prior = D.prior_cells is not None
     n_cells = R.adata_data.n_obs
     learned_cells = D.per_cell(D.R_learned, n_cells)
-    sub, emb = R.sub['Reference'], R.umap['Reference']
+    sub, emb = R.sub['Data'], R.umap['Data']
     prior_label = "prior (obs['proliferation_net_rate'])" if has_prior else 'prior: uniform (none provided)'
 
     # Page: maps and per-cell-type comparison
@@ -1292,7 +1357,7 @@ def _proliferation_pages(pdf, R, D):
             ax.spines[sp].set_visible(False)
     else:
         ax.axis('off')
-        ax.text(0.5, 0.5, 'No proliferation MLP\n(run infer_network_simul\n--simulate-proliferation)',
+        ax.text(0.5, 0.5, 'No proliferation MLP\n(simulate_with_proliferation = True,\nthen infer_network_simul)',
                 ha='center', va='center', fontsize=9, color='#555555', transform=ax.transAxes)
     if p_states is not None:
         _celltype_legend(fig, p_cmap, y=0.01)
@@ -1442,30 +1507,33 @@ def _velocity_pages(pdf, R, D, n_cells=2000, k_top=8):
         else:
             ax.axis('off')
         pdf.savefig(fig); plt.close(fig)
-        if name == 'Proteins':
-            # One summary page per cell-type annotation used by CardamomOT (selection, proliferation, transitions)
-            obs = R.adata_data.obs
-            for key in ('cell_type', 'cell_type_proliferation', 'cell_type_transition'):
-                if key == 'cell_type':
-                    labels, cmap_ct = (D.ct[idx] if D.ct is not None else None), R.color_map
-                elif key in obs:
-                    per_state = D._per_state(obs[key].astype(str).values, fill='')
-                    if per_state is None:
-                        continue
-                    labels = per_state[idx]
-                    cmap_ct = _cell_type_colors(sorted(set(obs[key].astype(str))))
-                else:
-                    continue
-                if key == 'cell_type' or labels is not None:
-                    _presentation_page(pdf, R, D, idx, E, V_meca, t, growth, labels, cmap_ct, key)
+        if name == 'mRNA':
+            summary = (E, V_traj)  # summary pages drawn at the end of the section
+    E_m, V_m = summary
+    # One summary page per cell-type annotation used by CardamomOT (selection, proliferation, transitions)
+    obs = R.adata_data.obs
+    for key in ('cell_type', 'cell_type_proliferation', 'cell_type_transition'):
+        if key == 'cell_type':
+            labels, cmap_ct = (D.ct[idx] if D.ct is not None else None), R.color_map
+        elif key in obs:
+            per_state = D._per_state(obs[key].astype(str).values, fill='')
+            if per_state is None:
+                continue
+            labels = per_state[idx]
+            cmap_ct = _cell_type_colors(sorted(set(obs[key].astype(str))))
+        else:
+            continue
+        if key == 'cell_type' or labels is not None:
+            _presentation_page(pdf, R, D, idx, E_m, V_m, t, growth, labels, cmap_ct, key)
 
 
-def _presentation_page(pdf, R, D, idx, E, V_meca, t, growth, labels=None, color_map=None, key='cell_type'):
-    """Summary figure for talks, on the protein UMAP: states by time (no field), protein velocity
-    field d1·(kon(P) − P) over the cell types, and final learned net rates (no field)."""
+def _presentation_page(pdf, R, D, idx, E, V_traj, t, growth, labels=None, color_map=None, key='cell_type'):
+    """Summary figure for talks, on the mRNA UMAP: states by time (no field), mRNA velocity along the
+    inferred trajectories over the cell types, and final learned net rates (no field)."""
     fig = plt.figure(figsize=A4_LANDSCAPE)
     _page_title(fig, '5. Learned dynamics — summary' + ('' if key == 'cell_type' else f' ({key})'),
-                f'{len(idx)} trajectory states on the UMAP of protein levels; background of the velocity field: {key}.')
+                f'{len(idx)} trajectory states on the UMAP of log1p NB-sampled mRNA; velocity along the inferred '
+                f'trajectories (x(t+1) − x(t)) / Δt; background of the velocity field: {key}.')
     gs = gridspec.GridSpec(1, 3, figure=fig, left=0.03, right=0.95, top=0.86, bottom=0.14, wspace=0.12)
     lo, hi = E.min(axis=0), E.max(axis=0)  # same extent on the three panels
     ax = fig.add_subplot(gs[0, 0])
@@ -1476,10 +1544,10 @@ def _presentation_page(pdf, R, D, idx, E, V_meca, t, growth, labels=None, color_
     cb.set_label('time', fontsize=8); cb.ax.tick_params(labelsize=7)
     ax = fig.add_subplot(gs[0, 1])
     if labels is not None:
-        _stream(ax, E, V_meca, labels, f'Protein velocity d1·(kon(P) − P), {key}', categorical=color_map,
+        _stream(ax, E, V_traj, labels, f'mRNA velocity along trajectories, {key}', categorical=color_map,
                 s=10, density=0.8, linewidth=1.5, alpha=0.55, color='#1A1A1A')
     else:
-        _stream(ax, E, V_meca, t, 'Protein velocity d1·(kon(P) − P)', s=10, density=0.8, linewidth=1.5,
+        _stream(ax, E, V_traj, t, 'mRNA velocity along trajectories', s=10, density=0.8, linewidth=1.5,
                 alpha=0.55, color="#1A1A1A")
     ax = fig.add_subplot(gs[0, 2])
     if growth is not None and np.isfinite(growth).any():

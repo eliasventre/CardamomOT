@@ -16,7 +16,8 @@ Held-out validation with everything learned on the training cells kept fixed:
 Per-sample parameters (mixtures, basals) are routed to the cells of each sample, never averaged.
 
 Usage:
-    python infer_test.py -i <project_path>
+    python infer_test.py -i <project_path> [--stimulus <float>] [--prior <float>] [--force-basins <float>]
+                         [--temporal-basins <0|1>]
 
 Required input files (from training pipeline):
     - Data/data_test.h5ad: test count matrix with temporal information
@@ -47,7 +48,7 @@ from CardamomOT import NetworkModel as NetworkModel_beta, find_data_file
 from CardamomOT.inputs import input_dir
 from CardamomOT.inference.integration import nb_cell_parameters
 from CardamomOT.inference.depth import state_depth, simulation_depth
-import getopt
+from CardamomOT.run_options import parse_step_options, settings, configure
 from CardamomOT.config import find_stimulus_schedule, simulation_schedule
 
 
@@ -58,41 +59,8 @@ def main(argv):
     Args:
         argv: Command-line arguments (--input).
     """
-    inputfile = ''
-    stimulus = -1.0
-    prior = -1.0
-    force_basins = -1
-    temporal_basins = -1
-    try:
-        opts, args = getopt.getopt(argv, "hi:t:p:f:b:",
-                                   ["input=", "stimulus=", "prior=",
-                                    "force-basins=", "temporal-basins="])
-    except getopt.GetoptError:
-        print("[infer_test] Error: Invalid command-line arguments")
-        print("[infer_test] Usage: python infer_test.py -i <project_path> "
-              "[--stimulus <float>] [--prior <float>] [--force-basins <int>] [--temporal-basins <int>]")
-        sys.exit(2)
-
-    for opt, arg in opts:
-        if opt in ("-i", "--input"):
-            inputfile = arg
-        elif opt in ("-t", "--stimulus"):
-            stimulus = float(arg)
-        elif opt in ("-p", "--prior"):
-            prior = float(arg)
-        elif opt in ("-f", "--force-basins"):
-            force_basins = int(arg)
-        elif opt in ("-b", "--temporal-basins"):
-            temporal_basins = int(arg)
-        elif opt == "-h":
-            print(__doc__)
-            sys.exit(0)
-
-    if not inputfile:
-        print("[infer_test] Error: Missing required argument --input")
-        sys.exit(1)
-
-    p = '{}/'.format(inputfile)
+    opts = parse_step_options(argv, 'infer_test', __doc__)
+    p = opts.p
     cardamom_dir = os.path.join(p, 'cardamomOT')
 
     # ─── LOAD TEST DATA ──────────────────────────────────────────────────
@@ -137,15 +105,7 @@ def main(argv):
 
     # ─── INITIALIZE MODEL AND LOAD TRAINING PARAMETERS ──────────────────
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
-    if stimulus >= 0:
-        model.stimulus = stimulus
-    if prior >= 0:
-        model.prior_network_pen = prior
-    if force_basins >= 0:
-        model.force_basins = force_basins
-    if temporal_basins >= 0:
-        model.temporal_basins = temporal_basins
-    model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
+    configure(model, opts)  # workbook, then the command-line options
     print(f"[infer_test] Initialized model with {adata.shape[1]} genes, "
           f"stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}, "
           f"force_basins={model.force_basins}, temporal_basins={model.temporal_basins}")
@@ -429,7 +389,8 @@ def main(argv):
         N0 = int(np.sum(times_simulation_test == times_simulation_test[0]))
         s_sim = None if s_test is None else np.tile(s_test[:N0], len(times_simulation_test) // N0)
         # Depth factors: states / simulated cells drawn at the depth of the test cells they mimic
-        depth_cells = adata.obs['depth_factor'].values.astype(float) if 'depth_factor' in adata.obs else None
+        depth_cells = (adata.obs['depth_factor'].values.astype(float)
+                       if (model.use_depth_factor and 'depth_factor' in adata.obs) else None)
         d_tr = state_depth(depth_cells, real_idx_test)
         d_sim = simulation_depth(depth_cells, real_idx_test, times_data_test, times_simulation_test)
         data_beta = _nb_sample(vect_kon_beta, times_data_test, s_test[:len(vect_kon_beta)] if s_test is not None else None, d_tr)

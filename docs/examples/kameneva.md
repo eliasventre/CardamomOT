@@ -15,15 +15,15 @@ The sympathoadrenal lineage arises from neural crest cells that migrate to the a
 ```bash
 cardamomot pipeline \
     -i experimental_datasets/Kameneva \
-    -s full \
-    -r 0.7 \
-    -c 0 \
-    --mean-forcing 0.5 \
     --stimulus 1.0 \
     --prior 1.0 \
+    --mean-forcing 0.5 \
     --force-basins 1.0 \
     --temporal-basins 1
 ```
+
+with, in the `Model_parameters` sheet of `Data/CardamomOT_inputs.xlsx`: `split = full`, `train_rate = 0.7`,
+`select_genes = False`.
 
 Multiple `--stimulus` values (0.2, 0.3, 0.5, 1.0) were explored to assess sensitivity to the stimulus-edge penalisation, as reflected in the pre-computed outputs.
 

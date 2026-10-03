@@ -27,11 +27,12 @@ scored (warning): the reference rates of Data/proliferation_rates.{csv,txt},
 if given, are assigned uniformly per cell type; otherwise no rate is assigned.
 
 Usage:
-    python get_proliferation_rates.py -i <project_path> [--species auto|human|mouse]
+    python get_proliferation_rates.py -i <project_path>
 
-    --species selects the built-in marker gene lists. By default ('auto') it is
-    detected from the gene nomenclature (mouse "Mki67" vs human "MKI67"), as in
-    get_degradation_rates.py; pass it explicitly to override the detection.
+    The parameter species (Model_parameters sheet) selects the built-in marker gene
+    lists. By default ('auto') it is detected from the gene nomenclature (mouse "Mki67"
+    vs human "MKI67"), as in get_degradation_rates.py; set it to override the detection.
+    senescence_gating = False disables the senescence gating of the proliferation score.
 
 Required input files:
     - Data/data.h5ad: count matrix (all genes, pre-selection, unless
@@ -43,17 +44,17 @@ Optional input files:
       never modified
     - Data/proliferation_signatures.csv|txt: proliferation marker genes,
       one per line or comma-separated (overrides the built-in default list
-      for the chosen --species)
+      for the chosen species)
     - Data/death_signatures.csv|txt: death marker genes, one per line or
       comma-separated (overrides the built-in default list for the chosen
-      --species)
+      species)
     - Data/senescence_signatures.csv|txt: senescence/cell-cycle-arrest/
       quiescence marker genes, one per line or comma-separated (overrides
-      the built-in default list for the chosen --species). Used to gate the
+      the built-in default list for the chosen species). Used to gate the
       birth rate to ~0 for cells that are arrested/senescent rather than
       actively dying, even if they still carry residual cell-cycle gene
       expression — see CardamomOT.tools.estimate_proliferation. Pass
-      an empty file (or set `--no-senescence-gating`) to disable this and
+      an empty file (or set senescence_gating = False) to disable this and
       recover the plain birth - death estimate.
     - Data/proliferation_rates.csv|txt: two columns, no header
       (cell_type, net_rate) — anchors the literature estimate's per-cell-type
@@ -72,7 +73,7 @@ Output files:
 """
 import sys; sys.path += ['../']
 import os
-import getopt
+from CardamomOT.run_options import parse_step_options, settings
 import anndata as ad
 import numpy as np
 import pandas as pd
@@ -172,45 +173,20 @@ def main(argv):
     Estimate and assign per-cell net proliferation rates.
 
     Args:
-        argv: Command-line arguments (--input, --species, --no-senescence-gating).
+        argv: Command-line arguments (-i <project>; species, senescence_gating: Model_parameters sheet).
 
     Returns:
         None. Updates Data/data.h5ad in place with obs['proliferation_net_rate'].
     """
-    inputfile = ''
-    species = 'auto'
-    senescence_gating = True
-    try:
-        opts, args = getopt.getopt(
-            argv, "hi:", ["input=", "species=", "no-senescence-gating"]
-        )
-    except getopt.GetoptError:
-        print("[get_proliferation_rates] Error: Invalid command-line arguments")
-        print("[get_proliferation_rates] Usage: python get_proliferation_rates.py "
-              "-i <project_path> [--species auto|human|mouse] [--no-senescence-gating]")
-        sys.exit(2)
-
-    for opt, arg in opts:
-        if opt in ("-i", "--input"):
-            inputfile = arg
-        elif opt == "--species":
-            species = arg
-        elif opt == "--no-senescence-gating":
-            senescence_gating = False
-        elif opt == "-h":
-            print(__doc__)
-            sys.exit(0)
-
-    if not inputfile:
-        print("[get_proliferation_rates] Error: Missing required argument --input")
-        sys.exit(1)
-    species = species.strip().lower()
+    opts = parse_step_options(argv, 'get_proliferation_rates', __doc__)
+    cfg = settings(opts)
+    species, senescence_gating = str(cfg.species).strip().lower(), bool(cfg.senescence_gating)
     if species not in ("auto", "human", "mouse"):
-        print(f"[get_proliferation_rates] Error: --species must be auto, human or mouse (got '{species}')")
+        print(f"[get_proliferation_rates] Error: species must be auto, human or mouse (got '{species}')")
         sys.exit(1)
 
-    p = '{}/'.format(inputfile)
-    data_dir = input_dir(p)
+    p = opts.p
+    data_dir = os.path.join(p, 'Data')  # data files; the run inputs are read from input_dir(p)
 
     # Data/data.h5ad is always the file that gets updated.
     data_path = os.path.join(data_dir, 'data.h5ad')
@@ -275,7 +251,7 @@ def main(argv):
     if species == "auto":
         species, hits = detect_species(adata_score.var_names)
         print(f"[get_proliferation_rates] Detected species='{species}' from gene names "
-              f"(official-name matches: {hits}); pass --species to override")
+              f"(official-name matches: {hits}); set the parameter species to override")
     else:
         print(f"[get_proliferation_rates] Using species='{species}'")
     print(f"[get_proliferation_rates] Senescence gating: "

@@ -8,7 +8,8 @@ transport problem that matches the temporal dynamics of the inferred
 mixture model to observed transcriptomic data.
 
 Usage:
-    python infer_network_structure.py -i <project_path> -s <split>
+    python infer_network_structure.py -i <project_path> [--stimulus <float>] [--prior <float>]
+                                      [--force-basins <float>] [--temporal-basins <0|1>]
 
 Required input files:
     - Data/data_<split>.h5ad: count matrix with degradation rates
@@ -25,7 +26,7 @@ from CardamomOT import NetworkModel as NetworkModel_beta, find_data_file
 from CardamomOT.inputs import input_dir
 from CardamomOT import check_stationary, STATIONARY_EXIT_CODE, STATIONARY_MESSAGE
 from CardamomOT import read_stimulus_targets, stimulus_target_mask
-import getopt
+from CardamomOT.run_options import parse_step_options, settings, configure
 from CardamomOT.config import find_stimulus_schedule
 import anndata as ad
 import pandas as pd
@@ -37,37 +38,11 @@ def main(argv):
     Infer the gene regulatory network structure from temporal scRNA-seq data.
 
     Args:
-        argv: Command-line arguments (--input, --split).
+        argv: Command-line arguments (-i <project> and the options of run_options.STEP_OPTIONS).
     """
-    inputfile = ''
-    split = ''
-    stimulus = -1.0
-    prior = -1.0
-    force_basins = -1
-    temporal_basins = -1
-    try:
-        opts, args = getopt.getopt(argv, "hi:s:t:p:f:b:",
-                                   ["input=", "split=", "stimulus=", "prior=",
-                                    "force-basins=", "temporal-basins="])
-    except getopt.GetoptError:
-        print("Error: Invalid arguments. Use: infer_network_structure.py -i <project> -s <split> "
-              "[--stimulus <float>] [--prior <float>] [--force-basins <int>] [--temporal-basins <int>]")
-        sys.exit(2)
-    for opt, arg in opts:
-        if opt in ("-i", "--input"):
-            inputfile = arg
-        if opt in ("-s", "--split"):
-            split = '{}'.format(arg)
-        if opt in ("-t", "--stimulus"):
-            stimulus = float(arg)
-        if opt in ("-p", "--prior"):
-            prior = float(arg)
-        if opt in ("-f", "--force-basins"):
-            force_basins = float(arg)
-        if opt in ("-b", "--temporal-basins"):
-            temporal_basins = int(arg)
-
-    p = '{}/'.format(inputfile)
+    opts = parse_step_options(argv, 'infer_network_structure', __doc__)
+    p = opts.p
+    split = settings(opts).split
 
     data_path = os.path.join(p, 'Data', 'data_{}.h5ad'.format(split))
     if os.path.exists(data_path):
@@ -105,15 +80,7 @@ def main(argv):
     # ─── LOAD MIXTURE PARAMETERS ────────────────────────────────────────
     try:
         model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
-        if stimulus >= 0:
-            model.stimulus = stimulus
-        if prior >= 0:
-            model.prior_network_pen = prior
-        if force_basins >= 0:
-            model.force_basins = force_basins
-        if temporal_basins >= 0:
-            model.temporal_basins = temporal_basins
-        model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
+        configure(model, opts)  # workbook, then the command-line options
         print(f"[infer_network_structure] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}, "
               f"force_basins={model.force_basins}, temporal_basins={model.temporal_basins}")
         model.modes = np.load(os.path.join(p, 'cardamomOT', 'modes.npy'))

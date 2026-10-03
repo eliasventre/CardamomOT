@@ -27,19 +27,20 @@ my_project/
 
 ## Run the interactive pipeline
 
-The simplest entry point is the interactive `run` command, which presents a checkbox menu for each analysis step:
+The simplest entry point is the interactive `run` command: it asks once for the hard-to-calibrate parameters (empty = workbook value or default), then for each step (Enter keeps the answer preselected from the project parameters):
 
 ```bash
 cardamomot run my_project/
 ```
 
-Steps (checked by default unless marked *optional*):
+Steps (preselected according to the parameters in parentheses):
 
-| Step | Description | Default |
+| Step | Description | Preselected |
 |---|---|---|
-| **Proliferation rates** | Estimate net proliferation rate per cell from literature gene signatures (runs first, on the full gene set) | ✓ |
-| **Gene selection** | Filter DE genes; split cells into train/test | ✓ |
-| Network constraint | Build prior network from databases | optional |
+| **Cell depth** | Per-cell depth diagnostic | ✓ |
+| Proliferation rates | Net proliferation rate per cell from literature gene signatures (on the full gene set) | `estimate_proliferation_rates` |
+| **Gene selection** | Select genes (`select_genes`); split cells into train/test (`split`, `train_rate`) | ✓ |
+| Network constraint | Build prior network from databases | `build_prior_network` and not `select_genes` |
 | **Kinetics** | Assign literature mRNA/protein degradation rates (h⁻¹), species auto-detected | ✓ |
 | **Mixture model** | Fit negative-binomial burst parameters per gene | ✓ |
 | Check mixture | Validate mixture against data | ✓ |
@@ -47,29 +48,27 @@ Steps (checked by default unless marked *optional*):
 | **Network adaptation** | Prepare network parameters for simulation | ✓ |
 | **Simulation** | Generate synthetic single-cell trajectories | ✓ |
 | Check simulation | Validate simulations vs data | ✓ |
-| Test — inference | Infer and simulate on held-out test set | optional |
-| Test — check | Compare test predictions to training observations | optional |
-| **Perturb (KO/OV)** | Simulate in-silico knock-outs / over-expressions | ✓ |
-| Check KO/OV | Compare perturbations to wild-type simulation | ✓ |
+| Test — inference | Infer and simulate on held-out test set | `run_test` (with `split = 'train'`) |
+| Test — check | Compare test predictions to training observations | `run_test` |
+| Perturb (KO/OV) | Simulate in-silico knock-outs / over-expressions / stimuli | `simulate_perturbations` |
+| Check KO/OV | Compare perturbations to wild-type simulation | `simulate_perturbations` |
+| **Report** | Final PDF | ✓ |
 
-To run all steps with default parameters without any prompt:
+To run the preselected steps with the project parameters, without any prompt:
 
 ```bash
 cardamomot run my_project/ --default
 ```
 
 ```{note}
-The **Proliferation rates** step needs no configuration to run: it scores each cell
-against built-in human proliferation/death marker genes and writes
+The **Proliferation rates** step (`estimate_proliferation_rates = True` in the `Model_parameters`
+sheet) scores each cell against built-in proliferation/death marker genes and writes
 `adata.obs['proliferation_net_rate']`, which the network-inference step then uses to
 correct the optimal-transport marginals for cell growth/death. It runs on the full,
 unfiltered dataset — *before* gene selection — so that DE gene filtering doesn't
 discard the literature marker genes needed to score the signature. It always
-(re)computes and overwrites `adata.obs['proliferation_net_rate']`, even if that
-column is already present. To keep your own values (e.g. from an external
-measurement such as EdU staining) instead, skip the step entirely — uncheck
-**Proliferation rates** in `cardamomot run`, or pass `--no-use-proliferation` to
-`cardamomot pipeline` / `use_proliferation=0` to `run.sh`. See
+(re)computes and overwrites `adata.obs['proliferation_net_rate']`; keep the parameter
+`False` (default) to use your own values (e.g. from EdU staining). See
 [Advanced Features](advanced.md#refining-proliferation-rates) to use mouse gene
 sets, supply your own marker genes, or anchor the estimate to a known
 population-level rate.
@@ -77,102 +76,70 @@ population-level rate.
 
 ## Run in batch mode
 
-For scripting or cluster submission, use the `pipeline` sub-command. **Only `-i` is required**; every other argument has a default inherited from the model (`base.py`):
+For scripting or cluster submission, use the `pipeline` sub-command (or `run.sh`). **Only `-i` is required**,
+and the only options are the hard-to-calibrate parameters, in this order:
 
 ```bash
-# Minimal call — all parameters use model defaults
+# Minimal call — workbook values, else defaults of base.py
 cardamomot pipeline -i my_project
 
 # Full explicit call
 cardamomot pipeline \
     -i my_project \
-    -s full \                       # dataset split: full | train  (default: full)
-    -c 0 \                          # differential gene selection (0=off, 1=on)  (default: 0)
-    -r 1 \                          # cell-selection split rate  (default: 1)
-    --mean-forcing 0.5 \            # mean-forcing intensity for NB mixture  (default: 0.5)
-    --stimulus 1.0 \                # stimulus-edge penalisation in [0,1]
-    --prior 1.0 \                   # prior-network weighting in [0,1]
-    --force-basins 1.0 \            # preserve NB mode means in [0,1]
-    --temporal-basins 1 \           # enforce temporal mode consistency (0 or 1)
-    --species mouse                 # organism, human | mouse  (default: detected from gene names)
+    --stimulus 1.0 \          # stimulus-edge penalisation in [0,1]            (model.stimulus)
+    --prior 1.0 \             # weight of edges absent from the prior in [0,1] (model.prior_network_pen)
+    --mean-forcing 0.5 \      # mean-forcing intensity of the NB mixture       (model.mean_forcing_em)
+    --force-basins 1.0 \      # basin weights kept in the network fit, [0,1]   (model.force_basins)
+    --temporal-basins 1        # basin weights per timepoint (0 or 1)           (model.temporal_basins)
+
+# Same with run.sh (positional, same order; empty or -1 = workbook value / default)
+./run.sh my_project 1.0 1.0 0.5 1.0 1
 ```
 
-**Optional-section flags** — these are switches with no value; just add the flag to change the behaviour:
+**Everything else is a parameter** of `NetworkModel` (`CardamomOT/model/base.py`), fixed per project in the
+`Model_parameters` sheet of `Data/CardamomOT_inputs.xlsx` (precedence: default < workbook < command line):
 
-| Flag | Step(s) triggered | Behaviour without flag | Behaviour with flag |
-|---|---|---|---|
-| `--ref` | `build_reference_network` | skipped | enabled |
-| `--ref-depth N` | *(used with `--ref`)* | `3` (default) | path length set to `N` |
-| `--test` | `infer_test` + `check_test_to_train` | skipped | enabled |
-| `--no-kov` | `simulate_network_KOV` + `check_KOV_to_sim` | enabled | skipped |
-| `--simulate-proliferation` | `infer_network_simul` + `simulate_network` + `simulate_network_KOV` | standard simulation | learn R_opt MLP; simulate with proliferation/death resampling |
-| `--no-use-proliferation` | `get_proliferation_rates` | enabled — (re)estimates `obs['proliferation_net_rate']` | skipped — keeps whatever is already in `obs['proliferation_net_rate']` |
+| Parameter | Default | Steps |
+|---|---|---|
+| `split` (`'train'` / `'full'`), `train_rate` | `'train'`, `0.7` | train/test split of the cells (all steps read `data_<split>.h5ad`) |
+| `select_genes` | `False` | gene selection in `select_genes_and_split` (otherwise all genes kept) |
+| `build_prior_network` | `False` | literature prior: by the selection, or `build_reference_network` if `select_genes = False` |
+| `estimate_proliferation_rates` | `False` | `get_proliferation_rates` |
+| `run_test` | `False` | `infer_test` + `check_test_to_train` (needs `split = 'train'`) |
+| `simulate_perturbations` | `True` | `simulate_network_KOV` + `check_KOV_to_sim` |
+| `simulate_with_proliferation` | `False` | proliferation MLP (`infer_network_simul`) and branching simulations |
+| `species` | `'auto'` | degradation rates, proliferation signatures, literature prior |
 
 ## Run individual steps
 
-Each step can be run independently with `cardamomot step <script_name> [args]`, using the exact same arguments as in `run.sh`. The script name is the filename without `.py`:
+Each step takes `-i` and only the hard-to-calibrate options it uses (`cardamomot step <script_name> [args]`,
+script name without `.py`); a removed option stops the step with the parameter to set instead:
 
 ```bash
-# ── Proliferation rates (run first, on the full unfiltered gene set) ─────────
-# Always (re)writes obs['proliferation_net_rate'], with the gene signatures of the species
-# detected from gene names (force it with --species human|mouse; see Advanced Features).
-# Skip this step entirely to keep your own obs['proliferation_net_rate'] values.
-cardamomot step get_proliferation_rates -i my_project
+cardamomot step estimate_cell_depth     -i my_project
+cardamomot step get_proliferation_rates -i my_project            # if estimate_proliferation_rates
+cardamomot step select_genes_and_split  -i my_project --prior 1.0
+cardamomot step build_reference_network -i my_project            # if build_prior_network and not select_genes
+cardamomot step get_degradation_rates   -i my_project            # d0/d1 of the species (overwrite_degradation_rates)
+cardamomot step infer_mixture           -i my_project --mean-forcing 0.5
+cardamomot step check_mixture_to_data   -i my_project
 
-# ── Gene selection and cell split ─────────────────────────────────────────────
-cardamomot step select_genes_and_split \
-    -i my_project -s full -r 1 -c 0 --mean-forcing 0.5 --force-basins 1.0 --temporal-basins 1
+# --stimulus and --prior must be identical in the network steps, the checks and the report (file tags)
+cardamomot step infer_network_structure -i my_project --stimulus 1.0 --prior 1.0 --force-basins 1.0 --temporal-basins 1
+cardamomot step infer_network_simul     -i my_project --stimulus 1.0 --prior 1.0   # + MLP if simulate_with_proliferation
+cardamomot step simulate_network        -i my_project
+cardamomot step check_sim_to_data       -i my_project --stimulus 1.0 --prior 1.0
 
-# ── Optional: prior network (run after gene selection) ────────────────────────
-cardamomot step build_reference_network -i my_project -d 3
+# Held-out validation (run_test, split = 'train'): test cells classified with the training mixtures, trajectory
+# loop with the network fixed continuing the training schedule, simulation from the test cells at t0, compared
+# to Data/data_test.h5ad (Check/ and section 6 of the report); test cells per (time, sample) capped at the train ones.
+cardamomot step infer_test              -i my_project --stimulus 1.0 --prior 1.0 --force-basins 1.0 --temporal-basins 1
+cardamomot step check_test_to_train     -i my_project --stimulus 1.0 --prior 1.0
 
-# ── Kinetics ──────────────────────────────────────────────────────────────────
-# Literature mRNA/protein degradation rates (hour^-1) in adata.var['d0'/'d1'], from the
-# reference table of the detected species (force it with --species human|mouse);
-# per-gene provenance in Data/degradation_rates_report.csv. Existing d0/d1 are kept
-# unless --overwrite. See Advanced Features -> Literature degradation rates.
-cardamomot step get_degradation_rates -i my_project -s full
-
-# ── Mixture model ─────────────────────────────────────────────────────────────
-cardamomot step infer_mixture \
-    -i my_project -s full --mean-forcing 0.5 --force-basins 1.0 --temporal-basins 1
-cardamomot step check_mixture_to_data -i my_project -s full
-
-# ── Network inference ─────────────────────────────────────────────────────────
-# --stimulus and --prior must be identical in both commands:
-#   infer_network_structure uses them to constrain what edges are *learned*
-#   infer_network_simul     uses them to build the *simulation* reference network
-cardamomot step infer_network_structure \
-    -i my_project -s full --stimulus 1.0 --prior 1.0 --force-basins 1.0 --temporal-basins 1
-cardamomot step infer_network_simul \
-    -i my_project -s full --stimulus 1.0 --prior 1.0
-# Add --simulate-proliferation to learn a ProliferationMLP from the inferred R_opt values:
-#   cardamomot step infer_network_simul -i my_project -s full --stimulus 1.0 --prior 1.0 --simulate-proliferation
-
-# ── Simulation ────────────────────────────────────────────────────────────────
-cardamomot step simulate_network -i my_project -s full
-# Add --simulate-proliferation to resample trajectories according to the learned R(P) network:
-#   cardamomot step simulate_network -i my_project -s full --simulate-proliferation
-cardamomot step check_sim_to_data \
-    -i my_project -s full --stimulus 1.0 --prior 1.0
-
-# ── Optional: test set (requires -s train) ────────────────────────────────────
-# Held-out validation, everything learned on the train cells fixed: test cells classified into basins
-# with the training mixtures (per sample), trajectory loop with the network fixed continuing the training
-# schedule (same EMD + network basin weights, low Sinkhorn regularization), simulation from the test cells
-# at t0, compared to Data/data_test.h5ad (Check/ and section 6 of the final report). The split caps the
-# test cells of each (time, sample) at the number of train cells.
-cardamomot step infer_test \
-    -i my_project --stimulus 1.0 --prior 1.0 --force-basins 1.0 --temporal-basins 1
-cardamomot step check_test_to_train \
-    -i my_project -s train --stimulus 1.0 --prior 1.0
-
-# ── Perturbations (default) ───────────────────────────────────────────────────
-cardamomot step simulate_network_KOV -i my_project -s full
-# Add --simulate-proliferation to apply proliferation/death resampling to perturbation simulations too:
-#   cardamomot step simulate_network_KOV -i my_project -s full --simulate-proliferation
-cardamomot step check_KOV_to_sim \
-    -i my_project -s full --stimulus 1.0 --prior 1.0
+# Perturbations (simulate_perturbations)
+cardamomot step simulate_network_KOV    -i my_project
+cardamomot step check_KOV_to_sim        -i my_project --stimulus 1.0 --prior 1.0
+cardamomot step report_results          -i my_project --stimulus 1.0 --prior 1.0
 ```
 
 ## Examine results

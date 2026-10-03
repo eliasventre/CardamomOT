@@ -8,7 +8,7 @@ observed expression data through distribution analysis and optimal
 transport distance metrics.
 
 Usage:
-    python check_mixture_to_data.py -i <project_path> -s <split>
+    python check_mixture_to_data.py -i <project_path>   (split: Model_parameters sheet)
 
 Required input files:
     - Data/data_<split>.h5ad: count matrix with temporal information
@@ -22,12 +22,14 @@ Output files:
 """
 
 import numpy as np
-import sys, getopt
+import sys
+from CardamomOT.run_options import parse_step_options, settings, configure
 import anndata as ad
 from CardamomOT import plot_data_umap_toref, plot_data_distrib, check_stationary
 from CardamomOT.inference.integration import nb_cell_parameters
 import scipy.sparse
 import os
+from CardamomOT.inputs import depth_factor_used
 import ot
 
 plot_in_script = 0
@@ -42,34 +44,15 @@ def main(argv):
     quality of the burst kinetics inference.
 
     Args:
-        argv: Command-line arguments (--input, --split).
+        argv: Command-line arguments (-i <project> and the options of run_options.STEP_OPTIONS).
     
     Returns:
         None. Saves comparison data and prints OT distance metric.
     """
-    inputfile = ''
-    split = ''
-    try:
-        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split="])
-    except getopt.GetoptError:
-        print("[check_mixture_to_data] Error: Invalid command-line arguments")
-        print("[check_mixture_to_data] Usage: python check_mixture_to_data.py -i <project_path> -s <split>")
-        sys.exit(2)
-    
-    for opt, arg in opts:
-        if opt in ("-i", "--input"):
-            inputfile = arg
-        elif opt in ("-s", "--split"):
-            split = '{}'.format(arg)
-        elif opt == "-h":
-            print(__doc__)
-            sys.exit(0)
-
-    if not inputfile or not split:
-        print("[check_mixture_to_data] Error: Missing required arguments --input and --split")
-        sys.exit(1)
-
-    p = '{}/'.format(inputfile)
+    opts = parse_step_options(argv, 'check_mixture_to_data', __doc__)
+    p = opts.p
+    split = settings(opts).split
+    inputfile = p  # plots write to <project>/Check
 
     outputfile = 'Check'
     complement1 = 'mixture_vs_data'
@@ -140,7 +123,8 @@ def main(argv):
 
     # Sample from negative binomial distribution (exclude stimulus columns ns:)
     # Depth factors: each cell drawn at its own depth, NB(k, c / s)
-    s = adata.obs['depth_factor'].values.astype(float)[:, None] if 'depth_factor' in adata.obs else 1.0
+    s = (adata.obs['depth_factor'].values.astype(float)[:, None]
+         if (depth_factor_used(p) and 'depth_factor' in adata.obs) else 1.0)
     data_beta[1:, :] = np.random.negative_binomial(((k1c + 1e-6)*vect_kon_beta)[:, ns:].T, (cc / (cc + s))[:, ns:].T)
     data_beta[1:, :] = np.where(zero_mask, 0, data_beta[1:, :])
 

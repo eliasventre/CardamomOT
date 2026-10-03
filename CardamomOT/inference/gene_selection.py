@@ -351,7 +351,7 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
                  literature_weight=1.0, literature_resources='extended', max_free_params=None,
                  min_entropy_change=0.1, min_nb_separation=0.15, n_cells_mixture=1024, seuil_mixture=0.01,
                  n_cells_network=1000, sample_key='dataset_id', forced_genes=None, stimulus_targets=None,
-                 species=None, seed=0, verb=True):
+                 species=None, use_depth_factor=False, seed=0, verb=True):
     """
     Full selection on raw counts (see module docstring). n_query + n_entropy must leave budget for
     the paths (< num_max_genes). The network is turned into edge probabilities against the same
@@ -406,7 +406,8 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
     sub = np.sort(np.concatenate([rng0.choice(np.flatnonzero(times == t), min(n_cells_entropy, int(np.sum(times == t))),
                                               replace=False) for t in tu]))
     # Depth factors (estimate_cell_depth.py): scores on counts at the reference depth
-    depth = np.asarray(adata.obs['depth_factor'].values, dtype=float) if 'depth_factor' in adata.obs else None
+    depth = (np.asarray(adata.obs['depth_factor'].values, dtype=float)
+             if (use_depth_factor and 'depth_factor' in adata.obs) else None)
     X = _dense(Xa[sub][:, universe]).astype(np.float32)
     if depth is not None:
         X = X / depth[sub, None].astype(np.float32)

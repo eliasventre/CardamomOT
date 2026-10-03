@@ -71,6 +71,8 @@ class NetworkModel:
         self.ref_network = None
         self.stimulus_targets = None  # (n_stimuli, n_genes) allowed stimulus -> gene edges (Data/stimulus_targets.txt)
         self.perturbation_stimulus = None  # KO/OV/Stim simulations: list of dict(signs=(G_tot,), schedule=t -> value)
+        self.rate_perturbation = None      # RATE effects of the KO/OV/Stim simulations: list of dict(weights=(G,) or None, scale=(G,), delta, schedule)
+        self.log_population = None         # log population size per simulated time (branching simulation), relative to t0
         self.basal = None
         self.inter = None
         self.inter_t = None
@@ -88,6 +90,22 @@ class NetworkModel:
         self.n_stimuli = n_stimuli
         self._stim_schedule = None
 
+        ### Pipeline (run.sh / cardamomot pipeline): data and steps, fixed per project in Data/CardamomOT_inputs.xlsx
+        self.split = 'train'                     # 'train': train/test split of the cells (train_rate per sample and time); 'full': all cells
+        self.train_rate = 0.7                    # share of the cells of each (sample, time) in the train split (at least 100); the test keeps at most as many
+        self.select_genes = False                # select_genes_and_split: gene selection (queries, entropy genes, global network, Steiner tree); False = all genes kept
+        self.build_prior_network = False         # literature prior cardamomOT/ref_network.csv: built by the gene selection if select_genes, else by build_reference_network
+        self.estimate_proliferation_rates = False  # get_proliferation_rates: obs['proliferation_net_rate'] from gene signatures, anchored to Data/proliferation_rates
+        self.run_test = False                    # infer_test + check_test_to_train on the held-out cells (needs split = 'train')
+        self.simulate_perturbations = True       # simulate_network_KOV + check_KOV_to_sim (Data/KO_OV_Stim_simulate)
+        self.species = 'auto'                    # 'auto' (from gene names), 'human' or 'mouse': degradation rates, proliferation signatures, literature prior
+        self.senescence_gating = True            # get_proliferation_rates: the senescence signature gates the proliferation score
+        self.overwrite_degradation_rates = False  # get_degradation_rates: replace the d0/d1 already stored in the AnnData files
+        self.report_net_index = 0                # report: network shown when n_networks > 1
+        self.report_normalize = False            # report UMAPs: counts normalised per cell
+        self.report_log1p = True                 # report UMAPs: log1p of the counts
+        self.report_n_umap = 4000                # report: maximal number of cells per stage in the UMAPs (0 = all)
+
         ### Default behaviour
         self.seed = None # Random seed for reproducibility (main process and parallel workers); None = not seeded (runs vary)
 
@@ -100,13 +118,14 @@ class NetworkModel:
         self.transform_proba = 0 # Do we want to force probas to be steep for compatibility with sigmoid model?
         self.seuil = 1e-2 # minimum for beta mixture parameters (second parameters)
         self.batch_size_mixture = 1024 # Maximum number of cells per time used for mixture calibration in the inference.
+        self.use_depth_factor = False   # use obs['depth_factor'] (estimate_cell_depth) in the NB model and simulations; False = s_i = 1 (an existing factor is kept but ignored)
+        self.compute_depth_factor = True # estimate_cell_depth computes the diagnostic and writes obs['depth_factor'] if needed; False = only reads an existing factor (never removed)
         self.allow_depth_correction = True  # estimate_cell_depth: apply the per-cell depth factor s_i when the diagnostic recommends it
         self.depth_method = 'poissonian'  # depth factor: 'group_median', 'poissonian' (Fang & Pachter, 2025), or <project>/depth_methods/<name>.py
         self.depth_method_params = {}       # parameters of the depth method
         self.depth_by_cell_type = False     # estimate s_i within (sample, time, cell type) groups; False = (sample, time) only:
                                             # cell types derive from expression, normalising within them pulls cells to their type (circular)
-        self.published_version = False # NB mixture as published (Sinkhorn argmax basins, posterior-sum target masses)
-        self.soft_em_refinement = False # NB mixture: refine (ks, c) by soft EM with fixed basin masses (ignored if published_version)
+        self.soft_em_refinement = False # NB mixture: refine (ks, c) by soft EM with fixed basin masses
         self.use_scBoolSeq = False # If True, initialize NB mixture with scBoolSeq binarization instead of hard EM
         self.scboolseq_confidence = 0.6 # GMM posterior probability threshold for cell label assignment (lower → fewer NaN)
         self.scboolseq_min_cells_per_label = 10 # min cells per label (0 and 1) required to use scBoolSeq path; otherwise falls back to normal EM
@@ -267,8 +286,8 @@ class NetworkModel:
     def apply_project_parameters(self, project, verb=True):
         """
         Override attributes with the values filled in the Model_parameters sheet of
-        Data/CardamomOT_inputs.xlsx; call it after the command-line options so that the
-        workbook dominates them. Values are cast to the type of the current value.
+        Data/CardamomOT_inputs.xlsx; the command-line options are applied after it and
+        dominate (run_options.configure). Values are cast to the type of the current value.
         Returns the set of overridden attributes.
         """
         import ast
@@ -301,7 +320,7 @@ class NetworkModel:
             done[name] = val
         self._project_overrides = set(done)
         if done and verb and not getattr(NetworkModel, '_printed_overrides', False):
-            print(f"[CardamomOT] Parameters of Data/CardamomOT_inputs.xlsx (override defaults and options): {done}")
+            print(f"[CardamomOT] Parameters of Data/CardamomOT_inputs.xlsx (override the defaults): {done}")
             NetworkModel._printed_overrides = True
         return set(done)
 
@@ -342,11 +361,10 @@ class NetworkModel:
         ns = self.n_stimuli
         self.ref_network[:ns, ns:] = self.ref_network[:ns, ns:] * np.asarray(mask, dtype=float)[:, :, None]
 
-    @staticmethod
-    def _depth_factors(data):
-        """Per-cell depth factors s_i (obs['depth_factor'], estimate_cell_depth.py), or None."""
+    def _depth_factors(self, data):
+        """Per-cell depth factors s_i (obs['depth_factor'], estimate_cell_depth.py), or None (also if not use_depth_factor)."""
         obs = getattr(data, 'obs', None)
-        if obs is None or 'depth_factor' not in obs:
+        if not self.use_depth_factor or obs is None or 'depth_factor' not in obs:
             return None
         return np.asarray(obs['depth_factor'].values, dtype=float)
 
@@ -540,7 +558,6 @@ class NetworkModel:
                                                  refilter=refilter, hard_em=self.hard_em,
                                                  preserve_mean_values=self.preserve_mean_values, mean_forcing_em=self.mean_forcing_em,
                                                  use_scBoolSeq=(scboolseq_matrix is not None),
-                                                 published_version=self.published_version,
                                                  soft_em_refinement=self.soft_em_refinement)
 
         def run_main_loop_for_gene(g):
@@ -2690,6 +2707,13 @@ class NetworkModel:
         _prolif_fn = None
         if self.simulate_with_proliferation and self.prolif_network is not None:
             _prolif_fn = self.prolif_network.predict  # (..., n_proteins), stimuli of the interval -> (...)
+        # RATE effects of perturbation stimuli (added to R); without the MLP, R = 0 + effects
+        _rates = list(getattr(self, 'rate_perturbation', None) or [])
+        if _rates and _prolif_fn is None and verb:
+            print("[simulate] Warning: RATE effects without the proliferation MLP: base net rate 0")
+        _branching = _prolif_fn is not None or bool(_rates)
+        self.log_population = np.zeros(len(times)) if _branching else None
+        if _branching:
             u_growth, w_growth = quadrature(self.n_growth_nodes)
             # Resampling groups: cells of a sample only replace cells of the same sample
             groups = ([np.flatnonzero(np.asarray(samples_data)[:N] == s) for s in np.unique(np.asarray(samples_data)[:N])]
@@ -2698,7 +2722,7 @@ class NetworkModel:
         for cnt, time in enumerate(times[start_time:-1], start=start_time):
             delta_t = times[cnt + 1] - time
             # Recording times within the interval (end state last)
-            t_rec = delta_t * u_growth[1:] if _prolif_fn is not None else delta_t
+            t_rec = delta_t * u_growth[1:] if _branching else delta_t
 
             degradations = self.d_t[cnt].copy()
             if self.simulation_stochastic:
@@ -2759,11 +2783,25 @@ class NetworkModel:
             # log_weight_n = ∫ R(P_n(s)) ds over the simulated path (trapezoidal rule on the
             # recorded states), the same quadrature as in the MLP training. Multinomial
             # resampling within each sample keeps N cells (no Poisson extinction at R ≈ 0).
-            if _prolif_fn is not None:
+            if _branching:
                 path = np.stack([prot_modified[start_index:start_index + N, ns:]]
                                 + [np.array([results[n].p[q][ns - 1:] for n in range(N)])
                                    for q in range(len(t_rec))], axis=1)       # (N, Q, G)
-                log_weights = (_prolif_fn(path, cur_stim_vals) * w_growth).sum(axis=1) * delta_t
+                R_path = _prolif_fn(path, cur_stim_vals) if _prolif_fn is not None else np.zeros(path.shape[:2])
+                for eff in _rates:
+                    # delta x score along the path, scaled by the stimulus value over the interval
+                    u = float(eff['schedule'](times[cnt + 1]))
+                    if u == 0:
+                        continue
+                    if eff['weights'] is None:
+                        score = np.ones(path.shape[:2])
+                    else:
+                        score = np.clip(path * eff['scale'], 0, 1) @ eff['weights']
+                    R_path = R_path + u * eff['delta'] * score
+                log_weights = (R_path * w_growth).sum(axis=1) * delta_t
+                # Population size: mean growth factor of the cells over the interval
+                self.log_population[cnt + 1] = self.log_population[cnt] + float(
+                    np.log(np.mean(np.exp(log_weights - log_weights.max()))) + log_weights.max())
                 P_end = prot_modified[end_index:end_index + N, ns:].copy()
                 for grp in groups:
                     weights = np.exp(log_weights[grp] - log_weights[grp].max())

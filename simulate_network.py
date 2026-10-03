@@ -4,7 +4,7 @@ simulate_network.py
 Simulate gene expression dynamics using the inferred network model.
 
 Usage:
-    python simulate_network.py -i <project_path> -s <split>
+    python simulate_network.py -i <project_path>   (simulate_with_proliferation: Model_parameters sheet)
 
 Required input files:
     - Data/data_<split>.h5ad: count matrix with temporal information
@@ -20,7 +20,7 @@ import sys; sys.path += ['../']
 import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta
 from CardamomOT.inputs import input_dir
-import getopt
+from CardamomOT.run_options import parse_step_options, settings, configure
 from CardamomOT.config import n_inference_stimuli, simulation_schedule
 import anndata as ad
 import os
@@ -31,35 +31,11 @@ def main(argv):
     Simulate gene expression dynamics using the inferred network model.
 
     Args:
-        argv: Command-line arguments (--input, --split).
+        argv: Command-line arguments (-i <project> and the options of run_options.STEP_OPTIONS).
     """
-    inputfile = ''
-    split = ''
-    simulate_with_proliferation = False
-    try:
-        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split=", "simulate-proliferation"])
-    except getopt.GetoptError:
-        print("[simulate_network] Error: Invalid command-line arguments")
-        print("[simulate_network] Usage: python simulate_network.py -i <project_path> -s <split> "
-              "[--simulate-proliferation]")
-        sys.exit(2)
-
-    for opt, arg in opts:
-        if opt in ("-i", "--input"):
-            inputfile = arg
-        elif opt in ("-s", "--split"):
-            split = '{}'.format(arg)
-        elif opt == "--simulate-proliferation":
-            simulate_with_proliferation = True
-        elif opt == "-h":
-            print(__doc__)
-            sys.exit(0)
-
-    if not inputfile or not split:
-        print("[simulate_network] Error: Missing required arguments --input and --split")
-        sys.exit(1)
-
-    p = '{}/'.format(inputfile)
+    opts = parse_step_options(argv, 'simulate_network', __doc__)
+    p = opts.p
+    split = settings(opts).split
 
     # Load gene expression data (for gene count and temporal validation)
     data_path = os.path.join(p, 'Data', 'data_{}.h5ad'.format(split))
@@ -79,9 +55,8 @@ def main(argv):
     stim_sched, _ = simulation_schedule(input_dir(p), n_stimuli)
 
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
-    model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
-    if model.overridden('simulate_with_proliferation'):
-        simulate_with_proliferation = model.simulate_with_proliferation
+    configure(model, opts)  # workbook, then the command-line options
+    simulate_with_proliferation = bool(model.simulate_with_proliferation)
     model.simulate_with_proliferation = False  # enabled below once the proliferation network is loaded
     print(f"[simulate_network] Data: {adata.shape[1]} genes, {adata.shape[0]} cells, n_stimuli={n_stimuli}")
 
@@ -156,8 +131,8 @@ def main(argv):
             model.simulate_with_proliferation = True
             print("[simulate_network] Loaded proliferation network — branching simulation enabled")
         else:
-            print("[simulate_network] Warning: --simulate-proliferation requested but prolif_network.pt not found; "
-                  "run infer_network_simul.py --simulate-proliferation first")
+            print("[simulate_network] Warning: simulate_with_proliferation = True but prolif_network.pt not found; "
+                  "run infer_network_simul.py with simulate_with_proliferation = True first")
 
     # Simulate network dynamics
     print("[simulate_network] Starting network simulation...")
@@ -173,6 +148,8 @@ def main(argv):
         # Whether the cells were resampled by the proliferation MLP (reference used by check_sim_to_data)
         np.save(os.path.join(cardamom_dir, 'simulation_with_proliferation'),
                 np.array([bool(model.simulate_with_proliferation and model.prolif_network is not None)]))
+        if model.log_population is not None:
+            np.save(os.path.join(cardamom_dir, 'data_log_population'), model.log_population)
         if model.simulate_full_with_harissa and hasattr(model, 'mrna_simul') and model.mrna_simul is not None:
             np.save(os.path.join(cardamom_dir, 'data_mrna_simul'), model.mrna_simul)
             print(f"[simulate_network] Saved mRNA simulation to data_mrna_simul.npy")

@@ -14,31 +14,25 @@ cardamomot run /path/to/project
 ```bash
 cardamomot run /path/to/project --default
 ```
-- Runs all steps with default parameters
+- Runs the steps given by the project parameters (Model_parameters sheet), with their values
 - No interaction required
 - Useful for scripting or batch processing
 
-### Traditional Pipeline (Direct arguments)
+### Full pipeline (direct arguments)
 ```bash
-cardamomot pipeline \
-  -i /path/to/project \
-  -s train \
-  -c 1 \
-  -r 1.0 \
-  -m 0.5
+cardamomot pipeline -i /path/to/project --stimulus 1 --prior 1 --mean-forcing 0.5
+./run.sh /path/to/project 1 1 0.5          # same, positional
 ```
-- Legacy interface for experienced users
-- All parameters specified on command line
-- Common flags:
-  - `-i, --input`: Project directory
-  - `-s, --split`: Data split name (default: 'full')
-  - `-c, --change`: Change detection flag (0 or 1)
-  - `-r, --rate`: Learning rate (default: 1.0)
-  - `-m, --mean`: Mean constraint strength (default: 1.0)
+- Only the hard-to-calibrate parameters are options, in this order: `--stimulus`, `--prior`,
+  `--mean-forcing`, `--force-basins`, `--temporal-basins` (absent or -1 = workbook value, else default)
+- Everything else (split, train_rate, select_genes, build_prior_network, estimate_proliferation_rates,
+  run_test, simulate_perturbations, simulate_with_proliferation, species...) is set in the
+  `Model_parameters` sheet of `Data/CardamomOT_inputs.xlsx` (default of `CardamomOT/model/base.py`)
+- Precedence: default < workbook < command line
 
 ### Individual Steps (Debugging/Advanced)
 ```bash
-cardamomot step infer_mixture -i /path/to/project
+cardamomot step infer_mixture -i /path/to/project --mean-forcing 0.5
 ```
 - Run a single analysis step
 - Useful for debugging or re-running specific steps
@@ -84,8 +78,8 @@ cardamomot run my_project --default
 # Check which steps ran
 ls my_project/cardamom_output/
 
-# Re-run a specific step with verbose output
-cardamomot step infer_mixture -i my_project --verbose
+# Re-run a specific step
+cardamomot step infer_mixture -i my_project
 ```
 
 ## Project Structure
@@ -109,17 +103,15 @@ my_project/
 
 ## Hyperparameter Quick Guide
 
-| Parameter | Flag | Default | Description |
+| Parameter | Flag (`run.sh` position) | Default (`base.py`) | Description |
 |-----------|------|---------|-------------|
-| Input path | `-i` | required | Project directory |
-| Split name | `-s` | 'full' | Data partition to analyze |
-| Change flag | `-c` | 0 | Enable change detection (0=off, 1=on) |
-| Rate | `-r` | 1.0 | Learning rate for inference (0.1-10) |
-| Mean | `-m` | 1.0 | Strength of mean constraint (0.1-10) |
-| N genes | `-n` | 1000 | Number of genes to keep |
-| Verbose | `--verbose` | off | Enable debug logging |
-| Quiet | `--quiet` | off | Suppress info messages |
-| Log file | `--log-file` | none | Save logs to file |
+| Input path | `-i` (1) | required | Project directory |
+| Stimulus | `--stimulus` (2) | 1.0 | Stimulus edge penalisation in [0, 1] |
+| Prior | `--prior` (3) | 1.0 | Weight of edges absent from the literature prior (0 = hard mask) |
+| Mean forcing | `--mean-forcing` (4) | 0.5 | Mean-forcing intensity of the NB mixture |
+| Force basins | `--force-basins` (5) | 1.0 | Basin weights kept from the mixture in the network fit |
+| Temporal basins | `--temporal-basins` (6) | 1 | Basin weights per timepoint (0/1) |
+| Split, genes, steps... | workbook | see `base.py` | `split`, `train_rate`, `select_genes`, `num_max_genes`, `run_test`... |
 
 ## Help and Information
 

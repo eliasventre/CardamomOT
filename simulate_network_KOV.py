@@ -4,7 +4,7 @@ simulate_network_KOV.py
 Simulate gene expression under in-silico knock-out (KO) and over-expression (OV).
 
 Usage:
-    python simulate_network_KOV.py -i <project_path> -s <split>
+    python simulate_network_KOV.py -i <project_path>   (simulate_with_proliferation: Model_parameters sheet)
 
 Required input files:
     - Data/data_<split>.h5ad: count matrix with temporal information
@@ -29,13 +29,13 @@ import re
 import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta
 from CardamomOT.inputs import input_dir
-import getopt
+from CardamomOT.run_options import parse_step_options, settings, configure
 import anndata as ad
 import os
 import copy
 import torch
 from CardamomOT.tools.perturbations import (find_perturbation_file, load_perturbations, combo_label,
-                                            perturbation_schedule)
+                                            perturbation_schedule, rate_target_genes)
 from CardamomOT.config import n_inference_stimuli, simulation_schedule
 
 
@@ -44,35 +44,11 @@ def main(argv):
     Simulate knockout/overexpression perturbations of the inferred network.
 
     Args:
-        argv: Command-line arguments (--input, --split).
+        argv: Command-line arguments (-i <project> and the options of run_options.STEP_OPTIONS).
     """
-    inputfile = ''
-    split = ''
-    simulate_with_proliferation = False
-    try:
-        opts, args = getopt.getopt(argv, "hi:s:", ["input=", "split=", "simulate-proliferation"])
-    except getopt.GetoptError:
-        print("[simulate_network_KOV] Error: Invalid command-line arguments")
-        print("[simulate_network_KOV] Usage: python simulate_network_KOV.py -i <project_path> -s <split> "
-              "[--simulate-proliferation]")
-        sys.exit(2)
-
-    for opt, arg in opts:
-        if opt in ("-i", "--input"):
-            inputfile = arg
-        elif opt in ("-s", "--split"):
-            split = '{}'.format(arg)
-        elif opt == "--simulate-proliferation":
-            simulate_with_proliferation = True
-        elif opt == "-h":
-            print(__doc__)
-            sys.exit(0)
-
-    if not inputfile or not split:
-        print("[simulate_network_KOV] Error: Missing required arguments --input and --split")
-        sys.exit(1)
-
-    p = f'{inputfile}/'
+    opts = parse_step_options(argv, 'simulate_network_KOV', __doc__)
+    p = opts.p
+    split = settings(opts).split
 
     ko_ov_file = find_perturbation_file(input_dir(p))
     if ko_ov_file is None:
@@ -112,9 +88,8 @@ def main(argv):
     print(f"[simulate_network_KOV] Data: {adata.shape[1]} genes, n_stimuli={n_stimuli}")
 
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
-    model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
-    if model.overridden('simulate_with_proliferation'):
-        simulate_with_proliferation = model.simulate_with_proliferation
+    configure(model, opts)  # workbook, then the command-line options
+    simulate_with_proliferation = bool(model.simulate_with_proliferation)
     model.simulate_with_proliferation = False  # enabled below once the proliferation network is loaded
 
     # Load network model parameters
@@ -235,7 +210,7 @@ def main(argv):
             model.simulate_with_proliferation = True
             print("[simulate_network_KOV] Loaded proliferation network — branching simulation enabled")
         else:
-            print("[simulate_network_KOV] Warning: --simulate-proliferation requested but prolif_network.pt not found")
+            print("[simulate_network_KOV] Warning: simulate_with_proliferation = True but prolif_network.pt not found (run infer_network_simul first)")
 
     # Simulate perturbations
     print(f"[simulate_network_KOV] Starting simulation of {len(combos)} perturbations...")
@@ -322,12 +297,36 @@ def main(argv):
             print(f"[simulate_network_KOV]   Error: {e}")
             continue
 
+        # RATE effects on the net proliferation rate: delta x signature score (protein / 99th percentile of
+        # the trajectories, clipped to [0, 1], mean over the genes), with the schedule of stimulus k
+        model_combo.rate_perturbation = []
+        try:
+            q99 = np.percentile(model_combo.prot[:, ns:], 99, axis=0)
+            scale = 1.0 / np.maximum(q99, 1e-12)
+            for k, effects in sorted(combo.get('RATE', {}).items()):
+                for target, delta in effects:
+                    genes_t = rate_target_genes(target, list(adata.var_names), input_dir(p))
+                    weights = None
+                    if genes_t is not None:
+                        weights = np.zeros(adata.shape[1])
+                        weights[[adata.var_names.get_loc(g) for g in genes_t]] = 1.0 / len(genes_t)
+                    model_combo.rate_perturbation.append(
+                        dict(weights=weights, scale=scale, delta=float(delta),
+                             schedule=perturbation_schedule(pert_sched, times, k)))
+                    print(f"[simulate_network_KOV]   Rate {k}: {target} ({'all cells' if genes_t is None else len(genes_t)}"
+                          f"{'' if genes_t is None else ' genes'}) {delta:+g} per time unit at maximal score")
+        except ValueError as e:
+            print(f"[simulate_network_KOV]   Error: {e}")
+            continue
+
         # Simulate dynamics
         try:
             model_combo.simulate_network(times, stimulus_schedule=stim_sched)
             cardamom_dir = os.path.join(p, 'cardamomOT')
             np.save(os.path.join(cardamom_dir, f'data_prot_simul_{label}'), model_combo.prot)
             np.save(os.path.join(cardamom_dir, f'data_kon_simul_{label}'), model_combo.kon_theta)
+            if model_combo.log_population is not None:
+                np.save(os.path.join(cardamom_dir, f'data_log_population_{label}'), model_combo.log_population)
             print(f"[simulate_network_KOV]   Results saved for condition: {label}")
         except Exception as e:
             print(f"[simulate_network_KOV]   Error simulating condition {idx}: {e}")

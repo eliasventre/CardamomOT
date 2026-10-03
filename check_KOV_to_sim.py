@@ -8,7 +8,7 @@ with observed wildtype data. Generates AnnData objects for each perturbation
 condition for downstream analysis and visualization.
 
 Usage:
-    python check_KOV_to_sim.py -i <project_path> -s <split>
+    python check_KOV_to_sim.py -i <project_path> [--stimulus <float>] [--prior <float>]
 
 Required input files:
     - Data/data_<split>.h5ad: observed count matrix (wildtype)
@@ -22,7 +22,8 @@ Output files:
 """
 import re
 import numpy as np
-import sys, getopt
+import sys
+from CardamomOT.run_options import parse_step_options, settings, configure
 import anndata as ad
 from CardamomOT import NetworkModel
 from CardamomOT.inputs import input_dir
@@ -30,6 +31,7 @@ from CardamomOT.inference.integration import nb_cell_parameters
 from CardamomOT.inference.depth import simulation_depth
 import scipy.sparse
 import os
+from CardamomOT.inputs import depth_factor_used
 
 
 # Shared loader (KO / OV / STIM columns), kept under the old names for other scripts
@@ -58,42 +60,14 @@ def main(argv):
     wildtype observations.
 
     Args:
-        argv: Command-line arguments (--input, --split).
+        argv: Command-line arguments (-i <project> and the options of run_options.STEP_OPTIONS).
     
     Returns:
         None. Saves validation datasets to cardamomOT/ directory.
     """
-    inputfile = ''
-    split = ''
-    stimulus = -1.0
-    prior = -1.0
-    try:
-        opts, args = getopt.getopt(argv, "hi:s:t:p:",
-                                   ["input=", "split=", "stimulus=", "prior="])
-    except getopt.GetoptError:
-        print("[check_KOV_to_sim] Error: Invalid command-line arguments")
-        print("[check_KOV_to_sim] Usage: python check_KOV_to_sim.py -i <project_path> -s <split> "
-              "[--stimulus <float>] [--prior <float>]")
-        sys.exit(2)
-
-    for opt, arg in opts:
-        if opt in ("-i", "--input"):
-            inputfile = arg
-        elif opt in ("-s", "--split"):
-            split = '{}'.format(arg)
-        elif opt in ("-t", "--stimulus"):
-            stimulus = float(arg)
-        elif opt in ("-p", "--prior"):
-            prior = float(arg)
-        elif opt == "-h":
-            print(__doc__)
-            sys.exit(0)
-
-    if not inputfile or not split:
-        print("[check_KOV_to_sim] Error: Missing required arguments --input and --split")
-        sys.exit(1)
-
-    p = '{}/'.format(inputfile)
+    opts = parse_step_options(argv, 'check_KOV_to_sim', __doc__)
+    p = opts.p
+    split = settings(opts).split
 
     # Load perturbations (KO / OV / STIM)
     ko_ov_file = find_perturbation_file(input_dir(p))
@@ -167,7 +141,8 @@ def main(argv):
     # NB parameters of each simulated cell: its sample's mixture if per-sample (identical otherwise)
     k1_sim, c_sim, pz_sim = nb_cell_parameters(mixture_parameters, pi_zinb, _sim_sample_idx(samples_traj, times_simulation))
     # Depth factors: each simulated cell drawn at the depth of the real cell it mimics (p = c / (c + s))
-    depth_cells = adata.obs['depth_factor'].values.astype(float) if 'depth_factor' in adata.obs else None
+    depth_cells = (adata.obs['depth_factor'].values.astype(float)
+                   if (depth_factor_used(p) and 'depth_factor' in adata.obs) else None)
     idx_path = os.path.join(p, 'cardamomOT', 'data_traj_real_idx.npy')
     times_path = os.path.join(p, 'cardamomOT', 'data_times.npy')
     s_sim = (simulation_depth(depth_cells, np.load(idx_path), np.load(times_path), times_simulation)
@@ -175,11 +150,7 @@ def main(argv):
     s_sim = 1.0 if s_sim is None else s_sim[:, None]
 
     model = NetworkModel(G)
-    if stimulus >= 0:
-        model.stimulus = stimulus
-    if prior >= 0:
-        model.prior_network_pen = prior
-    model.apply_project_parameters(p)  # Data/CardamomOT_inputs.xlsx dominates the options
+    configure(model, opts)  # workbook, then the command-line options
     print(f"[check_KOV_to_sim] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
 
     # Create AnnData objects for each perturbation combination
@@ -224,6 +195,10 @@ def main(argv):
         adata_sim.var = adata.var.copy()
         adata_sim.obs["combo_label"] = label
         adata_sim.obs['time'] = times_simulation
+        # Population size of the branching simulation (log, relative to t0, per simulated time)
+        pop_path = os.path.join(p, 'cardamomOT', f'data_log_population_{label}.npy')
+        if os.path.exists(pop_path):
+            adata_sim.uns['log_population'] = np.load(pop_path)
 
         # Save simulated RNA data
         sim_rna_path = os.path.join(p, f'cardamomOT/adata_sim_{label}_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad')

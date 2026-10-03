@@ -41,7 +41,7 @@ dataset is therefore put on the scale of its own species' table.
 ## How a gene gets its half-life
 
 1. The species is detected from the nomenclature (`Gata1` → mouse, `GATA1` → human),
-   or forced with `--species`.
+   or forced with the parameter `species` (Model_parameters sheet).
 2. The name is resolved in that species (official symbol, Ensembl id, previous
    symbol, unambiguous synonym, then case-insensitive).
 3. If the gene is in its own species' table, that value is used (`measured`).
