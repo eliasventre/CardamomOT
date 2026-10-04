@@ -6,7 +6,7 @@ KO/OV predictions) and write it in the project directory.
 
 Usage:
     python report_results.py -i <project_path> [--stimulus <float>] [--prior <float>] [-o <out.pdf>]
-(split, report_net_index, report_normalize, report_log1p, report_n_umap: Model_parameters sheet)
+(split, report_net_index, report_normalize, report_log1p, report_n_umap: model_parameters sheet)
 
 If --stimulus/--prior are given neither on the command line nor in the workbook, they are read from
 the most recent cardamomOT/adata_sim_stim*_prior*.h5ad (fallback: model defaults).

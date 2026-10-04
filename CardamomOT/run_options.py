@@ -5,7 +5,7 @@ A step takes only the project path (-i) and, among the hard-to-calibrate paramet
 order: --stimulus, --prior, --mean-forcing, --force-basins, --temporal-basins), those it uses
 (STEP_OPTIONS). Everything else (split, gene selection, literature prior, test, perturbations,
 proliferation, species...) is a NetworkModel parameter (CardamomOT/model/base.py), fixed per project
-in the Model_parameters sheet of Data/CardamomOT_inputs.xlsx.
+in the model_parameters sheet of Data/CardamomOT_inputs.xlsx.
 
 Precedence: default of base.py < workbook < command-line option; an absent or negative option
 keeps the workbook value (or the default).
@@ -44,7 +44,7 @@ STEP_OPTIONS = {
     'report_results': ('stimulus', 'prior'),
 }
 
-# Former options, now parameters of the Model_parameters sheet (error message only)
+# Former options, now parameters of the model_parameters sheet (error message only)
 REMOVED_OPTIONS = {
     '-s': 'split', '--split': 'split', '-r': 'train_rate', '--rate': 'train_rate', '-c': 'select_genes',
     '--change': 'select_genes', '--ref': 'build_prior_network', '--simulate-proliferation': 'simulate_with_proliferation',
@@ -76,7 +76,7 @@ def parse_step_options(argv, step, doc=None, output=False):
         bad = next((a.split('=')[0] for a in argv if a.split('=')[0] in REMOVED_OPTIONS), None)
         if bad:
             print(f"{tag} Error: option {bad} was removed: set the parameter '{REMOVED_OPTIONS[bad]}' in the "
-                  f"Model_parameters sheet of Data/CardamomOT_inputs.xlsx (or its default in CardamomOT/model/base.py)")
+                  f"model_parameters sheet of Data/CardamomOT_inputs.xlsx (or its default in CardamomOT/model/base.py)")
         else:
             print(f"{tag} Error: {e}. Usage: python {step}.py -i <project>"
                   + ''.join(f' [--{h} <value>]' for h in hard) + (' [-o <out.pdf>]' if output else ''))

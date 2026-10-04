@@ -16,6 +16,13 @@
 >
 > or download it as a zip from its [GitHub page](https://github.com/eliasventre/CardamomOT/tree/plos-cb-2026) (Code → Download ZIP).
 
+> **Project settings: [`CardamomOT_inputs.xlsx`](CardamomOT_inputs.xlsx).** Copy this empty workbook into the
+> `Data/` folder of your project (`my_project/Data/CardamomOT_inputs.xlsx`) and fill what you need: model and
+> pipeline parameters (`model_parameters` sheet, with their description; empty value = default of
+> `CardamomOT/model/base.py`), genes of interest, stimulus schedules and targets, in-silico perturbations,
+> timepoints, proliferation and transition rates. Every sheet is optional, and empty cells keep the defaults.
+> Without it, the pipeline creates an empty one at the first run.
+
 CARDAMOM is an executable gene regulatory network (GRN) inference method, adapted to time-course scRNA-seq datasets. The algorithm consists in calibrating the parameters of a mechanistic model of gene expression: the calibrated model can then be simulated, which allows to reproduce the dataset used for inference. The first inference method has been introduced in [[1](#Ventre2021)]. It has been benchmarked along with other GRN inference tools and applied to a real dataset in [[2](#Ventre2023)]. The second version is presented in [[3](#Mauge2026)] and combines GRN and trajectory inference method and shows a strong improvement over the first version.  The simulation part is based on the [Harissa](https://github.com/ulysseherbach/harissa) package.
 
 ## 🚀 Quick Start
@@ -77,7 +84,7 @@ my_project/
 - `data.obs['cell_type_proliferation']` / `data.obs['cell_type_transition']`: groupings matching the rows of `Data/proliferation_rates` (optional anchor of the literature estimate) / `Data/transition_rates` (structures the OT). They may differ; if only one of the two is defined it is used for both, and if neither is defined `cell_type` is used
 
 
-**Optional run inputs: `Data/CardamomOT_inputs.xlsx`.** All optional information steering a run (genes of interest, stimulus schedules and targets, in-silico perturbations, timepoints, proliferation anchors, transition rates…) lives in one Excel workbook, created with its documented structure at the first run (README sheet + one sheet per input; hover the header cells for their meaning). Empty cells mean "not given": the defaults of CardamomOT apply. Text files of older projects (`genes_queries.txt`, `KO_OV_simulate.txt`, `stimulus_schedule.txt`, …) still present in `Data/` are imported into the workbook at each run, overwriting the corresponding cells (with a warning): older projects run unchanged and get a filled workbook; delete the text files to edit the workbook instead. Large numeric arrays (`reference_network.csv`, `basal_init`/`basal_ref`, `inter_init`/`inter_ref`, `inter_simul_ref`) stay files in `Data/`. The text files named in this documentation correspond to the sheets: genes_queries / signatures → `Gene_lists`; stimulus_schedule_inference → `Stimulus_inference`; stimulus_targets → `Stimulus_targets`; stimulus_schedule_simulate → `Simulation_schedule`; KO_OV_Stim_simulate → `Perturbations`; KO_OV_inference → `KO_OV_inference`; times_to_inference / times_to_simulate → `Times`; proliferation_rates, population_sizes, transition_rates → sheets of the same name. The sheet `Model_parameters` fixes model parameters for the project (`parameter` / `value` / `default` / `description`, the description being the comment of `CardamomOT/model/base.py`): a filled value replaces the default of `base.py`, and is itself overridden by the command-line options of the pipeline (`--stimulus`, `--prior`, `--mean-forcing`, `--force-basins`, `--temporal-basins`); an empty value keeps the default.
+**Optional run inputs: `Data/CardamomOT_inputs.xlsx`.** All optional information steering a run (genes of interest, stimulus schedules and targets, in-silico perturbations, timepoints, proliferation anchors, transition rates…) lives in one Excel workbook, created with its documented structure at the first run (README sheet + one sheet per input; hover the header cells for their meaning). Empty cells mean "not given": the defaults of CardamomOT apply. Text files of older projects (`genes_queries.txt`, `KO_OV_simulate.txt`, `stimulus_schedule.txt`, …) still present in `Data/` are imported into the workbook at each run, overwriting the corresponding cells (with a warning): older projects run unchanged and get a filled workbook; delete the text files to edit the workbook instead. Large numeric arrays (`reference_network.csv`, `basal_init`/`basal_ref`, `inter_init`/`inter_ref`, `inter_simul_ref`) stay files in `Data/`. The text files named in this documentation correspond to the sheets: genes_queries / signatures → `gene_lists`; stimulus_schedule_inference → `stimulus_inference_schedule`; stimulus_targets → `perturbation_inference` (`STIMk`); stimulus_schedule_simulate → `stimulus_simulation_schedule`; KO_OV_Stim_simulate → `perturbation_simulation`; KO_OV_inference → `perturbation_inference`; times_to_inference / times_to_simulate → `times`; proliferation_rates, population_sizes, transition_rates → sheets of the same name. The sheet `model_parameters` fixes model parameters for the project (`parameter` / `value` / `description`, grouped by use — pipeline steps first —, the description being the comment of `CardamomOT/model/base.py`; the frequently changed parameters are listed with an empty value): a filled value replaces the default of `base.py`, and is itself overridden by the command-line options of the pipeline (`--stimulus`, `--prior`, `--mean-forcing`, `--force-basins`, `--temporal-basins`); an empty value keeps the default. **Inference stimuli:** the row `sample_id = all` of `perturbation_inference` gives, for each stimulus of `stimulus_inference_schedule`, its possible targets (`STIMk`) and its effects on the net proliferation rate (`RATEk`: `cell_type:delta`, added to the rate of `proliferation_rates` which is then the rate without stimulus, or `gene_list:delta` on an mRNA signature score), scaled by the stimulus value: the proliferation MLP learns the rate without stimulus and the simulations add the effect back with `stimulus_simulation_schedule`, so that other treatment schedules can be simulated (see docs/advanced.md).
 ### 3. Run the full analysis
 
 #### Full pipeline (recommended for beginners)
@@ -104,7 +111,7 @@ python -m CardamomOT.cli pipeline -i my_project --stimulus 1 --prior 1 --mean-fo
 | `--temporal-basins` | 6 | `temporal_basins` (`1`) | temporal consistency of the basins (`0` or `1`) |
 
 **Everything else is a parameter of `NetworkModel`** (`CardamomOT/model/base.py`), fixed per project in the
-`Model_parameters` sheet of `Data/CardamomOT_inputs.xlsx` (empty value = default of `base.py`). Precedence:
+`model_parameters` sheet of `Data/CardamomOT_inputs.xlsx` (empty value = default of `base.py`). Precedence:
 **default < workbook < command line**. The pipeline settings are:
 
 | Parameter | Default | Effect |
@@ -121,7 +128,7 @@ python -m CardamomOT.cli pipeline -i my_project --stimulus 1 --prior 1 --mean-fo
 
 Step-specific settings are parameters too (`allow_depth_correction`, `depth_method`, `use_depth_factor`,
 `literature_depth`, `literature_resources`, `integrate_samples`, `senescence_gating`,
-`overwrite_degradation_rates`, `report_n_umap`...): see the `Model_parameters` sheet and `base.py`.
+`overwrite_degradation_rates`, `report_n_umap`...): see the `model_parameters` sheet and `base.py`.
 
 **The pipeline starts with a per-cell depth diagnostic** (`estimate_cell_depth`, on `Data/data_complete.h5ad` or on `Data/data.h5ad` if it has at least 10,000 genes): when depth differences between cells of the same sample and time dominate the co-variation of genes, a depth factor per cell is stored in `adata.obs['depth_factor']` (unless `model.allow_depth_correction = False`). It is used by the later steps (counts modelled as NB(k, c / s_i)) only with `model.use_depth_factor = True` (default `False`: the factor is kept but ignored); `model.compute_depth_factor = False` makes the step only read an existing factor (never removed). See [Per-cell sequencing depth](docs/advanced.md#per-cell-sequencing-depth-estimate_cell_depth-first-step).
 
@@ -225,7 +232,7 @@ For a single stimulus channel, a single-column file suffices. Values between 0 a
 
 ### Stimulus and prior-network penalization (`--stimulus`, `--prior`)
 
-Two scalar parameters let you **tune the influence of the stimulus and of a prior interaction graph** on network inference and simulation. They are given on the command line (`cardamomot pipeline --stimulus/--prior`, positions 2 and 3 of `run.sh`), which forwards them to every step that uses them, or fixed in the `Model_parameters` sheet.
+Two scalar parameters let you **tune the influence of the stimulus and of a prior interaction graph** on network inference and simulation. They are given on the command line (`cardamomot pipeline --stimulus/--prior`, positions 2 and 3 of `run.sh`), which forwards them to every step that uses them, or fixed in the `model_parameters` sheet.
 
 **Default values** are defined in `NetworkModel` (`base.py`) as `model.stimulus = 1.0` and `model.prior_network_pen = 1.0`. Omitting these arguments (or passing `-1`) keeps the workbook value, else the default.
 
@@ -384,7 +391,7 @@ Five levers, from least to most involved, all optional:
 
 | Refinement | How | Why |
 |---|---|---|
-| Species | parameter `species = 'human'\|'mouse'` (Model_parameters sheet; default `'auto'`: detected from gene names) | Forces the built-in human or mouse marker gene lists (moscot uses different death markers per species — see `docs/advanced.md` for details) |
+| Species | parameter `species = 'human'\|'mouse'` (model_parameters sheet; default `'auto'`: detected from gene names) | Forces the built-in human or mouse marker gene lists (moscot uses different death markers per species — see `docs/advanced.md` for details) |
 | Score on the unfiltered gene set | Place `Data/data_complete.h5ad` (all genes) alongside an already gene-filtered `Data/data.h5ad` | If `Data/data.h5ad` was prepared with genes already filtered, the literature marker genes may be missing from it; `data_complete.h5ad` is used only to score the signature (never modified), and the result is mapped back onto `Data/data.h5ad` by cell name — every cell in `data.h5ad` must also be present in `data_complete.h5ad` |
 | Custom marker genes | `Data/proliferation_signatures.csv`/`.txt`, `Data/death_signatures.csv`/`.txt` (one gene per line or comma-separated) | Override the built-in lists with signatures specific to your system (e.g. a disease- or lineage-specific gene set) |
 | Anchor to a known rate | `Data/proliferation_rates.csv`/`.txt` (two columns, no header: `cell_type, rate`) — **`rate` in hour⁻¹**, matching `adata.obs['time']` (growth curves are often reported per day — divide by 24 first) | If you have a trusted population-level growth rate per cell type (e.g. from a growth curve), the literature-based per-cell estimate is recentred so its mean matches your value within each cell type, while keeping the per-cell heterogeneity from the signature. Grouping uses `adata.obs['cell_type_proliferation']` if present, else `cell_type_transition`, else `cell_type`. All-or-nothing: if any cell type is missing from the table (or no grouping is found), the unanchored estimate is kept for all cells |

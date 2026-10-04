@@ -8,7 +8,7 @@ observed expression data through distribution analysis and optimal
 transport distance metrics.
 
 Usage:
-    python check_mixture_to_data.py -i <project_path>   (split: Model_parameters sheet)
+    python check_mixture_to_data.py -i <project_path>   (split: model_parameters sheet)
 
 Required input files:
     - Data/data_<split>.h5ad: count matrix with temporal information

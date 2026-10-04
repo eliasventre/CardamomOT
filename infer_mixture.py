@@ -8,7 +8,7 @@ scRNA-seq data.
 
 Usage:
     python infer_mixture.py -i <project_path> [--mean-forcing <float>]
-(split, soft_em_refinement, integrate_samples, ref_sample_integration: Model_parameters sheet)
+(split, soft_em_refinement, integrate_samples, ref_sample_integration: model_parameters sheet)
 
 Several samples (obs['dataset_id'] with >= 2 samples): the mixture is fitted per sample and kept per
 sample (mixture_parameters.npy (S, M+1, G)); integrate_samples lam in [0, 1] (default 1) pushes

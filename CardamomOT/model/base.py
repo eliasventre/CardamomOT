@@ -94,7 +94,7 @@ class NetworkModel:
         self.split = 'train'                     # 'train': train/test split of the cells (train_rate per sample and time); 'full': all cells
         self.train_rate = 0.7                    # share of the cells of each (sample, time) in the train split (at least 100); the test keeps at most as many
         self.select_genes = False                # select_genes_and_split: gene selection (queries, entropy genes, global network, Steiner tree); False = all genes kept
-        self.build_prior_network = False         # literature prior cardamomOT/ref_network.csv: built by the gene selection if select_genes, else by build_reference_network
+        self.build_prior_network = True         # literature prior cardamomOT/ref_network.csv: built by the gene selection if select_genes, else by build_reference_network
         self.estimate_proliferation_rates = False  # get_proliferation_rates: obs['proliferation_net_rate'] from gene signatures, anchored to Data/proliferation_rates
         self.run_test = False                    # infer_test + check_test_to_train on the held-out cells (needs split = 'train')
         self.simulate_perturbations = True       # simulate_network_KOV + check_KOV_to_sim (Data/KO_OV_Stim_simulate)
@@ -233,6 +233,8 @@ class NetworkModel:
         self.prolif_uses_stimulus = True         # inference stimuli are inputs of the ProliferationMLP, R(u, P) (no effect if constant over the intervals)
         self.prolif_network = None               # ProliferationMLP trained in refine_network_degradations
         self.R_opt = None                        # net growth rate of each trajectory state over the next interval (NaN at last time), from the final growth OT pass
+        self.R_stim_offset = None                # part of R_opt due to the inference stimuli (RATEk of perturbation_inference), removed before training the proliferation MLP
+        self.stimulus_rate_model = None          # StimulusRateModel: stimulus part of the net rate from mRNA, added back in the branching simulations
         self.growth_reg_source = 2.0             # source-marginal relaxation (x log G) of the growth OT pass: small = data-driven but noisy, large = prior kept
         self.n_growth_iter = 1                   # WOT-style growth iterations (source weights <- row marginals); more iterations amplify the noise
         self.n_growth_nodes = 5                  # quadrature nodes per interval to integrate R along paths (MLP training and branching simulation)
@@ -285,7 +287,7 @@ class NetworkModel:
 
     def apply_project_parameters(self, project, verb=True):
         """
-        Override attributes with the values filled in the Model_parameters sheet of
+        Override attributes with the values filled in the model_parameters sheet of
         Data/CardamomOT_inputs.xlsx; the command-line options are applied after it and
         dominate (run_options.configure). Values are cast to the type of the current value.
         Returns the set of overridden attributes.
@@ -296,7 +298,7 @@ class NetworkModel:
         done = {}
         for name, v in values.items():
             if not hasattr(self, name):
-                print(f"[CardamomOT] Warning: Model_parameters: unknown parameter '{name}' ignored")
+                print(f"[CardamomOT] Warning: model_parameters: unknown parameter '{name}' ignored")
                 continue
             cur = getattr(self, name)
             try:
@@ -314,7 +316,7 @@ class NetworkModel:
                     except (ValueError, SyntaxError):
                         val = v
             except (TypeError, ValueError):
-                print(f"[CardamomOT] Warning: Model_parameters: invalid value {v!r} for '{name}', ignored")
+                print(f"[CardamomOT] Warning: model_parameters: invalid value {v!r} for '{name}', ignored")
                 continue
             setattr(self, name, val)
             done[name] = val
@@ -325,7 +327,7 @@ class NetworkModel:
         return set(done)
 
     def overridden(self, name):
-        """True if the attribute was set by the Model_parameters sheet of the project."""
+        """True if the attribute was set by the model_parameters sheet of the project."""
         return name in getattr(self, '_project_overrides', set())
 
     def _add_perturbation_stimulus(self, basal_t, inter_t, times):
@@ -2361,9 +2363,12 @@ class NetworkModel:
         if self.recompute_proliferations and self.R_opt is not None:
             if verb:
                 print("[refine_network_degradations] Training ProliferationMLP on R_opt...")
+            # Rate without the inference stimuli when their effects are given (added back in the simulations);
+            # the MLP then takes no stimulus input
+            R_target = self.R_opt if self.R_stim_offset is None else self.R_opt - self.R_stim_offset
             self.prolif_network = train_proliferation_mlp(
-                self.prot, self.R_opt, self.times_data, ns=ns,
-                n_nodes=self.n_growth_nodes, with_stim=self.prolif_uses_stimulus, seed=self.seed, verb=verb,
+                self.prot, R_target, self.times_data, ns=ns, n_nodes=self.n_growth_nodes,
+                with_stim=self.prolif_uses_stimulus and self.R_stim_offset is None, seed=self.seed, verb=verb,
             )
             if verb:
                 print("[refine_network_degradations] ProliferationMLP training done.")
@@ -2798,6 +2803,23 @@ class NetworkModel:
                     else:
                         score = np.clip(path * eff['scale'], 0, 1) @ eff['weights']
                     R_path = R_path + u * eff['delta'] * score
+                srm = getattr(self, 'stimulus_rate_model', None)
+                if srm is not None and _prolif_fn is not None:
+                    # Inference stimuli: their part of the rate (removed when the MLP was trained), with the
+                    # simulated schedule, from mRNA drawn at the recorded states (reference depth)
+                    Qn = path.shape[1]
+                    n_samp_k = basal_t.shape[1] if basal_t.ndim == 4 else (ks.shape[0] if ks.ndim == 3 else 1)
+                    prot_nodes = np.hstack([np.broadcast_to(cur_stim_vals, (N * Qn, ns)), path.reshape(N * Qn, -1)])
+                    kon_nodes = self._kon_ref_per_sample(prot_nodes, ks, inter_t[cnt], basal_t[cnt],
+                                                         samples_id=np.arange(n_samp_k),
+                                                         samples_data=np.repeat(s_cells, Qn))[:, ns:]
+                    k1_nb = k1[..., ns:] if k1.ndim == 1 else k1[np.minimum(np.repeat(s_cells, Qn), len(k1) - 1), ns:]
+                    c_nb = self.a[..., -1, :][..., ns:]
+                    if c_nb.ndim == 2:
+                        c_nb = c_nb[np.minimum(np.repeat(s_cells, Qn), len(c_nb) - 1)]
+                    counts = np.random.negative_binomial(np.maximum(k1_nb * kon_nodes, 1e-8), c_nb / (c_nb + 1.0))
+                    u_sim = np.asarray(self._stim_schedule[times[cnt + 1]], dtype=float)[:srm.n_stimuli]
+                    R_path = R_path + srm.effect(counts).reshape(N, Qn, -1) @ u_sim
                 log_weights = (R_path * w_growth).sum(axis=1) * delta_t
                 # Population size: mean growth factor of the cells over the interval
                 self.log_population[cnt + 1] = self.log_population[cnt] + float(

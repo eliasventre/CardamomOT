@@ -29,7 +29,7 @@ if given, are assigned uniformly per cell type; otherwise no rate is assigned.
 Usage:
     python get_proliferation_rates.py -i <project_path>
 
-    The parameter species (Model_parameters sheet) selects the built-in marker gene
+    The parameter species (model_parameters sheet) selects the built-in marker gene
     lists. By default ('auto') it is detected from the gene nomenclature (mouse "Mki67"
     vs human "MKI67"), as in get_degradation_rates.py; set it to override the detection.
     senescence_gating = False disables the senescence gating of the proliferation score.
@@ -141,6 +141,52 @@ def assign_proliferation_rates(adata, prolif_path, species='human', proliferatio
           f"per '{celltype_col}' ({len(rates)} types)")
 
 
+def add_stimulus_effects(adata_target, adata_score, p):
+    """
+    Effects of the inference stimuli on the net rate (RATEk of perturbation_inference, row all): the
+    rates computed so far (anchors of proliferation_rates) are those without stimulus; each cell gets
+    u_k(t) * delta for its cell type (cell_type_proliferation) and for the signatures (score on its mRNA:
+    log1p counts, normalised by the library size if the transcriptome is scored). The rate without
+    stimulus is kept in obs['proliferation_net_rate_base'].
+    """
+    from CardamomOT.stimulus_rates import (load_effects, schedule_values, interval_values, split_effects,
+                                           log_counts, signature_score)
+    from CardamomOT.tools.perturbations import rate_target_genes
+    prefix = "[get_proliferation_rates]"
+    effects = load_effects(p)
+    if not effects or 'proliferation_net_rate' not in adata_target.obs:
+        return
+    obs = adata_target.obs
+    base = obs['proliferation_net_rate'].to_numpy(dtype=float)
+    times = obs['time'].to_numpy(dtype=float) if 'time' in obs else np.zeros(len(obs))
+    tu = np.sort(np.unique(times))
+    U = interval_values(times, tu, schedule_values(p, tu, max(effects)))
+    ct_key = resolve_cell_type_obs(adata_target, 'proliferation')
+    labels = obs[ct_key].astype(str).to_numpy() if ct_key else np.array([''] * len(obs))
+    add = np.zeros(len(obs))
+    L = None
+    for k, (ct, sig) in split_effects(effects, np.unique(labels) if ct_key else []).items():
+        for c, d in ct.items():
+            add += U[:, k - 1] * d * (labels == c)
+            print(f"{prefix} Stimulus {k}: {d:+g} h^-1 on '{c}' ({ct_key}), scaled by its schedule")
+        for target, d in sig:
+            if L is None:
+                score_cells = adata_score[adata_target.obs_names]
+                L = log_counts(score_cells.X, normalize=score_cells.n_vars >= MIN_GENES_SCORING)
+            genes = list(adata_score.var_names)
+            idx = [genes.index(g) for g in rate_target_genes(target, genes, input_dir(p))]
+            score = signature_score(L, idx, np.maximum(np.percentile(L[:, idx], 99, axis=0), 1e-6))
+            add += U[:, k - 1] * d * score
+            print(f"{prefix} Stimulus {k}: {target} ({len(idx)} genes) {d:+g} h^-1 at maximal mRNA score")
+    obs['proliferation_net_rate_base'] = base
+    obs['proliferation_net_rate'] = base + add
+    if ct_key:
+        for c in np.unique(labels):
+            m = labels == c
+            print(f"{prefix}   {c}: mean rate without stimulus {base[m].mean():.5f}, with the inference "
+                  f"schedule {(base + add)[m].mean():.5f} h^-1")
+
+
 def read_anchors(adata, prolif_path, fallback):
     """
     Reference rates per cell type (Data/proliferation_rates.{csv,txt}: cell_type, rate per hour),
@@ -173,7 +219,7 @@ def main(argv):
     Estimate and assign per-cell net proliferation rates.
 
     Args:
-        argv: Command-line arguments (-i <project>; species, senescence_gating: Model_parameters sheet).
+        argv: Command-line arguments (-i <project>; species, senescence_gating: model_parameters sheet).
 
     Returns:
         None. Updates Data/data.h5ad in place with obs['proliferation_net_rate'].
@@ -236,6 +282,7 @@ def main(argv):
             labels, rates, celltype_col = anchors
             adata_target.obs['proliferation_net_rate'] = np.array([rates[l] for l in labels], dtype=float)
             print(f"[get_proliferation_rates] Rates of {prolif_path} assigned uniformly per '{celltype_col}'")
+            add_stimulus_effects(adata_target, adata_score, p)
         elif 'proliferation_net_rate' in adata_target.obs.columns:
             print("[get_proliferation_rates] Warning: keeping the existing adata.obs['proliferation_net_rate'] "
                   "(computed beforehand, e.g. by another method)")
@@ -297,6 +344,7 @@ def main(argv):
     elif adata_score is not adata_target:
         # Scored on the raw-count layer: only the rates go back to Data/data.h5ad (X untouched)
         adata_target.obs['proliferation_net_rate'] = adata_score.obs['proliferation_net_rate'].to_numpy()
+    add_stimulus_effects(adata_target, adata_score, p)
 
     try:
         adata_target.write(data_path)

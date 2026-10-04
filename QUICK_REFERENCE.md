@@ -14,7 +14,7 @@ cardamomot run /path/to/project
 ```bash
 cardamomot run /path/to/project --default
 ```
-- Runs the steps given by the project parameters (Model_parameters sheet), with their values
+- Runs the steps given by the project parameters (model_parameters sheet), with their values
 - No interaction required
 - Useful for scripting or batch processing
 
@@ -27,7 +27,7 @@ cardamomot pipeline -i /path/to/project --stimulus 1 --prior 1 --mean-forcing 0.
   `--mean-forcing`, `--force-basins`, `--temporal-basins` (absent or -1 = workbook value, else default)
 - Everything else (split, train_rate, select_genes, build_prior_network, estimate_proliferation_rates,
   run_test, simulate_perturbations, simulate_with_proliferation, species...) is set in the
-  `Model_parameters` sheet of `Data/CardamomOT_inputs.xlsx` (default of `CardamomOT/model/base.py`)
+  `model_parameters` sheet of `Data/CardamomOT_inputs.xlsx` (default of `CardamomOT/model/base.py`)
 - Precedence: default < workbook < command line
 
 ### Individual Steps (Debugging/Advanced)

@@ -13,7 +13,7 @@ STIM1); one condition per row, '0' or empty for nothing; '#' lines are comments:
 - RATEk: effect of perturbation stimulus k on the net proliferation rate (same schedule as STIMk,
   which may be empty): comma-separated 'TARGET:delta' entries, delta (per time unit, e.g. -0.01)
   being added to the rate R of a cell at the maximal score of TARGET, in proportion to its score:
-  TARGET = a gene list of the Gene_lists sheet (any extra column, e.g. ferroptosis_sensitive),
+  TARGET = a gene list of the gene_lists sheet (any extra column, e.g. ferroptosis_sensitive),
   genes joined by '+' (e.g. FTH1+FTL+TFRC), a single gene, or 'all' (every cell, score 1). The score
   of a cell is the mean over the genes of its protein level divided by the 99th percentile of the
   trajectories, clipped to [0, 1]. Applied in the branching simulation (proliferation MLP), along
@@ -95,7 +95,7 @@ def parse_rate(cell):
 def rate_target_genes(target, genes, input_dir=None):
     """
     Genes of a RATE target among `genes` (model genes): None for 'all', else the genes of the gene list
-    gene_list_<target>.txt of the run inputs (Gene_lists sheet), of a '+'-joined list, or the gene itself.
+    gene_list_<target>.txt of the run inputs (gene_lists sheet), of a '+'-joined list, or the gene itself.
     """
     if target.lower() == 'all':
         return None

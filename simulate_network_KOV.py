@@ -4,7 +4,7 @@ simulate_network_KOV.py
 Simulate gene expression under in-silico knock-out (KO) and over-expression (OV).
 
 Usage:
-    python simulate_network_KOV.py -i <project_path>   (simulate_with_proliferation: Model_parameters sheet)
+    python simulate_network_KOV.py -i <project_path>   (simulate_with_proliferation: model_parameters sheet)
 
 Required input files:
     - Data/data_<split>.h5ad: count matrix with temporal information
@@ -208,6 +208,12 @@ def main(argv):
             prolif_net.eval()
             model.prolif_network = prolif_net
             model.simulate_with_proliferation = True
+            stim_pkl = os.path.join(p, 'cardamomOT', 'stimulus_rates.pkl')
+            if os.path.exists(stim_pkl):
+                import pickle
+                model.stimulus_rate_model = pickle.load(open(stim_pkl, 'rb'))
+                print("[simulate_network_KOV] Effects of the inference stimuli on the net rate (perturbation_inference) "
+                      "applied with the simulated schedule")
             print("[simulate_network_KOV] Loaded proliferation network — branching simulation enabled")
         else:
             print("[simulate_network_KOV] Warning: simulate_with_proliferation = True but prolif_network.pt not found (run infer_network_simul first)")

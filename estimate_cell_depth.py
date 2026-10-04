@@ -19,7 +19,7 @@ read (summary printed) and never removed, and the previous diagnostic files are 
 
 Usage:
     python estimate_cell_depth.py -i <project_path>
-(allow_depth_correction, depth_method, compute_depth_factor, use_depth_factor: Model_parameters sheet)
+(allow_depth_correction, depth_method, compute_depth_factor, use_depth_factor: model_parameters sheet)
 
 Outputs:
     - cardamomOT/depth_diagnostic.csv: depth per group (cells, median counts, CV, s quantiles)

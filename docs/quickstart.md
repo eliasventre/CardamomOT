@@ -22,8 +22,24 @@ Organise your project folder as follows:
 ```
 my_project/
 └── Data/
-    └── data.h5ad
+    ├── data.h5ad
+    └── CardamomOT_inputs.xlsx    # optional: project settings (copy of the empty workbook of the repository)
 ```
+
+**Project settings.** Copy the empty workbook [`CardamomOT_inputs.xlsx`](https://github.com/eliasventre/CardamomOT/blob/main/CardamomOT_inputs.xlsx) of the repository root into
+`my_project/Data/` and fill what you need (every sheet and cell is optional; empty = default; without the file,
+the pipeline creates an empty one at the first run):
+
+| Sheet | Content |
+|---|---|
+| `model_parameters` | model and pipeline parameters, grouped by use, with their description (empty = default of `CardamomOT/model/base.py`; the command-line options `--stimulus`, `--prior`, `--mean-forcing`, `--force-basins`, `--temporal-basins` override it) |
+| `gene_lists` | genes of interest for the gene selection, signatures, named gene lists (RATE targets) |
+| `stimulus_inference_schedule`, `perturbation_inference` | stimulus schedule of the measured data; perturbations of the measured data: KO / OV of samples, and (row `all`) possible targets `STIMk` and effects on proliferation `RATEk` of each inference stimulus |
+| `stimulus_simulation_schedule`, `perturbation_simulation` | schedules and in-silico perturbations (KO, OV, STIM, RATE) of the simulations |
+| `times` | timepoints used |
+| `proliferation_rates`, `population_sizes`, `transition_rates` | anchors of the population dynamics |
+
+Each sheet has its own description (`readme` sheet, and comments on the header cells).
 
 ## Run the interactive pipeline
 
@@ -61,7 +77,7 @@ cardamomot run my_project/ --default
 ```
 
 ```{note}
-The **Proliferation rates** step (`estimate_proliferation_rates = True` in the `Model_parameters`
+The **Proliferation rates** step (`estimate_proliferation_rates = True` in the `model_parameters`
 sheet) scores each cell against built-in proliferation/death marker genes and writes
 `adata.obs['proliferation_net_rate']`, which the network-inference step then uses to
 correct the optimal-transport marginals for cell growth/death. It runs on the full,
@@ -97,7 +113,7 @@ cardamomot pipeline \
 ```
 
 **Everything else is a parameter** of `NetworkModel` (`CardamomOT/model/base.py`), fixed per project in the
-`Model_parameters` sheet of `Data/CardamomOT_inputs.xlsx` (precedence: default < workbook < command line):
+`model_parameters` sheet of `Data/CardamomOT_inputs.xlsx` (precedence: default < workbook < command line):
 
 | Parameter | Default | Steps |
 |---|---|---|

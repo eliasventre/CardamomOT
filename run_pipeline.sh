@@ -15,4 +15,4 @@
 # ./run.sh experimental_datasets/Kameneva    0.2 1 0.5 1 1
 # ./run.sh experimental_datasets/Schiebinger 1   1 0.5 1 1
 
-./run.sh collaborations/Copycat_sc 1 1 0.75 1 1
+./run.sh collaborations/Copycat_sc 1 1 1 1 1

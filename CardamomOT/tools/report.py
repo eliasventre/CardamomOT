@@ -421,7 +421,7 @@ def _cover_page(pdf, R, info, perturbations_status):
         y -= 0.022 * (len(lines) - 1)
 
     x0 = 0.60
-    fig.text(x0, 0.75, 'Perturbations (KO_OV_Stim_simulate)', fontsize=13, fontweight='bold')
+    fig.text(x0, 0.75, 'Perturbations (perturbation_simulation)', fontsize=13, fontweight='bold')
     y = 0.72
     if not perturbations_status:
         fig.text(x0 + 0.01, y - 0.03, 'No KO_OV_Stim_simulate.txt / no perturbation listed.', fontsize=9, color='#777777')
@@ -1065,6 +1065,23 @@ class _Dynamics:
         # Stimuli of the interval starting at each state (as in training and simulation)
         self.stim_state = interval_stimulus(prot, self.times, self.ns) if self.ns > 0 else np.zeros((len(self.times), 0))
         self.R_mlp = self.mlp.predict(self.P, self.stim_state) if self.mlp is not None else None
+        # Part of the inference stimuli (perturbation_inference, RATEk): not in the MLP, added back with the
+        # inference schedule (rate of each state over the interval it starts, as for R_opt)
+        self.R_stim = None
+        stim_pkl = os.path.join(cdir, 'stimulus_rates.pkl')
+        if self.R_mlp is not None and self.real_idx is not None and os.path.exists(stim_pkl):
+            import pickle
+            from ..stimulus_rates import schedule_values
+            srm = pickle.load(open(stim_pkl, 'rb'))
+            Xd = _dense(R.adata_data.X).astype(float)
+            if R.use_depth and 'depth_factor' in R.adata_data.obs:
+                Xd = Xd / R.adata_data.obs['depth_factor'].to_numpy(dtype=float)[:, None]
+            S = srm.effect(Xd[self.real_idx]).reshape(len(self.tu), self.N, -1)
+            U = schedule_values(R.p, self.tu, srm.n_stimuli)[:, :srm.n_stimuli]
+            off = np.zeros((len(self.tu), self.N))
+            off[:-1] = np.einsum('tnk,tk->tn', (S[:-1] + S[1:]) / 2, U[1:])
+            self.R_stim = off.ravel()
+            self.R_mlp = self.R_mlp + self.R_stim
         diag_path = os.path.join(cdir, 'prolif_network_diagnostics.json')
         self.mlp_diag = json.load(open(diag_path)) if (self.mlp is not None and os.path.exists(diag_path)) else None
         # Cumulative log mass of each state along its path (growth OT pass), for the growth-weighted trajectories
@@ -1270,14 +1287,21 @@ def _proliferation_pages(pdf, R, D):
         if pr_path is not None:
             tab = pd.read_csv(pr_path, sep=None, engine='python', header=None)
             anchors = {str(k): float(v) for k, v in zip(tab.iloc[:, 0], tab.iloc[:, 1])}
+        # Effects of the inference stimuli on the cell types (anchors are then rates without stimulus)
+        from ..stimulus_rates import load_effects, split_effects
+        stim_ct = {}
+        for k, (ct, _) in split_effects(load_effects(R.p), cats).items():
+            for c, dlt in ct.items():
+                stim_ct[c] = stim_ct.get(c, '') + f' {dlt:+.3g}·u{k}'
         fmt = lambda x: f'{x:.3g}' if np.isfinite(x) else '—'
-        rows = [[c, fmt(anchors.get(c, np.nan)),
+        rows = [[c, fmt(anchors.get(c, np.nan)) + stim_ct.get(c, ''),
                  fmt(np.nanmean(D.prior_cells[ct_cells == c])) if has_prior else '—',
                  fmt(np.nanmean(learned_cells[ct_cells == c])) if np.isfinite(learned_cells[ct_cells == c]).any() else '—']
                 for c in cats]
         ax = fig.add_subplot(gs[1, 2]); ax.axis('off')
-        t = ax.table(cellText=rows, colLabels=['Cell type', 'Anchor', 'Prior', 'Learned'],
-                     loc='upper center', cellLoc='center', colWidths=[0.46, 0.18, 0.18, 0.18])
+        t = ax.table(cellText=rows, colLabels=['Cell type', 'Anchor' + (' (+ stimulus)' if stim_ct else ''), 'Prior',
+                                               'Learned'],
+                     loc='upper center', cellLoc='center', colWidths=[0.34, 0.30, 0.18, 0.18])
         t.auto_set_font_size(False); t.set_fontsize(7); t.scale(1, 1.3)
         for (r, c), cell in t.get_celld().items():
             cell.set_linewidth(0.3)
@@ -1306,6 +1330,8 @@ def _proliferation_pages(pdf, R, D):
         _, w = quadrature(5)
         S = D.prot_full[:T * N, :D.ns].reshape(T, N, D.ns)[1:, None]       # stimuli of each interval
         integ = (D.mlp.predict(states, S) * w[None, :, None]).sum(axis=1) * dt[:, None]
+        if D.R_stim is not None:  # part of the inference stimuli over each interval
+            integ = integ + D.R_stim.reshape(T, N)[:-1] * dt[:, None]
         curves.append(('MLP R(P) along paths', REG_COLOR, '-', np.mean(np.exp(integ), axis=1)))
     for z, (lab, col, ls, g) in enumerate(curves):
         # Prior drawn last: the OT pass is anchored on it (same mean growth) unless population sizes are given

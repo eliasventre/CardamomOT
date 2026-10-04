@@ -33,6 +33,14 @@ CardamomOT combines optimal transport and mechanistic modelling to jointly infer
 - **Gene regulatory interactions** using an optimal-transport trajectory that aligns consecutive snapshots
 - **Stochastic simulations** of the inferred network for in-silico perturbation experiments
 
+```{tip}
+**Project settings.** Download the empty workbook [`CardamomOT_inputs.xlsx`](https://github.com/eliasventre/CardamomOT/blob/main/CardamomOT_inputs.xlsx) (root of the repository),
+copy it into the `Data/` folder of your project and fill what you need: model and pipeline parameters
+(`model_parameters` sheet, with their description; empty value = default), genes of interest, stimulus schedules
+and targets, in-silico perturbations, timepoints, proliferation and transition rates. Every sheet is optional;
+without it, the pipeline creates an empty one at the first run. See [Quick Start](quickstart.md).
+```
+
 The package is described in:
 
 > Maugé Y. and Ventre E. (2026). *CardamomOT: a mechanistic optimal transport-based framework for gene regulatory network inference, trajectory reconstruction and generative modeling*. doi: [10.64898/2026.03.31.715390](https://doi.org/10.64898/2026.03.31.715390)

@@ -3,7 +3,7 @@
 The pipeline takes the project directory and, optionally, the hard-to-calibrate parameters (in this
 order) --stimulus, --prior, --mean-forcing, --force-basins, --temporal-basins. Everything else (split,
 gene selection, literature prior, test, perturbations, proliferation, species...) is a parameter of
-NetworkModel (CardamomOT/model/base.py), fixed per project in the Model_parameters sheet of
+NetworkModel (CardamomOT/model/base.py), fixed per project in the model_parameters sheet of
 Data/CardamomOT_inputs.xlsx. Precedence: default < workbook < command-line option.
 
 Usage examples

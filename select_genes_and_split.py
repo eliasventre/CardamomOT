@@ -5,7 +5,7 @@ Select the genes of the model and split data into train/test sets.
 
 Usage:
     python select_genes_and_split.py -i <project_path> [--prior <float>]
-(split, train_rate, select_genes, build_prior_network: Model_parameters sheet)
+(split, train_rate, select_genes, build_prior_network: model_parameters sheet)
 
 With select_genes = True, genes are selected from the whole transcriptome of Data/data.h5ad in two steps
 (CardamomOT.inference.gene_selection): a coarse global GRN with OTVelo-Corr on log(x+1) counts

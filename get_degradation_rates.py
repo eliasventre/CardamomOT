@@ -16,7 +16,7 @@ Gene Ontology function); see CardamomOT/inference/halflife_db.py.
 
 Usage:
     python get_degradation_rates.py -i <project_path>
-    (split, species, overwrite_degradation_rates: Model_parameters sheet)
+    (split, species, overwrite_degradation_rates: model_parameters sheet)
 
 Required input files:
     - Data/data_full.h5ad: full count matrix

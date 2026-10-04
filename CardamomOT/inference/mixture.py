@@ -95,9 +95,12 @@ def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=10
     for i in range(m):
         V[i, :len(vals[i])], Wm[i, :len(vals[i])] = vals[i], mult[i]
     
-    # Σ x_i / s_i  (denominator for b)
-    sx: float = max(np.sum(x if s is None else x / s), EPS)
+    # Moment equation for b on the raw counts: Σ_i (a_g(i) / b) s_i = Σ_i x_i, i.e. b = Σ_g a_g S_g / Σ x
+    # with S_g the sum of the depth factors of group g (S_g = n_g without depth factors): the counts
+    # expected at the cells' depths keep the observed total
+    sx: float = max(np.sum(x), EPS)
     gidx = np.searchsorted(t, times) if s is not None else None
+    w_b = n if s is None else np.bincount(gidx, weights=s, minlength=m)
 
     k, c = 0, 0
     while (k == 0) or (k < max_iter and c > tol):
@@ -118,7 +121,7 @@ def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=10
         da = np.where(ok, -d / np.where(ok, h, 1.0), 0.0)
         
         a += np.maximum(da, -a)
-        b = np.sum(n*a)/sx
+        b = np.sum(w_b * a) / sx
         c = np.max(np.abs(da))
         k += 1
         if (k > 100) and (b > 1/seuil or b < seuil): break
@@ -241,8 +244,10 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
     else:
         b = float(b_init)
     
-    # weighted total sum (for updating b)
-    sx: np.bool_ | float = max(np.sum(resp * (x if s is None else x / s)[:, None]), EPS)
+    # Moment equation for b on the raw counts (as the hard M-step): b = Σ_k a_k S_k / Σ_i r_ik x_i,
+    # S_k = Σ_i r_ik s_i (= n_k without depth factors)
+    sx: np.bool_ | float = max(np.sum(resp * x[:, None]), EPS)
+    w_b = n if s is None else resp.T @ np.asarray(s, dtype=float)
     
     # Newton-Raphson with damping
     iteration, conv_metric = 0, 0
@@ -273,7 +278,7 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
                     da[k] = 0.0
         
         a += np.maximum(da, -a)
-        b = np.sum(n*a)/sx
+        b = np.sum(w_b * a) / sx
         
         # convergence metric
         conv_metric = np.max(np.abs(da))
@@ -628,7 +633,7 @@ def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_component
     Solves a constrained quadratic optimization problem.
     """
     # Depth factors: mean at the reference depth, p_i = c / (c + s_i) per cell
-    mean_t = np.mean(data_t if s is None else data_t / s)
+    mean_t = np.mean(data_t) if s is None else np.mean(data_t) / np.mean(s)  # ratio of means, as the M-step
     p_cells = c / (1 + c) if s is None else c / (c + np.asarray(s, dtype=float))
 
     # Size everything from the actual components, not a possibly stale n_components.

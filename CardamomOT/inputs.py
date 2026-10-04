@@ -23,100 +23,123 @@ import pandas as pd
 WORKBOOK = 'CardamomOT_inputs.xlsx'
 CACHE = os.path.join('cardamomOT', 'inputs')
 
-# Parameters of NetworkModel listed in the Model_parameters sheet (others can be added as rows)
-MODEL_PARAMETERS = [
-    # pipeline: data and steps
-    'split', 'train_rate', 'select_genes', 'build_prior_network', 'estimate_proliferation_rates', 'run_test',
-    'simulate_perturbations', 'species',
-    # gene selection
-    'num_max_genes', 'n_query_genes', 'n_entropy_genes', 'max_free_params', 'network_method', 'k_in_steiner',
-    'closure_min', 'min_entropy_change', 'min_nb_separation', 'literature_selection', 'literature_depth',
-    'literature_resources',
-    # per-cell depth
-    'use_depth_factor', 'compute_depth_factor', 'allow_depth_correction', 'depth_method', 'depth_by_cell_type',
-    # mixture and samples
-    'mean_forcing_em', 'force_basins', 'temporal_basins', 'batch_size_mixture', 'integrate_samples',
-    # network inference
-    'stimulus', 'prior_network_pen', 'min_n_loops', 'max_iter', 'batch_size_traj', 'n_network_fits',
-    # proliferation and simulation
-    'simulate_with_proliferation', 'growth_reg_source', 'simulation_stochastic',
+# Parameters listed in the model_parameters sheet, grouped by use (empty value = default of base.py;
+# other attributes of NetworkModel can be added as rows)
+PARAMETER_GROUPS = [
+    ('Pipeline: steps and data', [
+        'estimate_proliferation_rates', 'simulate_with_proliferation', 'select_genes', 'build_prior_network',
+        'simulate_perturbations', 'run_test', 'split', 'train_rate', 'species']),
+    ('Gene selection', [
+        'num_max_genes', 'n_query_genes', 'n_entropy_genes', 'network_method', 'k_in_steiner', 'closure_min',
+        'min_entropy_change', 'min_nb_separation']),
+    ('Literature prior network', [
+        'prior_network_pen', 'max_free_params', 'literature_selection', 'literature_depth', 'literature_resources']),
+    ('Stimulus', ['stimulus']),
+    ('Per-cell sequencing depth', [
+        'use_depth_factor', 'compute_depth_factor', 'allow_depth_correction', 'depth_method', 'depth_by_cell_type']),
+    ('NB mixture and samples', [
+        'mean_forcing_em', 'batch_size_mixture', 'soft_em_refinement', 'integrate_samples', 'ref_sample_integration']),
+    ('Network inference', [
+        'force_basins', 'temporal_basins', 'min_n_loops', 'max_iter', 'batch_size_traj', 'n_network_fits']),
+    ('Proliferation and simulation', [
+        'growth_reg_source', 'prolif_uses_stimulus', 'simulation_stochastic']),
+    ('Reproducibility', ['seed']),
 ]
+MODEL_PARAMETERS = [name for _, names in PARAMETER_GROUPS for name in names]
+GROUP_TITLES = {title for title, _ in PARAMETER_GROUPS} | {'Other parameters'}
 
 # Sheet -> (columns with their description, purpose, legacy files)
 SHEETS = {
-    'Model_parameters': (
+    'model_parameters': (
         [('parameter', 'Attribute of NetworkModel (CardamomOT/model/base.py); rows can be added for other attributes'),
-         ('value', 'Value for this project: when filled, it overrides the default AND the options of the pipeline / CLI'),
-         ('default', 'Default value of CardamomOT (for information)'),
+         ('value', 'Value for this project (empty = default of base.py); the command-line options of the pipeline '
+                   '(--stimulus, --prior, --mean-forcing, --force-basins, --temporal-basins) override it'),
          ('description', 'What the parameter does (comment of base.py)')],
-        'Parameters of the model for this project: a filled value overrides the default and the pipeline / '
-        'command-line options; empty value = default or command-line option.',
+        'Parameters of the model for this project, grouped by use: empty value = default of CardamomOT/model/base.py; '
+        'a filled value overrides it, and the command-line options override the workbook.',
         []),
-    'Gene_lists': (
+    'gene_lists': (
         [('genes_queries', 'Genes of interest for the gene selection (select_genes_and_split with select_genes = True), one per row'),
          ('proliferation_signatures', 'Proliferation marker genes (get_proliferation_rates), replace the built-in list'),
          ('death_signatures', 'Death marker genes (get_proliferation_rates), replace the built-in list'),
          ('senescence_signatures', 'Senescence / arrest marker genes (get_proliferation_rates), replace the built-in list')],
-        'Gene lists, one gene per row in each column. Any other column is a named gene list usable as a '
-        'RATE target of the Perturbations sheet (exported as gene_list_<name>.txt; legacy Data/gene_list_<name>.txt).',
+        'Gene lists, one gene per row in each column. Any other column is a named gene list, usable as the '
+        'targets (STIMk) or a RATE target of perturbation_inference and perturbation_simulation '
+        '(exported as gene_list_<name>.txt; legacy Data/gene_list_<name>.txt).',
         ['genes_queries.txt', 'proliferation_signatures', 'death_signatures', 'senescence_signatures']),
-    'Stimulus_inference': (
+    'stimulus_inference_schedule': (
         [('time', 'Timepoint (optional: without times, rows follow the sorted timepoints of the data)'),
          ('stimulus_1', 'Value of stimulus 1 at this timepoint (default: 0 at the first timepoint, 1 after)')],
-        'Schedule of the stimuli during the inference; one row per timepoint, one column per stimulus '
-        '(add stimulus_2, stimulus_3... for several stimuli).',
+        'Schedule of the stimuli of the measured data (inference); one row per timepoint, one column per stimulus '
+        '(add stimulus_2, stimulus_3... for several stimuli; without this sheet: one stimulus).',
         ['stimulus_schedule_inference.txt', 'stimulus_schedule.txt']),
-    'Stimulus_targets': (
-        [('stimulus_1', 'Possible direct targets of stimulus 1, one gene per row (empty column: no constraint)')],
-        'Possible targets of each stimulus (restricts the stimulus edges in the gene selection and the '
-        'network); a column naming no gene of the data means no constraint.',
-        ['stimulus_targets']),
-    'Simulation_schedule': (
+    'stimulus_simulation_schedule': (
         [('time', 'Simulated timepoint (optional: without times, rows follow the sorted simulated timepoints)'),
          ('stimulus_1', 'Inference stimulus 1 during the simulations (default: its inference schedule)'),
-         ('STIM1', 'Perturbation stimulus STIM1 of the Perturbations sheet (default: 0 at the first time, 1 after)')],
-        'Schedules of the simulations, one row per simulated timepoint: inference stimuli (stimulus_k), '
-        'then perturbation stimuli (STIMk, as in the Perturbations sheet).',
+         ('STIM1', 'Perturbation stimulus STIM1 of perturbation_simulation (default: 0 at the first time, 1 after)')],
+        'Schedules of the simulations, one row per simulated timepoint: inference stimuli (stimulus_k, acting '
+        'on the genes and, through the RATEk of perturbation_inference, on proliferation and death), then '
+        'perturbation stimuli (STIMk, as in perturbation_simulation).',
         ['stimulus_schedule_simulate.txt', 'stimulus_schedule_simul.txt']),
-    'Perturbations': (
+    'perturbation_inference': (
+        [('sample_id', 'dataset_id of a measured sample carrying genetic perturbations (KO / OV), or "all" '
+                       'for the row describing the inference stimuli (STIMk / RATEk)'),
+         ('KO', 'Genes knocked-out in this sample, comma-separated'),
+         ('OV', 'Genes over-expressed in this sample, comma-separated'),
+         ('STIM1', 'Row "all": possible direct targets of inference stimulus 1: a gene list of gene_lists or '
+                   'comma-separated genes (empty: every gene)'),
+         ('RATE1', 'Row "all": effect of inference stimulus 1 on the net proliferation rate (per hour), '
+                   'TARGET:delta comma-separated, scaled by its schedule: TARGET = a cell type of '
+                   'cell_type_proliferation (delta added to its rate of proliferation_rates, which is then the '
+                   'rate without stimulus), or a gene list of gene_lists / GENE1+GENE2 / a gene (delta x mRNA '
+                   'signature score in [0, 1])'),
+         ('comment', 'Free comment (ignored)')],
+        'Perturbations of the measured data, used by the inference: genetic perturbations of samples (KO / OV), '
+        'and the inference stimuli (row sample_id = all: targets STIMk and effects on proliferation RATEk, '
+        'k = column of stimulus_inference_schedule). Empty: one stimulus, every gene a possible target, no '
+        'effect on the rates.',
+        ['KO_OV_inference.txt', 'stimulus_targets']),
+    'perturbation_simulation': (
         [('KO', 'Knocked-out genes, comma-separated; GENE-X for a partial KO of X%'),
          ('OV', 'Over-expressed genes, comma-separated; GENE-X for a partial OV of X%'),
          ('STIM1', "Perturbation stimulus 1: targets followed by + (activated) or - (inhibited), e.g. CHGA+STMN2-"),
          ('RATE1', "Effect of stimulus 1 (its schedule, STIM1 may be empty) on the net proliferation rate: "
-                   "TARGET:delta, comma-separated; TARGET = a gene list of Gene_lists, GENE1+GENE2..., a gene or "
+                   "TARGET:delta, comma-separated; TARGET = a gene list of gene_lists, GENE1+GENE2..., a gene or "
                    "'all'; delta (per time unit) added to R of a cell at the maximal score, e.g. "
                    "ferroptosis_sensitive:-0.01 (needs the proliferation MLP)"),
          ('comment', 'Free comment (ignored)')],
         'In-silico perturbations simulated by simulate_network_KOV, one condition per row '
         '(add STIM2, STIM3... for several perturbation stimuli; their effects add up).',
         ['KO_OV_Stim_simulate.txt', 'KO_OV_simulate.txt']),
-    'KO_OV_inference': (
-        [('sample_id', 'dataset_id of a sample carrying genetic perturbations'),
-         ('KO', 'Genes knocked-out in this sample, comma-separated'),
-         ('OV', 'Genes over-expressed in this sample, comma-separated')],
-        'Known perturbations of the measured samples, used as priors of the inference.',
-        ['KO_OV_inference.txt']),
-    'Times': (
+    'times': (
         [('times_to_inference', 'Inference restricted to the timepoints <= the largest value of this column'),
          ('times_to_simulate', 'Timepoints of the simulations (0 added if absent)')],
         'Timepoints, one per row.',
         ['times_to_inference.txt', 'times_to_simulate.txt']),
-    'Proliferation_rates': (
+    'proliferation_rates': (
         [('cell_type', 'Cell type (as in obs cell_type_proliferation, else cell_type_transition, else cell_type)'),
-         ('net_rate_per_hour', 'Reference net proliferation rate (birth - death), in h^-1')],
+         ('net_rate_per_hour', 'Reference net proliferation rate (birth - death), in h^-1; without the inference '
+                               'stimulus if perturbation_inference gives its effect on this cell type (RATEk)')],
         'Anchors of the net proliferation rates per cell type (get_proliferation_rates); every cell type '
         'needs a value.',
         ['proliferation_rates']),
-    'Population_sizes': (
+    'population_sizes': (
         [('time', 'Timepoint'), ('population_size', 'Total population size at this timepoint')],
         'Absolute population sizes, anchoring the growth estimated by optimal transport.',
         ['population_sizes']),
-    'Transition_rates': (
+    'transition_rates': (
         [('from \\ to', 'Source cell type (rows) and target cell types (header): allowed transition rates')],
         'Cell-type transition rate matrix constraining optimal transport: first column = source cell types, '
         'header = target cell types (as in obs cell_type_transition, else cell_type).',
         ['transition_rates']),
 }
+
+# Sheet names of earlier versions -> current names (workbooks are migrated at the first use)
+RENAMED = {'README': 'readme', 'Model_parameters': 'model_parameters', 'Gene_lists': 'gene_lists',
+           'Stimulus_inference': 'stimulus_inference_schedule', 'Simulation_schedule': 'stimulus_simulation_schedule',
+           'Perturbations': 'perturbation_simulation', 'KO_OV_inference': 'perturbation_inference',
+           'Times': 'times', 'Proliferation_rates': 'proliferation_rates', 'Population_sizes': 'population_sizes',
+           'Transition_rates': 'transition_rates'}
 
 
 def _is_empty(v):
@@ -149,13 +172,9 @@ def _style_header(ws, columns):
     ws.freeze_panes = 'A2'
 
 
-def create_workbook(path):
-    """Empty workbook with the documented structure (README sheet + one sheet per input)."""
-    from openpyxl import Workbook
+def _fill_readme(ws):
+    """Content of the readme sheet: purpose of the workbook and of each sheet."""
     from openpyxl.styles import Font, Alignment
-    wb = Workbook()
-    ws = wb.active
-    ws.title = 'README'
     lines = [
         ('CardamomOT — optional inputs of the run', 'title'),
         ('Fill only what you need: empty cells mean "not given" and the defaults of CardamomOT apply. '
@@ -188,13 +207,84 @@ def create_workbook(path):
                                                  for f in legacy)).alignment = Alignment(wrap_text=True, vertical='top')
         ws.row_dimensions[r].height = 48
         r += 1
-    ws.column_dimensions['A'].width = 24
+    ws.column_dimensions['A'].width = 28
     ws.column_dimensions['B'].width = 95
     ws.column_dimensions['C'].width = 45
+
+
+def create_workbook(path):
+    """Empty workbook with the documented structure (readme sheet + one sheet per input)."""
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'readme'
+    _fill_readme(ws)
     for name, (columns, purpose, legacy) in SHEETS.items():
         _style_header(wb.create_sheet(name), columns)
-    _fill_parameter_rows(wb['Model_parameters'])
+    _fill_parameter_rows(wb['model_parameters'])
     wb.save(path)
+
+
+def _all_row(df):
+    """Index of the row sample_id = all of a perturbation_inference table (created if absent), and the table."""
+    if 'sample_id' not in df:
+        df['sample_id'] = None
+    mask = df['sample_id'].astype(str).str.strip().str.lower() == 'all'
+    if not mask.any():
+        df = pd.concat([pd.DataFrame([{'sample_id': 'all'}]), df], ignore_index=True)
+        return 0, df
+    return df.index[mask][0], df
+
+
+def _migrate(wb):
+    """Sheets of earlier versions renamed (lowercase names), Stimulus_targets merged into
+    perturbation_inference (row all, STIMk = gene list stimulus_k_targets); returns True if changed."""
+    changed = False
+    for old, new in RENAMED.items():
+        if old in wb.sheetnames and new not in wb.sheetnames:
+            wb[old].title = '_renaming_'  # openpyxl compares titles case-insensitively
+            wb['_renaming_'].title = new
+            changed = True
+            if new not in ('readme', 'model_parameters'):
+                df = read_sheet(wb, new)
+                if len(df.columns):
+                    write_sheet(wb, new, df)  # headers and comments of the current version
+                else:
+                    wb[new].delete_rows(1, wb[new].max_row)
+                    _style_header(wb[new], SHEETS[new][0])
+    if changed and 'readme' in wb.sheetnames:
+        idx = wb.sheetnames.index('readme')
+        del wb['readme']
+        _fill_readme(wb.create_sheet('readme', idx))
+    if 'Stimulus_targets' in wb.sheetnames:
+        tg = read_sheet(wb, 'Stimulus_targets')
+        gl, pi = read_sheet(wb, 'gene_lists'), read_sheet(wb, 'perturbation_inference')
+        for c in [c for c in tg.columns if str(c).startswith('stimulus_')]:
+            genes = _values(tg, c)
+            if genes:
+                k = int(str(c).split('_')[1])
+                gl = _set_column(gl, f'stimulus_{k}_targets', genes)
+                r, pi = _all_row(pi)
+                pi.loc[r, f'STIM{k}'] = f'stimulus_{k}_targets'
+        write_sheet(wb, 'gene_lists', gl)
+        write_sheet(wb, 'perturbation_inference', _pi_columns(pi))
+        del wb['Stimulus_targets']
+        changed = True
+    # Missing sheets of the current version (empty, with their header)
+    for name, (columns, _, _) in SHEETS.items():
+        if name not in wb.sheetnames:
+            _style_header(wb.create_sheet(name), columns)
+            if name == 'model_parameters':
+                _fill_parameter_rows(wb[name])
+            changed = True
+    return changed
+
+
+def _pi_columns(df):
+    """perturbation_inference columns in their usual order (sample_id, KO, OV, STIMk / RATEk, comment, others)."""
+    ks = sorted({int(c[4:]) for c in df.columns if re.fullmatch(r'(STIM|RATE)\d+', str(c))} | {1})
+    order = ['sample_id', 'KO', 'OV'] + [x for k in ks for x in (f'STIM{k}', f'RATE{k}')] + ['comment']
+    return df.reindex(columns=order + [c for c in df.columns if c not in order])
 
 
 def parameter_docs():
@@ -209,23 +299,57 @@ def parameter_docs():
     return {name: (getattr(model, name, None), docs.get(name, '')) for name in vars(model)}
 
 
-def _fill_parameter_rows(ws, values=None):
-    """Rows parameter / value / default / description of MODEL_PARAMETERS."""
-    from openpyxl.styles import Alignment
-    docs = parameter_docs()
-    for i, name in enumerate(MODEL_PARAMETERS, start=2):
-        default, comment = docs.get(name, (None, ''))
-        ws.cell(row=i, column=1, value=name)
-        if values and name in values:
-            ws.cell(row=i, column=2, value=values[name])
-        ws.cell(row=i, column=3, value=repr(default) if isinstance(default, (dict, list, tuple)) or default is None
-                else default)
-        c = ws.cell(row=i, column=4, value=comment)
-        c.alignment = Alignment(wrap_text=True, vertical='top')
-    ws.column_dimensions['A'].width = 28
+def _fill_parameter_rows(ws, values=None, extra=()):
+    """Group title rows, then parameter / value / description of each listed parameter (+ extra rows)."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+    docs, values = parameter_docs(), values or {}
+    groups = PARAMETER_GROUPS + ([('Other parameters', list(extra))] if extra else [])
+    r = 2
+    for title, names in groups:
+        for j in (1, 2, 3):
+            ws.cell(row=r, column=j).fill = PatternFill('solid', fgColor='D9E1F2')
+        ws.cell(row=r, column=1, value=title).font = Font(bold=True)
+        r += 1
+        for name in names:
+            ws.cell(row=r, column=1, value=name)
+            if name in values:
+                ws.cell(row=r, column=2, value=values[name])
+            ws.cell(row=r, column=3, value=docs.get(name, (None, ''))[1]).alignment = Alignment(wrap_text=True,
+                                                                                               vertical='top')
+            r += 1
+    ws.column_dimensions['A'].width = 30
     ws.column_dimensions['B'].width = 14
-    ws.column_dimensions['C'].width = 14
-    ws.column_dimensions['D'].width = 110
+    ws.column_dimensions['C'].width = 120
+
+
+def _sync_parameter_sheet(ws):
+    """Bring an existing model_parameters sheet to the current layout (groups, descriptions, no default column),
+    keeping its values and its added rows; returns True if it was rewritten."""
+    rows = [r for r in ws.iter_rows(min_row=1, values_only=True)]
+    header = [str(c).strip() if c is not None else '' for c in (rows[0] if rows else ())]
+    j_val = header.index('value') if 'value' in header else 1
+    values, order = {}, []
+    for r in rows[1:]:
+        name = str(r[0]).strip() if r and r[0] is not None else ''
+        if not name or name in GROUP_TITLES:
+            continue
+        order.append(name)
+        v = r[j_val] if len(r) > j_val else None
+        if v is not None and str(v).strip() != '':
+            values[name] = v
+    extra = [n for n in order if n not in MODEL_PARAMETERS]
+    docs = parameter_docs()
+    expected = [('parameter', 'value', 'description')]
+    for title, names in PARAMETER_GROUPS + ([('Other parameters', extra)] if extra else []):
+        expected.append((title, None, None))
+        expected += [(n, values.get(n), docs.get(n, (None, ''))[1]) for n in names]
+    current = [tuple((list(r) + [None] * 3)[:3]) for r in rows]
+    if [tuple(e) for e in expected] == current and len(header) == 3:
+        return False
+    ws.delete_rows(1, ws.max_row)
+    _style_header(ws, SHEETS['model_parameters'][0])
+    _fill_parameter_rows(ws, values, extra)
+    return True
 
 
 def read_sheet(wb, name):
@@ -300,19 +424,19 @@ def import_legacy(wb, data_dir):
               f"(sheet {sheet}); text files overwrite the workbook: delete it to edit the workbook instead")
 
     # Gene lists
-    gl = read_sheet(wb, 'Gene_lists')
+    gl = read_sheet(wb, 'gene_lists')
     for col, name in [('genes_queries', 'genes_queries.txt'), ('proliferation_signatures', 'proliferation_signatures'),
                       ('death_signatures', 'death_signatures'), ('senescence_signatures', 'senescence_signatures')]:
         path = _legacy_path(data_dir, name)
         if path:
             gl = _set_column(gl, col, _gene_list(path))
-            note(path, 'Gene_lists')
+            note(path, 'gene_lists')
     # Named gene lists (RATE targets)
     for path in sorted(glob.glob(os.path.join(data_dir, 'gene_list_*.txt'))):
         gl = _set_column(gl, os.path.basename(path)[len('gene_list_'):-4], _gene_list(path))
-        note(path, 'Gene_lists')
+        note(path, 'gene_lists')
     if imported:
-        write_sheet(wb, 'Gene_lists', gl)
+        write_sheet(wb, 'gene_lists', gl)
 
     # Inference schedule (rows in timepoint order, no time column)
     n_inf = None
@@ -323,22 +447,26 @@ def import_legacy(wb, data_dir):
             n_inf = arr.shape[1]
             df = pd.DataFrame(arr, columns=[f'stimulus_{k + 1}' for k in range(n_inf)])
             df.insert(0, 'time', None)
-            write_sheet(wb, 'Stimulus_inference', df)
-            note(path, 'Stimulus_inference')
+            write_sheet(wb, 'stimulus_inference_schedule', df)
+            note(path, 'stimulus_inference_schedule')
             break
     if n_inf is None:
-        n_inf = max(1, sum(c.startswith('stimulus_') for c in read_sheet(wb, 'Stimulus_inference').columns))
+        n_inf = max(1, sum(c.startswith('stimulus_') for c in read_sheet(wb, 'stimulus_inference_schedule').columns))
 
-    # Stimulus targets (tab columns, or one list)
+    # Stimulus targets (tab columns, or one list) -> gene lists stimulus_k_targets, row all of perturbation_inference
     path = _legacy_path(data_dir, 'stimulus_targets')
     if path:
         from .config import read_stimulus_targets
         cols = read_stimulus_targets(data_dir) or []
-        df = pd.DataFrame()
+        gl, pi = read_sheet(wb, 'gene_lists'), read_sheet(wb, 'perturbation_inference')
         for k, genes in enumerate(cols, start=1):
-            df = _set_column(df, f'stimulus_{k}', genes)
-        write_sheet(wb, 'Stimulus_targets', df)
-        note(path, 'Stimulus_targets')
+            if genes:
+                gl = _set_column(gl, f'stimulus_{k}_targets', genes)
+                r, pi = _all_row(pi)
+                pi.loc[r, f'STIM{k}'] = f'stimulus_{k}_targets'
+        write_sheet(wb, 'gene_lists', gl)
+        write_sheet(wb, 'perturbation_inference', _pi_columns(pi))
+        note(path, 'gene_lists / perturbation_inference')
 
     # Simulation schedule: inference stimuli, then perturbation stimuli
     for name in ('stimulus_schedule_simulate.txt', 'stimulus_schedule_simul.txt'):
@@ -348,8 +476,8 @@ def import_legacy(wb, data_dir):
             cols = [f'stimulus_{k + 1}' if k < n_inf else f'STIM{k - n_inf + 1}' for k in range(arr.shape[1])]
             df = pd.DataFrame(arr, columns=cols)
             df.insert(0, 'time', None)
-            write_sheet(wb, 'Simulation_schedule', df)
-            note(path, 'Simulation_schedule')
+            write_sheet(wb, 'stimulus_simulation_schedule', df)
+            note(path, 'stimulus_simulation_schedule')
             break
 
     # Perturbations
@@ -360,8 +488,8 @@ def import_legacy(wb, data_dir):
             df.columns = [{'STIM': 'STIM1', 'RATE': 'RATE1'}.get(c.upper(), c.upper() if c.upper() in ('KO', 'OV') or
                           re.fullmatch(r'(STIM|RATE)\d+', c.upper()) else c) for c in df.columns]
             df = df.replace({'0': None, '': None})
-            write_sheet(wb, 'Perturbations', df)
-            note(path, 'Perturbations')
+            write_sheet(wb, 'perturbation_simulation', df)
+            note(path, 'perturbation_simulation')
             break
 
     # Perturbations of the measured samples
@@ -369,25 +497,29 @@ def import_legacy(wb, data_dir):
     if path:
         df = _raw_table(path)
         df.columns = ['sample_id' if c.upper() in ('SAMPLE_ID', 'DATASET_ID') else c.upper() for c in df.columns]
-        write_sheet(wb, 'KO_OV_inference', df.replace({'0': None, '': None}))
-        note(path, 'KO_OV_inference')
+        # Sample rows replaced, row all (inference stimuli) kept
+        pi = read_sheet(wb, 'perturbation_inference')
+        keep = pi[pi['sample_id'].astype(str).str.strip().str.lower() == 'all'] if 'sample_id' in pi else pi.iloc[:0]
+        write_sheet(wb, 'perturbation_inference',
+                    _pi_columns(pd.concat([keep, df.replace({'0': None, '': None})], ignore_index=True)))
+        note(path, 'perturbation_inference')
 
     # Timepoints
-    tm = read_sheet(wb, 'Times')
+    tm = read_sheet(wb, 'times')
     changed = False
     for col in ('times_to_inference', 'times_to_simulate'):
         path = _legacy_path(data_dir, f'{col}.txt')
         if path:
             vals = [float(l.strip()) for l in open(path) if l.strip()]
             tm = _set_column(tm, col, vals)
-            note(path, 'Times')
+            note(path, 'times')
             changed = True
     if changed:
-        write_sheet(wb, 'Times', tm)
+        write_sheet(wb, 'times', tm)
 
     # Two-column tables
-    for sheet, name, cols in [('Proliferation_rates', 'proliferation_rates', ['cell_type', 'net_rate_per_hour']),
-                              ('Population_sizes', 'population_sizes', ['time', 'population_size'])]:
+    for sheet, name, cols in [('proliferation_rates', 'proliferation_rates', ['cell_type', 'net_rate_per_hour']),
+                              ('population_sizes', 'population_sizes', ['time', 'population_size'])]:
         path = _legacy_path(data_dir, name)
         if path:
             df = pd.read_csv(path, sep=None, engine='python', header=None).iloc[:, :2]
@@ -400,8 +532,8 @@ def import_legacy(wb, data_dir):
     if path:
         df = pd.read_csv(path, sep=None, engine='python', index_col=0)
         df.insert(0, 'from \\ to', df.index.astype(str))
-        write_sheet(wb, 'Transition_rates', df.reset_index(drop=True))
-        note(path, 'Transition_rates')
+        write_sheet(wb, 'transition_rates', df.reset_index(drop=True))
+        note(path, 'transition_rates')
     return imported
 
 
@@ -428,7 +560,7 @@ def export(wb, out_dir):
     os.makedirs(out_dir)
     write = lambda name, text: open(os.path.join(out_dir, name), 'w').write(text)
 
-    gl = read_sheet(wb, 'Gene_lists')
+    gl = read_sheet(wb, 'gene_lists')
     for col, name in [('genes_queries', 'genes_queries.txt'), ('proliferation_signatures', 'proliferation_signatures.txt'),
                       ('death_signatures', 'death_signatures.txt'), ('senescence_signatures', 'senescence_signatures.txt')]:
         genes = _values(gl, col)
@@ -440,22 +572,46 @@ def export(wb, out_dir):
         if genes:
             write(f'gene_list_{col}.txt', '\n'.join(map(str, genes)) + '\n')
 
-    st = read_sheet(wb, 'Stimulus_inference')
+    st = read_sheet(wb, 'stimulus_inference_schedule')
     inf_cols = sorted([c for c in st.columns if c.startswith('stimulus_') and st[c].notna().any()],
                       key=lambda c: int(c.split('_')[1]))
     if inf_cols:
         np.savetxt(os.path.join(out_dir, 'stimulus_schedule_inference.txt'), _schedule(st, inf_cols), fmt='%g')
     n_inf = max(1, len(inf_cols))
 
-    tg = read_sheet(wb, 'Stimulus_targets')
-    tcols = sorted([c for c in tg.columns if c.startswith('stimulus_')], key=lambda c: int(c.split('_')[1]))
-    lists = [list(map(str, _values(tg, c))) for c in tcols]
-    if any(lists):
-        n = max(len(l) for l in lists)
-        write('stimulus_targets.txt', '\n'.join('\t'.join(l[i] if i < len(l) else '' for l in lists)
+    # Inference stimuli (row all of perturbation_inference): targets STIMk and rate effects RATEk
+    pi = read_sheet(wb, 'perturbation_inference')
+    is_all = (pi['sample_id'].astype(str).str.strip().str.lower() == 'all') if 'sample_id' in pi else pd.Series([], dtype=bool)
+    lists, rates = {}, {}
+    for _, r in pi[is_all].iterrows():
+        for c in pi.columns:
+            m = re.fullmatch(r'(STIM|RATE)(\d+)', str(c))
+            if not m or _is_empty(r[c]):
+                continue
+            k, cell = int(m.group(2)), str(_clean(r[c]))
+            if m.group(1) == 'STIM':
+                # A gene list of gene_lists, else comma-separated genes
+                genes = _values(gl, cell) if cell in gl.columns else [g.strip() for g in re.split(r'[,\s]+', cell) if g.strip()]
+                lists.setdefault(k, []).extend(str(g) for g in genes)
+            else:
+                from .tools.perturbations import parse_rate
+                rates.setdefault(k, []).extend(parse_rate(cell))
+    bad = sorted(k for k in set(lists) | set(rates) if k > n_inf)
+    if bad:
+        print(f"[CardamomOT] Warning: perturbation_inference describes inference stimuli {bad} but "
+              f"stimulus_inference_schedule has {n_inf} stimulus column(s): ignored")
+    if any(lists.get(k) for k in range(1, n_inf + 1)):
+        cols = [lists.get(k, []) for k in range(1, n_inf + 1)]
+        n = max(len(l) for l in cols)
+        write('stimulus_targets.txt', '\n'.join('\t'.join(l[i] if i < len(l) else '' for l in cols)
                                                 for i in range(n)) + '\n')
+    rates = {k: v for k, v in rates.items() if k <= n_inf and v}
+    if rates:
+        import json
+        json.dump({str(k): v for k, v in rates.items()}, open(os.path.join(out_dir, 'stimulus_rates.json'), 'w'),
+                  indent=1)
 
-    ss = read_sheet(wb, 'Simulation_schedule')
+    ss = read_sheet(wb, 'stimulus_simulation_schedule')
     s_inf = sorted([c for c in ss.columns if c.startswith('stimulus_') and ss[c].notna().any()],
                    key=lambda c: int(c.split('_')[1]))
     s_pert = sorted([c for c in ss.columns if re.fullmatch(r'STIM\d+', c) and ss[c].notna().any()],
@@ -466,7 +622,7 @@ def export(wb, out_dir):
             rows = rows.sort_values('time')
         if not s_inf:
             # Inference stimuli not given: default schedule (0 at the first time, 1 after)
-            print(f"[CardamomOT] Warning: sheet Simulation_schedule has perturbation stimuli but no inference "
+            print(f"[CardamomOT] Warning: sheet stimulus_simulation_schedule has perturbation stimuli but no inference "
                   f"stimulus column: default 0 at the first time and 1 after for the {n_inf} inference stimuli")
             inf = np.ones((len(rows), n_inf))
             inf[0] = 0
@@ -475,7 +631,7 @@ def export(wb, out_dir):
         pert = rows[s_pert].astype(float).fillna(1.0).to_numpy() if s_pert else np.zeros((len(rows), 0))
         np.savetxt(os.path.join(out_dir, 'stimulus_schedule_simulate.txt'), np.hstack([inf, pert]), fmt='%g')
 
-    pt = read_sheet(wb, 'Perturbations')
+    pt = read_sheet(wb, 'perturbation_simulation')
     pcols = [c for c in pt.columns if c in ('KO', 'OV') or re.fullmatch(r'(STIM|RATE)\d+', str(c))]
     if pcols and len(pt):
         lines = ['\t'.join(pcols)]
@@ -486,31 +642,31 @@ def export(wb, out_dir):
         if len(lines) > 1:
             write('KO_OV_Stim_simulate.txt', '\n'.join(lines) + '\n')
 
-    ki = read_sheet(wb, 'KO_OV_inference')
+    ki = pi[~is_all] if len(pi) else pi
     if 'sample_id' in ki and len(ki):
         lines = ['SAMPLE_ID\tKO\tOV']
         for _, r in ki.iterrows():
-            if not _is_empty(r['sample_id']):
+            if not _is_empty(r['sample_id']) and (not _is_empty(r.get('KO')) or not _is_empty(r.get('OV'))):
                 lines.append('\t'.join(['0' if _is_empty(r.get(c)) else str(_clean(r.get(c)))
                                         for c in ('sample_id', 'KO', 'OV')]))
         if len(lines) > 1:
             write('KO_OV_inference.txt', '\n'.join(lines) + '\n')
 
-    tm = read_sheet(wb, 'Times')
+    tm = read_sheet(wb, 'times')
     for col in ('times_to_inference', 'times_to_simulate'):
         vals = _values(tm, col)
         if vals:
             write(f'{col}.txt', '\n'.join(f'{float(v):g}' for v in vals) + '\n')
 
-    for sheet, name, cols in [('Proliferation_rates', 'proliferation_rates.txt', ['cell_type', 'net_rate_per_hour']),
-                              ('Population_sizes', 'population_sizes.txt', ['time', 'population_size'])]:
+    for sheet, name, cols in [('proliferation_rates', 'proliferation_rates.txt', ['cell_type', 'net_rate_per_hour']),
+                              ('population_sizes', 'population_sizes.txt', ['time', 'population_size'])]:
         df = read_sheet(wb, sheet)
         if all(c in df for c in cols):
             df = df.dropna(subset=cols)
             if len(df):
                 write(name, '\n'.join(f'{_clean(a)}\t{_clean(b)}' for a, b in zip(df[cols[0]], df[cols[1]])) + '\n')
 
-    mp = read_sheet(wb, 'Model_parameters')
+    mp = read_sheet(wb, 'model_parameters')
     if 'parameter' in mp and 'value' in mp:
         import json
         values = {str(k).strip(): _clean(v) for k, v in zip(mp['parameter'], mp['value'])
@@ -518,7 +674,7 @@ def export(wb, out_dir):
         if values:
             json.dump(values, open(os.path.join(out_dir, 'model_parameters.json'), 'w'), indent=1, default=str)
 
-    tr = read_sheet(wb, 'Transition_rates')
+    tr = read_sheet(wb, 'transition_rates')
     if len(tr) and tr.shape[1] > 1:
         tr = tr.set_index(tr.columns[0])
         tr.index = tr.index.astype(str)
@@ -533,14 +689,14 @@ _SYNCED = {}
 
 
 def project_parameters(project):
-    """{attribute: value} filled in the Model_parameters sheet of the project."""
+    """{attribute: value} filled in the model_parameters sheet of the project."""
     import json
     path = os.path.join(input_dir(project), 'model_parameters.json')
     return json.load(open(path)) if os.path.exists(path) else {}
 
 
 def depth_factor_used(project):
-    """use_depth_factor of the project (Model_parameters sheet, else the default of NetworkModel)."""
+    """use_depth_factor of the project (model_parameters sheet, else the default of NetworkModel)."""
     from .model.base import NetworkModel
     m = NetworkModel(1)
     m.apply_project_parameters(project, verb=False)
@@ -564,32 +720,19 @@ def input_dir(project):
             create_workbook(path)
             print(f"[CardamomOT] Created Data/{WORKBOOK}: optional inputs of the run (empty cells = defaults)")
         wb = load_workbook(path)
-        if 'Model_parameters' not in wb.sheetnames:
-            # Workbook created before the parameter sheet: add it (empty values)
-            ws = wb.create_sheet('Model_parameters', 1)
-            _style_header(ws, SHEETS['Model_parameters'][0])
-            _fill_parameter_rows(ws)
-            wb.save(path)
-        else:
-            # Parameters added to CardamomOT since the workbook was made: new rows with empty values (defaults)
-            ws = wb['Model_parameters']
-            present = {str(r[0]).strip() for r in ws.iter_rows(min_row=2, values_only=True) if r and r[0]}
-            new = [n for n in MODEL_PARAMETERS if n not in present]
-            if new:
-                from openpyxl.styles import Alignment
-                docs = parameter_docs()
-                for name in new:
-                    default, comment = docs.get(name, (None, ''))
-                    r = ws.max_row + 1
-                    ws.cell(row=r, column=1, value=name)
-                    ws.cell(row=r, column=3, value=repr(default) if isinstance(default, (dict, list, tuple))
-                            or default is None else default)
-                    ws.cell(row=r, column=4, value=comment).alignment = Alignment(wrap_text=True, vertical='top')
-                try:
-                    wb.save(path)
-                    print(f"[CardamomOT] Model_parameters: new parameters added with empty values (defaults): {new}")
-                except PermissionError:
-                    pass
+        if _migrate(wb):
+            # Workbook of an earlier version: lowercase sheet names, merged sheets, new sheets
+            try:
+                wb.save(path)
+                print(f"[CardamomOT] Data/{WORKBOOK} updated to the current sheet layout")
+            except PermissionError:
+                pass
+        if _sync_parameter_sheet(wb['model_parameters']):
+            # Layout of the current version (groups, descriptions, new parameters), values kept
+            try:
+                wb.save(path)
+            except PermissionError:
+                pass
         if import_legacy(wb, data_dir):
             try:
                 wb.save(path)

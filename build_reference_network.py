@@ -10,7 +10,7 @@ literature.py): this script is only needed for a gene list chosen without it.
 
 Usage:
     python build_reference_network.py -i <project_path>
-    (literature_depth, literature_resources, species: Model_parameters sheet; run by the pipeline when
+    (literature_depth, literature_resources, species: model_parameters sheet; run by the pipeline when
     build_prior_network is True and select_genes is False)
 """
 import sys; sys.path += ['../']
