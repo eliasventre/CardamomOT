@@ -14,6 +14,13 @@ Held-out validation with everything learned on the training cells kept fixed:
 4. AnnData objects equivalent to the training ones (compared to Data/data_test.h5ad by
    check_test_to_train.py and in the final report).
 Per-sample parameters (mixtures, basals) are routed to the cells of each sample, never averaged.
+Stimuli: stimulus_test_schedule (per-sample rows), else the inference schedule.
+
+Samples with remove_from_inference (perturbation_inference) are validated separately: simulation from the
+first-timepoint training states of their reference_sample (default: the largest training sample), with that
+sample's mixture and basal and the removed sample's test schedule (e.g. an untreated control measured at a
+single time), saved as cardamomOT/adata_sim_validation_<sample>_stim*_prior*.h5ad and compared to its cells
+in the report (section 6).
 
 Usage:
     python infer_test.py -i <project_path> [--stimulus <float>] [--prior <float>] [--force-basins <float>]
@@ -45,11 +52,12 @@ import numpy as np
 import anndata as ad
 import pandas as pd
 from CardamomOT import NetworkModel as NetworkModel_beta, find_data_file
-from CardamomOT.inputs import input_dir
+from CardamomOT.inputs import input_dir, removed_samples
 from CardamomOT.inference.integration import nb_cell_parameters
 from CardamomOT.inference.depth import state_depth, simulation_depth
 from CardamomOT.run_options import parse_step_options, settings, configure
-from CardamomOT.config import find_stimulus_schedule, simulation_schedule
+from CardamomOT.config import n_inference_stimuli
+from CardamomOT.schedules import StimulusSchedule, sample_names, test_schedule
 
 
 def main(argv):
@@ -74,34 +82,42 @@ def main(argv):
     except FileNotFoundError as e:
         print(f"[infer_test] Error: {e}")
         sys.exit(1)
-
-    try:
-        times_obs = adata.obs['time'].values
-        if len(np.unique(times_obs)) <= 1:
-            raise ValueError("Dataset must contain multiple timepoints")
-        print(f"[infer_test] Found {len(np.unique(times_obs))} timepoints: {sorted(np.unique(times_obs))}")
-    except (KeyError, ValueError) as e:
-        print(f"[infer_test] Error: {e}")
+    if 'time' not in adata.obs:
+        print("[infer_test] Error: data_test.h5ad has no obs['time']")
         sys.exit(1)
 
+    # Samples removed from the inference (perturbation_inference): validation pass; the others: test pass
+    removed, refs = ([], {})
+    if 'dataset_id' in adata.obs:
+        removed, refs = removed_samples(p, present=adata.obs['dataset_id'].astype(str).unique())
+    is_removed = (adata.obs['dataset_id'].astype(str).isin(removed).to_numpy() if removed
+                  else np.zeros(adata.n_obs, dtype=bool))
+    adata_removed = adata[is_removed].copy()
+    adata = adata[~is_removed].copy()
+
+    if adata.n_obs and len(np.unique(adata.obs['time'])) > 1:
+        test_pass(p, opts, adata, cardamom_dir, removed)
+    elif adata.n_obs:
+        print("[infer_test] Warning: held-out cells of the training samples at a single timepoint: test pass skipped")
+    if removed:
+        validation_pass(p, opts, adata_removed, removed, refs, cardamom_dir)
+    elif not adata.n_obs or len(np.unique(adata.obs['time'])) <= 1:
+        print("[infer_test] Error: no held-out cells over several timepoints and no sample removed from the inference")
+        sys.exit(1)
+    print("[infer_test] Test set inference and simulation completed successfully")
+
+
+def test_pass(p, opts, adata, cardamom_dir, removed=()):
+    """Trajectories and simulation of the held-out cells of the training samples (network fixed)."""
+    times_obs = adata.obs['time'].values
+    print(f"[infer_test] Test pass: {adata.n_obs} cells, timepoints {sorted(np.unique(times_obs))}")
+
     # ─── STIMULUS SCHEDULES ──────────────────────────────────────────────
-    stim_sched = None
-    sched_path = (find_stimulus_schedule(input_dir(p))
-                  or os.path.join(input_dir(p), 'stimulus_schedule_inference.txt'))
-    if os.path.exists(sched_path):
-        stim_sched = np.loadtxt(sched_path)
-        print(f"[infer_test] Loaded stimulus schedule from {sched_path}")
-
-    # Inference stimuli in simulation: first columns of stimulus_schedule_simulate.txt
-    _ns = int(np.asarray(stim_sched).shape[1]) if stim_sched is not None and np.ndim(stim_sched) == 2 else 1
-    stim_sched_simul, _ = simulation_schedule(input_dir(p), _ns)
-    if stim_sched_simul is None:
-        stim_sched_simul = stim_sched
-
-    # ─── DETECT n_stimuli FROM SCHEDULE ─────────────────────────────────
-    _stim_arr = np.asarray(stim_sched) if stim_sched is not None else None
-    n_stimuli = int(_stim_arr.shape[1]) if (_stim_arr is not None and _stim_arr.ndim == 2) else 1
-    print(f"[infer_test] n_stimuli detected: {n_stimuli}")
+    # Held-out cells: stimulus_test_schedule (per sample), else the inference schedule; also for the simulation
+    n_stimuli = n_inference_stimuli(input_dir(p))
+    stim_sched, test_overrides = test_schedule(p, n_stimuli)
+    test_overrides = {s: v for s, v in test_overrides.items() if s not in removed}  # validation pass
+    stim_sched_simul = stim_sched
 
     # ─── INITIALIZE MODEL AND LOAD TRAINING PARAMETERS ──────────────────
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
@@ -138,6 +154,9 @@ def main(argv):
         print(f"[infer_test] Error: test samples {missing_s} absent from the training cells")
         sys.exit(1)
     rows_s = [int(np.flatnonzero(train_ids == s)[0]) for s in test_ids]
+    # Per-sample schedules of the held-out cells (sample indices follow the sorted test samples)
+    model._stim_overrides = test_overrides
+    model.set_sample_names(test_ids)
 
     def _sample_rows(arr, axis=0):
         # Rows of the test samples when arr has one entry per training sample along axis
@@ -427,7 +446,94 @@ def main(argv):
         print(f"[infer_test] Error building AnnData objects: {e}")
         sys.exit(1)
 
-    print("[infer_test] Test set inference and simulation completed successfully")
+
+def _restrict_slots(model, keep):
+    """Model trajectories restricted to the slots `keep` (bool (N,)), every timepoint."""
+    T = len(np.unique(model.times_data))
+    for attr in ('prot', 'rna', 'kon_beta', 'times_data', 'samples_data'):
+        arr = getattr(model, attr, None)
+        if arr is not None and len(arr) == len(model.times_data):
+            arr = np.asarray(arr)
+            setattr(model, attr, arr.reshape((T, -1) + arr.shape[1:])[:, keep].reshape((-1,) + arr.shape[1:]))
+
+
+def validation_pass(p, opts, adata_rem, removed, refs, cardamom_dir):
+    """
+    Samples removed from the inference: simulation from the first-timepoint training states of their reference
+    sample (its mixture and basal), with their stimulus_test_schedule, compared to their observed cells.
+    """
+    import copy
+    from simulate_network import load_simulation_model
+    split = settings(opts).split
+    train = ad.read_h5ad(os.path.join(p, 'Data', f'data_{split}.h5ad'))
+    names = sample_names(train)
+    base, _ = load_simulation_model(p, opts, train, tag='[infer_test]')
+    ns = base.n_stimuli
+    default, overrides = test_schedule(p, ns)
+    pi_zinb = np.load(os.path.join(cardamom_dir, 'pi_zinb.npy'))
+    T_tr = np.sort(np.unique(base.times_data))
+    N = int(np.sum(base.times_data == T_tr[0]))
+    sd = (np.asarray(base.samples_data).astype(int)[:N] if base.samples_data is not None
+          else np.zeros(N, dtype=int))
+    counts = train.obs['dataset_id'].astype(str).value_counts() if 'dataset_id' in train.obs else None
+    tag = f'stim{base.stimulus}_prior{base.prior_network_pen}'
+
+    for r in removed:
+        cells = adata_rem[adata_rem.obs['dataset_id'].astype(str) == r]
+        ref = refs.get(r)
+        if ref is None:
+            ref = str(counts.index[0]) if counts is not None else names[0]
+            print(f"[infer_test] Warning: no reference_sample for removed sample {r}: '{ref}' (largest training sample)")
+        if ref not in names:
+            print(f"[infer_test] Warning: reference sample '{ref}' of {r} not in the training samples: {r} skipped")
+            continue
+        ref_idx = names.index(ref)
+        keep = sd == ref_idx if len(names) > 1 else np.ones(N, dtype=bool)
+        if not keep.any():
+            print(f"[infer_test] Warning: no training trajectory of sample '{ref}': {r} skipped")
+            continue
+        m = copy.deepcopy(base)
+        _restrict_slots(m, keep)
+
+        # Simulated times: training times up to the last observed time of r, and the observed times of r
+        t_obs = np.sort(np.unique(cells.obs['time'].astype(float)))
+        sim_times = sorted({float(t) for t in T_tr if t <= t_obs[-1]} | {float(t) for t in t_obs} | {float(T_tr[0])})
+        sched = StimulusSchedule(m._build_default_schedule(np.array(sim_times), default, times_ref=T_tr), overrides)
+        m._stim_schedule = StimulusSchedule({t: sched.at(t, r) for t in sim_times})
+        print(f"[infer_test] Validation of removed sample {r} ({cells.n_obs} cells at {t_obs.tolist()}) from the "
+              f"first-timepoint states of '{ref}' ({int(keep.sum())} trajectories); schedule "
+              + ', '.join(f'{t:g}: {np.round(v, 3).tolist()}' for t, v in m._stim_schedule.items()))
+        try:
+            m.simulate_network(list(sim_times))
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            print(f"[infer_test] Error during the validation simulation of {r}: {e}")
+            continue
+
+        # mRNA drawn from the simulated kon with the reference sample's mixture (depth of the observed cells)
+        kon = m.kon_theta + 1e-6
+        n_sim = kon.shape[0]
+        k1c, cc, pzc = nb_cell_parameters(m.a, pi_zinb, np.full(n_sim, ref_idx))
+        depth = None
+        if m.use_depth_factor and 'depth_factor' in cells.obs:
+            depth = np.random.choice(cells.obs['depth_factor'].to_numpy(dtype=float), n_sim)
+        sd_ = 1.0 if depth is None else depth[:, None]
+        n_param = np.maximum(((k1c + 1e-6) * kon)[:, ns:], 1e-6)
+        p_param = np.clip((cc / (cc + sd_))[:, ns:], 1e-6, 1 - 1e-6)
+        x = np.random.negative_binomial(n_param, p_param)
+        x = np.where(np.random.uniform(0, 1, x.shape) < pzc, 0, x)  # pzc (1 or N, genes)
+        a = ad.AnnData(X=x.astype(float))
+        a.var = train.var.copy()
+        a.obs['time'] = m.times_simul
+        a.obs['dataset_id'] = r
+        a.uns['reference_sample'] = ref
+        a.uns['observed_times'] = t_obs
+        if m.log_population is not None:
+            a.uns['log_population'] = np.asarray(m.log_population)
+            a.uns['simulated_times'] = np.array(sim_times)
+        out = os.path.join(cardamom_dir, f'adata_sim_validation_{r}_{tag}.h5ad')
+        a.write(out)
+        print(f"[infer_test] Saved {os.path.basename(out)}")
 
 
 if __name__ == "__main__":

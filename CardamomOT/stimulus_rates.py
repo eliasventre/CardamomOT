@@ -8,7 +8,7 @@ TARGET:delta entries (per hour):
 - otherwise a gene list of gene_lists, GENE1+GENE2..., or a gene: delta x signature score, the score
   being computed on mRNA counts (mean over the genes of log1p(x) / q99, clipped to [0, 1]).
 A cell at time t receives u_k * delta, u_k being the value of inference stimulus k over the interval
-that starts at t (that of the next timepoint, as in the simulations).
+that starts at t (that of the next timepoint, as in the simulations), in the schedule of its sample.
 
 The effects are used in three places, always on mRNA:
 1. get_proliferation_rates: prior rate of the observed cells (all genes; counts normalised by the
@@ -50,10 +50,37 @@ def schedule_values(project, times_sorted, n_stimuli=None):
     return U
 
 
-def interval_values(cell_times, times_sorted, U):
-    """(n, n_stimuli): value of each stimulus over the interval that starts at each cell's time."""
-    i = np.searchsorted(np.asarray(times_sorted, dtype=float), np.asarray(cell_times, dtype=float))
-    return U[np.minimum(i + 1, len(times_sorted) - 1)]
+def cell_values(project, cell_times, cell_samples, times_sorted, n_stimuli=None, names=None):
+    """
+    (n, n_stimuli) values at cell_times of the inference schedule of each cell's sample (per-sample overrides
+    of stimulus_inference_schedule; samples are dataset_id labels, or indices into `names`).
+    """
+    from .schedules import StimulusSchedule, keep_present, load_overrides
+    U = schedule_values(project, times_sorted, n_stimuli)
+    tu = [float(t) for t in times_sorted]
+    present = names if names is not None else np.unique(np.asarray(cell_samples).astype(str))
+    ov = keep_present(load_overrides(project, 'inference', U.shape[1]), present, 'stimulus schedule')
+    sched = StimulusSchedule(dict(zip(tu, U)), ov, names)
+    cell_times = np.asarray(cell_times, dtype=float)
+    cell_samples = np.asarray(cell_samples)
+    out = np.zeros((len(cell_times), U.shape[1]))
+    for t in np.unique(cell_times):
+        m = cell_times == t
+        out[m] = sched.per_cell(float(t), cell_samples[m])
+    return out
+
+
+def slot_offsets(project, S, tu, slot_samples, names):
+    """
+    Stimulus part of the net rate along trajectories: S (T, N, K) stimulus parts at the states, slot_samples
+    (N,) sample index of each slot. Interval k: u(t_k+1) of the slot's sample x mean of S at both ends. (T, N).
+    """
+    T, N, K = S.shape
+    U = cell_values(project, np.repeat(np.asarray(tu, dtype=float)[1:], N), np.tile(slot_samples, T - 1), tu,
+                    K, names)[:, :K].reshape(T - 1, N, K)
+    off = np.zeros((T, N))
+    off[:-1] = np.sum((S[:-1] + S[1:]) / 2 * U, axis=-1)
+    return off
 
 
 def split_effects(effects, cell_types):

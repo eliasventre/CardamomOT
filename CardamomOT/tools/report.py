@@ -346,11 +346,28 @@ class _ReportData:
         else:
             self.categories, self.color_map = [], {}
 
-        # Held-out test cells (infer_test.py with split=train): observed data and predictions
-        self.test = None
+        # Held-out test cells (infer_test.py): observed data and predictions; samples removed from the
+        # inference (remove_from_inference) are validated separately (adata_sim_validation_<sample>_*)
+        self.test, self.validation = None, {}
         test_path = os.path.join(p, 'Data', 'data_test.h5ad')
-        if split == 'train' and os.path.exists(test_path):
-            stages = {'Test data': ad.read_h5ad(test_path),
+        data_test = ad.read_h5ad(test_path) if os.path.exists(test_path) else None
+        if data_test is not None and 'dataset_id' in data_test.obs:
+            from ..inputs import removed_samples
+            removed, refs = removed_samples(p, present=data_test.obs['dataset_id'].astype(str).unique())
+            sid = data_test.obs['dataset_id'].astype(str)
+            for r in removed:
+                sim = _read(os.path.join(cdir, f'adata_sim_validation_{r}_{tag}.h5ad'))
+                if sim is not None:
+                    obs_r = data_test[(sid == r).to_numpy()].copy()
+                    if self.has_ct:
+                        predict_cell_types(sim, self.clf, label_key=LABEL_KEY)
+                        if LABEL_KEY not in obs_r.obs:
+                            predict_cell_types(obs_r, self.clf, label_key=LABEL_KEY)
+                    self.validation[r] = (obs_r, sim, str(sim.uns.get('reference_sample', refs.get(r, ''))))
+            if removed:
+                data_test = data_test[~sid.isin(removed).to_numpy()].copy()
+        if data_test is not None and data_test.n_obs and data_test.obs['time'].nunique() > 1:
+            stages = {'Test data': data_test,
                       'NB mixture': _read(os.path.join(cdir, f'adata_beta_test_{tag}.h5ad')),
                       'Network': _read(os.path.join(cdir, f'adata_theta_test_{tag}.h5ad')),
                       'Simulation': _read(os.path.join(cdir, f'adata_sim_test_{tag}.h5ad'))}
@@ -382,6 +399,12 @@ class _ReportData:
         for k, A in (self.test or {}).items():
             self.test_sub[k] = self._subsample(A)
             self.test_umap[k] = self.reducer.transform(_preprocess(A.X[self.test_sub[k]], self.norm, self.log))
+        self.val_umap = {}
+        for r, (obs_r, sim, _) in self.validation.items():
+            t_obs = np.unique(self.times(obs_r))
+            sim_o = sim[np.isin(self.times(sim), t_obs)]
+            self.val_umap[r] = [(A, idx, self.reducer.transform(_preprocess(A.X[idx], self.norm, self.log)))
+                                for A in (obs_r, sim_o) for idx in [self._subsample(A)]]
         self.pert_sub, self.pert_umap = {}, {}
         for label, _, A in self.perturbations:
             if A is None:
@@ -445,7 +468,9 @@ def _cover_page(pdf, R, info, perturbations_status):
              '3. In-silico perturbations — overview across KO/OV, then one page per perturbation\n'
              '4. Proliferation — prior vs learned net rates, population growth, proteins driving growth\n'
              '5. Learned dynamics — mRNA and protein velocity fields (mechanistic and along trajectories), summary on mRNA'
-             + ('\n6. Held-out test cells — predictions with the network fixed vs the test data' if R.test else ''),
+             + ('\n6. Held-out test cells — predictions with the network fixed vs the test data' if R.test else '')
+             + ('\n6. Validation — samples removed from the inference, predicted from a reference sample'
+                if R.validation else ''),
              fontsize=9, va='bottom', linespacing=1.6)
     pdf.savefig(fig); plt.close(fig)
 
@@ -657,6 +682,102 @@ def _test_pages(pdf, R):
                                'Cell-type proportions over time', 'Test data', 'Test simulation')
         _panel_label(ax, 'E', -0.08)
         _celltype_legend(fig, R.color_map, y=0.01)
+    pdf.savefig(fig); plt.close(fig)
+
+
+def _validation_page(pdf, R, r):
+    """Sample removed from the inference: simulation from its reference sample's first-timepoint states with its
+    own schedule vs its observed cells (baseline: the reference sample's data at the same times)."""
+    obs_r, sim, ref = R.validation[r]
+    t_obs = np.unique(R.times(obs_r))
+    t_last = float(t_obs.max())
+    ref_data = None
+    if 'dataset_id' in R.adata_data.obs:
+        m = (R.adata_data.obs['dataset_id'].astype(str) == ref).to_numpy() & np.isin(R.times(R.adata_data), t_obs)
+        ref_data = R.adata_data[m] if m.any() else None
+    fig = plt.figure(figsize=A4_LANDSCAPE)
+    _page_title(fig, f'6. Validation — sample {r} (removed from the inference)',
+                f'Simulated from the first-timepoint training states of {ref} with the stimulus_test_schedule of {r}; '
+                f'compared to the observed cells of {r} at {", ".join(f"{t:g}" for t in t_obs)}. '
+                f'Baseline: data of {ref} at the same times.')
+    gs = gridspec.GridSpec(2, 3, figure=fig, left=0.06, right=0.97, top=0.87, bottom=0.12, hspace=0.45, wspace=0.3)
+    bg = np.vstack([R.umap[k] for k in R.stages])
+    for j, ((A, idx, coords), lab) in enumerate(zip(R.val_umap[r], [f'Observed {r}', 'Prediction'])):
+        ax = fig.add_subplot(gs[0, j])
+        if R.has_ct:
+            _umap_celltype(ax, coords, R.labels(A, idx), R.color_map, lab, bg=bg)
+        else:
+            _umap_time(ax, coords, R.times(A, idx), float(t_obs.min()), t_last, lab, bg=bg)
+        _panel_label(ax, 'AB'[j], -0.05)
+
+    # Mean expression per (gene, observed time): prediction and baseline vs observed
+    def _means(A):
+        X, t = _dense(A.X).astype(float), R.times(A)
+        return np.concatenate([np.log1p(X[t == tv].mean(axis=0)) if np.any(t == tv) else np.full(X.shape[1], np.nan)
+                               for tv in t_obs])
+    ax = fig.add_subplot(gs[0, 2])
+    m_o = _means(obs_r)
+    for A, col, lab in [(ref_data, '#999999', f'data of {ref}'), (sim, 'k', 'prediction')]:
+        if A is None:
+            continue
+        mm = _means(A)
+        ok = np.isfinite(mm) & np.isfinite(m_o)
+        if ok.sum() > 2:
+            ax.scatter(m_o[ok], mm[ok], s=5, color=col, alpha=0.6, linewidths=0,
+                       label=f'{lab} (R = {np.corrcoef(m_o[ok], mm[ok])[0, 1]:.2f})')
+    lim = [0, np.nanmax(m_o) * 1.05]
+    ax.plot(lim, lim, 'r--', lw=0.8, alpha=0.6)
+    ax.set_xlabel(f'Observed {r}: log1p(mean) per gene and time', fontsize=8); ax.set_ylabel('Prediction / baseline', fontsize=8)
+    ax.legend(fontsize=6.5, frameon=False); ax.tick_params(labelsize=7); ax.set_title('Mean expression', fontsize=9)
+    _panel_label(ax, 'C', -0.2)
+
+    # Per-gene W1 vs observed: prediction and baseline; genes where the prediction beats the baseline
+    ax = fig.add_subplot(gs[1, 0])
+    w_sim = _w1_per_gene(sim, obs_r, t_obs, R.rng)
+    groups, labels = [w_sim], ['Prediction']
+    if ref_data is not None:
+        t_com = np.intersect1d(t_obs, np.unique(R.times(ref_data)))
+        w_ref = _w1_per_gene(ref_data, obs_r, t_com, R.rng)
+        groups, labels = [w_ref, w_sim], [f'Data of {ref}', 'Prediction']
+    ax.boxplot(groups, widths=0.6, showfliers=False)
+    for i, w in enumerate(groups):
+        ax.scatter(np.full(len(w), i + 1) + R.rng.uniform(-0.15, 0.15, len(w)), w, s=4, color='k', alpha=0.4,
+                   linewidths=0, rasterized=True)
+    ax.set_xticks(range(1, len(groups) + 1)); ax.set_xticklabels(labels, fontsize=7)
+    ax.set_ylabel(f'W1 vs observed {r} (log1p)', fontsize=8); ax.tick_params(axis='y', labelsize=7)
+    title = 'Medians: ' + ' · '.join(f'{np.median(w):.3f}' for w in groups)
+    if len(groups) == 2:
+        title += f'\nprediction closer for {np.mean(w_sim < w_ref) * 100:.0f}% of genes'
+    ax.set_title(title, fontsize=8)
+    for sp in ('top', 'right'):
+        ax.spines[sp].set_visible(False)
+    _panel_label(ax, 'D', -0.2)
+
+    # Cell-type proportions at the last observed time
+    if R.has_ct:
+        ax = fig.add_subplot(gs[1, 1])
+        bars = [(f'Observed {r}', obs_r), ('Prediction', sim)] + ([(f'Data {ref}', ref_data)] if ref_data is not None else [])
+        for i, (lab, A) in enumerate(bars):
+            t = R.times(A)
+            labs = R.labels(A)[np.isclose(t, t_last)] if np.any(np.isclose(t, t_last)) else R.labels(A)
+            bottom = 0.0
+            for cat in R.categories:
+                v = 100 * np.mean(labs == cat) if len(labs) else 0
+                ax.bar(i, v, bottom=bottom, color=R.color_map[cat], width=0.6)
+                bottom += v
+        ax.set_xticks(range(len(bars))); ax.set_xticklabels([b[0] for b in bars], fontsize=7)
+        ax.set_ylabel('% of cells', fontsize=8); ax.set_title(f'Cell types at t = {t_last:g}', fontsize=9)
+        ax.tick_params(labelsize=7)
+        _panel_label(ax, 'E', -0.2)
+        _celltype_legend(fig, R.color_map, y=0.01)
+
+    # Population growth of the prediction (branching simulation)
+    if 'log_population' in sim.uns and 'simulated_times' in sim.uns:
+        ax = fig.add_subplot(gs[1, 2])
+        ax.plot(np.asarray(sim.uns['simulated_times']), np.exp(np.asarray(sim.uns['log_population'])), 'k-o', ms=3)
+        ax.set_xlabel('time', fontsize=8); ax.set_ylabel('relative population size', fontsize=8)
+        ax.set_title('Predicted population growth', fontsize=9); ax.tick_params(labelsize=7)
+        _panel_label(ax, 'F', -0.2)
     pdf.savefig(fig); plt.close(fig)
 
 
@@ -1071,15 +1192,15 @@ class _Dynamics:
         stim_pkl = os.path.join(cdir, 'stimulus_rates.pkl')
         if self.R_mlp is not None and self.real_idx is not None and os.path.exists(stim_pkl):
             import pickle
-            from ..stimulus_rates import schedule_values
+            from ..schedules import sample_names
+            from ..stimulus_rates import slot_offsets
             srm = pickle.load(open(stim_pkl, 'rb'))
             Xd = _dense(R.adata_data.X).astype(float)
             if R.use_depth and 'depth_factor' in R.adata_data.obs:
                 Xd = Xd / R.adata_data.obs['depth_factor'].to_numpy(dtype=float)[:, None]
             S = srm.effect(Xd[self.real_idx]).reshape(len(self.tu), self.N, -1)
-            U = schedule_values(R.p, self.tu, srm.n_stimuli)[:, :srm.n_stimuli]
-            off = np.zeros((len(self.tu), self.N))
-            off[:-1] = np.einsum('tnk,tk->tn', (S[:-1] + S[1:]) / 2, U[1:])
+            slots = self.samples.reshape(len(self.tu), self.N)[0]
+            off = slot_offsets(R.p, S, self.tu, slots, sample_names(R.adata_data))
             self.R_stim = off.ravel()
             self.R_mlp = self.R_mlp + self.R_stim
         diag_path = os.path.join(cdir, 'prolif_network_diagnostics.json')
@@ -1673,6 +1794,8 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None, net_
                      ('5. Learned dynamics — velocity fields', lambda: _velocity_pages(pdf, R, dyn()))]
         if R.test:
             sections.append(('6. Held-out test cells', lambda: _test_pages(pdf, R)))
+        for r in R.validation:
+            sections.append((f'6. Validation of sample {r}', lambda r=r: _validation_page(pdf, R, r)))
         for title, fn in sections:
             try:
                 fn()

@@ -154,7 +154,8 @@ def main(argv):
     # before training the proliferation MLP, model saved for the simulations
     stim_pkl = os.path.join(p, 'cardamomOT', 'stimulus_rates.pkl')
     if recompute_proliferations and model.R_opt is not None:
-        from CardamomOT.stimulus_rates import load_effects, schedule_values, StimulusRateModel
+        from CardamomOT.stimulus_rates import load_effects, slot_offsets, StimulusRateModel
+        from CardamomOT.schedules import sample_names
         effects = load_effects(p)
         idx_path = os.path.join(p, 'cardamomOT', 'data_traj_real_idx.npy')
         if effects and os.path.exists(idx_path):
@@ -169,10 +170,10 @@ def main(argv):
             tu = np.sort(np.unique(model.times_data))
             T, N = len(tu), len(model.times_data) // len(tu)
             S = srm.effect(X[real_idx]).reshape(T, N, -1)
-            U = schedule_values(p, tu, srm.n_stimuli)[:, :srm.n_stimuli]
-            # Rate part over interval k: u(t_k+1) x mean of the stimulus part at both ends of the path
-            offset = np.zeros((T, N))
-            offset[:-1] = np.einsum('tnk,tk->tn', (S[:-1] + S[1:]) / 2, U[1:])
+            # Rate part over interval k: u(t_k+1) of the slot's sample x mean of the stimulus part at both ends
+            slots = (np.asarray(model.samples_data).astype(int).reshape(T, N)[0]
+                     if getattr(model, 'samples_data', None) is not None else np.zeros(N, dtype=int))
+            offset = slot_offsets(p, S, tu, slots, sample_names(adata))
             model.R_stim_offset = offset.ravel()
             model.stimulus_rate_model = srm
             pickle.dump(srm, open(stim_pkl, 'wb'))

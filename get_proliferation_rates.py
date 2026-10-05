@@ -149,8 +149,7 @@ def add_stimulus_effects(adata_target, adata_score, p):
     log1p counts, normalised by the library size if the transcriptome is scored). The rate without
     stimulus is kept in obs['proliferation_net_rate_base'].
     """
-    from CardamomOT.stimulus_rates import (load_effects, schedule_values, interval_values, split_effects,
-                                           log_counts, signature_score)
+    from CardamomOT.stimulus_rates import load_effects, cell_values, split_effects, log_counts, signature_score
     from CardamomOT.tools.perturbations import rate_target_genes
     prefix = "[get_proliferation_rates]"
     effects = load_effects(p)
@@ -160,7 +159,10 @@ def add_stimulus_effects(adata_target, adata_score, p):
     base = obs['proliferation_net_rate'].to_numpy(dtype=float)
     times = obs['time'].to_numpy(dtype=float) if 'time' in obs else np.zeros(len(obs))
     tu = np.sort(np.unique(times))
-    U = interval_values(times, tu, schedule_values(p, tu, max(effects)))
+    # Value over the interval that starts at each cell's time (next timepoint), schedule of its sample
+    t_next = tu[np.minimum(np.searchsorted(tu, times) + 1, len(tu) - 1)]
+    samples = obs['dataset_id'].astype(str).to_numpy() if 'dataset_id' in obs else np.array(['0'] * len(obs))
+    U = cell_values(p, t_next, samples, tu, max(effects))
     ct_key = resolve_cell_type_obs(adata_target, 'proliferation')
     labels = obs[ct_key].astype(str).to_numpy() if ct_key else np.array([''] * len(obs))
     add = np.zeros(len(obs))

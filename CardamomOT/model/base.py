@@ -39,6 +39,15 @@ np.set_printoptions(precision=3, suppress=True)
 EPS=1e-16
 
 
+def _sample_values(entry, t, samples):
+    """Value at time t of a perturbation stimulus for each sample index (its own schedule if given)."""
+    samples = np.asarray(samples)
+    out = np.full(len(samples), float(entry['schedule'](t)))
+    for s, fn in (entry.get('sample_schedules') or {}).items():
+        out[samples == s] = float(fn(t))
+    return out
+
+
 class NetworkModel:
     """
     Encapsulates the state and parameters of a regulatory network.
@@ -89,14 +98,16 @@ class NetworkModel:
 
         self.n_stimuli = n_stimuli
         self._stim_schedule = None
+        self._stim_overrides = {}   # per-sample stimulus schedules {dataset_id: (times or None, values)}
+        self._sample_names = None   # sorted dataset_id of the run (index of a sample -> its label)
 
         ### Pipeline (run.sh / cardamomot pipeline): data and steps, fixed per project in Data/CardamomOT_inputs.xlsx
         self.split = 'train'                     # 'train': train/test split of the cells (train_rate per sample and time); 'full': all cells
         self.train_rate = 0.7                    # share of the cells of each (sample, time) in the train split (at least 100); the test keeps at most as many
         self.select_genes = False                # select_genes_and_split: gene selection (queries, entropy genes, global network, Steiner tree); False = all genes kept
-        self.build_prior_network = True         # literature prior cardamomOT/ref_network.csv: built by the gene selection if select_genes, else by build_reference_network
-        self.estimate_proliferation_rates = False  # get_proliferation_rates: obs['proliferation_net_rate'] from gene signatures, anchored to Data/proliferation_rates
-        self.run_test = False                    # infer_test + check_test_to_train on the held-out cells (needs split = 'train')
+        self.build_prior_network = True         # literature prior cardamomOT/ref_network.csv: by the gene selection if it used the literature, else build_reference_network
+        self.estimate_proliferation_rates = True  # get_proliferation_rates: obs['proliferation_net_rate'] from gene signatures, anchored to Data/proliferation_rates
+        self.run_test = True                    # infer_test + check_test_to_train on the held-out cells (needs split = 'train')
         self.simulate_perturbations = True       # simulate_network_KOV + check_KOV_to_sim (Data/KO_OV_Stim_simulate)
         self.species = 'auto'                    # 'auto' (from gene names), 'human' or 'mouse': degradation rates, proliferation signatures, literature prior
         self.senescence_gating = True            # get_proliferation_rates: the senescence signature gates the proliferation score
@@ -211,7 +222,7 @@ class NetworkModel:
         self.edge_prior = 0.9            # each Steiner edge costs -log(prob * edge_prior): favours short paths among equally probable ones
         self.null_network = 'hybrid'     # edge probabilities vs permuted data: 'hybrid' (gene edges within (sample, time), stimulus all cells), 'within_time', 'all_cells'
         self.closure_min = 0.5           # closure: add the gene bringing the most probable regulation (sum of w) to the selection while >= this
-        self.literature_selection = True  # reweight edge probabilities by OmniPath feasibility and write the literature prior (ref_network.csv)
+        self.literature_selection = True  # gene selection with a hard prior (prior_network_pen = 0): edge probabilities reweighted by OmniPath feasibility, budget in free parameters
         self.literature_depth = 3        # max path length in the literature graph (last edge TF -> target)
         self.literature_weight = 1.0     # exponent on the data-calibrated literature likelihood ratio (0 = data only)
         self.min_entropy_change = 0.1    # variability floor of the selection: max BUB-entropy change between consecutive times (bits, Gandrillon MDE)
@@ -285,6 +296,16 @@ class NetworkModel:
         key = resolve_cell_type_obs(data, 'transition')
         return None if key is None else obs[key].values.astype(str)
 
+    def set_sample_names(self, names):
+        """Sorted dataset_id of the run: labels of the sample indices (per-sample schedules); overrides of
+        samples absent from the data are dropped with a warning."""
+        from ..schedules import keep_present
+        self._sample_names = [str(s) for s in names]
+        self._stim_overrides = keep_present(self._stim_overrides, self._sample_names, 'stimulus schedule')
+        if self._stim_schedule is not None:
+            self._stim_schedule.sample_names = self._sample_names
+            self._stim_schedule.overrides = self._stim_overrides
+
     def apply_project_parameters(self, project, verb=True):
         """
         Override attributes with the values filled in the model_parameters sheet of
@@ -345,15 +366,18 @@ class NetworkModel:
         for pert in perts:
             signs = np.asarray(pert['signs'], dtype=float)
             targets = np.flatnonzero(signs)
+            if pert.get('sample_schedules') and basal_t.ndim != 4:
+                print("[simulate] Warning: per-sample perturbation schedules need per-sample basal: default schedule used")
             for cnt in range(len(times) - 1):
-                u = float(pert['schedule'](times[cnt + 1]))
-                if u == 0 or not len(targets):
+                if not len(targets):
                     continue
                 w = signs[targets][:, None] * (100 + np.abs(inter_t[cnt][:, targets, :]).sum(axis=0))  # (n_targets, n_networks)
                 if basal_t.ndim == 4:
-                    basal_t[cnt][:, targets, :] += u * w[None]
+                    # Each sample with its own schedule of the stimulus
+                    u = _sample_values(pert, times[cnt + 1], np.arange(basal_t.shape[1]))
+                    basal_t[cnt][:, targets, :] += u[:, None, None] * w[None]
                 else:
-                    basal_t[cnt][targets, :] += u * w
+                    basal_t[cnt][targets, :] += float(pert['schedule'](times[cnt + 1])) * w
 
     def _apply_stimulus_targets(self):
         """Forbid the stimulus -> gene edges outside self.stimulus_targets ((n_stimuli, n_genes) mask)."""
@@ -436,6 +460,12 @@ class NetworkModel:
         print(f"Transition rates anchored on adata.obs['{ct_col}']")
 
     def _build_stimulus_schedule(self, times_unique, stimulus_schedule=None, times_ref=None):
+        """Default schedule {t: values} with the per-sample overrides (StimulusSchedule)."""
+        from ..schedules import StimulusSchedule
+        return StimulusSchedule(self._build_default_schedule(times_unique, stimulus_schedule, times_ref),
+                                self._stim_overrides, self._sample_names)
+
+    def _build_default_schedule(self, times_unique, stimulus_schedule=None, times_ref=None):
         if stimulus_schedule is None:
             t_min = times_unique[0]
             return {t: (np.zeros(self.n_stimuli) if t == t_min else np.ones(self.n_stimuli))
@@ -791,6 +821,11 @@ class NetworkModel:
         samples = data.obs[sample_key].values if sample_key in data.obs else None
         sample_ids = list(np.unique(samples)) if samples is not None else []
         if len(sample_ids) < 2:
+            if len(sample_ids) == 1 and str(sample_ids[0]) in self._stim_overrides:
+                # Single sample with its own schedule (stimulus_inference_schedule, sample_id rows)
+                tt = np.sort(np.unique(np.asarray(data.obs[time_key], dtype=float)))
+                sched = self._build_stimulus_schedule(tt, stimulus_schedule)
+                stimulus_schedule = np.array([sched.at(t, sample_ids[0]) for t in tt])
             self.fit_mixture(data, stimulus_schedule=stimulus_schedule, time_key=time_key, verb=verb, **kwargs)
             return None
         lam = float(np.clip(float(self.integrate_samples), 0.0, 1.0))
@@ -815,7 +850,7 @@ class NetworkModel:
                 print(f"[integration] Fitting the mixture of sample {s} ({m.sum()} cells)")
             sub = data[m]
             t_sub = np.sort(np.unique(vect_t[m]))
-            self.fit_mixture(sub, stimulus_schedule=np.array([sched_full[t] for t in t_sub]),
+            self.fit_mixture(sub, stimulus_schedule=np.array([sched_full.at(t, s) for t in t_sub]),
                              time_key=time_key, verb=verb, **kwargs)
             fits.append(dict(id=s, mask=m, a=self.a.copy(), proba_init=self.proba_init.copy(),
                              proba=self.proba.copy(), pi_init=self.pi_init,
@@ -1093,11 +1128,19 @@ class NetworkModel:
 
         # Growth pass: the final trajectories (t = 0 included) are kept as they are
         if not growth_only:
-            # Set stimulus values per timepoint (schedule-based)
+            # Set stimulus values per timepoint (schedule-based, per sample if it has its own schedule)
+            sched = self._stim_schedule
+            per_sample = getattr(sched, 'has_overrides', lambda: False)()
+            slot_s = np.repeat(np.arange(len(samples_id)), N_full)[:N_total] if per_sample else None
             for t_idx, t_i in enumerate(times):
                 sl = slice(t_idx * N_total, (t_idx + 1) * N_total)
-                val = np.asarray(self._stim_schedule[t_i], dtype=float)
-                prot_formodes[vect_t == t_i, :ns] = val * self.scale_proteins
+                m_t = vect_t == t_i
+                if per_sample:
+                    val = sched.per_cell(t_i, slot_s)
+                    prot_formodes[m_t, :ns] = sched.per_cell(t_i, vect_samples_id[m_t]) * self.scale_proteins
+                else:
+                    val = np.asarray(sched[t_i], dtype=float)
+                    prot_formodes[m_t, :ns] = val * self.scale_proteins
                 rna_modified[sl, :ns] = val * self.scale_mrnas
                 prot_modified[sl, :ns] = val * self.scale_proteins
                 kon_modified[sl, :ns] = (val >= 0.5)
@@ -1169,7 +1212,7 @@ class NetworkModel:
                         s1_s, ks_s, self.d[1, ns:], times[t_idx + 1] - time, basal_s, inter, loss=self.loss_norm,
                         n_iter=n_iter, intensity_prior=intensity_prior,
                         compute_with_proba=self.compute_with_proba,
-                        n_stimuli=ns, stim_vals=np.asarray(self._stim_schedule[times[t_idx + 1]], dtype=np.float64),
+                        n_stimuli=ns, stim_vals=np.asarray(self._stim_schedule.at(times[t_idx + 1], s_idx), dtype=np.float64),
                         scale_proteins=self.scale_proteins
                     )
 
@@ -1461,13 +1504,14 @@ class NetworkModel:
         if compute_theta:
             _, prev_cols = active_regulators(self.ref_network, inter_ref, hard_forcing_ref)
             y_prot_prev = PrevProt.zeros(prev_cols, len(times) * N_tot)
+            slot_s = np.repeat(np.arange(len(N_full)), N_full)[:N_tot]  # sample of each trajectory slot
             for t_idx, t_i in enumerate(times):
                 sl = slice(t_idx * N_tot, (t_idx + 1) * N_tot)
-                # Same scaling as the stimulus columns of y_prot
-                stim_val = np.asarray(self._stim_schedule[t_i], dtype=float) * self.scale_proteins
+                # Same scaling as the stimulus columns of y_prot (per sample if it has its own schedule)
+                stim_val = self._stim_schedule.per_cell(t_i, slot_s) * self.scale_proteins
                 for c, v in zip(y_prot_prev.cols, y_prot_prev.values):
                     is_stim = c < self.n_stimuli
-                    v[sl, is_stim] = stim_val[c[is_stim]]
+                    v[sl, is_stim] = stim_val[:, c[is_stim]]
         y_kon = np.zeros_like(y_prot)
         y_rna = np.zeros_like(y_prot)
         y_proba = np.zeros((len(times) * N_tot, G_tot, self.n_networks + 1))
@@ -1697,7 +1741,7 @@ class NetworkModel:
                             tol=self.alpha_threshold,
                             n_pas = self.n_pas if self.force_n_pas else max(self.n_pas, int(times[cnt + 1] - time)),
                             samples_data=y_samples[vect_t_sim == time],
-                            stim_vals=np.asarray(self._stim_schedule[times[cnt + 1]], dtype=float),
+                            stim_vals=self._stim_schedule.per_cell(times[cnt + 1], y_samples[vect_t_sim == time]),
                             scale_proteins=self.scale_proteins
                         )
                 # Same pool size as every other Parallel call: a different n_jobs makes loky respawn workers
@@ -1979,6 +2023,7 @@ class NetworkModel:
         # Unique time points and sample IDs
         times = np.sort(np.unique(vect_t))
         samples_id = np.sort(np.unique(vect_samples_id))
+        self.set_sample_names(samples_id)  # per-sample stimulus schedules
 
         # --- Compute number of real cells per time/sample ---
         nb_cells = np.zeros((len(samples_id), len(times)), dtype=int)
@@ -2751,10 +2796,12 @@ class NetworkModel:
             else:
                 basal_cells = None
 
-            cur_stim_vals = self._stim_schedule[times[cnt + 1]] * self.scale_proteins
+            # Stimulus values of each simulated cell over the interval (its sample's schedule)
+            stim_cells = self._stim_schedule.per_cell(times[cnt + 1], s_cells) * self.scale_proteins
 
-            def run_main_loop_for_cell(n, _basal_cells=basal_cells, _basal_t_cnt=basal_t[cnt], 
-                                       _stim_vals=cur_stim_vals):
+            def run_main_loop_for_cell(n, _basal_cells=basal_cells, _basal_t_cnt=basal_t[cnt],
+                                       _stim_cells=stim_cells):
+                _stim_vals = _stim_cells[n]
                 basal_n = _basal_cells[n] if _basal_cells is not None else _basal_t_cnt
                 s_n = s_cells[n]
                 if self.simulation_stochastic:
@@ -2792,24 +2839,24 @@ class NetworkModel:
                 path = np.stack([prot_modified[start_index:start_index + N, ns:]]
                                 + [np.array([results[n].p[q][ns - 1:] for n in range(N)])
                                    for q in range(len(t_rec))], axis=1)       # (N, Q, G)
-                R_path = _prolif_fn(path, cur_stim_vals) if _prolif_fn is not None else np.zeros(path.shape[:2])
+                R_path = _prolif_fn(path, stim_cells[:, None, :]) if _prolif_fn is not None else np.zeros(path.shape[:2])
                 for eff in _rates:
                     # delta x score along the path, scaled by the stimulus value over the interval
-                    u = float(eff['schedule'](times[cnt + 1]))
-                    if u == 0:
+                    u = _sample_values(eff, times[cnt + 1], s_cells)  # (N,) value of each cell's sample
+                    if not u.any():
                         continue
                     if eff['weights'] is None:
                         score = np.ones(path.shape[:2])
                     else:
                         score = np.clip(path * eff['scale'], 0, 1) @ eff['weights']
-                    R_path = R_path + u * eff['delta'] * score
+                    R_path = R_path + (u * eff['delta'])[:, None] * score
                 srm = getattr(self, 'stimulus_rate_model', None)
                 if srm is not None and _prolif_fn is not None:
                     # Inference stimuli: their part of the rate (removed when the MLP was trained), with the
                     # simulated schedule, from mRNA drawn at the recorded states (reference depth)
                     Qn = path.shape[1]
                     n_samp_k = basal_t.shape[1] if basal_t.ndim == 4 else (ks.shape[0] if ks.ndim == 3 else 1)
-                    prot_nodes = np.hstack([np.broadcast_to(cur_stim_vals, (N * Qn, ns)), path.reshape(N * Qn, -1)])
+                    prot_nodes = np.hstack([np.repeat(stim_cells, Qn, axis=0), path.reshape(N * Qn, -1)])
                     kon_nodes = self._kon_ref_per_sample(prot_nodes, ks, inter_t[cnt], basal_t[cnt],
                                                          samples_id=np.arange(n_samp_k),
                                                          samples_data=np.repeat(s_cells, Qn))[:, ns:]
@@ -2818,8 +2865,8 @@ class NetworkModel:
                     if c_nb.ndim == 2:
                         c_nb = c_nb[np.minimum(np.repeat(s_cells, Qn), len(c_nb) - 1)]
                     counts = np.random.negative_binomial(np.maximum(k1_nb * kon_nodes, 1e-8), c_nb / (c_nb + 1.0))
-                    u_sim = np.asarray(self._stim_schedule[times[cnt + 1]], dtype=float)[:srm.n_stimuli]
-                    R_path = R_path + srm.effect(counts).reshape(N, Qn, -1) @ u_sim
+                    u_sim = self._stim_schedule.per_cell(times[cnt + 1], s_cells)[:, :srm.n_stimuli]  # (N, K)
+                    R_path = R_path + (srm.effect(counts).reshape(N, Qn, -1) * u_sim[:, None, :]).sum(axis=-1)
                 log_weights = (R_path * w_growth).sum(axis=1) * delta_t
                 # Population size: mean growth factor of the cells over the interval
                 self.log_population[cnt + 1] = self.log_population[cnt] + float(
@@ -2831,7 +2878,7 @@ class NetworkModel:
                     prot_modified[end_index + grp, ns:] = P_end[src]
 
             # Set stim values at step boundary from schedule (authoritative source).
-            prot_modified[end_index:end_index + N, :ns] = cur_stim_vals
+            prot_modified[end_index:end_index + N, :ns] = stim_cells
 
             # Each cell with its own sample's basal and mixture (index-based, as basal_cells)
             n_samp = basal_t.shape[1] if basal_t.ndim == 4 else (ks.shape[0] if ks.ndim == 3 else 1)
@@ -3014,7 +3061,8 @@ class NetworkModel:
         # default (ns==1, stimulus active at every non-initial timepoint).
         t_min = min(self._stim_schedule.keys())
         _stim_is_default = (
-            self.n_stimuli == 1
+            not self._stim_schedule.has_overrides()
+            and self.n_stimuli == 1
             and all(
                 np.all(np.asarray(v) == 1.0)
                 for t, v in self._stim_schedule.items() if t > t_min

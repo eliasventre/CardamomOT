@@ -61,6 +61,34 @@ def main(argv):
         print(f"[check_test_to_train] Error: {e}")
         sys.exit(1)
 
+    # Samples removed from the inference: validation simulations (adata_sim_validation_<sample>_*)
+    from CardamomOT.inputs import removed_samples
+    removed = (removed_samples(p, present=adata.obs['dataset_id'].astype(str).unique())[0]
+               if 'dataset_id' in adata.obs else [])
+    tag = f'stim{stim}_prior{prior}'
+    for r in removed:
+        cells = adata[adata.obs['dataset_id'].astype(str) == r]
+        fpath = os.path.join(cardamom_dir, f'adata_sim_validation_{r}_{tag}.h5ad')
+        if not os.path.exists(fpath):
+            print(f"[check_test_to_train] Warning: {os.path.basename(fpath)} not found (run infer_test.py)")
+            continue
+        sim = ad.read_h5ad(fpath)
+        X_obs = cells.X.toarray() if scipy.sparse.issparse(cells.X) else np.asarray(cells.X)
+        X_sim = sim.X.toarray() if scipy.sparse.issparse(sim.X) else np.asarray(sim.X)
+        try:
+            plot_data_distrib(np.vstack([cells.obs['time'].values, X_obs.T]).astype(float),
+                              np.vstack([sim.obs['time'].values, X_sim.T]).astype(float),
+                              sorted(np.unique(cells.obs['time']).tolist()), sorted(np.unique(sim.obs['time']).tolist()),
+                              adata.var_names, inputfile, 'Check', f'validation_{r}_{tag}')
+            print(f"[check_test_to_train] Validation plots of removed sample {r} in Check/validation_{r}_{tag}/")
+        except Exception as e:
+            print(f"[check_test_to_train] Warning: Error generating the validation plots of {r}: {e}")
+    if removed:
+        adata = adata[~adata.obs['dataset_id'].astype(str).isin(removed)].copy()
+        if not adata.n_obs or len(np.unique(adata.obs['time'])) <= 1:
+            print("[check_test_to_train] No held-out cells of the training samples over several timepoints: done")
+            return
+
     if scipy.sparse.issparse(adata.X):
         data_rna_extracted = adata.X.T.toarray().astype(float)
     else:

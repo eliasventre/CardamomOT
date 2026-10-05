@@ -29,7 +29,7 @@ import re
 import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta
 from CardamomOT.inputs import input_dir
-from CardamomOT.run_options import parse_step_options, settings, configure
+from CardamomOT.run_options import parse_step_options, settings, configure, configure_simulation
 import anndata as ad
 import os
 import copy
@@ -89,6 +89,7 @@ def main(argv):
 
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
     configure(model, opts)  # workbook, then the command-line options
+    pert_overrides = configure_simulation(model, opts, adata)  # per-sample schedules {sample index: override}
     simulate_with_proliferation = bool(model.simulate_with_proliferation)
     model.simulate_with_proliferation = False  # enabled below once the proliferation network is loaded
 
@@ -218,6 +219,12 @@ def main(argv):
         else:
             print("[simulate_network_KOV] Warning: simulate_with_proliferation = True but prolif_network.pt not found (run infer_network_simul first)")
 
+    def sample_schedules(k):
+        """{sample index: t -> value} of perturbation stimulus k for the samples with their own schedule."""
+        from CardamomOT.schedules import override_function
+        out = {s: override_function(ov, times, k) for s, ov in pert_overrides.items()}
+        return {s: f for s, f in out.items() if f is not None}
+
     # Simulate perturbations
     print(f"[simulate_network_KOV] Starting simulation of {len(combos)} perturbations...")
     for idx, combo in enumerate(combos, start=1):
@@ -298,7 +305,8 @@ def main(argv):
                     else:
                         print(f"[simulate_network_KOV]   Warning: stimulus {k} target '{gene}' not found in data")
                 model_combo.perturbation_stimulus.append(
-                    dict(signs=signs, schedule=perturbation_schedule(pert_sched, times, k)))
+                    dict(signs=signs, schedule=perturbation_schedule(pert_sched, times, k),
+                         sample_schedules=sample_schedules(k)))
         except ValueError as e:
             print(f"[simulate_network_KOV]   Error: {e}")
             continue
@@ -318,7 +326,8 @@ def main(argv):
                         weights[[adata.var_names.get_loc(g) for g in genes_t]] = 1.0 / len(genes_t)
                     model_combo.rate_perturbation.append(
                         dict(weights=weights, scale=scale, delta=float(delta),
-                             schedule=perturbation_schedule(pert_sched, times, k)))
+                             schedule=perturbation_schedule(pert_sched, times, k),
+                             sample_schedules=sample_schedules(k)))
                     print(f"[simulate_network_KOV]   Rate {k}: {target} ({'all cells' if genes_t is None else len(genes_t)}"
                           f"{'' if genes_t is None else ' genes'}) {delta:+g} per time unit at maximal score")
         except ValueError as e:

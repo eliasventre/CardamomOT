@@ -12,10 +12,10 @@ With select_genes = True, genes are selected from the whole transcriptome of Dat
 (highly variable, protein-coding, non mito/ribo genes), then a directed Steiner tree linking the
 stimulus to the genes of Data/genes_queries.txt and to the highest-entropy genes, within a budget
 of model.num_max_genes genes. With select_genes = False all genes are kept. The selection also writes
-the literature prior of the selected genes (cardamomOT/ref_network.csv). With build_prior_network and a
-hard prior (--prior 0, or model.prior_network_pen = 0 if --prior is not given), selection and prior are built
-together: the gene budget is set so that the prior leaves model.max_free_params free network
-parameters.
+the literature only with literature_selection and a hard prior (--prior 0, or model.prior_network_pen = 0
+if --prior is not given): selection and literature prior are then built together, the gene budget being set so
+that the prior leaves model.max_free_params free network parameters, and the prior is written to
+cardamomOT/ref_network.csv if build_prior_network. Otherwise the literature is not queried (data only).
 
 Required input files:
     - Data/data.h5ad: input count matrix, with temporal information in obs['time']
@@ -26,6 +26,8 @@ Optional:
 Output files:
     - Data/data_full.h5ad: dataset restricted to the selected genes
     - Data/data_train.h5ad, data_test.h5ad: train/test split (if split = 'train', train_rate per sample and time)
+      Samples with remove_from_inference (perturbation_inference) are excluded from the selection, data_full and
+      data_train: all their cells go to data_test (also written with split = 'full').
     - cardamomOT/gene_selection_report.csv: role of each selected gene (query, entropy, Steiner) and its parent
     - cardamomOT/global_network.npz: global network C, its null C_null, edge probabilities W, genes (stimuli first)
     - cardamomOT/ref_network.csv: literature prior of the selected genes
@@ -34,7 +36,7 @@ import sys; sys.path += ['../']
 import os
 import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta
-from CardamomOT.inputs import input_dir
+from CardamomOT.inputs import input_dir, removed_samples
 from CardamomOT.inference.gene_selection import select_genes
 from CardamomOT import check_stationary, read_gene_list, resolve_cell_type_obs, ensure_raw_counts, harmonize_obs, read_stimulus_targets
 import anndata as ad
@@ -52,15 +54,34 @@ def load_queries(p):
     print("[select_genes_and_split] No Data/genes_queries.txt: the selection only uses entropy genes")
     return []
 
-def perturbed_genes(p, genes=None):
-    """Genes perturbed in Data/KO_OV_Stim_simulate.txt (KO, OV and stimulus targets) and
-    Data/KO_OV_inference.txt (always selected)."""
-    from CardamomOT.tools.perturbations import find_perturbation_file, load_perturbations, combo_genes
+def perturbed_genes(p, names=None):
+    """Genes always selected: those perturbed in perturbation_simulation (KO, OV, stimulus targets, and
+    the genes of the RATE signatures, needed to score them) and in perturbation_inference (KO, OV, and
+    the genes of the RATE signatures of the inference stimuli)."""
+    from CardamomOT.tools.perturbations import (find_perturbation_file, load_perturbations, combo_genes,
+                                                rate_target_genes)
+    from CardamomOT.stimulus_rates import load_effects
     genes = []
+
+    def signature_genes(target):
+        # Gene list / GENE1+GENE2 / gene of a RATE entry ('all' and cell types have no genes)
+        if names is None or target.lower() == 'all':
+            return []
+        try:
+            return rate_target_genes(target, names, input_dir(p))
+        except ValueError:
+            return []  # e.g. a cell type of cell_type_proliferation
+
     path = find_perturbation_file(input_dir(p))
     if path is not None:
-        for combo in load_perturbations(path, genes):
+        for combo in load_perturbations(path, names):
             genes += combo_genes(combo)
+            for effects in combo.get('RATE', {}).values():
+                for target, _ in effects:
+                    genes += signature_genes(target)
+    for effects in load_effects(p).values():
+        for target, _ in effects:
+            genes += signature_genes(target)
     path = os.path.join(input_dir(p), 'KO_OV_inference.txt')
     if os.path.exists(path):
         df = pd.read_csv(path, sep='\t', dtype=str).fillna('')
@@ -101,6 +122,20 @@ def main(argv):
         print(f"[select_genes_and_split] Error: {e}")
         sys.exit(1)
 
+    # Samples held out of the inference (remove_from_inference): every cell goes to data_test
+    adata_removed = None
+    if 'dataset_id' in adata.obs:
+        removed, _ = removed_samples(p, present=adata.obs['dataset_id'].astype(str).unique())
+        if removed:
+            is_removed = adata.obs['dataset_id'].astype(str).isin(removed).to_numpy()
+            if is_removed.all():
+                print("[select_genes_and_split] Error: every sample is removed from the inference")
+                sys.exit(1)
+            adata_removed = adata[is_removed].copy()
+            adata = adata[~is_removed].copy()
+            print(f"[select_genes_and_split] Samples removed from the inference (all their {adata_removed.n_obs} "
+                  f"cells in data_test): {removed}")
+
     # Temporal information (absent or single timepoint = stationary setting)
     stationary = check_stationary(adata)
     times = adata.obs['time'].values
@@ -120,9 +155,11 @@ def main(argv):
     if change:
         model = _make_model(adata.shape[1])
         queries = load_queries(p)
-        # Hard prior to be built (ref=1, prior 0): budget of free network parameters instead of genes
+        # Literature only with literature_selection and a hard prior (prior 0): budget of free network
+        # parameters instead of genes; otherwise selection on the data only
         prior_pen = model.prior_network_pen
-        max_free = model.max_free_params if (ref and prior_pen == 0 and model.literature_selection) else None
+        use_literature = bool(prior_pen == 0 and model.literature_selection)
+        max_free = model.max_free_params if use_literature else None
         budget = f"{max_free} free network parameters" if max_free else f"{model.num_max_genes} genes"
         print(f"[select_genes_and_split] Gene selection: {model.n_query_genes} queries (of {len(queries)}) + "
               f"{model.n_entropy_genes} entropy genes, '{model.network_method}' network and directed Steiner tree "
@@ -143,7 +180,7 @@ def main(argv):
             network_method=model.network_method, network_params=model.network_method_params,
             project_path=p, k_in=model.k_in_steiner, k_stim=model.k_stim_steiner,
             min_edge_prob=model.min_edge_prob, edge_prior=model.edge_prior, null_network=model.null_network,
-            closure_min=model.closure_min, literature=model.literature_selection,
+            closure_min=model.closure_min, literature=use_literature,
             literature_depth=model.literature_depth, literature_weight=model.literature_weight,
             literature_resources=model.literature_resources, max_free_params=max_free,
             min_entropy_change=model.min_entropy_change, min_nb_separation=model.min_nb_separation,
@@ -158,13 +195,17 @@ def main(argv):
             np.savez_compressed(os.path.join(out_dir, 'global_network.npz'), **net)
         print(f"[select_genes_and_split] Saved gene_selection_report.csv and global_network.npz to {out_dir}")
         genes_list_final = [g for g in genes_list_init if g in set(selected)]
-        if prior is not None:
+        ref_path = os.path.join(out_dir, 'ref_network.csv')
+        if prior is not None and ref:
             # Literature prior of the selection, in the order of the saved genes
             pos = [selected.index(g) for g in genes_list_final]
             up = [g.upper() for g in genes_list_final]  # infer_network_structure matches upper-case names
-            pd.DataFrame(prior[np.ix_(pos, pos)], index=up, columns=up).to_csv(
-                os.path.join(out_dir, 'ref_network.csv'))
+            pd.DataFrame(prior[np.ix_(pos, pos)], index=up, columns=up).to_csv(ref_path)
             print(f"[select_genes_and_split] Saved the literature prior ref_network.csv to {out_dir}")
+        elif not ref and os.path.exists(ref_path):
+            # Prior of an earlier gene list: would constrain the new network (build_prior_network = False)
+            os.remove(ref_path)
+            print("[select_genes_and_split] Removed the ref_network.csv of an earlier run (build_prior_network = False)")
 
     adata = adata[:, genes_list_final]
 
@@ -214,6 +255,8 @@ def main(argv):
 
         adata = adata[:, genes_list_final]
         adata_test = adata_test[:, genes_list_final]
+        if adata_removed is not None:
+            adata_test = ad.concat([adata_test, adata_removed[:, genes_list_final]], merge='same')
 
         try:
             adata.write(os.path.join(p, 'Data', 'data_train.h5ad'))
@@ -224,6 +267,11 @@ def main(argv):
         except Exception as e:
             print(f"[select_genes_and_split] Error saving train/test datasets: {e}")
             sys.exit(1)
+
+    elif adata_removed is not None:
+        # No split: data_test holds the removed samples only
+        adata_removed[:, genes_list_final].copy().write(os.path.join(p, 'Data', 'data_test.h5ad'))
+        print(f"[select_genes_and_split] Saved the removed samples to data_test.h5ad ({adata_removed.n_obs} cells)")
 
     print("[select_genes_and_split] Gene selection and splitting completed successfully")
 

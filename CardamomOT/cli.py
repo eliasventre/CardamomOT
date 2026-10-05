@@ -38,22 +38,26 @@ def _run_script(script: str, args: List[str]) -> int:
     return subprocess.call(cmd)
 
 
-def pipeline_steps(cfg) -> List[str]:
-    """Steps of a run given the configured NetworkModel `cfg` (pipeline parameters)."""
+def pipeline_steps(cfg, project=None) -> List[str]:
+    """Steps of a run given the configured NetworkModel `cfg` (pipeline parameters) of `project`."""
     steps = ['estimate_cell_depth']
     if cfg.estimate_proliferation_rates:
         steps.append('get_proliferation_rates')
     steps.append('select_genes_and_split')
-    # With select_genes the selection already writes the literature prior (same computation)
-    if cfg.build_prior_network and not cfg.select_genes:
+    # The selection writes the literature prior only when it used the literature (hard prior)
+    lit_selection = cfg.select_genes and cfg.prior_network_pen == 0 and cfg.literature_selection
+    if cfg.build_prior_network and not lit_selection:
         steps.append('build_reference_network')
     steps += ['get_degradation_rates', 'infer_mixture', 'check_mixture_to_data', 'infer_network_structure',
               'infer_network_simul', 'simulate_network', 'check_sim_to_data']
     if cfg.run_test:
-        if cfg.split == 'train':
+        from .inputs import removed_samples
+        removed = removed_samples(project)[0] if project is not None else []
+        if cfg.split == 'train' or removed:
             steps += ['infer_test', 'check_test_to_train']
         else:
-            print("Warning: run_test = True needs split = 'train' (held-out cells); test steps skipped")
+            print("Warning: run_test = True needs split = 'train' or samples with remove_from_inference "
+                  "(held-out cells); test steps skipped")
     if cfg.simulate_perturbations:
         steps += ['simulate_network_KOV', 'check_KOV_to_sim']
     steps.append('report_results')
@@ -72,7 +76,7 @@ def _pipeline(args: argparse.Namespace) -> None:
     opts = StepOptions(p=str(Path(args.input)) + '/',
                        values={HARD_OPTIONS[h]: float(v) for h, v in values.items() if float(v) >= 0})
     cfg = settings(opts)
-    steps = pipeline_steps(cfg)
+    steps = pipeline_steps(cfg, opts.p)
     print(f"Pipeline on {args.input}: split={cfg.split}, select_genes={cfg.select_genes}, "
           f"build_prior_network={cfg.build_prior_network}, estimate_proliferation_rates="
           f"{cfg.estimate_proliferation_rates}, run_test={cfg.run_test}, simulate_perturbations="

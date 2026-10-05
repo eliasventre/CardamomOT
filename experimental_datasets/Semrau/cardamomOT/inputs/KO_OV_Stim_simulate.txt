@@ -1,0 +1,4 @@
+KO	OV
+0	Dnmt3a
+0	Col4a2
+0	Hoxb2

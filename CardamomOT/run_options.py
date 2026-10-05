@@ -106,6 +106,9 @@ def parse_step_options(argv, step, doc=None, output=False):
 def configure(model, opts, verb=True):
     """Workbook values, then the command-line options (which dominate), on a NetworkModel; returns it."""
     model.apply_project_parameters(opts.p, verb=verb)
+    # Per-sample schedules of the inference stimuli (stimulus_inference_schedule, sample_id rows)
+    from .schedules import load_overrides
+    model._stim_overrides = load_overrides(opts.p, 'inference', model.n_stimuli)
     for attr, v in opts.values.items():
         cur = getattr(model, attr)
         setattr(model, attr, type(cur)(v) if isinstance(cur, (int, float)) and not isinstance(cur, bool) else v)
@@ -113,6 +116,21 @@ def configure(model, opts, verb=True):
     if opts.values and verb:
         print(f"[CardamomOT] Command-line options (override the workbook): {opts.values}")
     return model
+
+
+def configure_simulation(model, opts, adata):
+    """
+    Per-sample schedules of a simulation (stimulus_simulation_schedule, else inference overrides) on the
+    samples of `adata` (absent samples ignored with a warning). Returns the perturbation-stimulus overrides
+    {sample index: (times or None, values)}.
+    """
+    from .schedules import keep_present, sample_names, simulation_overrides
+    names = sample_names(adata)
+    inf, pert = simulation_overrides(opts.p, model.n_stimuli)
+    model._stim_overrides = inf
+    model.set_sample_names(names)
+    pert = keep_present(pert, names, 'perturbation stimulus schedule')
+    return {names.index(s): v for s, v in pert.items()}
 
 
 def settings(opts):

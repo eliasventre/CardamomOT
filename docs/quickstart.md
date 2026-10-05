@@ -34,7 +34,8 @@ the pipeline creates an empty one at the first run):
 |---|---|
 | `model_parameters` | model and pipeline parameters, grouped by use, with their description (empty = default of `CardamomOT/model/base.py`; the command-line options `--stimulus`, `--prior`, `--mean-forcing`, `--force-basins`, `--temporal-basins` override it) |
 | `gene_lists` | genes of interest for the gene selection, signatures, named gene lists (RATE targets) |
-| `stimulus_inference_schedule`, `perturbation_inference` | stimulus schedule of the measured data; perturbations of the measured data: KO / OV of samples, and (row `all`) possible targets `STIMk` and effects on proliferation `RATEk` of each inference stimulus |
+| `stimulus_inference_schedule`, `perturbation_inference` | stimulus schedule of the measured data (default rows, and rows with a `sample_id` for a sample's own schedule); perturbations of the measured data: KO / OV of samples, samples held out for validation (`remove_from_inference`, `reference_sample`), and (row `all`) possible targets `STIMk` and effects on proliferation `RATEk` of each inference stimulus |
+| `stimulus_test_schedule` | stimulus schedule of the held-out cells and samples (`infer_test`; default: the inference schedule) |
 | `stimulus_simulation_schedule`, `perturbation_simulation` | schedules and in-silico perturbations (KO, OV, STIM, RATE) of the simulations |
 | `times` | timepoints used |
 | `proliferation_rates`, `population_sizes`, `transition_rates` | anchors of the population dynamics |
@@ -56,7 +57,7 @@ Steps (preselected according to the parameters in parentheses):
 | **Cell depth** | Per-cell depth diagnostic | ✓ |
 | Proliferation rates | Net proliferation rate per cell from literature gene signatures (on the full gene set) | `estimate_proliferation_rates` |
 | **Gene selection** | Select genes (`select_genes`); split cells into train/test (`split`, `train_rate`) | ✓ |
-| Network constraint | Build prior network from databases | `build_prior_network` and not `select_genes` |
+| Network constraint | Build prior network from databases | `build_prior_network`, unless the selection used the literature (`select_genes`, `literature_selection`, `prior_network_pen = 0`) |
 | **Kinetics** | Assign literature mRNA/protein degradation rates (h⁻¹), species auto-detected | ✓ |
 | **Mixture model** | Fit negative-binomial burst parameters per gene | ✓ |
 | Check mixture | Validate mixture against data | ✓ |
@@ -119,7 +120,8 @@ cardamomot pipeline \
 |---|---|---|
 | `split` (`'train'` / `'full'`), `train_rate` | `'train'`, `0.7` | train/test split of the cells (all steps read `data_<split>.h5ad`) |
 | `select_genes` | `False` | gene selection in `select_genes_and_split` (otherwise all genes kept) |
-| `build_prior_network` | `False` | literature prior: by the selection, or `build_reference_network` if `select_genes = False` |
+| `build_prior_network` | `False` | literature prior: by the selection when it used the literature, else `build_reference_network` |
+| `literature_selection` | `True` | gene selection reweighted by the literature (only with `prior_network_pen = 0`) |
 | `estimate_proliferation_rates` | `False` | `get_proliferation_rates` |
 | `run_test` | `False` | `infer_test` + `check_test_to_train` (needs `split = 'train'`) |
 | `simulate_perturbations` | `True` | `simulate_network_KOV` + `check_KOV_to_sim` |
@@ -135,7 +137,7 @@ script name without `.py`); a removed option stops the step with the parameter t
 cardamomot step estimate_cell_depth     -i my_project
 cardamomot step get_proliferation_rates -i my_project            # if estimate_proliferation_rates
 cardamomot step select_genes_and_split  -i my_project --prior 1.0
-cardamomot step build_reference_network -i my_project            # if build_prior_network and not select_genes
+cardamomot step build_reference_network -i my_project            # if build_prior_network and the selection did not use the literature
 cardamomot step get_degradation_rates   -i my_project            # d0/d1 of the species (overwrite_degradation_rates)
 cardamomot step infer_mixture           -i my_project --mean-forcing 0.5
 cardamomot step check_mixture_to_data   -i my_project

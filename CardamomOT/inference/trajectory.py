@@ -250,7 +250,8 @@ def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init
                     y_kon_end_true, y_kon_end, y_prot_end, y_rna_end, mode_init, mode_end,
                     basal, inter, ks, delta_t, tol=0.6, n_pas=25, samples_data=None, stim_vals=np.ones(1), scale_proteins=1):
     
-    ns = len(stim_vals)
+    stim_vals = np.asarray(stim_vals, dtype=float)
+    ns = stim_vals.shape[-1]  # (ns,) or one row per cell (per-sample schedules)
     s1 = s1_rows(s1, samples_data)
     y_prot = np.ones_like(y_rna_end)
     y_prot[:, :ns] = stim_vals * scale_proteins

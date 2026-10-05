@@ -53,6 +53,15 @@ def _get_device_from_module(module) -> torch.device:
             return torch.device("cpu")
 
 
+def _stim_at(stim_schedule, t, sample, ns):
+    """Stimulus values at time t for a sample (its own schedule when per-sample overrides exist)."""
+    if not stim_schedule:
+        return np.ones(ns, dtype=np.float32)
+    if hasattr(stim_schedule, 'at'):
+        return np.asarray(stim_schedule.at(t, sample), dtype=np.float32)
+    return np.asarray(stim_schedule[t], dtype=np.float32)
+
+
 def _ks_sample(ks, s_idx):
     """Amplitudes (n_modes, G) of sample s_idx: ks is per-sample (S, n_modes, G) when 3-D, else shared."""
     ks = np.asarray(ks)
@@ -757,9 +766,8 @@ def infer_ratio_d0_d1_unitary(
             X0_np = X0_np[:n_pairs]
             X1_np = X1_np[:n_pairs]
 
-            stim0 = np.asarray(stim_schedule[t0] if stim_schedule else np.ones(ns), dtype=np.float32)
-            stim1 = np.asarray(stim_schedule[t1] if stim_schedule else np.ones(ns), dtype=np.float32)
-            stim0, stim1 = stim0*scale, stim1*scale
+            stim0 = _stim_at(stim_schedule, t0, s_int, ns) * scale
+            stim1 = _stim_at(stim_schedule, t1, s_int, ns) * scale
 
             # ── Select per-interval bias / theta ─────────────────────────────────
             bias_np  = np.asarray(bias,         dtype=np.float32)
@@ -988,9 +996,8 @@ def inference_degradation_prot(
                 t0, t1 = float(unique_t[ti]), float(unique_t[ti + 1])
                 X0_np = X_s[t_s == unique_t[ti]]
                 X1_np = X_s[t_s == unique_t[ti + 1]]
-                stim0 = stim_schedule[t0] if stim_schedule else np.ones(ns, dtype=np.float32)
-                stim1 = stim_schedule[t1] if stim_schedule else np.ones(ns, dtype=np.float32)
-                stim0, stim1 = stim0*scale_proteins, stim1*scale_proteins
+                stim0 = _stim_at(stim_schedule, t0, s, ns) * scale_proteins
+                stim1 = _stim_at(stim_schedule, t1, s, ns) * scale_proteins
                 n_p = min(len(X0_np), len(X1_np))
                 if n_p > 0:
                     lab0 = None if strata is None else np.asarray(strata)[mask_s][t_s == unique_t[ti]][:n_p]
@@ -1366,12 +1373,8 @@ def infer_ratio_d0_d1_full(
             if len(X0_np) == 0:
                 continue
 
-            stim0 = np.asarray(
-                stim_schedule[t0] if stim_schedule else np.ones(ns), dtype=np.float32
-            )
-            stim1 = np.asarray(
-                stim_schedule[t1] if stim_schedule else np.ones(ns), dtype=np.float32
-            )
+            stim0 = _stim_at(stim_schedule, t0, s_int, ns)
+            stim1 = _stim_at(stim_schedule, t1, s_int, ns)
 
             # ── Select bias / theta ──────────────────────────────────────────────
             # Supported layouts (mirroring infer_ratio_d0_d1_unitary):

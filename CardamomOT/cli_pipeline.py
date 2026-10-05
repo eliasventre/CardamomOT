@@ -217,7 +217,7 @@ def run_pipeline_interactive(project_path: str, use_defaults: bool = False):
     values = {} if use_defaults else prompt_hard_options()
     opts = StepOptions(p=os.path.join(project_path, ''),
                        values={HARD_OPTIONS[h]: float(v) for h, v in values.items() if float(v) >= 0})
-    default_ids = set(pipeline_steps(settings(opts)))
+    default_ids = set(pipeline_steps(settings(opts), opts.p))
     if use_defaults:
         selected = [s["script"] for s in PIPELINE_STEPS if s["id"] in default_ids]
     else:

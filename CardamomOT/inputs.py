@@ -68,13 +68,24 @@ SHEETS = {
         '(exported as gene_list_<name>.txt; legacy Data/gene_list_<name>.txt).',
         ['genes_queries.txt', 'proliferation_signatures', 'death_signatures', 'senescence_signatures']),
     'stimulus_inference_schedule': (
-        [('time', 'Timepoint (optional: without times, rows follow the sorted timepoints of the data)'),
+        [('sample_id', 'Optional: dataset_id whose schedule these rows replace (empty or "all": default schedule '
+                       'of every sample)'),
+         ('time', 'Timepoint (optional: without times, rows follow the sorted timepoints of the data)'),
          ('stimulus_1', 'Value of stimulus 1 at this timepoint (default: 0 at the first timepoint, 1 after)')],
         'Schedule of the stimuli of the measured data (inference); one row per timepoint, one column per stimulus '
-        '(add stimulus_2, stimulus_3... for several stimuli; without this sheet: one stimulus).',
+        '(add stimulus_2, stimulus_3... for several stimuli; without this sheet: one stimulus). Rows with a '
+        'sample_id give the schedule of that sample only (e.g. an untreated control at 0).',
         ['stimulus_schedule_inference.txt', 'stimulus_schedule.txt']),
+    'stimulus_test_schedule': (
+        [('sample_id', 'Optional: dataset_id whose schedule these rows replace (empty or "all": default)'),
+         ('time', 'Timepoint (optional: without times, rows follow the sorted timepoints)'),
+         ('stimulus_1', 'Value of inference stimulus 1 for the held-out cells (default: the inference schedule)')],
+        'Schedule of the inference stimuli for the held-out cells (infer_test): test split and samples removed '
+        'from the inference (perturbation_inference, remove_from_inference). Empty: the inference schedule.',
+        []),
     'stimulus_simulation_schedule': (
-        [('time', 'Simulated timepoint (optional: without times, rows follow the sorted simulated timepoints)'),
+        [('sample_id', 'Optional: dataset_id whose schedule these rows replace (empty or "all": default)'),
+         ('time', 'Simulated timepoint (optional: without times, rows follow the sorted simulated timepoints)'),
          ('stimulus_1', 'Inference stimulus 1 during the simulations (default: its inference schedule)'),
          ('STIM1', 'Perturbation stimulus STIM1 of perturbation_simulation (default: 0 at the first time, 1 after)')],
         'Schedules of the simulations, one row per simulated timepoint: inference stimuli (stimulus_k, acting '
@@ -86,6 +97,11 @@ SHEETS = {
                        'for the row describing the inference stimuli (STIMk / RATEk)'),
          ('KO', 'Genes knocked-out in this sample, comma-separated'),
          ('OV', 'Genes over-expressed in this sample, comma-separated'),
+         ('remove_from_inference', 'True / 1: every cell of this sample is held out (data_test, not split), '
+                                   'excluded from the gene selection and the inference; infer_test validates the '
+                                   'model on it with its stimulus_test_schedule'),
+         ('reference_sample', 'Removed sample without the first timepoint: dataset_id whose first-timepoint '
+                              'training cells start its validation simulation'),
          ('STIM1', 'Row "all": possible direct targets of inference stimulus 1: a gene list of gene_lists or '
                    'comma-separated genes (empty: every gene)'),
          ('RATE1', 'Row "all": effect of inference stimulus 1 on the net proliferation rate (per hour), '
@@ -95,6 +111,7 @@ SHEETS = {
                    'signature score in [0, 1])'),
          ('comment', 'Free comment (ignored)')],
         'Perturbations of the measured data, used by the inference: genetic perturbations of samples (KO / OV), '
+        'samples held out for validation (remove_from_inference, reference_sample), '
         'and the inference stimuli (row sample_id = all: targets STIMk and effects on proliferation RATEk, '
         'k = column of stimulus_inference_schedule). Empty: one stimulus, every gene a possible target, no '
         'effect on the rates.',
@@ -270,6 +287,16 @@ def _migrate(wb):
         write_sheet(wb, 'perturbation_inference', _pi_columns(pi))
         del wb['Stimulus_targets']
         changed = True
+    # Columns added in later versions (sample_id of the schedules, held-out samples)
+    for name, cols in NEW_COLUMNS.items():
+        if name in wb.sheetnames and wb[name].max_row >= 1 and wb[name].cell(1, 1).value is not None:
+            df = read_sheet(wb, name)
+            missing = [c for c in cols if c not in df.columns]
+            if missing:
+                df = df.reindex(columns=list(df.columns) + missing)
+                write_sheet(wb, name, _pi_columns(df) if name == 'perturbation_inference'
+                            else df[['sample_id'] + [c for c in df.columns if c != 'sample_id']])
+                changed = True
     # Missing sheets of the current version (empty, with their header)
     for name, (columns, _, _) in SHEETS.items():
         if name not in wb.sheetnames:
@@ -280,10 +307,19 @@ def _migrate(wb):
     return changed
 
 
+NEW_COLUMNS = {'stimulus_inference_schedule': ['sample_id'], 'stimulus_simulation_schedule': ['sample_id'],
+               'stimulus_test_schedule': ['sample_id'],
+               'perturbation_inference': ['remove_from_inference', 'reference_sample']}
+
+
+def _truthy(v):
+    return not _is_empty(v) and str(_clean(v)).strip().lower() in ('1', 'true', 'yes', 'oui', 'x', 'vrai')
+
+
 def _pi_columns(df):
     """perturbation_inference columns in their usual order (sample_id, KO, OV, STIMk / RATEk, comment, others)."""
     ks = sorted({int(c[4:]) for c in df.columns if re.fullmatch(r'(STIM|RATE)\d+', str(c))} | {1})
-    order = ['sample_id', 'KO', 'OV'] + [x for k in ks for x in (f'STIM{k}', f'RATE{k}')] + ['comment']
+    order = ['sample_id', 'KO', 'OV', 'remove_from_inference', 'reference_sample'] + [x for k in ks for x in (f'STIM{k}', f'RATE{k}')] + ['comment']
     return df.reindex(columns=order + [c for c in df.columns if c not in order])
 
 
@@ -553,6 +589,29 @@ def _schedule(df, cols):
     return df[cols].astype(float).to_numpy()
 
 
+def _split_samples(df):
+    """(default rows, {sample_id: rows}) of a schedule sheet (sample_id empty or "all" = default)."""
+    if 'sample_id' not in df or not len(df):
+        return df, {}
+    sid = df['sample_id'].astype(str).str.strip()
+    default = df['sample_id'].isna() | sid.str.lower().isin(['', 'all', 'nan', 'none'])
+    return df[default], {s: df[~default & (sid == s)] for s in sorted(set(sid[~default]))}
+
+
+def _add_overrides(overrides, kind, groups, cols):
+    """Per-sample schedules of a sheet into overrides[kind] (missing values: 1)."""
+    for sid, rows in groups.items():
+        rows = rows.dropna(subset=cols, how='all') if cols else rows.iloc[:0]
+        if not len(rows):
+            continue
+        timed = 'time' in rows and rows['time'].notna().all()
+        if timed:
+            rows = rows.sort_values('time')
+        overrides.setdefault(kind, {})[sid] = {
+            'time': [float(t) for t in rows['time']] if timed else None,
+            'values': rows[cols].astype(float).fillna(1.0).to_numpy().tolist()}
+
+
 def export(wb, out_dir):
     """Write the content of the workbook as the text files read by the pipeline."""
     if os.path.isdir(out_dir):
@@ -572,12 +631,23 @@ def export(wb, out_dir):
         if genes:
             write(f'gene_list_{col}.txt', '\n'.join(map(str, genes)) + '\n')
 
-    st = read_sheet(wb, 'stimulus_inference_schedule')
-    inf_cols = sorted([c for c in st.columns if c.startswith('stimulus_') and st[c].notna().any()],
+    overrides = {}
+    st_all = read_sheet(wb, 'stimulus_inference_schedule')
+    inf_cols = sorted([c for c in st_all.columns if c.startswith('stimulus_') and st_all[c].notna().any()],
                       key=lambda c: int(c.split('_')[1]))
-    if inf_cols:
+    st, st_over = _split_samples(st_all)
+    if inf_cols and len(st.dropna(subset=inf_cols, how='all')):
         np.savetxt(os.path.join(out_dir, 'stimulus_schedule_inference.txt'), _schedule(st, inf_cols), fmt='%g')
     n_inf = max(1, len(inf_cols))
+    _add_overrides(overrides, 'inference', st_over, inf_cols)
+
+    te_all = read_sheet(wb, 'stimulus_test_schedule')
+    te_cols = sorted([c for c in te_all.columns if c.startswith('stimulus_') and te_all[c].notna().any()],
+                     key=lambda c: int(c.split('_')[1]))
+    te, te_over = _split_samples(te_all)
+    if te_cols and len(te.dropna(subset=te_cols, how='all')):
+        np.savetxt(os.path.join(out_dir, 'stimulus_schedule_test.txt'), _schedule(te, te_cols), fmt='%g')
+    _add_overrides(overrides, 'test', te_over, te_cols)
 
     # Inference stimuli (row all of perturbation_inference): targets STIMk and rate effects RATEk
     pi = read_sheet(wb, 'perturbation_inference')
@@ -611,12 +681,14 @@ def export(wb, out_dir):
         json.dump({str(k): v for k, v in rates.items()}, open(os.path.join(out_dir, 'stimulus_rates.json'), 'w'),
                   indent=1)
 
-    ss = read_sheet(wb, 'stimulus_simulation_schedule')
-    s_inf = sorted([c for c in ss.columns if c.startswith('stimulus_') and ss[c].notna().any()],
+    ss_all = read_sheet(wb, 'stimulus_simulation_schedule')
+    s_inf = sorted([c for c in ss_all.columns if c.startswith('stimulus_') and ss_all[c].notna().any()],
                    key=lambda c: int(c.split('_')[1]))
-    s_pert = sorted([c for c in ss.columns if re.fullmatch(r'STIM\d+', c) and ss[c].notna().any()],
+    s_pert = sorted([c for c in ss_all.columns if re.fullmatch(r'STIM\d+', c) and ss_all[c].notna().any()],
                     key=lambda c: int(c[4:]))
-    if s_inf or s_pert:
+    ss, ss_over = _split_samples(ss_all)
+    _add_overrides(overrides, 'simulation', ss_over, s_inf + s_pert)
+    if (s_inf or s_pert) and len(ss.dropna(subset=s_inf + s_pert, how='all')):
         rows = ss.dropna(subset=s_inf + s_pert, how='all')
         if 'time' in rows and rows['time'].notna().all() and len(rows):
             rows = rows.sort_values('time')
@@ -652,6 +724,19 @@ def export(wb, out_dir):
         if len(lines) > 1:
             write('KO_OV_inference.txt', '\n'.join(lines) + '\n')
 
+    # Samples held out of the inference (validation in infer_test), with their reference sample
+    if 'sample_id' in ki and 'remove_from_inference' in ki and len(ki):
+        info = {'removed': [], 'reference': {}}
+        for _, r in ki.iterrows():
+            if not _is_empty(r['sample_id']) and _truthy(r['remove_from_inference']):
+                sid = str(_clean(r['sample_id']))
+                info['removed'].append(sid)
+                if not _is_empty(r.get('reference_sample')):
+                    info['reference'][sid] = str(_clean(r['reference_sample']))
+        if info['removed']:
+            import json
+            json.dump(info, open(os.path.join(out_dir, 'samples_info.json'), 'w'), indent=1)
+
     tm = read_sheet(wb, 'times')
     for col in ('times_to_inference', 'times_to_simulate'):
         vals = _values(tm, col)
@@ -665,6 +750,10 @@ def export(wb, out_dir):
             df = df.dropna(subset=cols)
             if len(df):
                 write(name, '\n'.join(f'{_clean(a)}\t{_clean(b)}' for a, b in zip(df[cols[0]], df[cols[1]])) + '\n')
+
+    if overrides:
+        import json
+        json.dump(overrides, open(os.path.join(out_dir, 'stimulus_schedules.json'), 'w'), indent=1)
 
     mp = read_sheet(wb, 'model_parameters')
     if 'parameter' in mp and 'value' in mp:
@@ -686,6 +775,29 @@ def export(wb, out_dir):
 # ---------------------------------------------------------------------------
 
 _SYNCED = {}
+
+
+def removed_samples(project, present=None):
+    """(removed dataset_id, {removed: reference dataset_id}) of perturbation_inference; with `present` (dataset_id of
+    the data), the samples absent from the data are ignored with a warning."""
+    import json
+    path = os.path.join(input_dir(project), 'samples_info.json')
+    if not os.path.exists(path):
+        return [], {}
+    info = json.load(open(path))
+    removed = [str(s) for s in info.get('removed', [])]
+    ref = {str(k): str(v) for k, v in info.get('reference', {}).items()}
+    if present is not None:
+        present = {str(s) for s in present}
+        absent = [s for s in removed if s not in present]
+        if absent:
+            print(f"[CardamomOT] Warning: remove_from_inference given for sample(s) {absent} absent from the data: ignored")
+        removed = [s for s in removed if s in present]
+        for s in [s for s in removed if s in ref and ref[s] not in present]:
+            print(f"[CardamomOT] Warning: reference_sample '{ref[s]}' of sample {s} absent from the data: ignored")
+            del ref[s]
+        ref = {s: r for s, r in ref.items() if s in removed}
+    return removed, ref
 
 
 def project_parameters(project):
