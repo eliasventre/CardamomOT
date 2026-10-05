@@ -8,9 +8,9 @@ Usage:
 
 Required input files:
     - Data/data_<split>.h5ad: count matrix with temporal information
-    - Data/KO_OV_Stim_simulate.txt (old name KO_OV_simulate.txt): perturbations (tab-separated)
+    - the perturbation_simulation sheet: perturbations (tab-separated)
 Optional:
-    - Data/stimulus_schedule_simulate.txt: schedules of the simulation, one row per simulated
+    - stimulus_simulation_schedule sheet: schedules of the simulation, one row per simulated
       time: the inference stimuli, then the perturbation stimuli STIM1, STIM2... (default 0 at
       the first time, 1 after)
     - cardamom/inter_t_simul.npy, basal_simul.npy: inferred parameters
@@ -52,7 +52,7 @@ def main(argv):
 
     ko_ov_file = find_perturbation_file(input_dir(p))
     if ko_ov_file is None:
-        print("[simulate_network_KOV] Error: no Data/KO_OV_Stim_simulate.txt")
+        print("[simulate_network_KOV] Error: no perturbation_simulation sheet")
         sys.exit(1)
 
     # Load gene expression data (for gene count and var_names)
@@ -122,16 +122,16 @@ def main(argv):
         sys.exit(1)
 
     # Determine simulation timepoints
-    filepath = os.path.join(input_dir(p), 'times_to_simulate.txt')
+    filepath = os.path.join(input_dir(p), 'times_simulation.txt')
     if os.path.exists(filepath):
-        print("[simulate_network_KOV] Using custom timepoints from times_to_simulate.txt")
+        print("[simulate_network_KOV] Using custom timepoints from times_simulation.txt")
         try:
             with open(filepath, "r") as f:
                 times = [float(line.strip()) for line in f if line.strip()]
             if times[0] != 0:
                 times = [0] + times
         except (ValueError, IOError) as e:
-            print(f"[simulate_network_KOV] Error reading times_to_simulate.txt: {e}")
+            print(f"[simulate_network_KOV] Error reading times_simulation.txt: {e}")
             times = list(set(model.times_data))
     else:
         times = list(set(model.times_data))

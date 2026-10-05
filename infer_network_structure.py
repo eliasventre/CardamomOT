@@ -103,7 +103,7 @@ def main(argv):
     G_tot = adata.shape[1] + model.n_stimuli
     ns = model.n_stimuli
     model.ref_network = np.ones((G_tot, G_tot, model.n_networks))
-    # Possible targets of the stimuli (Data/stimulus_targets.txt), applied in fit_network
+    # Possible targets of the stimuli (STIMk of the row all of perturbation_inference), applied in fit_network
     model.stimulus_targets = stimulus_target_mask(read_stimulus_targets(input_dir(p)),
                                                   list(adata.var_names), ns)
     stim_labels = ['Stimulus'] if ns == 1 else [f'Stimulus_{i}' for i in range(ns)]
@@ -299,7 +299,7 @@ def main(argv):
     inter_ref  = _load_gene_mat('inter_ref')
 
     # ─── PER-SAMPLE KOV PRIOR (overrides basal_ref if present) ──────────
-    # Data/KO_OV_inference.txt : TSV with columns  sample_id | KO | OV
+    # perturbation_inference sheet : TSV with columns  sample_id | KO | OV
     # sample_id values must match adata.obs['dataset_id'].
     # KO genes get basal_ref = -100 (forced OFF), OV genes get +100 (forced ON).
     # Also saves basal_ref_mask.npy: bool (n_samples, G_tot) for downstream

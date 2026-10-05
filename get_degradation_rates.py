@@ -24,7 +24,7 @@ Required input files:
 Output files:
     - Data/data_full.h5ad: updated with d0 (mRNA) and d1 (protein) degradation rates (h⁻¹)
     - Data/data_train.h5ad, data_test.h5ad: updated with degradation rates (if split = 'train')
-    - Data/degradation_rates_report.csv: per-gene match, half-lives, source and neighbours used
+    - cardamomOT/degradation_rates_report.csv: per-gene match, half-lives, source and neighbours used
 """
 import sys; sys.path += ['../']
 import os
@@ -113,7 +113,8 @@ def main(argv):
 
     assign_rates(adata, details, species, overwrite)
 
-    report_path = os.path.join(p, 'Data', 'degradation_rates_report.csv')
+    os.makedirs(os.path.join(p, 'cardamomOT'), exist_ok=True)
+    report_path = os.path.join(p, 'cardamomOT', 'degradation_rates_report.csv')
     report = details.copy()
     report["d0_assigned"] = adata.var["d0"].to_numpy()
     report["d1_assigned"] = adata.var["d1"].to_numpy()

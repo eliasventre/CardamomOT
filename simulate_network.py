@@ -71,19 +71,19 @@ def load_simulation_model(p, opts, adata, tag='[simulate_network]'):
         sys.exit(1)
 
     # Determine simulation timepoints
-    times_file = os.path.join(input_dir(p), 'times_to_simulate.txt')
+    times_file = os.path.join(input_dir(p), 'times_simulation.txt')
     if os.path.exists(times_file):
         print(f"{tag} Custom timepoints found in {times_file}")
         try:
             with open(times_file, "r") as f:
                 times = [float(line.strip()) for line in f if line.strip()]
             if not times:
-                raise ValueError("times_to_simulate.txt is empty")
+                raise ValueError("times_simulation.txt is empty")
             if times[0] != 0:
                 times = [0] + times
             print(f"{tag} Using custom timepoints: {times}")
         except (ValueError, IOError) as e:
-            print(f"{tag} Error reading times_to_simulate.txt: {e}")
+            print(f"{tag} Error reading times_simulation.txt: {e}")
             times = list(set(model.times_data))
     else:
         print(f"{tag} Using timepoints from loaded data")

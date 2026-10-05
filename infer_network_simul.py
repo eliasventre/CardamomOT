@@ -186,7 +186,7 @@ def main(argv):
 
     model.ref_network = signed_floor(model.ref_network, model.prior_network_pen)  # keeps signed priors
     model.ref_network[:ns, :] = model.stimulus
-    # Possible targets of the stimuli (Data/stimulus_targets.txt)
+    # Possible targets of the stimuli (STIMk of the row all of perturbation_inference)
     model.stimulus_targets = stimulus_target_mask(read_stimulus_targets(input_dir(p)),
                                                   list(adata.var_names), ns)
     model._apply_stimulus_targets()

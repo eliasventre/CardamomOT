@@ -105,10 +105,10 @@ class NetworkModel:
         self.split = 'train'                     # 'train': train/test split of the cells (train_rate per sample and time); 'full': all cells
         self.train_rate = 0.7                    # share of the cells of each (sample, time) in the train split (at least 100); the test keeps at most as many
         self.select_genes = False                # select_genes_and_split: gene selection (queries, entropy genes, global network, Steiner tree); False = all genes kept
-        self.build_prior_network = True         # literature prior cardamomOT/ref_network.csv: by the gene selection if it used the literature, else build_reference_network
+        self.build_prior_network = False         # literature prior cardamomOT/ref_network.csv: built by the gene selection if select_genes, literature_selection and prior_network_pen = 0, else by build_reference_network
         self.estimate_proliferation_rates = True  # get_proliferation_rates: obs['proliferation_net_rate'] from gene signatures, anchored to Data/proliferation_rates
         self.run_test = True                    # infer_test + check_test_to_train on the held-out cells (needs split = 'train')
-        self.simulate_perturbations = True       # simulate_network_KOV + check_KOV_to_sim (Data/KO_OV_Stim_simulate)
+        self.simulate_perturbations = True       # simulate_network_KOV + check_KOV_to_sim (perturbation_simulation sheet)
         self.species = 'auto'                    # 'auto' (from gene names), 'human' or 'mouse': degradation rates, proliferation signatures, literature prior
         self.senescence_gating = True            # get_proliferation_rates: the senescence signature gates the proliferation score
         self.overwrite_degradation_rates = False  # get_degradation_rates: replace the d0/d1 already stored in the AnnData files
@@ -130,8 +130,8 @@ class NetworkModel:
         self.seuil = 1e-2 # minimum for beta mixture parameters (second parameters)
         self.batch_size_mixture = 1024 # Maximum number of cells per time used for mixture calibration in the inference.
         self.use_depth_factor = False   # use obs['depth_factor'] (estimate_cell_depth) in the NB model and simulations; False = s_i = 1 (an existing factor is kept but ignored)
-        self.compute_depth_factor = True # estimate_cell_depth computes the diagnostic and writes obs['depth_factor'] if needed; False = only reads an existing factor (never removed)
-        self.allow_depth_correction = True  # estimate_cell_depth: apply the per-cell depth factor s_i when the diagnostic recommends it
+        self.compute_depth_factor = False # estimate_cell_depth computes the diagnostic and writes obs['depth_factor'] if needed; False = only reads an existing factor (never removed)
+        self.allow_depth_correction = False  # estimate_cell_depth: apply the per-cell depth factor s_i when the diagnostic recommends it
         self.depth_method = 'poissonian'  # depth factor: 'group_median', 'poissonian' (Fang & Pachter, 2025), or <project>/depth_methods/<name>.py
         self.depth_method_params = {}       # parameters of the depth method
         self.depth_by_cell_type = False     # estimate s_i within (sample, time, cell type) groups; False = (sample, time) only:
@@ -166,7 +166,7 @@ class NetworkModel:
         self.scale_pen = 20 # Error that is expected = 1/scale_pen
         self.compute_with_proba = 0 # Determine if compute with proba or kon values in network inference (recommended:1)
         self.weight_prev = .4 # max = .5 to not withdrawn the inference on timepoints, allows the calibration to incorporate some "flow-matching" method
-        self.batch_size_network = None # Cells per network sub-sample (stratified by time and sample); raised to 10 x the parameters of a target-gene fit if lower; None = that floor
+        self.batch_size_network = 100 # Cells per network sub-sample (stratified by time and sample); raised to 10 x the parameters of a target-gene fit if lower; None = that floor
         self.n_network_fits = 10 # Theta = mean of min(n_network_fits, 1 + n_states // batch_size) fits on disjoint subsamples, at every network update
         # Inference of alpha = switch moment between each timepoint and modes
         self.update_modes = 1
@@ -209,7 +209,7 @@ class NetworkModel:
 
         ## Gene selection (select_genes_and_split.py, change=1): terminals + global network + directed Steiner tree
         self.num_max_genes = 100         # budget: number of selected genes (stimuli excluded)
-        self.n_query_genes = 40          # at most this many genes of Data/genes_queries.txt (round robin over time/cell-type DE groups)
+        self.n_query_genes = 40          # at most this many genes of genes_queries (gene_lists sheet) (round robin over time/cell-type DE groups)
         self.n_entropy_genes = 30        # at least this many entropy genes (Gandrillon KD & MDE), same round robin; n_query + n_entropy < num_max_genes
         self.n_top_entropy = 400         # top genes per transition for KD and for MDE (Gandrillon's TOP_N)
         self.n_cells_entropy = 1000      # cells per timepoint for the BUB entropy (its matrices are (N+1)^2)
@@ -222,7 +222,7 @@ class NetworkModel:
         self.edge_prior = 0.9            # each Steiner edge costs -log(prob * edge_prior): favours short paths among equally probable ones
         self.null_network = 'hybrid'     # edge probabilities vs permuted data: 'hybrid' (gene edges within (sample, time), stimulus all cells), 'within_time', 'all_cells'
         self.closure_min = 0.5           # closure: add the gene bringing the most probable regulation (sum of w) to the selection while >= this
-        self.literature_selection = True  # gene selection with a hard prior (prior_network_pen = 0): edge probabilities reweighted by OmniPath feasibility, budget in free parameters
+        self.literature_selection = True  # gene selection: edge probabilities reweighted by OmniPath feasibility, whatever the prior
         self.literature_depth = 3        # max path length in the literature graph (last edge TF -> target)
         self.literature_weight = 1.0     # exponent on the data-calibrated literature likelihood ratio (0 = data only)
         self.min_entropy_change = 0.1    # variability floor of the selection: max BUB-entropy change between consecutive times (bits, Gandrillon MDE)
@@ -1402,7 +1402,7 @@ class NetworkModel:
         """
         batch_size = self._network_batch_size(n_params)
         # Disjoint sub-samples covering as many states as possible (a single one if it holds them all)
-        n_fits = max(1, min(n_fits, 1 + len(times_vec) // batch_size))
+        n_fits = max(5, min(n_fits, 1 + len(times_vec) // batch_size))
         sels, _ = grouped_partition([times_vec, samples_vec], batch_size, n_fits, labels)
         self._net_batch_info = (int(np.mean([len(sel) for sel in sels])), len(sels), len(times_vec))  # for the iteration log
         fits = fit_fn(sels)
@@ -3046,7 +3046,7 @@ class NetworkModel:
         times_train = np.sort(np.unique(self.times_data))
         if stimulus_schedule is not None or self._stim_schedule is None:
             # Pass times_ref=times_train so the schedule is step-function interpolated
-            # when simulation times differ from training times (e.g. times_to_simulate.txt).
+            # when simulation times differ from training times (e.g. times_simulation.txt).
             self._stim_schedule = self._build_stimulus_schedule(
                 np.sort(np.unique(times)), stimulus_schedule, times_ref=times_train)
         N = np.sum(self.times_data == times_train[0])

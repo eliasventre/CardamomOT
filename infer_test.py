@@ -344,7 +344,7 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
     real_idx_test = np.asarray(model.traj_real_idx).copy()  # test cell behind each trajectory state
 
     # ─── SIMULATION TIMES ────────────────────────────────────────────────
-    times_file = os.path.join(input_dir(p), 'times_to_simulate.txt')
+    times_file = os.path.join(input_dir(p), 'times_simulation.txt')
     if os.path.exists(times_file):
         with open(times_file, "r") as f:
             sim_times = [float(line.strip()) for line in f if line.strip()]

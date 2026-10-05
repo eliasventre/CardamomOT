@@ -10,18 +10,19 @@ Usage:
 With select_genes = True, genes are selected from the whole transcriptome of Data/data.h5ad in two steps
 (CardamomOT.inference.gene_selection): a coarse global GRN with OTVelo-Corr on log(x+1) counts
 (highly variable, protein-coding, non mito/ribo genes), then a directed Steiner tree linking the
-stimulus to the genes of Data/genes_queries.txt and to the highest-entropy genes, within a budget
-of model.num_max_genes genes. With select_genes = False all genes are kept. The selection also writes
-the literature only with literature_selection and a hard prior (--prior 0, or model.prior_network_pen = 0
-if --prior is not given): selection and literature prior are then built together, the gene budget being set so
-that the prior leaves model.max_free_params free network parameters, and the prior is written to
-cardamomOT/ref_network.csv if build_prior_network. Otherwise the literature is not queried (data only).
+stimulus to the genes of genes_queries (gene_lists sheet) and to the highest-entropy genes, within a budget
+of model.num_max_genes genes. With select_genes = False all genes are kept. With literature_selection, the
+edge probabilities are reweighted by the literature (OmniPath / CollecTRI), whatever the prior; otherwise the
+literature is not queried. With build_prior_network and a hard prior (--prior 0, or model.prior_network_pen = 0
+if --prior is not given), the literature prior is built along: the gene budget is set so that it leaves
+model.max_free_params free network parameters, and it is written to cardamomOT/ref_network.csv (otherwise
+build_reference_network builds the prior after the selection).
 
 Required input files:
     - Data/data.h5ad: input count matrix, with temporal information in obs['time']
 Optional:
-    - Data/genes_queries.txt: genes of interest (one per line or comma-separated)
-    - Data/stimulus_schedule_inference.txt: stimulus values per timepoint (default 0 at the first one, 1 after)
+    - genes_queries (gene_lists sheet): genes of interest (one per line or comma-separated)
+    - stimulus_inference_schedule sheet: stimulus values per timepoint (default 0 at the first one, 1 after)
 
 Output files:
     - Data/data_full.h5ad: dataset restricted to the selected genes
@@ -47,11 +48,11 @@ import pandas as pd
 
 
 def load_queries(p):
-    """Genes of interest: Data/genes_queries.txt (one per line or comma-separated)."""
+    """Genes of interest: genes_queries (gene_lists sheet) (one per line or comma-separated)."""
     path = os.path.join(input_dir(p), 'genes_queries.txt')
     if os.path.isfile(path):
         return read_gene_list(path)
-    print("[select_genes_and_split] No Data/genes_queries.txt: the selection only uses entropy genes")
+    print("[select_genes_and_split] No genes_queries (gene_lists sheet): the selection only uses entropy genes")
     return []
 
 def perturbed_genes(p, names=None):
@@ -155,11 +156,12 @@ def main(argv):
     if change:
         model = _make_model(adata.shape[1])
         queries = load_queries(p)
-        # Literature only with literature_selection and a hard prior (prior 0): budget of free network
-        # parameters instead of genes; otherwise selection on the data only
+        # Literature-reweighted selection with literature_selection, whatever the prior; the prior network is
+        # built along (budget in free network parameters) only for build_prior_network with a hard prior (0)
         prior_pen = model.prior_network_pen
-        use_literature = bool(prior_pen == 0 and model.literature_selection)
-        max_free = model.max_free_params if use_literature else None
+        use_literature = bool(model.literature_selection)
+        build_prior = bool(use_literature and ref and prior_pen == 0)
+        max_free = model.max_free_params if build_prior else None
         budget = f"{max_free} free network parameters" if max_free else f"{model.num_max_genes} genes"
         print(f"[select_genes_and_split] Gene selection: {model.n_query_genes} queries (of {len(queries)}) + "
               f"{model.n_entropy_genes} entropy genes, '{model.network_method}' network and directed Steiner tree "
@@ -172,6 +174,12 @@ def main(argv):
         stim = np.loadtxt(sched_path) if os.path.exists(sched_path) else None
         model._stim_schedule = model._build_stimulus_schedule(tu, stim)
         stim = np.array([model._stim_schedule[t] for t in tu])
+        # Per-sample schedules (sample_id rows of stimulus_inference_schedule): one schedule per sample
+        from CardamomOT.schedules import sample_names
+        names_s = sample_names(adata)
+        model.set_sample_names(names_s)
+        if model._stim_schedule.has_overrides():
+            stim = {None: stim, **{s: np.array([model._stim_schedule.at(t, s) for t in tu]) for s in names_s}}
 
         selected, df_report, net, prior = select_genes(
             adata, queries, model.num_max_genes, n_query=model.n_query_genes, n_entropy=model.n_entropy_genes,
@@ -196,7 +204,7 @@ def main(argv):
         print(f"[select_genes_and_split] Saved gene_selection_report.csv and global_network.npz to {out_dir}")
         genes_list_final = [g for g in genes_list_init if g in set(selected)]
         ref_path = os.path.join(out_dir, 'ref_network.csv')
-        if prior is not None and ref:
+        if prior is not None and build_prior:
             # Literature prior of the selection, in the order of the saved genes
             pos = [selected.index(g) for g in genes_list_final]
             up = [g.upper() for g in genes_list_final]  # infer_network_structure matches upper-case names
@@ -229,7 +237,7 @@ def main(argv):
         times = adata.obs['time'].values if 'time' in adata.obs else np.zeros(adata.n_obs)
 
         # Filter to specified inference times if provided
-        times_file = os.path.join(input_dir(p), 'times_to_inference.txt')
+        times_file = os.path.join(input_dir(p), 'times_inference.txt')
         if os.path.exists(times_file):
             with open(times_file, "r") as f:
                 times_unique = [float(line.strip()) for line in f if line.strip()]

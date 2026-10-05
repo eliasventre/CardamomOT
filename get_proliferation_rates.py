@@ -23,7 +23,7 @@ Data/data.h5ad is assumed to also be present in Data/data_complete.h5ad; the
 converse need not hold). If `Data/data_complete.h5ad` is absent,
 `Data/data.h5ad` is used directly for both scoring and output if it has at
 least MIN_GENES_SCORING (10,000) genes. With fewer, the signatures are not
-scored (warning): the reference rates of Data/proliferation_rates.{csv,txt},
+scored (warning): the reference rates of the proliferation_rates sheet,
 if given, are assigned uniformly per cell type; otherwise no rate is assigned.
 
 Usage:
@@ -56,8 +56,8 @@ Optional input files:
       expression — see CardamomOT.tools.estimate_proliferation. Pass
       an empty file (or set senescence_gating = False) to disable this and
       recover the plain birth - death estimate.
-    - Data/proliferation_rates.csv|txt: two columns, no header
-      (cell_type, net_rate) — anchors the literature estimate's per-cell-type
+    - sheet proliferation_rates of Data/CardamomOT_inputs.xlsx: cell_type, net_rate_per_hour
+      anchors the literature estimate's per-cell-type
       mean to a trusted population-level rate. Grouping uses
       `adata.obs['cell_type_proliferation']` if present, else
       `cell_type_transition`, else `cell_type`; if no grouping is found or
@@ -104,7 +104,7 @@ def assign_proliferation_rates(adata, prolif_path, species='human', proliferatio
     birth - death estimate.
 
     If `prolif_path` points to a per-cell-type reference table
-    (Data/proliferation_rates.csv or .txt, two columns: cell_type, rate), the
+    (sheet proliferation_rates: cell_type, rate), the
     literature estimate is anchored so its mean matches the reference rate
     within each cell type, keeping per-cell heterogeneity from the
     signature. Grouping uses `adata.obs['cell_type_proliferation']` if
@@ -129,7 +129,7 @@ def assign_proliferation_rates(adata, prolif_path, species='human', proliferatio
 
     adata.obs['proliferation_net_rate'] = net_lit
     if prolif_path is None:
-        print(f"{prefix} No Data/proliferation_rates.{{csv,txt}} found; "
+        print(f"{prefix} No proliferation_rates sheet filled; "
               "using literature-only proliferation rate estimate")
         return
     anchors = read_anchors(adata, prolif_path, "using unanchored literature estimate")
@@ -191,7 +191,7 @@ def add_stimulus_effects(adata_target, adata_score, p):
 
 def read_anchors(adata, prolif_path, fallback):
     """
-    Reference rates per cell type (Data/proliferation_rates.{csv,txt}: cell_type, rate per hour),
+    Reference rates per cell type (sheet proliferation_rates: cell_type, rate per hour),
     grouped by adata.obs['cell_type_proliferation'], else 'cell_type_transition', else 'cell_type'.
     Returns (labels per cell, {cell type: rate}, column) or None (message ending with fallback)
     when no grouping exists or a cell type has no rate (partial anchoring is worse than none).
@@ -289,7 +289,7 @@ def main(argv):
             print("[get_proliferation_rates] Warning: keeping the existing adata.obs['proliferation_net_rate'] "
                   "(computed beforehand, e.g. by another method)")
         else:
-            print("[get_proliferation_rates] No Data/proliferation_rates.{csv,txt}: no rate assigned")
+            print("[get_proliferation_rates] No proliferation_rates sheet filled: no rate assigned")
         adata_target.write(data_path)
         print(f"[get_proliferation_rates] Saved updated dataset to {data_path}")
         return

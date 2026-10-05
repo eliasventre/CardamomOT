@@ -1,5 +1,5 @@
 """
-In-silico perturbations to simulate: Data/KO_OV_Stim_simulate.txt (old name KO_OV_simulate.txt).
+In-silico perturbations to simulate: the perturbation_simulation sheet.
 
 Tab-separated table with a header and the columns KO, OV and optionally STIM1, STIM2... (STIM =
 STIM1); one condition per row, '0' or empty for nothing; '#' lines are comments:
@@ -8,7 +8,7 @@ STIM1); one condition per row, '0' or empty for nothing; '#' lines are comments:
   (inhibited), e.g. 'CHGA+STMN2-' or 'CHGA+,STMN2-'. Its effect on a target is that of an
   interaction of ±(100 + sum of the |interactions| received by the gene), which dominates them
   like a KO/OV, scaled by the value of the stimulus, which follows its own schedule (column k of
-  the perturbation stimuli in Data/stimulus_schedule_simulate.txt, after the inference stimuli;
+  the perturbation stimuli in stimulus_simulation_schedule sheet, after the inference stimuli;
   default 0 at the first simulated time and 1 after). Several stimuli add their effects.
 - RATEk: effect of perturbation stimulus k on the net proliferation rate (same schedule as STIMk,
   which may be empty): comma-separated 'TARGET:delta' entries, delta (per time unit, e.g. -0.01)
@@ -24,18 +24,13 @@ import re
 
 import numpy as np
 
-FILE_NAMES = ('KO_OV_Stim_simulate.txt', 'KO_OV_simulate.txt')
+FILE_NAME = 'KO_OV_Stim_simulate.txt'
 
 
 def find_perturbation_file(data_dir):
-    """Path of the perturbation table (new name first; old name accepted with a warning), or None."""
-    for name in FILE_NAMES:
-        path = os.path.join(data_dir, name)
-        if os.path.exists(path):
-            if name != FILE_NAMES[0]:
-                print(f"[CardamomOT] Warning: reading {name}; rename it {FILE_NAMES[0]}")
-            return path
-    return None
+    """Path of the perturbation table (sheet perturbation_simulation, exported), or None."""
+    path = os.path.join(data_dir, FILE_NAME)
+    return path if os.path.exists(path) else None
 
 
 def parse_gene_with_pct(token):

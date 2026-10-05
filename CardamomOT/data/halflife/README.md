@@ -63,7 +63,7 @@ dataset is therefore put on the scale of its own species' table.
    the human tables.
 5. Otherwise the median of the query species' table is used.
 
-`Data/degradation_rates_report.csv` lists, for each gene of a project, the
+`cardamomOT/degradation_rates_report.csv` lists, for each gene of a project, the
 match, the ortholog, the half-lives, the source used and the genes behind it.
 
 ## Accuracy of the estimation

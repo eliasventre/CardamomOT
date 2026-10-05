@@ -997,7 +997,7 @@ def _perturbation_pages(pdf, R):
     done = [(l, d, A) for l, d, A in R.perturbations if A is not None]
     if not done:
         _error_page(pdf, '3. In-silico perturbations',
-                    'No simulated perturbation found (Data/KO_OV_Stim_simulate.txt absent/empty, or '
+                    'No simulated perturbation found (perturbation_simulation sheet absent/empty, or '
                     'simulate_network_KOV.py + check_KOV_to_sim.py not run with this --stimulus/--prior).')
         return
     sim = R.stages['Simulation']
@@ -1402,7 +1402,7 @@ def _proliferation_pages(pdf, R, D):
         for sp in ('top', 'right'):
             ax.spines[sp].set_visible(False)
 
-        # Table: anchor rate (Data/proliferation_rates) vs prior and learned means
+        # Table: anchor rate (sheet proliferation_rates) vs prior and learned means
         anchors = {}
         pr_path = find_data_file(input_dir(R.p), 'proliferation_rates')
         if pr_path is not None:
@@ -1435,7 +1435,7 @@ def _proliferation_pages(pdf, R, D):
     fig = plt.figure(figsize=A4_LANDSCAPE)
     _page_title(fig, '4. Proliferation — population growth and drivers',
                 'Relative population size from the mean growth factor per interval; '
-                'unless Data/population_sizes is given, its absolute level follows the prior.')
+                'unless the sheet population_sizes is filled, its absolute level follows the prior.')
     gs = gridspec.GridSpec(1, 3, figure=fig, left=0.06, right=0.97, top=0.86, bottom=0.12, wspace=0.35)
     T, N, dt = len(D.tu), D.N, np.diff(D.tu)
     ax = fig.add_subplot(gs[0, 0])
@@ -1735,7 +1735,7 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None, net_
         Stimulus / prior penalisation values of the run (suffix ``stim{stim}_prior{prior}``).
         The stimulus regulator is shown only if ``stim >= 0.5``.
     perturbations : iterable of (label, description, genes)
-        KO/OV conditions from ``Data/KO_OV_Stim_simulate.txt`` (label as in file names,
+        KO/OV conditions from the ``perturbation_simulation`` sheet (label as in file names,
         genes = perturbed gene names, highlighted in the GRN subgraphs).
     out_path : str, optional
         Output PDF path (default: ``<p>/CardamomOT_report_stim{stim}_prior{prior}.pdf``).

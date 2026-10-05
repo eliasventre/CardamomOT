@@ -12,7 +12,7 @@ Usage:
 
 Required input files:
     - Data/data_<split>.h5ad: observed count matrix (wildtype)
-    - Data/KO_OV_Stim_simulate.txt (old name KO_OV_simulate.txt): perturbations
+    - the perturbation_simulation sheet: perturbations
     - cardamomOT/data_prot_simul_KO_*.npy: simulated proteins for each perturbation
     - cardamomOT/data_kon_simul_KO_*.npy: simulated bursting for each perturbation
 

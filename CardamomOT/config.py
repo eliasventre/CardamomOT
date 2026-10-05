@@ -144,7 +144,7 @@ def find_data_file(data_dir: Path, basename: str,
                     extensions: Sequence[str] = (".csv", ".txt")) -> Optional[Path]:
     """
     Look up an optional data file that may be provided as either a .csv or a
-    .txt table (e.g. Data/transition_rates.csv or Data/proliferation_rates.txt).
+    .txt table of the exported inputs (e.g. transition_rates.csv, proliferation_rates.txt).
 
     Args:
         data_dir: Directory to look in (e.g. project_dir / "Data").
@@ -306,15 +306,9 @@ def ensure_raw_counts(adata, label: str = "data"):
 
 
 def find_stimulus_schedule(data_dir) -> Optional[str]:
-    """Stimulus schedule of the inference: Data/stimulus_schedule_inference.txt (old name
-    stimulus_schedule.txt accepted with a warning), or None."""
-    for name in ("stimulus_schedule_inference.txt", "stimulus_schedule.txt"):
-        path = Path(data_dir) / name
-        if path.exists():
-            if name == "stimulus_schedule.txt":
-                print("[CardamomOT] Warning: reading stimulus_schedule.txt; rename it stimulus_schedule_inference.txt")
-            return str(path)
-    return None
+    """Stimulus schedule of the inference (stimulus_schedule_inference.txt of the exported inputs), or None."""
+    path = Path(data_dir) / "stimulus_schedule_inference.txt"
+    return str(path) if path.exists() else None
 
 
 def n_inference_stimuli(data_dir) -> int:
@@ -328,12 +322,11 @@ def n_inference_stimuli(data_dir) -> int:
 
 def simulation_schedule(data_dir, n_stimuli):
     """
-    Stimulus schedules of the simulations, Data/stimulus_schedule_simulate.txt: one row per
+    Stimulus schedules of the simulations, stimulus_schedule_simulate.txt of the exported inputs: one row per
     simulated time, first the n_stimuli columns of the inference stimuli, then one column per
     perturbation stimulus of KO_OV_Stim_simulate.txt (STIM1, STIM2...). Returns (inference
     stimuli (rows, n_stimuli) or None, perturbation stimuli (rows, k) or None). Without file, the
-    inference schedule is used (old stimulus_schedule_simul.txt still read, with a warning) and
-    the perturbation stimuli take their default (0 at the first time, 1 after).
+    inference schedule is used and the perturbation stimuli take their default (0 at the first time, 1 after).
     """
     path = Path(data_dir) / "stimulus_schedule_simulate.txt"
     if path.exists():
@@ -343,17 +336,13 @@ def simulation_schedule(data_dir, n_stimuli):
         print(f"[CardamomOT] Simulation schedule from {path}: {n_stimuli} inference stimuli"
               + (f", {arr.shape[1] - n_stimuli} perturbation stimuli" if arr.shape[1] > n_stimuli else ""))
         return arr[:, :n_stimuli], (arr[:, n_stimuli:] if arr.shape[1] > n_stimuli else None)
-    old = Path(data_dir) / "stimulus_schedule_simul.txt"
-    if old.exists():
-        print("[CardamomOT] Warning: reading stimulus_schedule_simul.txt; rename it stimulus_schedule_simulate.txt")
-        return np.loadtxt(old, ndmin=2), None
     inf = find_stimulus_schedule(data_dir)
     return (np.loadtxt(inf, ndmin=2) if inf is not None else None), None
 
 
 def read_stimulus_targets(data_dir: Path) -> Optional[List[List[str]]]:
     """
-    Possible targets of each stimulus (Data/stimulus_targets.txt or .csv): one column per
+    Possible targets of each stimulus (stimulus_targets.txt of the exported inputs): one column per
     stimulus, in the order of the columns of stimulus_schedule_inference.txt, one gene per row (columns
     separated by tabs, empty cells allowed; with a single stimulus, any separator). '#' starts a
     comment. Returns one gene list per column, or None without file.

@@ -44,8 +44,8 @@ def pipeline_steps(cfg, project=None) -> List[str]:
     if cfg.estimate_proliferation_rates:
         steps.append('get_proliferation_rates')
     steps.append('select_genes_and_split')
-    # The selection writes the literature prior only when it used the literature (hard prior)
-    lit_selection = cfg.select_genes and cfg.prior_network_pen == 0 and cfg.literature_selection
+    # The selection builds the literature prior only with literature_selection and a hard prior
+    lit_selection = cfg.select_genes and cfg.literature_selection and cfg.prior_network_pen == 0
     if cfg.build_prior_network and not lit_selection:
         steps.append('build_reference_network')
     steps += ['get_degradation_rates', 'infer_mixture', 'check_mixture_to_data', 'infer_network_structure',

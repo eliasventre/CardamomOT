@@ -11,8 +11,8 @@ CardamomOT reads a single **AnnData** file (`h5ad` format). The required metadat
 | `adata.obs['time']` | float | Measurement time for each cell. If absent or unique, the data are treated as stationary: gene selection (on cell types only) and mixture inference run, then the pipeline stops — network inference will be handled by CardamomOT-stat (in prep.) |
 | `adata.obs['cell_type']` | str | Cell type label (optional but recommended), used for DE gene selection |
 | `adata.obs['cell_type_selection']` | str | Optional override of `cell_type` for DE gene selection |
-| `adata.obs['cell_type_proliferation']` | str | Optional, only used with `Data/proliferation_rates` to anchor the literature proliferation estimate ([details](advanced.md)) |
-| `adata.obs['cell_type_transition']` | str | Optional, only used with `Data/transition_rates` to structure the OT ([details](advanced.md)) |
+| `adata.obs['cell_type_proliferation']` | str | Optional, only used with sheet `proliferation_rates` to anchor the literature proliferation estimate ([details](advanced.md)) |
+| `adata.obs['cell_type_transition']` | str | Optional, only used with sheet `transition_rates` to structure the OT ([details](advanced.md)) |
 
 `cell_type_proliferation` and `cell_type_transition` may differ (e.g. a finer grouping for proliferation). If only one of them is defined, it is used for both; if neither is, `cell_type` is used. Both anchorings are all-or-nothing: if any cell type is missing from the corresponding file, a warning is printed and the anchoring is skipped for all cells.
 | `adata.X` | matrix | Raw or normalised count matrix |
@@ -57,7 +57,7 @@ Steps (preselected according to the parameters in parentheses):
 | **Cell depth** | Per-cell depth diagnostic | ✓ |
 | Proliferation rates | Net proliferation rate per cell from literature gene signatures (on the full gene set) | `estimate_proliferation_rates` |
 | **Gene selection** | Select genes (`select_genes`); split cells into train/test (`split`, `train_rate`) | ✓ |
-| Network constraint | Build prior network from databases | `build_prior_network`, unless the selection used the literature (`select_genes`, `literature_selection`, `prior_network_pen = 0`) |
+| Network constraint | Build prior network from databases | `build_prior_network`, unless the selection builds the prior (`select_genes`, `literature_selection`, `prior_network_pen = 0`) |
 | **Kinetics** | Assign literature mRNA/protein degradation rates (h⁻¹), species auto-detected | ✓ |
 | **Mixture model** | Fit negative-binomial burst parameters per gene | ✓ |
 | Check mixture | Validate mixture against data | ✓ |
@@ -121,7 +121,7 @@ cardamomot pipeline \
 | `split` (`'train'` / `'full'`), `train_rate` | `'train'`, `0.7` | train/test split of the cells (all steps read `data_<split>.h5ad`) |
 | `select_genes` | `False` | gene selection in `select_genes_and_split` (otherwise all genes kept) |
 | `build_prior_network` | `False` | literature prior: by the selection when it used the literature, else `build_reference_network` |
-| `literature_selection` | `True` | gene selection reweighted by the literature (only with `prior_network_pen = 0`) |
+| `literature_selection` | `True` | gene selection reweighted by the literature, whatever the prior |
 | `estimate_proliferation_rates` | `False` | `get_proliferation_rates` |
 | `run_test` | `False` | `infer_test` + `check_test_to_train` (needs `split = 'train'`) |
 | `simulate_perturbations` | `True` | `simulate_network_KOV` + `check_KOV_to_sim` |

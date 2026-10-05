@@ -16,7 +16,7 @@ Required input files:
     - cardamomOT/adata_{rna_traj,beta,theta,sim}_stim*_prior*.h5ad: from check_sim_to_data.py
     - cardamomOT/inter_simul.npy: inferred network
 Optional:
-    - Data/KO_OV_simulate.txt + cardamomOT/adata_sim_KO_*_stim*_prior*.h5ad: from check_KOV_to_sim.py
+    - perturbation_simulation sheet + cardamomOT/adata_sim_KO_*_stim*_prior*.h5ad: from check_KOV_to_sim.py
     - cardamomOT/adata_prot_{traj,simul}_stim*_prior*.h5ad
 
 Output:

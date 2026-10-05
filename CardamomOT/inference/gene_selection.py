@@ -3,11 +3,16 @@ Gene selection from the whole transcriptome (select_genes_and_split.py, change=1
 
 1. terminal genes, each chosen with a round robin over the groups (each timepoint and each cell
    type against the rest, Wilcoxon on log-normalised counts) so that all groups are covered:
-   - at most n_query genes of Data/genes_queries.txt;
+   - at most n_query genes of genes_queries (gene_lists sheet);
    - at least n_entropy genes among the entropy-selected genes of O. Gandrillon's workflow
      (gandrillon.py: KD and BUB-entropy changes between consecutive timepoints);
 2. a coarse global network on the highly variable genes (+ terminals), built by a network method
    (global_networks: OTVelo-Corr built in, or a custom method of the project);
+With several samples (obs['dataset_id']), the selection runs before the integration, so every dynamic
+signal is computed within each sample: entropy changes, NB basins and Wilcoxon groups per sample (a gene
+informative in one sample is a candidate: union), highly variable genes with the sample as batch, and one
+network per sample turned into edge probabilities against its own nulls, combined with weights
+cells x transitions (consensus of the shared network); literature and Steiner tree on the combination.
 3. a directed Steiner tree rooted at the stimuli reaching the terminals, the remaining budget
    (num_max_genes - terminals) going to intermediate genes on the paths (a path may go through
    several terminals), built greedily by shortest paths on costs -log(|C| / max|C|).
@@ -47,30 +52,37 @@ def _dense(X):
     return X.toarray() if scipy.sparse.issparse(X) else np.asarray(X)
 
 
-def de_groups(adata, genes, cell_type_key=None):
+def de_groups(adata, genes, cell_type_key=None, sample_key='dataset_id'):
     """
     Wilcoxon scores (scanpy rank_genes_groups, log-normalised counts) of the genes for each group
-    against the rest: each timepoint, and each cell type if cell_type_key is given.
-    Returns a DataFrame genes x groups ('time=<t>', '<key>=<c>') of scores and one of adjusted p-values.
+    against the rest: each timepoint, and each cell type if cell_type_key is given, within each sample
+    (obs[sample_key]; sample differences are not taken for dynamics).
+    Returns a DataFrame genes x groups ('time=<t>', '<key>=<c>', prefixed by '<sample>|' with several
+    samples) of scores and one of adjusted p-values.
     """
     import scanpy as sc
-    sub = sc.AnnData(X=_dense(adata[:, genes].X).astype(np.float32), obs=adata.obs.copy())
-    sub.var_names = list(genes)
-    sc.pp.normalize_total(sub, target_sum=1e4)
-    sc.pp.log1p(sub)
+    full = sc.AnnData(X=_dense(adata[:, genes].X).astype(np.float32), obs=adata.obs.copy())
+    full.var_names = list(genes)
+    sc.pp.normalize_total(full, target_sum=1e4)
+    sc.pp.log1p(full)
+    smp = full.obs[sample_key].astype(str).values if sample_key in full.obs else np.zeros(full.n_obs).astype(str)
+    multi = len(np.unique(smp)) > 1
     scores, padj = {}, {}
     keys = [('time', 'time')] + ([(cell_type_key, cell_type_key)] if cell_type_key else [])
-    for key, label in keys:
-        groups = sub.obs[key].astype(str)
-        if groups.nunique() < 2:
-            continue
-        sub.obs['_g'] = pd.Categorical(groups)
-        sc.tl.rank_genes_groups(sub, '_g', method='wilcoxon', n_genes=len(genes))
-        res = sub.uns['rank_genes_groups']
-        for gr in sub.obs['_g'].cat.categories:
-            s = pd.Series(res['scores'][gr], index=res['names'][gr]).reindex(genes)
-            p = pd.Series(res['pvals_adj'][gr], index=res['names'][gr]).reindex(genes)
-            scores[f'{label}={gr}'], padj[f'{label}={gr}'] = s.values, p.values
+    for sample in np.unique(smp):
+        sub = full[smp == sample].copy()
+        prefix = f'{sample}|' if multi else ''
+        for key, label in keys:
+            groups = sub.obs[key].astype(str)
+            if groups.nunique() < 2 or groups.value_counts().min() < 2:
+                continue
+            sub.obs['_g'] = pd.Categorical(groups)
+            sc.tl.rank_genes_groups(sub, '_g', method='wilcoxon', n_genes=len(genes))
+            res = sub.uns['rank_genes_groups']
+            for gr in sub.obs['_g'].cat.categories:
+                s = pd.Series(res['scores'][gr], index=res['names'][gr]).reindex(genes)
+                p = pd.Series(res['pvals_adj'][gr], index=res['names'][gr]).reindex(genes)
+                scores[f'{prefix}{label}={gr}'], padj[f'{prefix}{label}={gr}'] = s.values, p.values
     return pd.DataFrame(scores, index=genes), pd.DataFrame(padj, index=genes)
 
 
@@ -90,6 +102,24 @@ def nb_init_separation(X, times, cell_types=None, n_cells=1024, seuil=0.01, seed
 
     # Serial: a few ms per gene, less than the transfer overhead of parallel tasks
     return _separation_block(Xs, groups, seuil, None if depth is None else np.asarray(depth, dtype=float)[sub])
+
+
+def nb_separation_samples(X, times, cell_types=None, samples=None, n_cells=1024, seuil=0.01, seed=0, depth=None):
+    """
+    nb_init_separation within each sample (before integration, a shift between samples is not a basin),
+    largest value over the samples: a gene with distinct basins in one sample is kept (per-sample mixtures).
+    """
+    if samples is None or len(np.unique(samples)) == 1:
+        return nb_init_separation(X, times, cell_types, n_cells, seuil, seed, depth)
+    out = np.zeros(X.shape[1])
+    for s in np.unique(samples):
+        m = np.asarray(samples) == s
+        ct = None if cell_types is None else np.asarray(cell_types)[m]
+        if len(np.unique(times[m])) < 2 and (ct is None or len(np.unique(ct)) < 2):
+            continue
+        out = np.maximum(out, nb_init_separation(X[m], times[m], ct, n_cells, seuil, seed,
+                                                 None if depth is None else np.asarray(depth)[m]))
+    return out
 
 
 def _separation_block(Xb, groups, seuil, s=None):
@@ -367,6 +397,7 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
     BUB-entropy change between consecutive timepoints (Gandrillon MDE, bits) must reach
     min_entropy_change, and the NB-mixture initialization (nb_init_separation, n_cells_mixture
     cells per time, seuil_mixture) must separate its extreme modes by min_nb_separation.
+    stim: (n_times, n_stimuli) schedule on the sorted timepoints, or {sample: schedule} (None: default).
     forced_genes: genes always selected (required terminals, exempt from the variability floor),
     e.g. those perturbed in KO_OV_Stim_simulate.txt. stimulus_targets: one gene list per stimulus
     (read_stimulus_targets): stimulus edges are restricted to its listed genes (no constraint if
@@ -401,44 +432,56 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
     u_names = names[universe]
     times = adata.obs['time'].values.astype(float) if 'time' in adata.obs else np.zeros(adata.n_obs)
     tu = np.sort(np.unique(times))
-    # Gene scores of the whole universe (entropy, KD, variability) on at most n_cells_entropy cells per time
+    # Samples (obs[sample_key]): selection before the integration, so dynamics are scored within each sample
+    smp = adata.obs[sample_key].astype(str).values if sample_key in adata.obs else np.full(adata.n_obs, '0')
+    samples = list(np.unique(smp))
+    multi = len(samples) > 1
+    dyn = [s_ for s_ in samples if len(np.unique(times[smp == s_])) >= 2]  # samples with a dynamics
+    # Gene scores of the whole universe (entropy, KD, variability) on at most n_cells_entropy cells per (time, sample)
     rng0 = np.random.default_rng(seed)
-    sub = np.sort(np.concatenate([rng0.choice(np.flatnonzero(times == t), min(n_cells_entropy, int(np.sum(times == t))),
-                                              replace=False) for t in tu]))
+    sub = np.sort(np.concatenate([rng0.choice(i, min(n_cells_entropy, len(i)), replace=False)
+                                  for i in (np.flatnonzero((times == t) & (smp == s_)) for s_ in samples for t in tu)
+                                  if len(i)]))
     # Depth factors (estimate_cell_depth.py): scores on counts at the reference depth
     depth = (np.asarray(adata.obs['depth_factor'].values, dtype=float)
              if (use_depth_factor and 'depth_factor' in adata.obs) else None)
     X = _dense(Xa[sub][:, universe]).astype(np.float32)
     if depth is not None:
         X = X / depth[sub, None].astype(np.float32)
-    t_sub = times[sub]
+    t_sub, s_sub = times[sub], smp[sub]
     cts = adata.obs[cell_type_key].astype(str).values if cell_type_key else None
     if verb:
         print(f"[gene_selection] Universe: {len(u_names)} genes (protein-coding, no mito/ribo, >= 3 cells); "
-              f"gene scores on {len(sub)} cells (<= {n_cells_entropy} per time)"
+              f"gene scores on {len(sub)} cells (<= {n_cells_entropy} per time"
+              + (f" and sample; {len(samples)} samples scored separately" if multi else "") + ")"
               + ("; counts at the reference depth (obs['depth_factor'])" if depth is not None else ""))
 
     # Variability floor: Gandrillon entropy change, then distinct basins at the NB-mixture initialization
     kd = mde = None
     eligible = np.ones(len(u_names), bool)
-    if len(tu) >= 2:
-        kd, mde, _ = gandrillon_scores(X, t_sub, n_cells=n_cells_entropy, rng=seed)
+    if dyn:
+        # Transitions of every sample stacked: a gene changing in one sample is a candidate (union)
+        parts = [gandrillon_scores(X[s_sub == s_], t_sub[s_sub == s_], n_cells=n_cells_entropy, rng=seed) for s_ in dyn]
+        kd, mde = np.vstack([q[0] for q in parts]), np.vstack([q[1] for q in parts])
         eligible &= mde.max(axis=0) >= min_entropy_change
     n_mde = int(eligible.sum())
     # Network universe: highly variable genes among those above the entropy floor
     hvg = np.zeros(len(u_names), bool)
-    if len(tu) >= 2:
+    if dyn:
         tmp = sc.AnnData(X=np.log1p(X[:, eligible]))
-        sc.pp.highly_variable_genes(tmp, n_top_genes=min(n_hvg, int(eligible.sum())), flavor='seurat')
+        tmp.obs['sample'] = s_sub
+        # Several samples: variability within each sample (batch_key), not between them
+        sc.pp.highly_variable_genes(tmp, n_top_genes=min(n_hvg, int(eligible.sum())), flavor='seurat',
+                                    batch_key='sample' if multi else None)
         hvg[np.flatnonzero(eligible)[tmp.var['highly_variable'].values]] = True
-    nb_check = len(tu) >= 2 or (cts is not None and len(np.unique(cts)) > 1)
+    nb_check = bool(dyn) or (cts is not None and len(np.unique(cts)) > 1)
     if nb_check:
         # NB basins checked here on the candidate terminals only; the genes the Steiner tree or the
         # closure would add are checked on demand (most network genes are never selected)
         ent0 = set(u_names[gandrillon_genes(kd, mde, top_n=n_top_entropy)]) if kd is not None else set()
         cand = np.flatnonzero(eligible & np.isin(u_names, list(ent0) + list(queries)))
-        d = nb_init_separation(_dense(Xa[:, np.flatnonzero(universe)[cand]]), times, cts, n_cells_mixture,
-                               seuil_mixture, seed, depth)
+        d = nb_separation_samples(_dense(Xa[:, np.flatnonzero(universe)[cand]]), times, cts, smp if multi else None,
+                                  n_cells_mixture, seuil_mixture, seed, depth)
         eligible[cand[d < min_nb_separation]] = False
     # Forced genes stay selectable whatever their variability
     below = [g for g in forced if g in set(u_names[~eligible])]
@@ -464,13 +507,13 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
 
     # Entropy candidates (Gandrillon) and DE status of all candidates
     ent_candidates = []
-    if len(tu) >= 2:
+    if kd is not None:
         ent_candidates = [u_names[i] for i in gandrillon_genes(kd, mde, top_n=n_top_entropy)]
         if verb:
             print(f"[gene_selection] Entropy genes (KD top {n_top_entropy} & MDE top {n_top_entropy} per transition): "
                   f"{len(ent_candidates)}")
     pool = list(dict.fromkeys(queries + ent_candidates))
-    scores, padj = de_groups(ad_u, pool, cell_type_key) if pool else (pd.DataFrame(), pd.DataFrame())
+    scores, padj = de_groups(ad_u, pool, cell_type_key, sample_key) if pool else (pd.DataFrame(), pd.DataFrame())
 
     # Round robins over groups: the first n_query / n_entropy are required, the rest fill the budget
     q_all = round_robin(queries, scores, len(queries))
@@ -490,7 +533,7 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
             print(f"[gene_selection] Warning: only {len(e_req)} entropy genes available (n_entropy_genes = {n_entropy})")
 
     net, sel, rows, lg = None, list(required), {}, None
-    if len(tu) < 2:
+    if not dyn:
         if verb:
             print("[gene_selection] Single timepoint: no network, required terminals only")
     else:
@@ -499,30 +542,43 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
         listed = [g for col in (stimulus_targets or []) for g in col]
         keep = hvg | np.isin(u_names, pool) | np.isin(u_names, listed)
         net_genes = list(u_names[keep])
-        # Network and its nulls on at most n_cells_network cells per (time, sample)
-        smp = adata.obs[sample_key].values if sample_key in adata.obs else np.zeros(adata.n_obs)
+        # One network per sample with its own nulls (at most n_cells_network cells per time), turned into edge
+        # probabilities, then combined with weights cells x transitions (consensus of a shared network)
         rng1 = np.random.default_rng(seed)
-        cells = np.sort(np.concatenate([
-            rng1.choice(i, min(n_cells_network, len(i)), replace=False)
-            for i in (np.flatnonzero((times == t) & (smp == s)) for t in tu for s in np.unique(smp)) if len(i)]))
-        ad_net = adata[cells, net_genes].copy()
-        if depth is not None:  # network on counts at the reference depth
-            ad_net.X = _dense(ad_net.X).astype(np.float32) / depth[cells, None].astype(np.float32)
-        if verb:
-            print(f"[gene_selection] Global network '{network_method}' on {len(net_genes)} genes and {len(cells)} cells "
-                  f"(<= {n_cells_network} per time and sample), and its null network(s) ({null_network})")
-        run = lambda ad_: build_global_network(network_method, ad_, stim, seed=seed, params=network_params,
-                                               project_path=project_path)
-        C = run(ad_net)
-        C_time = run(permuted_counts(ad_net, True, seed)) if null_network in ('hybrid', 'within_time') else None
-        C_all = run(permuted_counts(ad_net, False, seed)) if null_network in ('hybrid', 'all_cells') else None
-        C_null = C_time if C_time is not None else C_all
-        C_null_stim = C_all if C_all is not None else C_time
-        ns = C.shape[0] - len(net_genes)
-        W = edge_probabilities(C, C_null, ns, C_null_stim)
+        parts, weights = [], []
+        for s_ in dyn:
+            cells = np.sort(np.concatenate([rng1.choice(i, min(n_cells_network, len(i)), replace=False)
+                                            for i in (np.flatnonzero((times == t) & (smp == s_)) for t in tu) if len(i)]))
+            ad_net = adata[cells, net_genes].copy()
+            if depth is not None:  # network on counts at the reference depth
+                ad_net.X = _dense(ad_net.X).astype(np.float32) / depth[cells, None].astype(np.float32)
+            ts = np.sort(np.unique(times[cells]))
+            st = _sample_stimulus(stim, s_, len(tu))
+            st = None if st is None else st[np.searchsorted(tu, ts)]
+            if verb:
+                print(f"[gene_selection] Global network '{network_method}' on {len(net_genes)} genes and {len(cells)} "
+                      f"cells (<= {n_cells_network} per time" + (f", sample {s_}" if multi else "")
+                      + f"), and its null network(s) ({null_network})")
+            run = lambda ad_: build_global_network(network_method, ad_, st, seed=seed, params=network_params,
+                                                   project_path=project_path)
+            C_s = run(ad_net)
+            C_time = run(permuted_counts(ad_net, True, seed)) if null_network in ('hybrid', 'within_time') else None
+            C_all = run(permuted_counts(ad_net, False, seed)) if null_network in ('hybrid', 'all_cells') else None
+            C_null_s = C_time if C_time is not None else C_all
+            C_null_stim_s = C_all if C_all is not None else C_time
+            ns = C_s.shape[0] - len(net_genes)
+            parts.append((C_s, C_null_s, C_null_stim_s, edge_probabilities(C_s, C_null_s, ns, C_null_stim_s)))
+            weights.append(float(np.sum(smp == s_)) * (len(ts) - 1))
+        w = np.array(weights) / np.sum(weights)
+        C, C_null, C_null_stim, W = (sum(wi * q[k] for wi, q in zip(w, parts)) for k in range(4))
+        if verb and multi:
+            print("[gene_selection] Edge probabilities combined over the samples, weights (cells x transitions): "
+                  + ', '.join(f'{s_} {wi:.2f}' for s_, wi in zip(dyn, w)))
         node_names = [f'Stimulus{"" if ns == 1 else " " + str(i + 1)}' for i in range(ns)] + net_genes
         idx = {g: ns + i for i, g in enumerate(net_genes)}
         net = dict(C=C, C_null=C_null, C_null_stim=C_null_stim, W=W, genes=np.array(node_names))
+        if multi:
+            net.update(W_samples=np.stack([q[3] for q in parts]), samples=np.array(dyn), sample_weights=w)
         lg = _literature(names, species, literature, literature_resources, verb)
         if lg is not None:
             # Feasibility with any intermediate (the selection is not known yet)
@@ -560,8 +616,8 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
                 new = [v for v in res[0] if v >= ns and v not in checked] if nb_check else []
                 if not new:
                     return res
-                d = nb_init_separation(_dense(adata[:, [node_names[v] for v in new]].X), times, cts, n_cells_mixture,
-                                       seuil_mixture, seed, depth)
+                d = nb_separation_samples(_dense(adata[:, [node_names[v] for v in new]].X), times, cts,
+                                          smp if multi else None, n_cells_mixture, seuil_mixture, seed, depth)
                 checked.update(new)
                 bad = [v for v, dv in zip(new, d) if dv < min_nb_separation]
                 if not bad:
@@ -594,10 +650,11 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
                   f"{closure_fraction(W, terminals_idx, list(range(ns)), min_edge_prob) * 100:.0f}% for the required "
                   f"terminals alone, {closure_fraction(W, chosen_set, list(range(ns)), min_edge_prob) * 100:.0f}% for the "
                   f"final selection ({len(closure)} closure regulators)")
-    if lg is None and len(tu) < 2:
+    if lg is None and not dyn:
         lg = _literature(names, species, literature, literature_resources, verb)
     prior = None
-    n_stim = 0 if stim is None else np.asarray(stim).reshape(len(tu), -1).shape[1]
+    st0 = _sample_stimulus(stim, samples[0], len(tu))
+    n_stim = 0 if st0 is None else st0.shape[1]
     if lg is not None:
         # Prior of the final selection: intermediates outside it (observed ones are network chains)
         prior = lg.prior(sel, literature_depth)
@@ -622,6 +679,17 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
               f"({int((~report['required'] & r.isin(['query', 'entropy'])).sum())} extra terminals); "
               f"{int((~report['connected'] & report['required']).sum())} required terminals not connected")
     return sel, report, net, prior
+
+
+def _sample_stimulus(stim, sample, n_times):
+    """(n_times, n_stimuli) stimulus schedule of a sample: stim is shared (array) or per sample ({sample: array})."""
+    if stim is None:
+        return None
+    if isinstance(stim, dict):
+        default = stim.get(None)
+        st = stim.get(str(sample), default)
+        return None if st is None else np.asarray(st, dtype=float).reshape(n_times, -1)
+    return np.asarray(stim, dtype=float).reshape(n_times, -1)
 
 
 def free_parameters(prior, ns):
