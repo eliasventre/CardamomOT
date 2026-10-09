@@ -21,10 +21,33 @@ import numpy as np
 from CardamomOT import NetworkModel as NetworkModel_beta
 from CardamomOT.inputs import input_dir
 from CardamomOT.run_options import parse_step_options, settings, configure, configure_simulation
-from CardamomOT.config import n_inference_stimuli, simulation_schedule
+from CardamomOT.config import n_inference_stimuli, simulation_schedule, schedule_reference_times
 import anndata as ad
 import os
 import torch
+
+def attach_proliferation(model, p, tag='[simulate_network]'):
+    """Proliferation MLP (prolif_network.pt, one or two heads) and effects of the inference stimuli on the net
+    rate attached to model: branching simulation (and birth rate of the dilution) as in simulate_network."""
+    prolif_path = os.path.join(p, 'cardamomOT', 'prolif_network.pt')
+    n_prot_path = os.path.join(p, 'cardamomOT', 'prolif_network_n_proteins.npy')
+    if not (os.path.exists(prolif_path) and os.path.exists(n_prot_path)):
+        print(f"{tag} Warning: simulate_with_proliferation = True but prolif_network.pt not found; "
+              "run infer_network_simul.py with simulate_with_proliferation = True first")
+        return False
+    from CardamomOT.inference.proliferations import load_proliferation_mlp
+    # One head (net rate) or two (birth, death); older networks keep identity input scaling
+    model.prolif_network = load_proliferation_mlp(prolif_path, int(np.load(n_prot_path)[0]))
+    model.simulate_with_proliferation = True
+    stim_pkl = os.path.join(p, 'cardamomOT', 'stimulus_rates.pkl')
+    if os.path.exists(stim_pkl):
+        import pickle
+        model.stimulus_rate_model = pickle.load(open(stim_pkl, 'rb'))
+        print(f"{tag} Effects of the inference stimuli on the net rate (perturbation_inference) "
+              "applied with the simulated schedule")
+    print(f"{tag} Loaded proliferation network — branching simulation enabled")
+    return True
+
 
 def load_simulation_model(p, opts, adata, tag='[simulate_network]'):
     """NetworkModel with the inferred simulation parameters of the project (and the proliferation MLP if
@@ -43,7 +66,7 @@ def load_simulation_model(p, opts, adata, tag='[simulate_network]'):
         model.basal = np.load(os.path.join(p, 'cardamomOT', 'basal_simul.npy'))
         model.inter = np.load(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))
         # Validate n_stimuli against loaded inter (authoritative for simulation)
-        n_stimuli_inter = model.inter.shape[0] - adata.shape[1]
+        n_stimuli_inter = model.inter.shape[-2] - adata.shape[1]  # inter: ([n_samples,] G_tot, G_tot, n_networks)
         if n_stimuli_inter != model.n_stimuli:
             print(f"{tag} Warning: correcting n_stimuli from {model.n_stimuli} "
                   f"to {n_stimuli_inter} based on loaded inter_simul.npy")
@@ -94,27 +117,7 @@ def load_simulation_model(p, opts, adata, tag='[simulate_network]'):
 
     # Load proliferation network if requested
     if simulate_with_proliferation:
-        prolif_path = os.path.join(p, 'cardamomOT', 'prolif_network.pt')
-        n_prot_path = os.path.join(p, 'cardamomOT', 'prolif_network_n_proteins.npy')
-        if os.path.exists(prolif_path) and os.path.exists(n_prot_path):
-            from CardamomOT.inference.proliferations import ProliferationMLP
-            n_proteins = int(np.load(n_prot_path)[0])
-            prolif_net = ProliferationMLP(n_proteins)
-            # strict=False: networks saved before input standardisation keep identity scaling
-            prolif_net.load_state_dict(torch.load(prolif_path, map_location='cpu', weights_only=True), strict=False)
-            prolif_net.eval()
-            model.prolif_network = prolif_net
-            model.simulate_with_proliferation = True
-            stim_pkl = os.path.join(p, 'cardamomOT', 'stimulus_rates.pkl')
-            if os.path.exists(stim_pkl):
-                import pickle
-                model.stimulus_rate_model = pickle.load(open(stim_pkl, 'rb'))
-                print(f"{tag} Effects of the inference stimuli on the net rate (perturbation_inference) "
-                      "applied with the simulated schedule")
-            print(f"{tag} Loaded proliferation network — branching simulation enabled")
-        else:
-            print(f"{tag} Warning: simulate_with_proliferation = True but prolif_network.pt not found; "
-                  "run infer_network_simul.py with simulate_with_proliferation = True first")
+        attach_proliferation(model, p, tag)
 
     return model, times
 
@@ -142,13 +145,14 @@ def main(argv):
         sys.exit(1)
 
     # Inference stimuli in simulation: first columns of stimulus_schedule_simulate.txt, else inference schedule
-    stim_sched, _ = simulation_schedule(input_dir(p), n_inference_stimuli(input_dir(p)))
+    stim_sched, _, rows_t = simulation_schedule(input_dir(p), n_inference_stimuli(input_dir(p)), with_times=True)
     model, times = load_simulation_model(p, opts, adata)
     configure_simulation(model, opts, adata)  # per-sample schedules of the simulation
 
-    # Simulate network dynamics
+    # Simulate network dynamics (default schedule; the scenarios are simulated by simulate_network_KOV)
     print("[simulate_network] Starting network simulation...")
-    model.simulate_network(times, stimulus_schedule=stim_sched)
+    model.simulate_network(times, stimulus_schedule=stim_sched,
+                           schedule_times=None if rows_t is None else schedule_reference_times(rows_t, times))
     print("[simulate_network] Simulation completed")
 
     # Save simulation results

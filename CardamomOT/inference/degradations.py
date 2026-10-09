@@ -17,6 +17,7 @@ import logging
 from typing import Any
 
 from CardamomOT.logging import get_logger
+from .sampling import stratified_choice
 
 # Initialize module-level logger
 logger = get_logger(__name__)
@@ -68,6 +69,12 @@ def _ks_sample(ks, s_idx):
     return ks[min(s_idx, ks.shape[0] - 1)] if ks.ndim == 3 else ks
 
 
+def _theta_sample(theta_inter, s_idx):
+    """Interactions (G, G, n_nets) of sample s_idx: per-sample (S, G, G, n_nets) when 4-D (network conditions), else shared."""
+    theta_inter = np.asarray(theta_inter)
+    return theta_inter[min(s_idx, theta_inter.shape[0] - 1)] if theta_inter.ndim == 4 else theta_inter
+
+
 def build_kon_fn(ks, theta_inter, bias, device="cpu"):
     """
     Return a function kon(X_numpy_or_torch) -> numpy array (batch, G)
@@ -106,285 +113,15 @@ def build_kon_fn(ks, theta_inter, bias, device="cpu"):
     return kon
 
 
-# ---------------------------------------------------------------------------
-# MLP
-# ---------------------------------------------------------------------------
-
-# def nb_log_likelihood_stable(
-#     k: torch.Tensor,
-#     mu: torch.Tensor,
-#     r: torch.Tensor,
-# ) -> torch.Tensor:
-#     """
-#     NB log-likelihood, paramétrisation mean/dispersion.
-#     Stable numériquement grâce aux log directs.
-#     variance = mu + mu²/r  (r → ∞ : Poisson)
-#     """
-#     log_p = (
-#         torch.lgamma(k + r)
-#         - torch.lgamma(r)
-#         - torch.lgamma(k + 1)
-#         + r * (torch.log(r) - torch.log(r + mu))
-#         + k * (torch.log(mu) - torch.log(r + mu))
-#     )
-#     return log_p.sum()
-
-
-# class KonCorrectionMLP(nn.Module):
-#     """
-#     Learns delta_mu = kon_harissa / kon_beta from [y_prot, kon_beta].
-
-#     At init: delta_mu = 1 everywhere (prior, no correction).
-
-#     Call directly with numpy:
-#         ratio = mlp(y_prot, kon_beta_genes)   # np.ndarray (N, G_genes)
-#     """
-
-#     def __init__(
-#         self,
-#         G_tot: int,
-#         G_genes: int,
-#         hidden_dim: int = 64,
-#         n_layers: int = 2,
-#     ) -> None:
-#         super().__init__()
-#         self.G_tot   = G_tot
-#         self.G_genes = G_genes
-
-#         input_dim = G_tot + G_genes
-
-#         trunk: list[nn.Module] = [nn.Linear(input_dim, hidden_dim), nn.Tanh()]
-#         for _ in range(n_layers - 1):
-#             trunk += [nn.Linear(hidden_dim, hidden_dim), nn.Tanh()]
-#         self.trunk = nn.Sequential(*trunk)
-
-#         for layer in self.trunk:
-#             if isinstance(layer, nn.Linear):
-#                 nn.init.xavier_uniform_(layer.weight, gain=0.1)
-#                 nn.init.zeros_(layer.bias)
-
-#         self.head = nn.Linear(hidden_dim, G_genes)
-#         nn.init.zeros_(self.head.weight)
-#         nn.init.constant_(self.head.bias, 0.541)  # softplus(0.541) ≈ 1.0
-
-#     def _forward_tensor(
-#         self, y_prot: torch.Tensor, kon_beta: torch.Tensor
-#     ) -> torch.Tensor:
-#         x = torch.cat([y_prot, kon_beta], dim=-1)
-#         return torch.nn.functional.softplus(self.head(self.trunk(x)))
-
-#     def forward(self, y_prot: np.ndarray, kon_beta: np.ndarray) -> np.ndarray:
-#         """
-#         Prédit delta_mu = kon_harissa / kon_beta.
-
-#         Args:
-#             y_prot   : (N, G_tot)   ou (G_tot,)
-#             kon_beta : (N, G_genes) ou (G_genes,)   colonnes ns: seulement
-
-#         Returns:
-#             delta_mu : (N, G_genes) ou (G_genes,)   toujours > 0
-#         """
-#         squeeze = y_prot.ndim == 1
-#         X  = torch.tensor(np.atleast_2d(y_prot).astype(np.float32))
-#         kb = torch.tensor(np.atleast_2d(kon_beta).astype(np.float32))
-
-#         with torch.no_grad():
-#             delta_mu = self._forward_tensor(X, kb)
-
-#         result = delta_mu.numpy()
-#         return result[0] if squeeze else result
-
-
-# def train_kon_correction_mlp(
-#     y_prot: np.ndarray,
-#     kon_harissa: np.ndarray,
-#     kon_beta: np.ndarray,
-#     ns: int,
-#     hidden_dim: int = 64,
-#     n_layers: int = 2,
-#     n_epochs: int = 1000,
-#     lr: float = 1e-2,
-#     device: str = "cpu",
-#     seuil: float = 1e-8,
-#     fixed_r: float = 10.0,    # grand → proche Poisson, pas appris
-# ) -> KonCorrectionMLP:
-#     """
-#     Maximise la NB log-likelihood avec r fixe (proche Poisson) :
-
-#         kon_harissa_g | X  ~  NB( mean = kon_beta_g * delta_mu_g(X), r=fixed_r )
-
-#     Le log dans la NB-NLL écrase naturellement les grandes valeurs
-#     et force le réseau à expliquer la moyenne plutôt que la variance.
-#     """
-#     N, G_tot = y_prot.shape
-#     G_genes  = G_tot - ns
-
-#     hidden_dim = max(hidden_dim, G_tot) 
-
-#     X_t  = torch.tensor(y_prot.astype(np.float32),               device=device)
-#     kb_t = torch.tensor(kon_beta[:, ns:].astype(np.float32),     device=device).clamp(seuil, None)
-#     kh_t = torch.tensor(kon_harissa[:, ns:].astype(np.float32),  device=device).clamp(seuil, None)
-#     r    = torch.full_like(kh_t, fixed_r)   # constante, pas de grad
-
-#     mlp = KonCorrectionMLP(G_tot, G_genes, hidden_dim, n_layers).to(device)
-#     optimizer = torch.optim.Adam(mlp.parameters(), lr=lr)
-
-#     for epoch in range(n_epochs):
-#         optimizer.zero_grad()
-#         delta_mu = mlp._forward_tensor(X_t, kb_t)
-#         mu       = kb_t * delta_mu
-#         loss     = -nb_log_likelihood_stable(kh_t, mu, r)
-#         loss.backward()
-#         optimizer.step()
-
-#         if epoch % 1000 == 0:
-#             with torch.no_grad():
-#                 rmse = ((delta_mu * kb_t - kh_t) ** 2).mean().item() ** 0.5
-#             print(f"epoch {epoch:5d}  NB-NLL/obs = {loss.item()/(N*G_genes):.4f}  RMSE(ratio) = {rmse:.4f}")
-
-#     return mlp.cpu().eval()
-
-from joblib import Parallel, delayed
-from .seeding import seeded_call, task_seed
-from .sampling import stratified_choice
-
-def _train_single_gene(
-    g_idx: int,
-    P_g: np.ndarray,       # (N,) protéine du gène g
-    kb_g: np.ndarray,      # (N,) kon_beta du gène g
-    kh_g: np.ndarray,      # (N,) kon_harissa du gène g
-    hidden_dim: int,
-    n_epochs: int,
-    lr: float,
-    fixed_r: float,
-    seuil: float,
-) -> np.ndarray:
-    """Entraîne un MLP pour un seul gène, retourne ses poids."""
-    import torch
-    import torch.nn as nn
-
-    P_t  = torch.tensor(P_g.astype(np.float32)).unsqueeze(-1)   # (N, 1)
-    kb_t = torch.tensor(kb_g.astype(np.float32)).unsqueeze(-1).clamp(seuil, None)  # (N, 1)
-    kh_t = torch.tensor(kh_g.astype(np.float32)).clamp(seuil, None)   # (N,)
-    r    = torch.full_like(kh_t, fixed_r)
-
-    x = torch.cat([P_t, kb_t], dim=-1)  # (N, 2)
-
-    W1 = nn.Parameter(torch.empty(2, hidden_dim))
-    b1 = nn.Parameter(torch.zeros(hidden_dim))
-    W2 = nn.Parameter(torch.zeros(hidden_dim, 1))
-    b2 = nn.Parameter(torch.full((1,), 0.541))
-    nn.init.xavier_uniform_(W1, gain=0.1)
-
-    optimizer = torch.optim.Adam([W1, b1, W2, b2], lr=lr)
-
-    for _ in range(n_epochs):
-        optimizer.zero_grad()
-        h       = torch.tanh(x @ W1 + b1)              # (N, hidden)
-        out     = torch.nn.functional.softplus(h @ W2 + b2).squeeze(-1)  # (N,)
-        mu      = (kb_t.squeeze(-1) * out).clamp(seuil)
-        log_p   = (
-            torch.lgamma(kh_t + r) - torch.lgamma(r) - torch.lgamma(kh_t + 1)
-            + r * (torch.log(r) - torch.log(r + mu))
-            + kh_t * (torch.log(mu) - torch.log(r + mu))
-        )
-        loss = -log_p.sum()
-        loss.backward()
-        optimizer.step()
-
-    return W1.detach(), b1.detach(), W2.detach(), b2.detach()
-
-
-class KonCorrectionMLP(nn.Module):
-    """
-    G_genes MLPs indépendants entraînés en parallèle via joblib.
-    Gène i prend [P_i, kon_beta_i] → delta_mu_i.
-    At init: delta_mu = 1 everywhere.
-    """
-
-    def __init__(self, G_tot: int, G_genes: int, hidden_dim: int = 8) -> None:
-        super().__init__()
-        self.G_tot    = G_tot
-        self.G_genes  = G_genes
-        self.ns       = G_tot - G_genes
-        self.hidden_dim = hidden_dim
-
-        # stocke les poids comme buffers après entraînement
-        self.W1 = nn.Parameter(torch.zeros(G_genes, 2, hidden_dim))
-        self.b1 = nn.Parameter(torch.zeros(G_genes, hidden_dim))
-        self.W2 = nn.Parameter(torch.zeros(G_genes, hidden_dim, 1))
-        self.b2 = nn.Parameter(torch.full((G_genes, 1), 0.541))
-
-    def _forward_tensor(
-        self, y_prot: torch.Tensor, kon_beta: torch.Tensor
-    ) -> torch.Tensor:
-        ns = self.ns
-        P  = y_prot[:, ns:]                      # (N, G_genes)
-        x  = torch.stack([P, kon_beta], dim=-1)  # (N, G_genes, 2)
-        x  = x.permute(1, 0, 2)                  # (G_genes, N, 2)
-        h   = torch.tanh(torch.bmm(x, self.W1) + self.b1.unsqueeze(1))
-        out = torch.bmm(h, self.W2) + self.b2.unsqueeze(1)
-        return torch.nn.functional.softplus(out.squeeze(-1).permute(1, 0))
-
-    def forward(self, y_prot: np.ndarray, kon_beta: np.ndarray) -> np.ndarray:
-        squeeze = y_prot.ndim == 1
-        X  = torch.tensor(np.atleast_2d(y_prot).astype(np.float32))
-        kb = torch.tensor(np.atleast_2d(kon_beta).astype(np.float32))
-        with torch.no_grad():
-            delta_mu = self._forward_tensor(X, kb)
-        result = delta_mu.numpy()
-        return result[0] if squeeze else result
-
-
-def train_kon_correction_mlp(
-    y_prot: np.ndarray,
-    kon_harissa: np.ndarray,
-    kon_beta: np.ndarray,
-    ns: int,
-    hidden_dim: int = 8, 
-    n_epochs: int = 1000,
-    lr: float = 1e-2,
-    seuil: float = 1e-8,
-    fixed_r: float = 10.0,
-    n_jobs: int = -1,
-    seed=None,
-) -> KonCorrectionMLP:
-
-    N, G_tot = y_prot.shape
-    G_genes  = G_tot - ns
-
-    P_all  = y_prot[:, ns:]          # (N, G_genes)
-    kb_all = kon_beta[:, ns:]        # (N, G_genes)
-    kh_all = kon_harissa[:, ns:]     # (N, G_genes)
-
-    results = Parallel(n_jobs=n_jobs)(
-        delayed(seeded_call)(
-            task_seed(seed, g), _train_single_gene,
-            g, P_all[:, g], kb_all[:, g], kh_all[:, g],
-            hidden_dim, n_epochs, lr, fixed_r, seuil
-        )
-        for g in range(G_genes)
-    )
-
-    mlp = KonCorrectionMLP(G_tot, G_genes, hidden_dim)
-    for g, (W1, b1, W2, b2) in enumerate(results):
-        mlp.W1.data[g] = W1
-        mlp.b1.data[g] = b1
-        mlp.W2.data[g] = W2
-        mlp.b2.data[g] = b2
-
-    return mlp.eval()
-
-
 class GeneRegulatoryODE_softmax(nn.Module):
     """
     ODE model for gene regulatory dynamics with generalized softmax-based kon.
     Learns gene-specific degradation rates (d) and scale factors.
-    Optionally applies a KonCorrectionMLP multiplicative correction (Harissa branch).
+    Optionally multiplies kon by a per-cell ratio g(t) (mRNA-driven proteins, see set_g_interpolation).
     """
 
     def __init__(self, G, d_init, ks, theta_inter, bias, n_stimuli=1, stim_vals=None,
-                 device="cpu", kon_mlp=None, lambda_scale=1e3) -> None:
+                 device="cpu", lambda_scale=1e3) -> None:
         """
         Args:
             G           : number of genes (total, including stimuli)
@@ -394,7 +131,6 @@ class GeneRegulatoryODE_softmax(nn.Module):
             bias        : array of shape (G, n_modes-1)
             n_stimuli   : number of stimulus columns (default 1)
             stim_vals   : fixed stimulus values shape (n_stimuli,); defaults to ones
-            kon_mlp     : optional KonCorrectionMLP; if provided, kon[:, ns:] *= g(X[:, ns:])
         """
         super().__init__()
         self.G = int(G)
@@ -421,39 +157,32 @@ class GeneRegulatoryODE_softmax(nn.Module):
         self.n_modes = int(self.ks.shape[0])
         self.lambda_scale = float(lambda_scale)
 
-        # ----- optional harissa correction MLP -----
-        self.kon_mlp = kon_mlp  # KonCorrectionMLP or None; not registered as submodule (frozen)
+        # Per-cell ratio g = kon_beta_nonscaled / kon_beta at both ends of the interval (None: no correction)
+        self._g0 = self._g1 = None
+        self._t0 = self._t1 = None
+        # Per-cell birth rate (dilution of the proteins, None: no dilution)
+        self._birth = None
 
-        # ----- lambda_mlp interpolation state (set per interval via set_ratio_interpolation) -----
-        self._lambda_mlp   = 0.0   # mix weight; 0 = pure MLP (original behaviour)
-        self._ratio_t0     = None  # (G_genes,) mean observed g at interval start
-        self._ratio_t1     = None  # (G_genes,) mean observed g at interval end
-        self._t_interval_start = None  # float
-        self._t_interval_end   = None  # float
+    def set_birth(self, birth=None):
+        """Birth rate b (batch,) of the rows of X in the next odeint calls: dilution term - b P of the genes
+        (dP/dt = d (kon - P) - b P = d kon - (d + b) P); None clears it."""
+        self._birth = None if birth is None else torch.as_tensor(np.asarray(birth, dtype=np.float32))
 
-    def set_ratio_interpolation(self, t_start, t_end, ratio_t0, ratio_t1, lambda_mlp):
-        """Configure time-interpolated ratio mix for the next odeint call.
-
-        Args:
-            t_start, t_end : boundaries of the current interval (floats).
-            ratio_t0, ratio_t1 : mean observed g = kon_harissa/kon_beta at
-                                  ``t_start`` / ``t_end``, shape ``(G_genes,)``.
-            lambda_mlp     : mix weight (1 = pure interpolation, 0 = pure MLP).
-        """
-        self._lambda_mlp        = float(lambda_mlp)
-        self._t_interval_start  = float(t_start)
-        self._t_interval_end    = float(t_end)
-        self._ratio_t0 = torch.tensor(np.asarray(ratio_t0, dtype=np.float32))
-        self._ratio_t1 = torch.tensor(np.asarray(ratio_t1, dtype=np.float32))
+    def set_g_interpolation(self, t0, t1, g0=None, g1=None):
+        """Per-cell ratios g0, g1 (batch, G_genes) at t0 and t1, linearly interpolated in time
+        to multiply kon[:, ns:] in the next odeint calls (rows = rows of X); None clears them."""
+        if g0 is None:
+            self._g0 = self._g1 = None
+            return
+        self._t0, self._t1 = float(t0), float(t1)
+        self._g0 = torch.as_tensor(np.asarray(g0, dtype=np.float32))
+        self._g1 = torch.as_tensor(np.asarray(g1, dtype=np.float32))
 
     def forward(self, t, X):
         """
         Compute dX/dt for a given state X at time t.
-        Includes learned scaling of theta_inter and bias.
-        When kon_mlp is set, applies a frozen per-gene multiplicative correction.
-        If ``set_ratio_interpolation`` has been called, the correction is mixed
-        with the linearly interpolated observed training ratios at weight
-        ``lambda_mlp``.
+        Includes learned scaling of theta_inter and bias, and the per-cell
+        ratio g(t) set by ``set_g_interpolation`` (mRNA-driven proteins).
         """
         squeeze_output = False
         if X.dim() == 1:
@@ -488,34 +217,18 @@ class GeneRegulatoryODE_softmax(nn.Module):
         ks_expanded = self.ks.T.unsqueeze(0)  # (1, G, n_modes)
         kon: torch.Tensor = torch.sum(base_kon * ks_expanded.to(X.device), dim=-1)
 
-        # ----- apply harissa correction (frozen, no grad) -----
-        if self.kon_mlp is not None:
-            g = torch.tensor(
-                self.kon_mlp(
-                    X.detach().cpu().numpy(),
-                    kon[:, ns:].detach().cpu().numpy(),
-                ),
-                device=X.device,
-            )   # (batch, G_genes)
-
-            # lambda_mlp mix: blend with linearly interpolated observed ratios
-            if self._lambda_mlp > 0.0 and self._ratio_t0 is not None:
-                t_s   = self._t_interval_start
-                t_e   = self._t_interval_end
-                alpha = float((float(t) - t_s) / (t_e - t_s + 1e-10))
-                alpha = max(0.0, min(1.0, alpha))
-                r0    = self._ratio_t0.to(X.device).unsqueeze(0)  # (1, G_genes)
-                r1    = self._ratio_t1.to(X.device).unsqueeze(0)
-                g_interp = (1.0 - alpha) * r0 + alpha * r1        # (1, G_genes) → broadcast
-                a_alpha = 4 * (1 - self._lambda_mlp)
-                lamb_alpha = 1 + a_alpha * alpha * (alpha - 1)
-                g = lamb_alpha * g_interp + (1.0 - lamb_alpha) * g
-
+        # ----- per-cell ratio g(t), linear between the interval ends -----
+        if self._g0 is not None:
+            t_f = float(t.detach()) if torch.is_tensor(t) else float(t)
+            alpha = min(1.0, max(0.0, (t_f - self._t0) / max(self._t1 - self._t0, 1e-10)))
+            g = (1.0 - alpha) * self._g0.to(X.device) + alpha * self._g1.to(X.device)
             kon = torch.cat([kon[:, :ns], kon[:, ns:] * g], dim=-1)
 
         # degradation and ODE dynamics
         d_eff: torch.Tensor = torch.nn.functional.softplus(self.d_param.to(X.device))
         dXdt = d_eff * (kon - X)
+        if self._birth is not None:  # dilution at the birth rate of each cell
+            dXdt = dXdt - self._birth.to(X.device)[:, None] * X
         mask = torch.ones(self.G, device=X.device)
         mask[:ns] = 0.0
         dXdt = dXdt * mask.unsqueeze(0)
@@ -537,7 +250,7 @@ def fit_scale_theta(X_prot, kon_beta, bias, theta_inter, ks, ns, samples_data=No
         X_prot      : ``(N, G)`` protein levels.
         kon_beta    : ``(N, G)`` mixture-inferred kon values.
         bias        : ``(G, n_modes-1)`` or ``(n_samples, G, n_modes-1)`` GRN basal.
-        theta_inter : ``(G, G, n_modes-1)`` GRN interaction tensor.
+        theta_inter : ``(G, G, n_modes-1)`` GRN interaction tensor, or per sample ``(n_samples, G, G, n_modes-1)``.
         ks          : ``(n_modes, G)`` softmax burst-rate amplitudes.
         ns          : number of stimulus columns.
         samples_data: ``(N,)`` per-cell sample index when bias is 3-D, else None.
@@ -558,8 +271,8 @@ def fit_scale_theta(X_prot, kon_beta, bias, theta_inter, ks, ns, samples_data=No
     n_modes = ks.shape[-2]
 
     per_sample = (bias.ndim == 3 and samples_data is not None)
-    if ks.ndim == 3 and not per_sample:
-        raise ValueError('per-sample ks needs a 3-D bias and samples_data')
+    if (ks.ndim == 3 or theta_inter.ndim == 4) and not per_sample:
+        raise ValueError('per-sample ks / interactions need a 3-D bias and samples_data')
 
     # Pre-compute all per-gene inputs before optimisation.
     if per_sample:
@@ -573,7 +286,7 @@ def fit_scale_theta(X_prot, kon_beta, bias, theta_inter, ks, ns, samples_data=No
                 if not np.any(mask_s):
                     continue
                 bias_s = bias[min(s_idx, bias.shape[0] - 1)]
-                A_g_s  = X_prot[mask_s] @ theta_inter[:, g, :] + bias_s[g, :]
+                A_g_s  = X_prot[mask_s] @ _theta_sample(theta_inter, s_idx)[:, g, :] + bias_s[g, :]
                 sample_data_g.append((mask_s, A_g_s, _ks_sample(ks, s_idx)[:, g]))
             gene_data.append((kon_beta[:, g], sample_data_g))
 
@@ -628,10 +341,13 @@ def infer_ratio_d0_d1_unitary(
     lambda_deg=0.0, prior_eps=None,
     outlier_quantile=0.95,
     min_kon=1e-6, eps_min=0.01, eps_max=100.0,
-    verbose=True, kon_mlp=None,
+    verbose=True,
     scale=1.0,
+    two_stage=False,
+    birth=None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Estimate ε_i = d1_i/d0_i from ODE residuals (bursty-PDMP variance matching).
+    """Estimate ε_i = d1_i/d0_i from ODE residuals (``birth``: (N,) birth rate of the rows, dilution in the
+    mean-field prediction; None: no dilution) (bursty-PDMP variance matching).
 
     **Theoretical background.**
 
@@ -697,8 +413,9 @@ def infer_ratio_d0_d1_unitary(
         min_kon            : Minimum kon value for a cell to contribute.
         eps_min, eps_max   : Output clipping bounds for ε = d1/d0.
         verbose            : Log per-interval diagnostics.
-        kon_mlp            : Optional :class:`KonCorrectionMLP` (Harissa branch).
         scale              : Protein scale (``self.scale_proteins``). Default 1.0.
+        two_stage          : True for the Harissa PDMP (explicit mRNA): the mRNA filters the protein
+                             noise by d0/(d0+d1), i.e. Var = ε/(1+ε)·h instead of ε·h.
 
     Returns:
         eps_temporal : ``(T-1, G)`` per-interval ε = d1/d0 estimates.
@@ -749,15 +466,22 @@ def infer_ratio_d0_d1_unitary(
             continue
 
         mask0_t = times == unique_times[cnt]
-        mask1_t = times == unique_times[cnt + 1]
-        # Each sample with its own cells, basal and mixture (sample index = value of samples_data)
+        # Each sample with its own cells, basal and mixture (sample index = value of samples_data),
+        # from t0 to its next observed time (samples may miss timepoints)
         sd = np.asarray(samples_data).astype(int) if samples_data is not None else np.zeros(len(times), dtype=int)
         n_valid_cnt = 0
-        for s_int in np.unique(sd[mask0_t | mask1_t]):
+        for s_int in np.unique(sd[mask0_t]):
+            later = np.unique(times[(sd == s_int) & (times > t0)])
+            if not len(later):
+                continue
+            t1s = float(later[0])
+            dts = t1s - t0
+            k_end = int(np.searchsorted(unique_times, t1s))   # grid intervals cnt..k_end-1 covered
             mask0 = mask0_t & (sd == s_int)
-            mask1 = mask1_t & (sd == s_int)
+            mask1 = (times == later[0]) & (sd == s_int)
             X0_np = X_prot[mask0]
             X1_np = X_prot[mask1]
+            b0_np = None if birth is None else np.asarray(birth, dtype=np.float32)[mask0]
             if len(X0_np) == 0 or len(X1_np) == 0:
                 continue
 
@@ -767,7 +491,7 @@ def infer_ratio_d0_d1_unitary(
             X1_np = X1_np[:n_pairs]
 
             stim0 = _stim_at(stim_schedule, t0, s_int, ns) * scale
-            stim1 = _stim_at(stim_schedule, t1, s_int, ns) * scale
+            stim1 = _stim_at(stim_schedule, t1s, s_int, ns) * scale
 
             # ── Select per-interval bias / theta ─────────────────────────────────
             bias_np  = np.asarray(bias,         dtype=np.float32)
@@ -798,13 +522,13 @@ def infer_ratio_d0_d1_unitary(
                 n_stimuli=ns,
                 stim_vals=stim1,
                 device=device,
-                kon_mlp=kon_mlp,
             ).to(device)
             ode.eval()
+            ode.set_birth(None if b0_np is None else b0_np[:n_pairs])  # dilution of the start states
 
             X0_t = torch.tensor(X0_np, dtype=torch.float32)
             X0_t[:, :ns] = torch.tensor(stim0)
-            t_span = torch.tensor([t0, t1], dtype=torch.float32)
+            t_span = torch.tensor([t0, t1s], dtype=torch.float32)
 
             with torch.no_grad():
                 traj = odeint(ode, X0_t, t_span, method=method, rtol=rtol, atol=atol)
@@ -815,15 +539,6 @@ def infer_ratio_d0_d1_unitary(
             kon_fn = build_kon_fn(ks_cnt, theta_cnt, bias_cnt, device=device)
             kon_0 = kon_fn(X0_np)                # (n_pairs, G) in protein units
             kon_1 = kon_fn(X_pred)
-            if kon_mlp is not None:
-                kon_0 = np.concatenate([
-                    kon_0[:, :ns],
-                    kon_0[:, ns:] * kon_mlp(X0_np, kon_0[:, ns:]),
-                ], axis=-1)
-                kon_1 = np.concatenate([
-                    kon_1[:, :ns],
-                    kon_1[:, ns:] * kon_mlp(X_pred, kon_1[:, ns:]),
-                ], axis=-1)
 
             # Midpoint average of kon over the interval
             kon_avg = 0.5 * (kon_0 + kon_1)   # (n_pairs, G)
@@ -834,7 +549,7 @@ def infer_ratio_d0_d1_unitary(
             # h_{ic} = 2 · dt · scale · d1_i/k1_i · kon_i(P_c), kon_i(P_c) = kon_avg already = kon_true/k1_i
             # Derived from Campbell's theorem: burst rate=k1·kon_norm·d0, burst size~Exp(k1·d0/(scale·d1))
             #   Var(ΔP_i) = burst_rate · E[B²] · dt = ε_i · 2·dt·scale·(d1_i/k1_i)·kon_i
-            h_mat = (2.0 * dt * float(scale)) * (d_param_vec / k1_i)[None, :] * kon_avg   # (n_pairs, G)
+            h_mat = (2.0 * dts * float(scale)) * (d_param_vec / k1_i)[None, :] * kon_avg   # (n_pairs, G)
             h_mat[:, :ns] = 0.0   # stimuli don't get ε estimated
 
             # ── Outlier filtering: exclude top (1 - outlier_quantile) per gene ────
@@ -856,8 +571,8 @@ def infer_ratio_d0_d1_unitary(
                     continue
                 contrib_num   = float(res_v[cell_ok, g].sum())
                 contrib_denom = float(h_v[cell_ok, g].sum())
-                num_t[cnt, g]   += contrib_num
-                denom_t[cnt, g] += contrib_denom
+                num_t[cnt:k_end, g]   += contrib_num    # every grid interval of the observed pair
+                denom_t[cnt:k_end, g] += contrib_denom
                 num_g[g]        += contrib_num
                 denom_g[g]      += contrib_denom
 
@@ -865,6 +580,8 @@ def infer_ratio_d0_d1_unitary(
             with np.errstate(invalid="ignore", divide="ignore"):
                 eps_cnt = num_t[cnt, ns:] / np.where(denom_t[cnt, ns:] > 0,
                                                       denom_t[cnt, ns:], np.nan)
+                if two_stage:
+                    eps_cnt = eps_cnt / (1.0 - eps_cnt)
             logger.info(
                 "[eps_temporal cnt=%d: t=%.3g→%.3g]  cells=%d  "
                 "mean_ε(genes)=%.3g",
@@ -872,23 +589,33 @@ def infer_ratio_d0_d1_unitary(
                 float(np.nanmean(eps_cnt)),
             )
 
-    # ── Solve regularised MoM for ε = d1/d0 ─────────────────────────────────
-    # ε_i = (Σ res²_ci  +  λ · ε_prior_i) / (Σ h_ic  +  λ)
+    # ── Solve regularised MoM for q = Var/h, then ε = d1/d0 ──────────────────
+    # q_i = (Σ res²_ci  +  λ · q_prior_i) / (Σ h_ic  +  λ); q = ε (one stage) or ε/(1+ε) (two stage)
+    def to_q(e):
+        return e / (1.0 + e) if two_stage else e
+
+    def to_eps(q):
+        if not two_stage:
+            return q
+        q = np.minimum(q, to_q(eps_max))
+        return q / (1.0 - q)
+
+    q_prior = to_q(r_prior)
     eff_denom_t = denom_t + lam
-    eff_num_t   = num_t   + lam * r_prior[None, :]
+    eff_num_t   = num_t   + lam * q_prior[None, :]
     has_t       = eff_denom_t > 0
-    eps_temporal_raw = np.where(has_t,
-                                eff_num_t / np.where(has_t, eff_denom_t, 1.0),
-                                r_prior[None, :])
+    eps_temporal_raw = to_eps(np.where(has_t,
+                                       eff_num_t / np.where(has_t, eff_denom_t, 1.0),
+                                       q_prior[None, :]))
     eps_temporal = np.clip(eps_temporal_raw, eps_min, eps_max).astype(np.float32)
     eps_temporal[:, :ns] = 1.0
 
     eff_denom_g = denom_g + lam
-    eff_num_g   = num_g   + lam * r_prior
+    eff_num_g   = num_g   + lam * q_prior
     has_g       = eff_denom_g > 0
-    eps_global_raw = np.where(has_g,
-                              eff_num_g / np.where(has_g, eff_denom_g, 1.0),
-                              r_prior)
+    eps_global_raw = to_eps(np.where(has_g,
+                                     eff_num_g / np.where(has_g, eff_denom_g, 1.0),
+                                     q_prior))
     eps_global = np.clip(eps_global_raw, eps_min, eps_max).astype(np.float32)
     eps_global[:ns] = 0.2
 
@@ -915,14 +642,15 @@ def inference_degradation_prot(
     scale_proteins=1.0,
     samples_data=None,
     strata=None,
-    kon_mlp=None,
     lambda_scale=1e3,
     lambda_deg=0.0,
-    lambda_mlp=0.0,
-    g_obs_train=None,
+    g_ratio=None,
+    birth=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Estimate degradation rates and scaling factors from protein time-course data.
+    ``birth``: (N,) birth rate of the rows of X_prot (dilution of the proteins, rate of the start state of each
+    interval: dP/dt = d (kon - P) - b P), or None (no dilution).
 
     When ``bias`` is 3-D (n_samples, G, n_modes-1) and ``samples_data`` is provided,
     one ODE module is created per sample with its own bias while ``d_param`` and
@@ -933,6 +661,8 @@ def inference_degradation_prot(
     step (one step per epoch); None uses every trajectory at each step.
     ``strata``: per-row cell types (same indexing as X_prot) or None; minibatches
     are then cell-type proportional at the start time of each interval.
+    ``g_ratio``: ``(N, G - ns)`` per-row ratio kon_beta_nonscaled / kon_beta (rows of X_prot) or None;
+    interpolated per trajectory over each interval to multiply kon (mRNA-driven proteins).
 
     Returns:
         ``d_learned``: Learned degradation rates, shape (G,).
@@ -946,6 +676,8 @@ def inference_degradation_prot(
     # 5.550000190734863 and the lookup misses.
     times  = np.asarray(times,  dtype=np.float64)
     bias   = np.asarray(bias,   dtype=np.float32)
+    g_ratio = None if g_ratio is None else np.asarray(g_ratio, dtype=np.float32)
+    birth = None if birth is None else np.asarray(birth, dtype=np.float32)
 
     G: int = X_prot.shape[1]
 
@@ -971,9 +703,9 @@ def inference_degradation_prot(
             stim_first = np.ones(ns, dtype=np.float32) * scale_proteins
         ode_funcs = [
             GeneRegulatoryODE_softmax(
-                G, d_init, _ks_sample(ks, s_idx), theta_inter, bias[s_idx],
+                G, d_init, _ks_sample(ks, s_idx), _theta_sample(theta_inter, s_idx), bias[s_idx],
                 n_stimuli=ns, stim_vals=stim_first, device=device,
-                kon_mlp=kon_mlp, lambda_scale=lambda_scale,
+                lambda_scale=lambda_scale,
             ).to(device)
             for s_idx in range(n_samples)
         ]
@@ -987,10 +719,13 @@ def inference_degradation_prot(
 
         # Build per-sample pairs: (s_idx, t0, t1, X0, X1, stim0, stim1)
         all_pairs = []
-        for s_idx, s in enumerate(unique_s):
+        for s in unique_s:
+            s_idx = int(s)  # sample index (row of bias), also when some samples are absent from the rows
             mask_s = (samples_data_arr == s)
             X_s  = X_prot[mask_s]
             t_s  = times[mask_s]
+            g_s  = None if g_ratio is None else g_ratio[mask_s]
+            b_s  = None if birth is None else birth[mask_s]
             unique_t = np.sort(np.unique(t_s))
             for ti in range(len(unique_t) - 1):
                 t0, t1 = float(unique_t[ti]), float(unique_t[ti + 1])
@@ -1001,24 +736,9 @@ def inference_degradation_prot(
                 n_p = min(len(X0_np), len(X1_np))
                 if n_p > 0:
                     lab0 = None if strata is None else np.asarray(strata)[mask_s][t_s == unique_t[ti]][:n_p]
-                    all_pairs.append((s_idx, t0, t1, X0_np[:n_p], X1_np[:n_p], stim0, stim1, lab0))
-
-        # ── Pre-compute observed training ratios per (sample, timepoint) ────────
-        # g_obs_train (N, G_genes) = kon_beta_harissa[:, ns:] / kon_beta[:, ns:]
-        # already computed by the caller — same row-indexing as X_prot / times.
-        lam_mlp = float(lambda_mlp)
-        ratio_obs_persample = {}  # key: (s_idx, t_val_float) → (G_genes,) ndarray
-        if kon_mlp is not None and lam_mlp > 0 and g_obs_train is not None:
-            g_obs_arr = np.asarray(g_obs_train, dtype=np.float32)
-            for s_idx_pre, s_pre in enumerate(unique_s):
-                mask_sp = (samples_data_arr == s_pre)
-                t_sp    = times[mask_sp]
-                g_sp    = g_obs_arr[mask_sp]
-                for t_val in np.unique(t_sp):
-                    mask_t = (t_sp == t_val)
-                    if mask_t.sum() == 0:
-                        continue
-                    ratio_obs_persample[(s_idx_pre, float(t_val))] = np.mean(g_sp[mask_t], axis=0)
+                    g01 = (None, None) if g_s is None else (g_s[t_s == unique_t[ti]][:n_p], g_s[t_s == unique_t[ti + 1]][:n_p])
+                    b0 = None if b_s is None else b_s[t_s == unique_t[ti]][:n_p]
+                    all_pairs.append((s_idx, t0, t1, X0_np[:n_p], X1_np[:n_p], stim0, stim1, lab0, g01, b0))
 
         old_loss  = 1e16
 
@@ -1026,16 +746,12 @@ def inference_degradation_prot(
             optimizer.zero_grad()
             total_loss, total_count = 0.0, 0
 
-            for (s_idx, t0, t1, X0_full, X1_full, stim0, stim1, lab0) in all_pairs:
+            for (s_idx, t0, t1, X0_full, X1_full, stim0, stim1, lab0, (g0, g1), b0) in all_pairs:
                 ode = ode_funcs[s_idx]
                 ode.stim_vals.copy_(torch.tensor(stim1, dtype=torch.float32))
-                # Apply lambda_mlp mix in forward() for this interval
-                if kon_mlp is not None and lam_mlp > 0:
-                    _ones = np.ones(G - ns, dtype=np.float32)
-                    r0 = ratio_obs_persample.get((s_idx, t0), _ones)
-                    r1 = ratio_obs_persample.get((s_idx, t1), _ones)
-                    ode.set_ratio_interpolation(t0, t1, r0, r1, lam_mlp)
                 idxs = _draw_minibatch(X0_full.shape[0], batch_size, lab0)
+                ode.set_g_interpolation(t0, t1, None if g0 is None else g0[idxs], None if g1 is None else g1[idxs])
+                ode.set_birth(None if b0 is None else b0[idxs])
                 X0 = torch.tensor(X0_full[idxs], dtype=torch.float32, device=device)
                 X1 = torch.tensor(X1_full[idxs], dtype=torch.float32, device=device)
                 X0[:, :ns] = torch.tensor(stim0, dtype=torch.float32)
@@ -1084,32 +800,21 @@ def inference_degradation_prot(
         n_pairs: int = min(len(X0_np), len(X1_np))
         if n_pairs > 0:
             lab0 = None if strata is None else np.asarray(strata)[mask0][:n_pairs]
-            pairs.append((float(t0), float(t1), X0_np[:n_pairs], X1_np[:n_pairs], stim0, stim1, lab0))
+            g01 = (None, None) if g_ratio is None else (g_ratio[mask0][:n_pairs], g_ratio[mask1][:n_pairs])
+            b0 = None if birth is None else birth[mask0][:n_pairs]
+            pairs.append((float(t0), float(t1), X0_np[:n_pairs], X1_np[:n_pairs], stim0, stim1, lab0, g01, b0))
 
-    stim_first = pairs[0][-2] if pairs else np.ones(ns, dtype=np.float32) * scale_proteins
-    if np.ndim(ks) == 3:
-        raise ValueError('per-sample ks needs a 3-D bias and samples_data')
+    stim_first = pairs[0][5] if pairs else np.ones(ns, dtype=np.float32) * scale_proteins
+    if np.ndim(ks) == 3 or np.ndim(theta_inter) == 4:
+        raise ValueError('per-sample ks / interactions need a 3-D bias and samples_data')
     ode_func: GeneRegulatoryODE_softmax = GeneRegulatoryODE_softmax(
         G, d_init, ks, theta_inter, bias,
         n_stimuli=ns, stim_vals=stim_first, device=device,
-        kon_mlp=kon_mlp, lambda_scale=lambda_scale,
+        lambda_scale=lambda_scale,
     ).to(device)
 
     optimizer = torch.optim.Adam([ode_func.d_param, ode_func.scale_param], lr=lr)
     mse = nn.MSELoss(reduction="mean")
-
-    # ── Pre-compute observed training ratios at each training timepoint ──────
-    # g_obs_train (N, G_genes) = kon_beta_harissa[:, ns:] / kon_beta[:, ns:]
-    # already computed by the caller — same row-indexing as X_prot / times.
-    lam_mlp = float(lambda_mlp)
-    ratio_obs = {}  # t_val_float → (G_genes,) ndarray
-    if kon_mlp is not None and lam_mlp > 0 and g_obs_train is not None:
-        g_obs_arr = np.asarray(g_obs_train, dtype=np.float32)
-        for t_val in unique_times:
-            mask_t = (times == t_val)
-            if mask_t.sum() == 0:
-                continue
-            ratio_obs[float(t_val)] = np.mean(g_obs_arr[mask_t], axis=0)
 
     old_loss = 1e16
 
@@ -1117,18 +822,11 @@ def inference_degradation_prot(
         optimizer.zero_grad()
         total_loss, total_count = 0.0, 0
 
-        for (t0, t1, X0_full, X1_full, stim0, stim1, lab0) in pairs:
+        for (t0, t1, X0_full, X1_full, stim0, stim1, lab0, (g0, g1), b0) in pairs:
             ode_func.stim_vals.copy_(torch.tensor(stim1, dtype=torch.float32))
-            # Apply lambda_mlp mix in forward() for this interval
-            if kon_mlp is not None and lam_mlp > 0:
-                _ones = np.ones(G - ns, dtype=np.float32)
-                ode_func.set_ratio_interpolation(
-                    t0, t1,
-                    ratio_obs.get(t0, _ones),
-                    ratio_obs.get(t1, _ones),
-                    lam_mlp,
-                )
             idxs = _draw_minibatch(X0_full.shape[0], batch_size, lab0)
+            ode_func.set_g_interpolation(t0, t1, None if g0 is None else g0[idxs], None if g1 is None else g1[idxs])
+            ode_func.set_birth(None if b0 is None else b0[idxs])
             X0: torch.Tensor = torch.tensor(X0_full[idxs], dtype=torch.float32, device=device)
             X1: torch.Tensor = torch.tensor(X1_full[idxs], dtype=torch.float32, device=device)
 
@@ -1174,385 +872,6 @@ def inference_degradation_prot(
     scale_learned = torch.nn.functional.softplus(ode_func.scale_param).detach().cpu().numpy()
 
     return d_learned, scale_learned
-
-
-# ---------------------------
-# infer_ratio_d0_d1_full
-# ---------------------------
-
-def infer_ratio_d0_d1_full(
-    X_prot,
-    times,
-    bias,
-    theta_inter,
-    ks,
-    d_learned,
-    k1_vec,
-    kon_mlp,
-    prior_d1d0=None,
-    n_stimuli=1,
-    stim_schedule=None,
-    samples_data=None,
-    method="dopri5",
-    rtol=1e-5,
-    atol=1e-7,
-    n_steps=10,
-    lambda_deg=0.0,
-    lambda_mlp=0.5,
-    g_obs_train=None,
-    min_h=1e-4,
-    verbose=True,
-    clip_lo=0.01,
-    clip_hi=100.0,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Infer d1/d0 from full simulated trajectories via regularised LS.
-
-    **Theoretical background.**
-
-    To first order in ``d1/d0``, the MLP correction factor satisfies:
-
-    .. math::
-
-        1 - g_i(P(t)) \\approx \\frac{d_{1,i}}{d_{0,i}} \\cdot h_i(P(t))
-
-    where ``g_i = kon_harissa_i / kon_beta_i`` (learned by *kon_mlp*) and
-
-    .. math::
-
-        h_i(P) = \\sum_j \\frac{\\partial\\ln kon_i}{\\partial X_j}
-                 \\cdot (kon^{\\rm eff}_j - X_j)
-
-    where the ``d_{1,j}`` factor is *not* included in ``h_i`` (uniform-d1
-    approximation: ``d_{1,j} \\approx d_{1,i}`` for all j, so it becomes
-    part of the ratio ``d_{1,i}/d_{0,i}`` that the LS estimates directly).
-
-    **Fitting strategy.**
-
-    Instead of evaluating only at the terminal state, this function simulates
-    full trajectories with ``n_steps`` intermediate evaluation points and fits
-    ``r_i = d1_i/d0_i`` by minimising over all *(cell, timestep)* pairs:
-
-    .. math::
-
-        \\mathcal{L}(r_i) = \\sum_{c,t} \\bigl[y_{ict} - r_i\\,h_{ict}\\bigr]^2
-                           + \\lambda\\,(r_i - r_{\\rm prior,i})^2
-
-    with ``y_{ict} = 1 - g_i(P_c(t))``.  The closed-form solution is:
-
-    .. math::
-
-        r_i^* = \\frac{\\sum h\\,y + \\lambda\\,r_{\\rm prior}}{\\sum h^2 + \\lambda}
-
-    Only *(cell, timestep)* pairs where ``h_i`` and ``y_i`` have the same
-    sign (i.e. where the formula predicts ``r_i > 0``) and where
-    ``|h_i| > min_h`` are included.
-
-    **Usage in base.py**::
-
-        ratios_temporal, ratios_global = infer_ratio_d0_d1_full(...)
-        # temporal (one ratio per interval):
-        self.ratios[cnt] = 1.0 / ratios_temporal[cnt]
-        # global (one shared ratio):
-        self.ratios[:] = (1.0 / ratios_global)[None, :]
-
-    Args:
-        X_prot       : ``(N, G)`` protein observations across all timepoints.
-        times        : ``(N,)`` time label for each observation.
-        bias         : GRN bias — ``(G, n_modes-1)`` or ``(n_samples, G, n_modes-1)``.
-        theta_inter  : GRN interactions — ``(G, G, n_modes-1)`` or
-                       ``(n_samples, G, G, n_modes-1)``.
-        ks           : Mode amplitudes, shape ``(n_modes, G)``.
-        d_learned    : Protein degradation rates, shape ``(G,)`` (constant) or
-                       ``(T-1, G)`` (temporal). When 2-D, interval ``cnt``
-                       uses ``d_learned[cnt]`` for the ODE simulation.
-        k1_vec       : Kept for interface compatibility (not used internally).
-        kon_mlp      : Trained :class:`KonCorrectionMLP`.
-        prior_d1d0   : ``(G,)`` prior for d1/d0 used when ``lambda_deg > 0``.
-                       Defaults to all-ones (quasi-stationary limit).
-        n_stimuli    : Number of stimulus columns (default 1).
-        stim_schedule: Dict ``{float_time: np.ndarray(ns,)}``; defaults to
-                       all-ones when ``None``.
-        samples_data : ``(N,)`` per-cell sample index.
-        method       : ODE solver method (default ``"dopri5"``).
-        rtol, atol   : ODE solver tolerances.
-        n_steps      : Number of intermediate ODE evaluation points per
-                       interval (default 10; total = n_steps+1 incl. t0, t1).
-        lambda_deg   : Tikhonov regularisation weight — same role as in
-                       :func:`inference_degradation_prot`.  ``0`` = pure LS;
-                       large values → prior.
-        lambda_mlp   : Mix weight between the linearly interpolated observed
-                       training ratios and the MLP prediction.  For a simulated
-                       state at time ``t`` in ``[t1, t2]`` the effective ratio
-                       used as ``y_i = 1 - g_eff`` is:
-
-                       .. math::
-
-                           g_{\\rm eff} = \\lambda_{\\rm mlp}
-                               \\Bigl[
-                                   \\frac{t_2-t}{t_2-t_1}\\,r_1
-                                 + \\frac{t-t_1}{t_2-t_1}\\,r_2
-                               \\Bigr]
-                             + (1-\\lambda_{\\rm mlp})\\,g(P,\\,k_{\\rm on}(P))
-
-                       where ``r_1`` / ``r_2`` are the mean observed MLP ratios
-                       at the training timepoints ``t_1`` / ``t_2``
-                       (shape ``(G_genes,)``).
-                       ``1.0`` = pure linear interpolation of observed g;
-                       ``0.0`` = pure MLP prediction (original behaviour).
-        min_h        : Minimum ``|h_i|`` to include a *(cell, timestep)* pair.
-        verbose      : Log per-interval diagnostics.
-        clip_lo, clip_hi : Final clamp on the estimated d1/d0.
-
-    Returns:
-        ratios_temporal : ``(T-1, G)`` per-interval d1/d0 estimates.
-        ratios_global   : ``(G,)``    global d1/d0 pooled over all intervals.
-
-        Stimulus columns (``[:ns]``) are fixed to 1.0 in both outputs.
-    """
-    device = "cpu"
-    X_prot   = np.asarray(X_prot,       dtype=np.float32)
-    # float64 on purpose: see inference_degradation_prot (stim_schedule keys).
-    times    = np.asarray(times,        dtype=np.float64)
-    bias_np  = np.asarray(bias,         dtype=np.float32)
-    theta_np = np.asarray(theta_inter,  dtype=np.float32)
-    d_arr    = np.asarray(d_learned,    dtype=np.float32)   # (G,) or (T-1, G)
-    _ = k1_vec   # interface compat; X is already in normalised units
-
-    ns      = int(n_stimuli)
-    G       = X_prot.shape[1]
-    G_genes = G - ns
-
-    unique_times = np.sort(np.unique(times))
-    T = len(unique_times)
-
-    ks_t    = torch.tensor(np.asarray(ks, dtype=np.float32))
-    n_modes = int(ks_t.shape[0])
-
-    # Prior for d1/d0 (quasi-stationary limit = 1 by default)
-    r_prior = (
-        np.ones(G, dtype=np.float64)
-        if prior_d1d0 is None
-        else np.asarray(prior_d1d0, dtype=np.float64)
-    )
-
-    # Accumulators for the regularised LS  — float64 for numerical stability
-    # Per-interval
-    num_t   = np.zeros((T - 1, G), dtype=np.float64)
-    denom_t = np.zeros((T - 1, G), dtype=np.float64)
-    # Global (pooled over all intervals)
-    num_g   = np.zeros(G, dtype=np.float64)
-    denom_g = np.zeros(G, dtype=np.float64)
-
-    kon_mlp.eval()
-
-    # ── Pre-compute mean observed training ratios at each timepoint ───────────
-    # g_obs_train (N, G_genes) = kon_beta_harissa[:, ns:] / kon_beta[:, ns:]
-    # already computed by the caller — same row-indexing as X_prot / times.
-    lam_mlp = float(lambda_mlp)
-    if lam_mlp > 0.0 and g_obs_train is not None:
-        g_obs_arr = np.asarray(g_obs_train, dtype=np.float32)
-        training_ratios_obs = np.zeros((T, G_genes), dtype=np.float32)
-        for tidx, t_val in enumerate(unique_times):
-            mask_t = times == t_val
-            if mask_t.sum() == 0:
-                continue
-            training_ratios_obs[tidx] = np.mean(g_obs_arr[mask_t], axis=0)
-    else:
-        training_ratios_obs = None   # not used when lam_mlp == 0 or no data
-
-    for cnt in range(T - 1):
-        t0 = float(unique_times[cnt])
-        t1 = float(unique_times[cnt + 1])
-
-        mask0_t = times == unique_times[cnt]
-        # Each sample with its own cells and basal (sample index = value of samples_data)
-        sd = np.asarray(samples_data).astype(int) if samples_data is not None else np.zeros(len(times), dtype=int)
-        for s_int in np.unique(sd[mask0_t]):
-            mask0 = mask0_t & (sd == s_int)
-            X0_np = X_prot[mask0]
-            if len(X0_np) == 0:
-                continue
-
-            stim0 = _stim_at(stim_schedule, t0, s_int, ns)
-            stim1 = _stim_at(stim_schedule, t1, s_int, ns)
-
-            # ── Select bias / theta ──────────────────────────────────────────────
-            # Supported layouts (mirroring infer_ratio_d0_d1_unitary):
-            #   bias : (G, n_nets)                    — constant
-            #          (T-1, G, n_nets)               — time-indexed
-            #          (T-1, n_samples, G, n_nets)    — time + sample indexed
-            #   theta: (G, G, n_nets)                 — constant
-            #          (T-1, G, G, n_nets)            — time-indexed
-            #          (T-1, n_samples, G, G, n_nets) — time + sample indexed
-            if bias_np.ndim == 3:
-                bias_cnt = bias_np[cnt]                                 # (G, n_nets)
-            elif bias_np.ndim == 4:
-                bias_cnt = bias_np[cnt, min(s_int, bias_np.shape[1] - 1)]  # (G, n_nets)
-            else:
-                bias_cnt = bias_np                                      # (G, n_nets)
-
-            if theta_np.ndim == 4:
-                theta_cnt = theta_np[cnt]                              # (G, G, n_nets)
-            elif theta_np.ndim == 5:
-                theta_cnt = theta_np[cnt, min(s_int, theta_np.shape[1] - 1)]  # (G, G, n_nets)
-            else:
-                theta_cnt = theta_np                                   # (G, G, n_nets)
-
-            bias_t      = torch.tensor(bias_cnt.astype(np.float32))
-            theta_cnt_t = torch.tensor(theta_cnt.astype(np.float32))
-
-            # ── 1. Simulate full trajectory (n_steps+1 evaluation points) ────────
-            d_cnt = d_arr[cnt] if d_arr.ndim == 2 else d_arr
-            d1_t  = torch.tensor(d_cnt, dtype=torch.float32)   # (G,) d1_j for all genes
-            ode = GeneRegulatoryODE_softmax(
-                G, d_cnt, ks, theta_cnt, bias_cnt,
-                n_stimuli=ns, stim_vals=stim1,
-                device=device, kon_mlp=kon_mlp,
-            ).to(device)
-            ode.eval()
-
-            X0_t = torch.tensor(X0_np, dtype=torch.float32)
-            X0_t[:, :ns] = torch.tensor(stim0)
-            N_cells = len(X0_np)
-
-            # linspace includes t0 and t1 → n_steps+1 points
-            t_eval = torch.linspace(t0, t1, n_steps + 1, dtype=torch.float32)
-
-            with torch.no_grad():
-                traj = odeint(ode, X0_t, t_eval, method=method, rtol=rtol, atol=atol)
-            # traj: (n_steps+1, N_cells, G) — fix stimuli for all steps
-            traj[:, :, :ns] = torch.tensor(stim1)
-
-            # ── 2. Batch all timesteps for efficient autograd ────────────────────
-            # (n_steps+1, N_cells, G)  →  (n_ts * N_cells, G)
-            n_ts = n_steps + 1
-            X_batch_np = traj.reshape(n_ts * N_cells, G).cpu().numpy()
-
-            # ── 3. Evaluate g_i = MLP ratio for every state (no grad) ───────────
-            with torch.no_grad():
-                X_tmp = torch.tensor(X_batch_np, dtype=torch.float32)
-                Z_tmp = torch.zeros(n_ts * N_cells, G, n_modes)
-                for k in range(n_modes - 1):
-                    Z_tmp[:, :, k + 1] = X_tmp @ theta_cnt_t[:, :, k] + bias_t[:, k]
-                kb_tmp = (torch.softmax(Z_tmp, dim=-1) * ks_t.T.unsqueeze(0)).sum(dim=-1)
-
-            g_batch_np = kon_mlp(X_batch_np, kb_tmp[:, ns:].numpy())   # (n_ts*N, G_genes)
-
-            # ── lambda_mlp mix: blend MLP prediction with linear interpolation ───
-            # of the mean observed ratios at the bracketing training timepoints.
-            # For time t in [t0, t1]:
-            #   alpha       = (t - t0) / (t1 - t0)
-            #   g_interp    = (1-alpha)*ratio_obs[cnt] + alpha*ratio_obs[cnt+1]
-            #   g_eff       = lam_mlp * g_interp + (1-lam_mlp) * g_mlp
-            # The batch is ordered as [t_eval[0]*N_cells, t_eval[1]*N_cells, ...].
-            if lam_mlp > 0.0:
-                alphas = (t_eval.numpy() - t0) / (t1 - t0)          #   (n_ts,)
-                r1 = training_ratios_obs[cnt]                         # (G_genes,)
-                r2 = training_ratios_obs[cnt + 1]                     # (G_genes,)
-                # Interpolated ratio at each timestep: (n_ts, G_genes)
-                g_interp = (1.0 - alphas[:, None]) * r1 + alphas[:, None] * r2
-                # Expand to match batch: each of the n_ts steps has N_cells rows
-                g_interp_batch = np.repeat(g_interp, N_cells, axis=0)  # (n_ts*N, G_genes)
-                a_alpha = 4 * (1 - lam_mlp)
-                lamb_alpha = 1 + a_alpha * alphas * (alphas - 1)
-                lamb_alpha_batch = np.repeat(lamb_alpha, N_cells)[:, None]  # (n_ts*N, 1)
-                g_batch_np = lamb_alpha_batch * g_interp_batch + (1.0 - lamb_alpha_batch) * g_batch_np
-
-            g_batch    = torch.tensor(g_batch_np, dtype=torch.float32)
-
-            # ── 4. Compute h_i via autograd over the full batch ──────────────────
-            X_batch_t = torch.tensor(X_batch_np, dtype=torch.float32, requires_grad=True)
-
-            Z = torch.zeros(n_ts * N_cells, G, n_modes, dtype=torch.float32)
-            for k in range(n_modes - 1):
-                Z[:, :, k + 1] = X_batch_t @ theta_cnt_t[:, :, k] + bias_t[:, k]
-            kon_beta = (torch.softmax(Z, dim=-1) * ks_t.T.unsqueeze(0)).sum(dim=-1)
-
-            # Effective kon — g is detached so autograd only sees ∂kon_beta/∂X
-            kon_eff = torch.cat([
-                kon_beta[:, :ns].detach(),
-                kon_beta[:, ns:].detach() * g_batch,
-            ], dim=-1)
-
-            # Driving force  drive_j = kon_eff_j − X_j  (fully detached)
-            drive = (kon_eff - X_batch_t.detach()).detach()
-            drive[:, :ns] = 0.0   # stimuli do not evolve
-
-            # ── 5. Accumulate LS numerators and denominators ─────────────────────
-            for gene_idx in range(G_genes):
-                i      = ns + gene_idx
-                retain = gene_idx < G_genes - 1
-
-                jac_i = torch.autograd.grad(
-                    kon_beta[:, i].sum(), X_batch_t,
-                    retain_graph=retain, create_graph=False,
-                )[0].detach()   # (n_ts*N, G)
-
-                ln_jac_i = jac_i / (kon_beta[:, i:i+1].detach() + 1e-10)   # (n_ts*N, G)
-
-                # h_i = Σ_j (∂ ln kon_i / ∂X_j) · (d1_j/d1_i) · drive_j
-                #
-                # Exact derivation (first-order mRNA lag):
-                #   1 - g_i  =  (1/d0_i) · d(ln kon_i)/dt
-                #             =  (1/d0_i) · Σ_j ∂(ln kon_i)/∂X_j · d1_j · drive_j
-                #             =  (d1_i/d0_i) · Σ_j ∂(ln kon_i)/∂X_j · (d1_j/d1_i) · drive_j
-                #                              └────────────────── h_i ──────────────────────┘
-                # No uniform-d1 approximation needed: we weight each term by d1_j/d1_i.
-                d1_i_val  = d1_t[i].clamp(min=1e-10)
-                d1_weight = (d1_t / d1_i_val).unsqueeze(0)          # (1, G)
-                h_i = (ln_jac_i * drive * d1_weight).sum(dim=-1)   # (n_ts*N,)
-                y_i = 1.0 - g_batch[:, gene_idx]               # (n_ts*N,)  y = 1 − g
-
-                # Keep only points that are not near-equilibrium AND where the
-                # sign is consistent with a positive d1/d0.
-                valid = (h_i.abs() > min_h) & (h_i * y_i > 0)
-
-                if valid.sum() == 0:
-                    continue
-
-                h_v = h_i[valid].detach().numpy().astype(np.float64)
-                y_v = y_i[valid].detach().numpy().astype(np.float64)
-
-                contrib_num   = float(np.dot(h_v, y_v))
-                contrib_denom = float(np.dot(h_v, h_v))
-
-                num_t[cnt, i]   += contrib_num
-                denom_t[cnt, i] += contrib_denom
-                num_g[i]        += contrib_num
-                denom_g[i]      += contrib_denom
-
-        if verbose:
-            n_genes_with_data = int((denom_t[cnt, ns:] > 0).sum())
-            logger.info(
-                "[cnt=%d: t=%.3g→%.3g]  genes with LS data: %d / %d",
-                cnt, t0, t1, n_genes_with_data, G_genes,
-            )
-
-    # ── 6. Solve regularised LS ───────────────────────────────────────────────
-    # r_i* = (Σ h*y  +  λ * r_prior_i) / (Σ h²  +  λ)
-    # When no data available for a gene/interval → fall back to prior.
-
-    lam = float(lambda_deg)
-
-    # Per-interval
-    eff_denom_t = denom_t + lam                            # (T-1, G)
-    eff_num_t   = num_t   + lam * r_prior[None, :]        # (T-1, G)
-    has_data_t  = eff_denom_t > 0
-    r_t = np.where(has_data_t, eff_num_t / np.where(has_data_t, eff_denom_t, 1.0),
-                   r_prior[None, :])
-    ratios_temporal = np.clip(r_t, clip_lo, clip_hi).astype(np.float32)
-    ratios_temporal[:, :ns] = 1.0   # stimuli: neutral
-
-    # Global
-    eff_denom_g = denom_g + lam                            # (G,)
-    eff_num_g   = num_g   + lam * r_prior                  # (G,)
-    has_data_g  = eff_denom_g > 0
-    r_g = np.where(has_data_g, eff_num_g / np.where(has_data_g, eff_denom_g, 1.0),
-                   r_prior)
-    ratios_global = np.clip(r_g, clip_lo, clip_hi).astype(np.float32)
-    ratios_global[:ns] = 0.2   # stimuli: neutral
-
-    return ratios_temporal, ratios_global
 
 
 # ---------------------------

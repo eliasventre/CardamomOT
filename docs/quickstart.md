@@ -56,7 +56,9 @@ Steps (preselected according to the parameters in parentheses):
 |---|---|---|
 | **Cell depth** | Per-cell depth diagnostic | ✓ |
 | Proliferation rates | Net proliferation rate per cell from literature gene signatures (on the full gene set) | `estimate_proliferation_rates` |
-| **Gene selection** | Select genes (`select_genes`); split cells into train/test (`split`, `train_rate`) | ✓ |
+| **Train/test split** | Split cells into train/test: `obs['split']` of `Data/data.h5ad` (`split`, `train_rate`) | ✓ |
+| **Gene selection** | Select genes (`select_genes`) on the train cells only; write `data_full/train/test` | ✓ |
+| **Classical OT** | Waddington-OT-style analysis on every gene (train cells): transitions, fate genes, velocities | `run_classical_OT` |
 | Network constraint | Build prior network from databases | `build_prior_network`, unless the selection builds the prior (`select_genes`, `literature_selection`, `prior_network_pen = 0`) |
 | **Kinetics** | Assign literature mRNA/protein degradation rates (h⁻¹), species auto-detected | ✓ |
 | **Mixture model** | Fit negative-binomial burst parameters per gene | ✓ |
@@ -119,7 +121,7 @@ cardamomot pipeline \
 | Parameter | Default | Steps |
 |---|---|---|
 | `split` (`'train'` / `'full'`), `train_rate` | `'train'`, `0.7` | train/test split of the cells (all steps read `data_<split>.h5ad`) |
-| `select_genes` | `False` | gene selection in `select_genes_and_split` (otherwise all genes kept) |
+| `select_genes` | `False` | gene selection in `select_genes`, on the train cells of `split_dataset` (otherwise all genes kept) |
 | `build_prior_network` | `False` | literature prior: by the selection when it used the literature, else `build_reference_network` |
 | `literature_selection` | `True` | gene selection reweighted by the literature, whatever the prior |
 | `estimate_proliferation_rates` | `False` | `get_proliferation_rates` |
@@ -136,7 +138,8 @@ script name without `.py`); a removed option stops the step with the parameter t
 ```bash
 cardamomot step estimate_cell_depth     -i my_project
 cardamomot step get_proliferation_rates -i my_project            # if estimate_proliferation_rates
-cardamomot step select_genes_and_split  -i my_project --prior 1.0
+cardamomot step split_dataset           -i my_project            # obs['split'] of Data/data.h5ad
+cardamomot step select_genes            -i my_project --prior 1.0  # on the train cells only
 cardamomot step build_reference_network -i my_project            # if build_prior_network and the selection did not use the literature
 cardamomot step get_degradation_rates   -i my_project            # d0/d1 of the species (overwrite_degradation_rates)
 cardamomot step infer_mixture           -i my_project --mean-forcing 0.5

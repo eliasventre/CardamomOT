@@ -1,11 +1,13 @@
 """
-Gene selection from the whole transcriptome (select_genes_and_split.py, change=1):
+Gene selection from the whole transcriptome (select_genes.py, select_genes = True; train cells only):
 
-1. terminal genes, each chosen with a round robin over the groups (each timepoint and each cell
-   type against the rest, Wilcoxon on log-normalised counts) so that all groups are covered:
+1. terminal genes among the high-entropy genes of O. Gandrillon's workflow (gandrillon.py: KD and BUB-entropy
+   changes between consecutive timepoints, which carry the time information), each chosen with a round robin over
+   the cell types (each against the rest, Wilcoxon on log-normalised counts; significantly DE genes first) so that
+   all cell types are covered (no cell type: by decreasing entropy change):
    - at most n_query genes of genes_queries (gene_lists sheet);
-   - at least n_entropy genes among the entropy-selected genes of O. Gandrillon's workflow
-     (gandrillon.py: KD and BUB-entropy changes between consecutive timepoints);
+   - fate drivers of the classical OT (round robin over the fates);
+   - at least n_entropy entropy genes (at least 2 per cell type);
 2. a coarse global network on the highly variable genes (+ terminals), built by a network method
    (global_networks: OTVelo-Corr built in, or a custom method of the project);
 With several samples (obs['dataset_id']), the selection runs before the integration, so every dynamic
@@ -54,11 +56,11 @@ def _dense(X):
 
 def de_groups(adata, genes, cell_type_key=None, sample_key='dataset_id'):
     """
-    Wilcoxon scores (scanpy rank_genes_groups, log-normalised counts) of the genes for each group
-    against the rest: each timepoint, and each cell type if cell_type_key is given, within each sample
-    (obs[sample_key]; sample differences are not taken for dynamics).
-    Returns a DataFrame genes x groups ('time=<t>', '<key>=<c>', prefixed by '<sample>|' with several
-    samples) of scores and one of adjusted p-values.
+    Wilcoxon scores (scanpy rank_genes_groups, log-normalised counts) of the genes for each cell type
+    (cell_type_key) against the rest, within each sample (obs[sample_key]; sample differences are not taken
+    for dynamics). No timepoint groups: the entropy changes of the candidates already carry the time.
+    Returns a DataFrame genes x groups ('<key>=<c>', prefixed by '<sample>|' with several samples) of
+    scores and one of adjusted p-values (empty without cell_type_key).
     """
     import scanpy as sc
     full = sc.AnnData(X=_dense(adata[:, genes].X).astype(np.float32), obs=adata.obs.copy())
@@ -68,7 +70,7 @@ def de_groups(adata, genes, cell_type_key=None, sample_key='dataset_id'):
     smp = full.obs[sample_key].astype(str).values if sample_key in full.obs else np.zeros(full.n_obs).astype(str)
     multi = len(np.unique(smp)) > 1
     scores, padj = {}, {}
-    keys = [('time', 'time')] + ([(cell_type_key, cell_type_key)] if cell_type_key else [])
+    keys = [(cell_type_key, cell_type_key)] if cell_type_key else []
     for sample in np.unique(smp):
         sub = full[smp == sample].copy()
         prefix = f'{sample}|' if multi else ''
@@ -132,15 +134,20 @@ def _separation_block(Xb, groups, seuil, s=None):
     return out
 
 
-def round_robin(candidates, scores, n, taken=()):
+def round_robin(candidates, scores, n, taken=(), padj=None, alpha=0.05):
     """
     Up to n candidates, each group in turn taking its best-scored candidate (higher Wilcoxon score =
-    more expressed in the group) not yet taken. Returns [(gene, group)].
+    more expressed in the group) not yet taken; with padj, the candidates significantly DE in the group
+    (padj < alpha, score > 0) come first. Returns [(gene, group)].
     """
     if n <= 0 or not len(candidates):
         return []
     taken = set(taken)
-    ranks = {gr: [g for g in scores.loc[candidates, gr].sort_values(ascending=False).index] for gr in scores.columns}
+    ranks = {}
+    for gr in scores.columns:
+        s = scores.loc[candidates, gr]
+        de = (padj.loc[candidates, gr] < alpha) & (s > 0) if padj is not None else pd.Series(False, index=s.index)
+        ranks[gr] = list(pd.DataFrame({'de': de, 's': s}).sort_values(['de', 's'], ascending=False).index)
     out = []
     while len(out) < n:
         added = False
@@ -154,7 +161,7 @@ def round_robin(candidates, scores, n, taken=()):
                 added = True
         if not added:
             break
-    # Without groups (single time and cell type): candidates in their given order
+    # Without groups (no cell type): candidates in their given order (decreasing entropy change)
     for g in candidates:
         if len(out) >= n:
             break
@@ -242,7 +249,7 @@ def literature_probabilities(W, ns, F, covered, weight=1.0, pseudo=1.0):
 
 
 def steiner_selection(W, roots, required, optional, budget, k_in=10, k_stim=10, w_min=0.05, edge_prior=0.9, C=None,
-                      closure_min=0.5):
+                      closure_min=0.5, W_parts=None):
     """
     Budgeted directed Steiner tree on edge probabilities W (greedy shortest-path heuristic, path
     cost = -log of the product of the edge probabilities, i.e. most probable paths).
@@ -257,6 +264,9 @@ def steiner_selection(W, roots, required, optional, budget, k_in=10, k_stim=10, 
     (sum of its W >= w_min towards them) is added, repeatedly, while it brings at least closure_min
     (missing regulators bias an inference restricted to the selection). Finally the optional
     terminals are tried in order (terminal + its path) until the budget is full.
+    W_parts (list of per-sample W, combination 'any'): balanced closure, each step serving the sample whose regulation
+    of the selection comes least from inside it (closure_fraction), with the gene bringing it the most probable
+    regulation (at least closure_min in that sample).
     Returns the selected nodes (in order of addition), the parent and path cost of each connected
     node, the set of optional terminals added and the list of closure regulators.
     """
@@ -334,22 +344,36 @@ def steiner_selection(W, roots, required, optional, budget, k_in=10, k_stim=10, 
                 break
         if not done:
             break
-    # 2. Regulatory closure of the selection
-    Wg = np.where(W >= w_min, W, 0.0)
-    Wg[list(roots), :] = 0.0
-    score = Wg[:, sorted(chosen)].sum(axis=1)
-    score[sorted(chosen)] = -np.inf
-    score[list(roots)] = -np.inf
+    # 2. Regulatory closure of the selection (balanced over the samples with W_parts)
+    parts = [W] if W_parts is None else list(W_parts)
+    Wgs = []
+    for Wp in parts:
+        Wg = np.where(Wp >= w_min, Wp, 0.0)
+        Wg[list(roots), :] = 0.0
+        Wgs.append(Wg)
+    scores = [Wg[:, sorted(chosen)].sum(axis=1) for Wg in Wgs]
+    for sc in scores:
+        sc[sorted(chosen)] = -np.inf
+        sc[list(roots)] = -np.inf
     closure = []
     while len(chosen) < budget:
-        k = int(np.argmax(score))
-        if score[k] < closure_min:
+        # Samples in increasing share of inside regulation, the first with a candidate above closure_min
+        order = np.argsort([closure_fraction(Wp, sorted(chosen), roots, w_min) for Wp in parts]) if len(parts) > 1 \
+            else [0]
+        k = None
+        for i in order:
+            c = int(np.argmax(scores[i]))
+            if scores[i][c] >= closure_min:
+                k = c
+                break
+        if k is None:
             break
         chosen.add(k)
         selected.append(k)
         closure.append(k)
-        score += Wg[:, k]
-        score[k] = -np.inf
+        for sc, Wg in zip(scores, Wgs):
+            sc += Wg[:, k]
+            sc[k] = -np.inf
     # 3. Optional terminals in order, while the budget allows
     for t in optional:
         if len(chosen) >= budget:
@@ -364,6 +388,35 @@ def steiner_selection(W, roots, required, optional, budget, k_in=10, k_stim=10, 
             commit(path, dist, prev)
             extra.add(t)
     return selected, parent, cost, extra, closure
+
+
+def selection_edges(W, node_names, sel, ns, p_min=0.6, F=None, covered=None):
+    """
+    Edges of the global network inside the selection (stimuli included as regulators): i -> j with
+    W >= p_min and, with the literature (F, covered: gene blocks), feasible within literature_depth;
+    pairs the literature does not cover are kept, as in the prior, and marked '*'.
+    Returns {gene: (regulators, targets)}, lists of (name, w, covered) by decreasing w.
+    """
+    pos = {g: i for i, g in enumerate(node_names)}
+    src = list(range(ns)) + [pos[g] for g in sel]
+    tgt = [pos[g] for g in sel]
+    E = W[np.ix_(src, tgt)] >= p_min
+    cov = np.ones(E.shape, bool)
+    if F is not None:
+        g_src, g_tgt = np.array([max(i - ns, 0) for i in src]), np.array(tgt) - ns
+        cov[ns:] = covered[np.ix_(g_src[ns:], g_tgt)]
+        E[ns:] &= F[np.ix_(g_src[ns:], g_tgt)] | ~cov[ns:]
+    E[ns + np.arange(len(sel)), np.arange(len(sel))] = False
+    out = {g: ([], []) for g in sel}
+    for a, b in zip(*np.nonzero(E)):
+        u, v, w = node_names[src[a]], sel[b], float(W[src[a], tgt[b]])
+        out[v][0].append((u, w, bool(cov[a, b])))
+        if a >= ns:
+            out[u][1].append((v, w, bool(cov[a, b])))
+    for lists in out.values():
+        for lst in lists:
+            lst.sort(key=lambda x: -x[1])
+    return out
 
 
 def closure_fraction(W, sel, roots, w_min=0.05):
@@ -381,7 +434,9 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
                  literature_weight=1.0, literature_resources='extended', max_free_params=None,
                  min_entropy_change=0.1, min_nb_separation=0.15, n_cells_mixture=1024, seuil_mixture=0.01,
                  n_cells_network=1000, sample_key='dataset_id', forced_genes=None, stimulus_targets=None,
-                 species=None, use_depth_factor=False, seed=0, verb=True):
+                 drivers=None, n_driver=0,
+                 species=None, use_depth_factor=False, report_edge_prob=0.6, entropy_preselection=True,
+                 sample_combination='consensus', seed=0, verb=True):
     """
     Full selection on raw counts (see module docstring). n_query + n_entropy must leave budget for
     the paths (< num_max_genes). The network is turned into edge probabilities against the same
@@ -397,20 +452,35 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
     BUB-entropy change between consecutive timepoints (Gandrillon MDE, bits) must reach
     min_entropy_change, and the NB-mixture initialization (nb_init_separation, n_cells_mixture
     cells per time, seuil_mixture) must separate its extreme modes by min_nb_separation.
+    entropy_preselection: queries, drivers and the genes of the network (Steiner paths, closure) are taken
+    among the entropy candidates (Gandrillon KD & MDE, top n_top_entropy per transition) and the forced genes only.
     stim: (n_times, n_stimuli) schedule on the sorted timepoints, or {sample: schedule} (None: default).
+    drivers: [(gene, 'fate=<type>')] fate drivers of the classical OT (round robin over the fates,
+    classical_ot.driver_order): the first n_driver are required terminals (role 'driver', after the queries,
+    before the entropy genes), subject to the universe and the variability floor; the others fill the budget.
     forced_genes: genes always selected (required terminals, exempt from the variability floor),
     e.g. those perturbed in KO_OV_Stim_simulate.txt. stimulus_targets: one gene list per stimulus
-    (read_stimulus_targets): stimulus edges are restricted to its listed genes (no constraint if
+    (read_stimulus_targets): stimulus edges are restricted to its listed genes, possible interactions only
+    (they do not enter the gene universe; no constraint if
     none is in the data).
     max_free_params (with the literature, for a hard prior): the gene budget is the largest one
     whose selection has at most this many free network parameters (free_parameters of its
     literature prior); num_max_genes is then ignored.
+    The report lists, for every selected gene, its regulators (is_regulated_by) and targets (regulates)
+    inside the selection: edges with probability >= report_edge_prob, literature-feasible (selection_edges), and,
+    with several samples, the samples in which it has such an edge (edge_samples).
+    sample_combination (several samples): 'consensus' = edge probabilities averaged over the samples (weights cells x
+    transitions; an edge must be supported in several samples, for a network shared by them), 'any' = probabilistic
+    OR 1 - prod(1 - W_s) (an edge supported in one sample is a candidate, for independent condition networks), with a
+    closure balanced over the samples (steiner_selection).
     Returns (selected gene names, report DataFrame, dict(C, C_null, W, genes) or None,
     literature prior of the selection (G x G, selection order) or None).
     """
     import scanpy as sc
-    if n_query + n_entropy >= num_max_genes and not max_free_params:
-        raise ValueError(f"n_query_genes + n_entropy_genes ({n_query} + {n_entropy}) must be lower than "
+    n_driver = n_driver if drivers else 0
+    if n_query + n_entropy + n_driver >= num_max_genes and not max_free_params:
+        raise ValueError(f"n_query_genes + n_entropy_genes + n_driver_genes ({n_query} + {n_entropy} + {n_driver}) "
+                         f"must be lower than "
                          f"num_max_genes ({num_max_genes}) to leave budget for the paths from the stimulus")
     names = np.asarray(adata.var_names).astype(str)
     name_set = set(names)
@@ -418,6 +488,7 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
     if missing and verb:
         print(f"[gene_selection] {len(missing)} query genes absent from the data: {missing[:10]}{' ...' if len(missing) > 10 else ''}")
     queries = [g for g in dict.fromkeys(queries) if g in name_set]
+    drivers = [(g, grp) for g, grp in (drivers or []) if g in name_set]
     forced = [g for g in dict.fromkeys(forced_genes or []) if g in name_set]
     missing_f = [g for g in dict.fromkeys(forced_genes or []) if g not in name_set]
     if missing_f and verb:
@@ -479,7 +550,7 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
         # NB basins checked here on the candidate terminals only; the genes the Steiner tree or the
         # closure would add are checked on demand (most network genes are never selected)
         ent0 = set(u_names[gandrillon_genes(kd, mde, top_n=n_top_entropy)]) if kd is not None else set()
-        cand = np.flatnonzero(eligible & np.isin(u_names, list(ent0) + list(queries)))
+        cand = np.flatnonzero(eligible & np.isin(u_names, list(ent0) + list(queries) + [g for g, _ in drivers]))
         d = nb_separation_samples(_dense(Xa[:, np.flatnonzero(universe)[cand]]), times, cts, smp if multi else None,
                                   n_cells_mixture, seuil_mixture, seed, depth)
         eligible[cand[d < min_nb_separation]] = False
@@ -497,6 +568,11 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
             print(f"[gene_selection] {len(dropped_q)} query genes below the floor, dropped: "
                   f"{dropped_q[:15]}{' ...' if len(dropped_q) > 15 else ''}")
     queries = [g for g in queries if g not in set(dropped_q)]
+    n_drv = len(drivers)
+    drivers = [(g, grp) for g, grp in drivers if g in set(u_names[eligible]) and g not in set(queries)]
+    if verb and n_drv:
+        print(f"[gene_selection] Fate drivers (classical OT): {len(drivers)} of {n_drv} in the universe and above the "
+              f"variability floor")
     keep_u = eligible
     universe[np.flatnonzero(universe)[~keep_u]] = False
     ad_u = adata[:, universe]
@@ -508,39 +584,75 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
     # Entropy candidates (Gandrillon) and DE status of all candidates
     ent_candidates = []
     if kd is not None:
-        ent_candidates = [u_names[i] for i in gandrillon_genes(kd, mde, top_n=n_top_entropy)]
+        ent_idx = gandrillon_genes(kd, mde, top_n=n_top_entropy)
+        # Highest entropy change first (largest MDE over the transitions)
+        ent_candidates = [u_names[i] for i in ent_idx[np.argsort(-mde[:, ent_idx].max(axis=0), kind='stable')]]
         if verb:
             print(f"[gene_selection] Entropy genes (KD top {n_top_entropy} & MDE top {n_top_entropy} per transition): "
                   f"{len(ent_candidates)}")
-    pool = list(dict.fromkeys(queries + ent_candidates))
+    # Entropy pre-selection: queries, drivers and every gene of the network (hence of the Steiner tree and of the
+    # closure) among the entropy candidates only; the perturbed genes are always kept
+    allowed = None
+    if entropy_preselection and ent_candidates:
+        allowed = set(ent_candidates) | set(forced)
+        out_q = [g for g in queries if g not in allowed]
+        out_d = [g for g, _ in drivers if g not in allowed]
+        queries = [g for g in queries if g in allowed]
+        drivers = [(g, grp) for g, grp in drivers if g in allowed]
+        if verb:
+            print(f"[gene_selection] Entropy pre-selection ({len(ent_candidates)} genes + perturbed ones): "
+                  f"{len(queries)} queries kept, {len(out_q)} dropped{(' ' + str(out_q[:10])) if out_q else ''}; "
+                  f"{len(drivers)} fate drivers kept, {len(out_d)} dropped")
+    pool = list(dict.fromkeys(queries + [g for g, _ in drivers] + ent_candidates))
     scores, padj = de_groups(ad_u, pool, cell_type_key, sample_key) if pool else (pd.DataFrame(), pd.DataFrame())
 
-    # Round robins over groups: the first n_query / n_entropy are required, the rest fill the budget
-    q_all = round_robin(queries, scores, len(queries))
-    e_all = round_robin([g for g in ent_candidates if g not in queries], scores, len(ent_candidates))
+    # At least two entropy genes per cell type (within each sample)
+    if 2 * scores.shape[1] > n_entropy:
+        if verb:
+            print(f"[gene_selection] n_entropy_genes raised from {n_entropy} to twice the number of cell-type groups "
+                  f"({2 * scores.shape[1]}): two entropy genes per cell type")
+        n_entropy = 2 * scores.shape[1]
+    # Round robins over the cell types (DE genes first): the first n_query / n_entropy are required, the rest fill
+    # the budget; queries ordered by entropy change too
+    rank_e = {g: i for i, g in enumerate(ent_candidates)}
+    queries = sorted(queries, key=lambda g: rank_e.get(g, len(rank_e)))
+    q_all = round_robin(queries, scores, len(queries), padj=padj)
+    e_all = round_robin([g for g in ent_candidates if g not in queries], scores, len(ent_candidates), padj=padj)
+    # Fate drivers (classical OT, already in round robin over the fates), then entropy genes
     q_req = q_all[:n_query]
-    e_req = [x for x in e_all if x[0] not in {g for g, _ in q_req}][:n_entropy]
-    required = list(dict.fromkeys(forced + [g for g, _ in q_req] + [g for g, _ in e_req]))
-    group = dict(q_all + e_all)
-    role = {**{g: 'query' for g, _ in q_all}, **{g: 'entropy' for g, _ in e_all}, **{g: 'perturbed' for g in forced}}
-    q_rest = [g for g, _ in q_all if g not in required]
-    e_rest = [g for g, _ in e_all if g not in required]
-    optional = [g for pair in zip(q_rest, e_rest) for g in pair] + q_rest[len(e_rest):] + e_rest[len(q_rest):]
+    taken = set(forced) | {g for g, _ in q_req}
+    d_all = [x for x in drivers if x[0] not in taken]
+    d_req = d_all[:n_driver]
+    taken |= {g for g, _ in d_req}
+    e_all = [x for x in e_all if x[0] not in {g for g, _ in d_req}]
+    e_req = [x for x in e_all if x[0] not in taken][:n_entropy]
+    required = list(dict.fromkeys(forced + [g for g, _ in q_req] + [g for g, _ in d_req] + [g for g, _ in e_req]))
+    group = dict(q_all + e_all + d_all)
+    # Role of a gene in several lists: perturbed > query > driver > entropy
+    role = {**{g: 'entropy' for g, _ in e_all}, **{g: 'driver' for g, _ in d_all}, **{g: 'query' for g, _ in q_all},
+            **{g: 'perturbed' for g in forced}}
+    # Budget left: further queries, drivers and entropy genes in turn
+    rest = [[g for g, _ in lst if g not in required] for lst in (q_all, d_all, e_all)]
+    optional = list(dict.fromkeys(g for i in range(max(map(len, rest), default=0)) for lst in rest if i < len(lst)
+                                  for g in [lst[i]]))
     if verb:
-        print(f"[gene_selection] Required terminals: {len(q_req)}/{len(queries)} queries, {len(e_req)} entropy genes "
-              f"(round robin over {scores.shape[1]} groups)")
+        print(f"[gene_selection] Required terminals: {len(q_req)}/{len(queries)} queries, {len(d_req)} fate drivers, "
+              f"{len(e_req)} entropy genes (round robin over {scores.shape[1]} cell-type groups)")
         if len(e_req) < n_entropy:
             print(f"[gene_selection] Warning: only {len(e_req)} entropy genes available (n_entropy_genes = {n_entropy})")
 
-    net, sel, rows, lg = None, list(required), {}, None
+    net, sel, rows, lg, edges = None, list(required), {}, None, {}
+    edge_samples = {}  # gene -> samples in which it has an edge inside the selection
     if not dyn:
         if verb:
             print("[gene_selection] Single timepoint: no network, required terminals only")
     else:
         # Network universe: highly variable genes + all candidate terminals
         # Listed stimulus targets join the network universe, so that the constraint can apply
-        listed = [g for col in (stimulus_targets or []) for g in col]
-        keep = hvg | np.isin(u_names, pool) | np.isin(u_names, listed)
+        # Listed stimulus targets are possible interactions only: they do not enter the network universe
+        keep = hvg | np.isin(u_names, pool)
+        if allowed is not None:
+            keep = np.isin(u_names, list(allowed))  # entropy pre-selection: the network stays among them
         net_genes = list(u_names[keep])
         # One network per sample with its own nulls (at most n_cells_network cells per time), turned into edge
         # probabilities, then combined with weights cells x transitions (consensus of a shared network)
@@ -571,8 +683,12 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
             weights.append(float(np.sum(smp == s_)) * (len(ts) - 1))
         w = np.array(weights) / np.sum(weights)
         C, C_null, C_null_stim, W = (sum(wi * q[k] for wi, q in zip(w, parts)) for k in range(4))
+        any_mode = multi and len(parts) > 1 and sample_combination == 'any'
+        if any_mode:  # probabilistic OR: an edge supported in one sample is a candidate
+            W = 1.0 - np.prod([1.0 - q[3] for q in parts], axis=0)
         if verb and multi:
-            print("[gene_selection] Edge probabilities combined over the samples, weights (cells x transitions): "
+            print(f"[gene_selection] Edge probabilities combined over the samples ({sample_combination}"
+                  + ("" if any_mode else ", weights cells x transitions") + "): "
                   + ', '.join(f'{s_} {wi:.2f}' for s_, wi in zip(dyn, w)))
         node_names = [f'Stimulus{"" if ns == 1 else " " + str(i + 1)}' for i in range(ns)] + net_genes
         idx = {g: ns + i for i, g in enumerate(net_genes)}
@@ -584,8 +700,12 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
             # Feasibility with any intermediate (the selection is not known yet)
             reg, tgt = lg.coverage(net_genes)
             F = lg.feasibility(net_genes, literature_depth)
-            W, lr = literature_probabilities(net['W'], ns, F, reg[:, None] & tgt[None, :], literature_weight)
+            covered = reg[:, None] & tgt[None, :]
+            W, lr = literature_probabilities(net['W'], ns, F, covered, literature_weight)
             net.update(W=W, W_data=net['W'], F=F)
+            if multi:  # same literature reweighting of each sample (closure balance, edges per sample)
+                net['W_samples'] = np.stack([literature_probabilities(Ws, ns, F, covered, literature_weight)[0]
+                                             for Ws in net['W_samples']])
             if verb:
                 print(f"[gene_selection] Literature (depth {literature_depth}): {reg.mean() * 100:.0f}% of the genes "
                       f"covered as regulators, {tgt.mean() * 100:.0f}% as targets, {F[reg][:, tgt].mean() * 100:.1f}% "
@@ -599,20 +719,32 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
         checked = {idx[g] for g in pool if g in idx}
         rejected = []
         Wm, Cm = W.copy(), C.copy()
+        Wsm = net['W_samples'].copy() if multi and 'W_samples' in net else None
         # Possible targets of the stimuli: other stimulus edges removed from the graph
         if stimulus_targets:
             from ..config import stimulus_target_mask
             mask = stimulus_target_mask(stimulus_targets, net_genes, ns)
+            # A stimulus whose listed targets are in the data but none in the network has no possible target here
+            data_up = {str(g).upper() for g in names}
+            for s_ in range(ns):
+                col = {str(g).upper() for g in stimulus_targets[s_]} if s_ < len(stimulus_targets) else set()
+                if col & data_up and not ({str(g).upper() for g in net_genes} & col):
+                    mask = np.ones((ns, len(net_genes)), bool) if mask is None else mask
+                    mask[s_] = False
+                    if verb:
+                        print(f"[gene_selection] stimulus {s_}: no listed target among the network genes, no stimulus edge")
             if mask is not None:
                 Wm[:ns, ns:] *= mask
                 Cm[:ns, ns:] *= mask
+                if Wsm is not None:
+                    Wsm[:, :ns, ns:] *= mask
 
         def steiner(B):
             while True:
                 res = steiner_selection(
                     Wm, list(range(ns)), [idx[g] for g in required], [idx[g] for g in optional], B,
                     k_in=k_in, k_stim=k_stim, w_min=min_edge_prob, edge_prior=edge_prior, C=Cm,
-                    closure_min=closure_min)
+                    closure_min=closure_min, W_parts=list(Wsm) if any_mode else None)
                 new = [v for v in res[0] if v >= ns and v not in checked] if nb_check else []
                 if not new:
                     return res
@@ -624,6 +756,8 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
                     return res
                 rejected.extend(bad)
                 Wm[bad, :], Wm[:, bad], Cm[bad, :], Cm[:, bad] = 0, 0, 0, 0
+                if Wsm is not None:
+                    Wsm[:, bad, :], Wsm[:, :, bad] = 0, 0
         if max_free_params and lg is None and verb:
             print(f"[gene_selection] Warning: no literature, parameter budget ignored (budget {num_max_genes} genes)")
         if max_free_params and lg is not None:
@@ -637,14 +771,27 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
                   f"{len(checked) - len({idx[g] for g in pool if g in idx})} checked, {len(rejected)} rejected")
         sel = [node_names[v] for v in chosen]
         for v, u in parent.items():
-            rows[node_names[v]] = dict(parent=node_names[u], cost=cost[v], edge_prob=float(W[u, v]))
+            rows[node_names[v]] = dict(steiner_parent=node_names[u], cost=cost[v], edge_prob=float(W[u, v]))
         chosen_set = list(chosen)
         for v in closure:
-            top = [u for u in np.argsort(-W[v, chosen_set]) if W[v, chosen_set[u]] >= min_edge_prob][:3]
-            rows[node_names[v]] = dict(regulates=', '.join(node_names[chosen_set[u]] for u in top))
             role[node_names[v]] = 'regulator'
+        # Every probable and literature-feasible edge inside the selection (Wm: stimulus-target constraint)
+        edges = selection_edges(Wm, node_names, sel, ns, report_edge_prob,
+                                *((F, covered) if lg is not None else (None, None)))
+        # Samples in which each gene has such an edge (several samples)
+        if Wsm is not None:
+            for s_, Ws in zip(dyn, Wsm):
+                e_s = selection_edges(Ws, node_names, sel, ns, report_edge_prob,
+                                      *((F, covered) if lg is not None else (None, None)))
+                for g, (rg, tg) in e_s.items():
+                    if rg or tg:
+                        edge_samples.setdefault(g, []).append(str(s_))
         terminals_idx = [idx[g] for g in required]
         if verb:
+            if Wsm is not None:
+                print("[gene_selection] Regulation of the selection coming from inside it, per sample: "
+                      + ', '.join(f'{s_} {closure_fraction(Ws, list(chosen), list(range(ns)), min_edge_prob) * 100:.0f}%'
+                                  for s_, Ws in zip(dyn, Wsm)))
             path_nodes = [v for v in chosen if v not in set(closure)]
             print(f"[gene_selection] Regulation of the selection coming from inside it (w >= {min_edge_prob}): "
                   f"{closure_fraction(W, terminals_idx, list(range(ns)), min_edge_prob) * 100:.0f}% for the required "
@@ -664,20 +811,35 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
                   f"edges allowed ({int((prior[off] > 0).sum())} free interactions), {np.mean(prior[off] == 1) * 100:.0f}% "
                   f"with weight 1 (feasible through unobserved intermediates, or not covered); "
                   f"{free_parameters(prior, n_stim)} free network parameters")
+    fmt = lambda lst: ', '.join(f"{u} ({w:.2f}{'' if c else '*'})" for u, w, c in lst)
     report = pd.DataFrame([dict(gene=g, role=role.get(g, 'steiner'), group=group.get(g, ''),
                                 required=g in required, **rows.get(g, {})) for g in sel],
-                          columns=['gene', 'role', 'group', 'required', 'parent', 'cost', 'edge_prob', 'regulates'])
-    report['connected'] = report['parent'].notna()
+                          columns=['gene', 'role', 'group', 'required', 'steiner_parent', 'cost', 'edge_prob'])
+    report['in_tree'] = report['steiner_parent'].notna()
+    reg_by, regs = ([edges.get(g, ([], []))[k] for g in report['gene']] for k in (0, 1))
+    report['n_regulators'] = [len(x) for x in reg_by]
+    report['is_regulated_by'] = [fmt(x) for x in reg_by]
+    report['n_targets'] = [len(x) for x in regs]
+    report['regulates'] = [fmt(x) for x in regs]
+    report['connected'] = (report['n_regulators'] + report['n_targets']) > 0
+    if multi:
+        report['edge_samples'] = [', '.join(edge_samples.get(g, [])) for g in report['gene']]
     if len(pool):
         sig = (padj < 0.05) & (scores > 0)
         report['DE_groups'] = [', '.join(sig.columns[sig.loc[g].values]) if g in sig.index else '' for g in report['gene']]
     if verb:
         r = report['role']
         print(f"[gene_selection] Selected {len(sel)} genes (budget {num_max_genes}): {(r == 'query').sum()} queries, "
+              f"{(r == 'driver').sum()} fate drivers, "
               f"{(r == 'entropy').sum()} entropy genes, {(r == 'steiner').sum()} Steiner genes, "
               f"{(r == 'regulator').sum()} closure regulators "
-              f"({int((~report['required'] & r.isin(['query', 'entropy'])).sum())} extra terminals); "
-              f"{int((~report['connected'] & report['required']).sum())} required terminals not connected")
+              f"({int((~report['required'] & r.isin(['query', 'entropy', 'driver'])).sum())} extra terminals); "
+              f"{int((~report['in_tree'] & report['required']).sum())} required terminals outside the Steiner tree")
+        if net is not None:
+            print(f"[gene_selection] Edges inside the selection (w >= {report_edge_prob}"
+                  + (", literature-feasible" if lg is not None else "") + f"): {int(report['n_regulators'].sum())}; "
+                  f"{int((~report['connected']).sum())} of the {len(sel)} genes without any (is_regulated_by / regulates "
+                  f"of cardamomOT/gene_selection_report.csv)")
     return sel, report, net, prior
 
 

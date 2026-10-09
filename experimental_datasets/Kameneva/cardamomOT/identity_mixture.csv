@@ -1,0 +1,29 @@
+classifier,version,cell_type,share,recall,n_cells
+,observed,chromaffin,0.28095238095238095,,354
+random forest,data (cross-validated),chromaffin,0.2785714285714286,0.9717514124293786,354
+random forest,data permuted within modes,chromaffin,0.2761904761904762,0.9548022598870056,354
+random forest,model draws,chromaffin,0.2992063492063492,0.9745762711864406,354
+logistic regression,data (cross-validated),chromaffin,0.276984126984127,0.9689265536723164,354
+logistic regression,data permuted within modes,chromaffin,0.28888888888888886,0.963276836158192,354
+logistic regression,model draws,chromaffin,0.2896825396825397,0.9689265536723164,354
+,observed,intermediate,0.11825396825396825,,149
+random forest,data (cross-validated),intermediate,0.11904761904761904,0.9664429530201343,149
+random forest,data permuted within modes,intermediate,0.1253968253968254,0.8993288590604027,149
+random forest,model draws,intermediate,0.10873015873015873,0.738255033557047,149
+logistic regression,data (cross-validated),intermediate,0.12063492063492064,0.9463087248322147,149
+logistic regression,data permuted within modes,intermediate,0.10158730158730159,0.7651006711409396,149
+logistic regression,model draws,intermediate,0.08253968253968254,0.6308724832214765,149
+,observed,precursors,0.35555555555555557,,448
+random forest,data (cross-validated),precursors,0.35555555555555557,0.9910714285714286,448
+random forest,data permuted within modes,precursors,0.3484126984126984,0.9665178571428571,448
+random forest,model draws,precursors,0.3531746031746032,0.9397321428571429,448
+logistic regression,data (cross-validated),precursors,0.35555555555555557,0.9910714285714286,448
+logistic regression,data permuted within modes,precursors,0.35873015873015873,0.9754464285714286,448
+logistic regression,model draws,precursors,0.3746031746031746,0.96875,448
+,observed,sympathoblasts,0.24523809523809523,,309
+random forest,data (cross-validated),sympathoblasts,0.24682539682539684,0.9805825242718447,309
+random forest,data permuted within modes,sympathoblasts,0.25,0.941747572815534,309
+random forest,model draws,sympathoblasts,0.2388888888888889,0.9223300970873787,309
+logistic regression,data (cross-validated),sympathoblasts,0.24682539682539684,0.9741100323624595,309
+logistic regression,data permuted within modes,sympathoblasts,0.2507936507936508,0.9352750809061489,309
+logistic regression,model draws,sympathoblasts,0.25317460317460316,0.9546925566343042,309

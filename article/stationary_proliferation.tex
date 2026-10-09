@@ -29,13 +29,7 @@
 \maketitle
 
 \begin{abstract}
-Cell populations profiled by single-cell RNA-seq divide, die and switch between states. These population dynamics shape the observed distributions as much as gene regulation does. CardamomOT calibrates a mechanistic, gene regulatory network (GRN)-driven model of gene expression from time series of scRNA-seq data, by reconstructing the hidden protein trajectories that drive regulation. Its published version, however, does not account for population dynamics. This project extends it in three directions:
-\begin{enumerate}[label=(\roman*)]
-\item \textbf{Population dynamics in time series.} We introduce per-cell proliferation and death rates, transitions between cell types and lineage constraints into the mechanistic OT of CardamomOT, in the spirit of Waddington-OT. We also learn a protein-dependent growth function, which turns the calibrated model into a branching generative model.
-\item \textbf{Inference from a snapshot at equilibrium.} We infer the GRN and the hidden protein levels from a single snapshot of a self-renewing population, assumed to be in \emph{balanced growth}. The method alternates between network calibration, estimation of the growth function, and population-level simulation of the model.
-\item \textbf{Growth-aware initial conditions in time series.} We use the same principle to initialise protein levels at the first timepoint, and to constrain the GRN so that the initial population is maintained without stimulus.
-\end{enumerate}
-The theory rests on two effects of proliferation on protein levels: \emph{dilution} by cell growth, which shifts the equilibrium of each cell, and \emph{selection}, which biases the history of the ancestors of observed cells. We derive explicit formulas for both. For (ii), StationaryOT~\cite{zhang2021stationaryot} is the closest existing approach, and the present work can be seen as its mechanistic counterpart.
+The cell populations profiled by single-cell RNA-seq divide, die and switch between states, and these population dynamics shape the observed distributions as much as gene regulation does. CardamomOT calibrates a mechanistic, gene regulatory network (GRN)-driven model of gene expression from time series of scRNA-seq data by reconstructing the hidden protein trajectories that drive regulation, but its published version ignores population dynamics. This project extends it in three directions. First, we bring per-cell proliferation and death rates, transitions between cell types and lineage constraints into the mechanistic optimal transport of CardamomOT, in the spirit of Waddington-OT, and we learn a protein-dependent growth function that turns the calibrated model into a branching generative model. Second, we infer the GRN and the hidden protein levels from a single snapshot of a self-renewing population assumed to be in balanced growth, by alternating network calibration, estimation of the growth function and population-level simulation of the model. Third, we use the same principle in time series, to initialise protein levels at the first timepoint and to constrain the GRN so that the initial population is maintained in the absence of stimulus. The theory behind the last two contributions rests on two effects of proliferation on protein levels, for which we derive explicit formulas: dilution by cell growth, which shifts the equilibrium of each cell, and selection, which biases the history of the ancestors of the observed cells. For snapshots, StationaryOT is the closest existing approach, and the present work can be seen as its mechanistic counterpart.
 \end{abstract}
 
 \tableofcontents
@@ -44,22 +38,13 @@ The theory rests on two effects of proliferation on protein levels: \emph{diluti
 \section{Introduction}
 %======================================================================
 
-\paragraph{Population dynamics in single-cell data.}
-Destructive measurements such as scRNA-seq do not follow individual cells over time. With temporal series, cells sampled at successive times can be linked by optimal transport (OT). Waddington-OT~\cite{schiebinger2019optimal} showed that this coupling must account for proliferation and death: a fast-dividing cell has more descendants at the next timepoint than a quiescent one. In practice, per-cell growth rates are estimated from proliferation and apoptosis gene signatures, and used to reweight the OT marginals, with an unbalanced relaxation~\cite{chizat2018scaling} to absorb estimation errors.
+Single-cell RNA sequencing is destructive: each cell is measured once, and the dynamics of gene expression must be inferred from population snapshots rather than from individual trajectories. When snapshots are collected at successive times, cells can be linked from one timepoint to the next by optimal transport (OT), which reconstructs the most plausible flow of the population through expression space. Waddington-OT~\cite{schiebinger2019optimal} made clear that such a reconstruction must account for proliferation and death, since a fast-dividing cell has more descendants at the next timepoint than a quiescent one. Per-cell growth rates are then estimated from proliferation and apoptosis gene signatures and used to reweight the marginals of the transport problem, which is relaxed into an unbalanced OT problem~\cite{chizat2018scaling} so that errors in these estimates do not force implausible couplings.
 
-\paragraph{Snapshots of self-renewing populations.}
-In many situations, only one timepoint is available, or the population is not evolving at all: homeostatic tissues, cell lines in culture, tumours, organoids. The observed distribution is then stationary in shape, even though each cell keeps moving: progenitors divide, cells commit to other states, differentiated cells stop dividing or die. Zhang et al.~\cite{zhang2021stationaryot} showed that such \emph{steady-state} snapshots still contain dynamical information, provided proliferation and death (sources and sinks) are known. Their method, StationaryOT, recovers cell-state transitions by balancing a growth step against an OT step. Weinreb et al.~\cite{weinreb2018fundamental} established that, from a snapshot alone, dynamics and growth cannot be separated without additional assumptions. Prior knowledge on rates and on the type of dynamics is therefore essential.
+In many situations, however, a single timepoint is available, or the population is simply not evolving: homeostatic tissues, cell lines and organoids in culture, or tumours, keep a stable composition even though each of their cells keeps moving. Progenitors divide, some of their daughters commit to other states, and differentiated cells stop dividing or die. Zhang et al.~\cite{zhang2021stationaryot} showed that such steady-state snapshots still carry information on the dynamics, provided that proliferation and death, which act as sources and sinks, are known. Their method, StationaryOT, recovers transitions between cell states by balancing a growth step against a transport step. The information is limited, though: Weinreb et al.~\cite{weinreb2018fundamental} established that, from a snapshot alone, dynamics and growth cannot be separated without additional assumptions, so that prior knowledge on rates and on the nature of the dynamics is essential.
 
-\paragraph{Why a mechanistic model.}
-OT-based methods move cells in transcript space, with an essentially Brownian prior. They do not account for proteins, the actual regulators, whose kinetics are partly known from the literature. CardamomOT~\cite{mauge2026cardamomot} replaces this prior by a mechanistic model of gene expression driven by a GRN, and reconstructs the hidden protein levels. In a self-renewing population, the hidden protein levels are precisely where the population history is stored: a protein with a half-life of two days integrates the transcriptional activity of a cell and of its recent ancestors. Proliferation affects this memory in two ways. Growth dilutes proteins, and the population over-represents the descendants of fast-dividing states.
+Mechanistic models are a natural source of such prior knowledge. OT-based methods move cells in transcript space under an essentially Brownian prior, and they ignore proteins, which are the actual regulators and whose kinetics are partly known from proteome-wide measurements. CardamomOT~\cite{mauge2026cardamomot} replaces this prior by a mechanistic model of gene expression driven by a GRN, and reconstructs the hidden protein levels of every cell. In a self-renewing population, these hidden levels are precisely where the history of the population is stored: a protein with a half-life of two days integrates the transcriptional activity of a cell and of its recent ancestors. Proliferation affects this memory in two ways, since growth dilutes proteins and the population over-represents the descendants of fast-dividing states.
 
-\paragraph{Contributions.}
-\begin{enumerate}[label=(\roman*)]
-\item \textbf{Population dynamics in CardamomOT} (Section~\ref{sec:popdyn}). Per-cell growth rates from gene signatures anchored on reference rates, growth-weighted unbalanced mechanistic OT, transition and lineage constraints, a protein-dependent growth function learnt along trajectories, and branching simulations.
-\item \textbf{CardamomOT-stat} (Section~\ref{sec:stat}). GRN and protein inference from a single snapshot at balanced growth. It is applied to scRNA-seq data of a patient-derived fusion-negative rhabdomyosarcoma organoid (RMS2V3)~\cite{savary2023fnrms}, and to simulations built for this purpose.
-\item \textbf{Growth-aware initial conditions} (Section~\ref{sec:init}) for time-course inference, together with a maintenance constraint on the GRN, validated on simulations.
-\end{enumerate}
-\noindent All three rest on a characterisation of the protein levels of a proliferating population under the CardamomOT model (Section~\ref{sec:theory}).
+This project builds on these observations. We first introduce population dynamics into CardamomOT (Section~\ref{sec:popdyn}): per-cell growth rates estimated from gene signatures and anchored on reference rates, growth-weighted unbalanced mechanistic OT, transition and lineage constraints, a protein-dependent growth function learnt along the reconstructed trajectories, and branching simulations. We then characterise the protein levels of a proliferating population under the CardamomOT model (Section~\ref{sec:theory}), which leads to CardamomOT-stat, a method that infers the GRN and the protein levels from a single snapshot in balanced growth (Section~\ref{sec:stat}). We plan to apply it to scRNA-seq data of a patient-derived fusion-negative rhabdomyosarcoma organoid (RMS2V3)~\cite{savary2023fnrms}, and to simulations built for this purpose. Finally, the same ideas provide growth-aware initial conditions and a maintenance constraint on the GRN for time-course inference (Section~\ref{sec:init}), which we will validate on simulations.
 
 %======================================================================
 \section{Background: CardamomOT}\label{sec:nutshell}
@@ -67,103 +52,71 @@ OT-based methods move cells in transcript space, with an essentially Brownian pr
 
 \subsection{The mechanistic model}
 
-The model is a multidimensional generalisation of the two-state model of gene expression~\cite{peccoud1995markovian, herbachinferring2017}. For each gene $i$, the promoter switches between an inactive and an active state. When active, it transcribes mRNA $M_i$, which is translated into protein $P_i$. Both degrade, at rates $d_{0,i}$ and $d_{1,i}$. Regulation enters through the activation rate of the promoter, which depends on the protein levels of all genes through the GRN $\theta$:
+The model underlying CardamomOT is a multidimensional generalisation of the two-state model of gene expression~\cite{peccoud1995markovian, herbachinferring2017}. The promoter of each gene $i$ switches between an inactive and an active state; when active, it transcribes mRNA $M_i$, which is translated into protein $P_i$, and both species degrade, at rates $d_{0,i}$ and $d_{1,i}$ respectively. Regulation enters through the activation rate of the promoter, which depends on the protein levels of all genes through the GRN $\theta$:
 \begin{equation}\label{eq:kon}
 \koni(P) = k_{0,i} + (k_{1,i}-k_{0,i})\,\sigma\Bigl(\beta_i + \sum_j \theta_{ij}P_j\Bigr).
 \end{equation}
 In the bursty regime relevant for single-cell data, mRNA is produced in bursts at frequency $\koni(P)$, and the protein follows
 \begin{equation}\label{eq:prot}
-\frac{dP_i}{dt} = s_{1,i}M_i - d_{1,i}P_i .
+\frac{dP_i}{dt} = s_{1,i}M_i - d_{1,i}P_i ,
 \end{equation}
-The resulting process is a piecewise-deterministic Markov process (PDMP). Proteins are normalised so that all genes share the same scale, $P_i \in [0,1]$. The deterministic limit then reads
+so that the whole system is a piecewise-deterministic Markov process (PDMP). Proteins are normalised so that all genes share the same scale, $P_i \in [0,1]$, and the deterministic limit of the model then reads
 \begin{equation}\label{eq:ode}
 \frac{dP}{dt} = d_1 \odot \Bigl(\frac{\kon(P)}{k_1} - P\Bigr).
 \end{equation}
-When the activation rate is effectively piecewise constant, taking values $\mathbf{k}_z$ in a few \emph{basins} (or \emph{modes}) $z$, the mRNA distribution of a population becomes a mixture of negative binomial distributions. This makes the model directly comparable to count data.
+When the activation rate is effectively piecewise constant, taking values $\mathbf{k}_z$ in a few \emph{basins} (or \emph{modes}) $z$, the mRNA distribution of a population is a mixture of negative binomial distributions, which makes the model directly comparable to count data.
 
 \subsection{Inference from time series}
 
-Starting from count matrices at timepoints $t_1 < \dots < t_N$, CardamomOT proceeds as follows.
-\begin{enumerate}
-\item \textbf{Mixture.} A negative binomial mixture is fitted gene by gene. It gives the burst parameters and, for each cell, the probabilities of its basins (its \emph{modes}).
-\item \textbf{EM-like loop} between protein trajectories and GRN:
-  \begin{itemize}
-  \item \emph{Trajectories.} Cells at $t_j$ are linked to cells at $t_{j+1}$ by an entropic OT problem whose cost $C$ is \emph{mechanistic}. Each candidate pair is scored by integrating the protein dynamics~\eqref{eq:ode} from the current cell and comparing the resulting activation rates with the basins of the target cell. This yields hidden protein trajectories for every cell.
-  \item \emph{GRN.} $\theta$ is fitted by regression of the basins on the reconstructed proteins, through~\eqref{eq:kon}, with sparsity and an optional prior network.
-  \item \emph{Basins.} Basin assignments are refined using the consistency between proteins and modes.
-  \end{itemize}
-\item \textbf{Generative model.} The calibrated model simulates new datasets, and in particular predicts the effect of perturbations (knock-outs, over-expressions, stimuli) without retraining.
-\end{enumerate}
+Given count matrices at timepoints $t_1 < \dots < t_N$, CardamomOT first fits a negative binomial mixture gene by gene. This yields the burst parameters and, for each cell, the probabilities of its basins. It then alternates, in an EM-like loop, between the reconstruction of protein trajectories and the calibration of the GRN. Cells at $t_j$ are linked to cells at $t_{j+1}$ by an entropic OT problem whose cost $C$ is mechanistic: each candidate pair is scored by integrating the protein dynamics~\eqref{eq:ode} from the current cell and comparing the resulting activation rates with the basins of the target cell. The resulting protein trajectories are then used to fit $\theta$, by regression of the basins on the proteins through~\eqref{eq:kon}, with a sparsity penalty and an optional prior network, and the basin assignments are refined from the consistency between proteins and modes. Once calibrated, the model is a generative model: it simulates new datasets and predicts the effect of perturbations such as knock-outs, over-expressions or stimuli, without retraining.
 
 \subsection{Kinetic information}
 
-CardamomOT relies on physical time and on kinetic knowledge.
-\begin{itemize}
-\item \textbf{Protein degradation rates $d_1$} (required) set the time scale of the protein dynamics, and thus how far a cell can move between two timepoints. They are taken from proteome-wide turnover measurements: mouse~\cite{schwanhausser2011global}, human~\cite{mathieson2018turnover}. Missing genes are completed from orthologs, paralogs or functionally related genes.
-\item \textbf{mRNA degradation rates $d_0$} (optional) convert the mixture parameters into kinetic rates and make simulated counts realistic.
-\end{itemize}
-In the published version, all cells are given the same weight in the OT, no transition between cell types is favoured or forbidden, and simulations follow a fixed number of independent cells. Population dynamics is the object of contribution (i).
+CardamomOT relies on physical time and on kinetic knowledge. Protein degradation rates $d_1$ are required, since they set the time scale of protein dynamics and thus how far a cell can move between two timepoints. They are taken from proteome-wide turnover measurements, in mouse~\cite{schwanhausser2011global} and in human~\cite{mathieson2018turnover}, and completed for missing genes from orthologs, paralogs or functionally related genes. mRNA degradation rates $d_0$ are optional; they convert the mixture parameters into kinetic rates and make simulated counts realistic. In the published version, however, all cells carry the same weight in the transport problem, no transition between cell types is favoured or forbidden, and simulations follow a fixed number of independent cells. Introducing population dynamics is the object of the next section.
 
 %======================================================================
-\section{(i) Population dynamics in CardamomOT}\label{sec:popdyn}
+\section{Population dynamics in CardamomOT}\label{sec:popdyn}
 %======================================================================
 
 \subsection{Per-cell growth rates}
 
-Following Waddington-OT and moscot~\cite{schiebinger2019optimal, klein2025moscot}, each cell is scored for a proliferation signature (cell-cycle genes~\cite{tirosh2016dissecting}) and for a death signature (apoptosis genes). Each score is mapped to a rate through a shifted logistic curve, giving a birth rate $b_c$ and a death rate $\delta_c$. We add two refinements:
-\begin{itemize}
-\item \textbf{Senescence gating.} A senescence / arrest signature pulls the birth rate towards $0$ for cells that look arrested, which the cell-cycle score alone does not detect.
-\item \textbf{Anchoring.} When reference net rates are known per cell type (doubling times, growth curves), the signature-based rates are rescaled within each type so that their mean matches the reference, while the variation between cells is kept.
-\end{itemize}
-Rates are expressed in the same unit as the timepoints (hours). The net rate is $r_c = b_c - \delta_c$. Optionally, measured population sizes at each timepoint fix the mean growth between consecutive timepoints.
+Following Waddington-OT and moscot~\cite{schiebinger2019optimal, klein2025moscot}, each cell is scored for a proliferation signature, made of cell-cycle genes~\cite{tirosh2016dissecting}, and for a death signature, made of apoptosis genes, and each score is mapped to a rate through a shifted logistic curve. This gives a birth rate $b_c$, a death rate $\delta_c$ and a net rate $r_c = b_c - \delta_c$, expressed in the same unit as the timepoints. We add two refinements to this procedure. A senescence and arrest signature pulls the birth rate towards zero for cells that look arrested, which the cell-cycle score alone does not detect. And when reference net rates are known for some cell types, from doubling times or growth curves, the signature-based rates are rescaled within each type so that their mean matches the reference, while the variability between cells is kept. When measured population sizes are available at each timepoint, they fix in addition the mean growth between consecutive timepoints.
 
 \subsection{Growth-weighted mechanistic OT}
 
-Between $t_j$ and $t_{j+1}$ ($\Delta t = t_{j+1} - t_j$), the OT marginals are reweighted with the Waddington-OT convention, symmetrically on both sides:
+Between $t_j$ and $t_{j+1}$, with $\Delta t = t_{j+1} - t_j$, the marginals of the transport problem are reweighted with the symmetric convention of Waddington-OT:
 \begin{equation}\label{eq:marginals}
 \mu_c \propto e^{\,r_c\Delta t/2}, \qquad \nu_{c'} \propto e^{-r_{c'}\Delta t/2}.
 \end{equation}
-A source cell that divides fast carries more mass. A target cell that divides fast represents fewer distinct ancestors. The OT is \emph{unbalanced}~\cite{chizat2018scaling}: the marginal constraints are replaced by KL penalties, so that errors in the estimated rates are absorbed instead of forcing implausible couplings. The cost remains the mechanistic cost of CardamomOT.
+A source cell that divides fast thus carries more mass, while a target cell that divides fast represents fewer distinct ancestors. The marginal constraints are replaced by Kullback--Leibler penalties, as in unbalanced OT~\cite{chizat2018scaling}, so that errors in the estimated rates are absorbed rather than forcing implausible couplings, and the cost remains the mechanistic cost of CardamomOT.
 
 \subsection{Transitions between cell types and lineages}
 
-\paragraph{Transition rates.}
-Prior knowledge on which cell types give rise to which can be given as a matrix of rates $Q$ between types. In entropic OT, the coupling has the form $\gamma_{cc'} = a_c\,e^{-C_{cc'}/\varepsilon}\,b_{c'}$: the Gibbs kernel $e^{-C/\varepsilon}$ plays the role of a reference transition. Type transitions enter naturally as a multiplicative prior on this kernel:
+Prior knowledge on which cell types give rise to which can be provided as a matrix of instantaneous transition rates $Q_{\tau\tau'} \geq 0$ between types $\tau \neq \tau'$, in $\mathrm{h}^{-1}$, a zero entry meaning that there is no direct transition. Completed by $Q_{\tau\tau} = -\sum_{\tau'\neq\tau}Q_{\tau\tau'}$, this matrix is the generator of a continuous-time Markov chain on types, and the probabilities of going from one type to another over an interval $\Delta t$ are given by the matrix exponential
+\begin{equation}\label{eq:Pi}
+\Pi(\Delta t) = \exp(Q\,\Delta t),
+\end{equation}
+which accounts for indirect transitions, such as $\tau \to \tau' \to \tau''$, whose probability grows with $\Delta t$. In entropic OT, the coupling has the form $\gamma_{cc'} = a_c\,e^{-C_{cc'}/\varepsilon}\,b_{c'}$, where the Gibbs kernel $e^{-C/\varepsilon}$ plays the role of a reference transition between cells. Type transitions therefore enter naturally as a multiplicative prior on this kernel,
 \begin{equation}\label{eq:transition}
 e^{-C_{cc'}/\varepsilon}\ \longrightarrow\ e^{-C_{cc'}/\varepsilon}\;\Pi_{\tau(c)\tau(c')}(\Delta t),
 \qquad\text{i.e.}\qquad
 C_{cc'}\ \longrightarrow\ C_{cc'} - \varepsilon\log\Pi_{\tau(c)\tau(c')}(\Delta t),
 \end{equation}
-where $\tau(c)$ is the type of cell $c$ and $\Pi(\Delta t)$ is the matrix of type-to-type transition probabilities over $\Delta t$, e.g.\ $\exp(Q\Delta t)$. Forbidden transitions ($\Pi = 0$) get an infinite cost. Unlikely transitions are penalised in proportion to their log-probability.
+where $\tau(c)$ is the type of cell $c$ and $\varepsilon$ the entropic regularisation. The reference process is then made of the mechanistic dynamics together with the type-switching chain. Unlikely transitions are penalised in proportion to their log-probability, and transitions that cannot occur within $\Delta t$ are forbidden; in practice, $\Pi$ is floored at $10^{-12}$ so that the Sinkhorn iterations remain stable. Over short intervals, $\Pi(\Delta t) \approx I$ and cells mostly keep their type, whereas the prior becomes more permissive over long intervals. The penalty is computed once per interval on the $K\times K$ matrix of types, so that its cost is negligible.
 
-\begin{rem}[Current implementation]
-The current code reweights the cost multiplicatively, dividing it by row-normalised weights $\exp(Q_{\tau\tau'}\Delta t)$ (entrywise). This has the same qualitative effect. The additive form~\eqref{eq:transition} is the principled one, since it is a prior on the reference process. The article should settle on one formulation and compare both.
-\end{rem}
+When clonal barcodes are available from lineage tracing, cells may in addition only be coupled to cells of the same clone at the next timepoint. Cross-clone pairs receive a large but finite penalty, which keeps the entropic solver stable, and cells without a barcode are left unconstrained.
 
-\paragraph{Lineage barcodes.}
-When clonal barcodes are available (lineage tracing), cells may only be coupled to cells of the same clone at the next timepoint. Cross-clone pairs get a large but finite penalty, which keeps the entropic solver stable. Cells without a barcode are left unconstrained.
+\subsection{A protein-dependent growth function}
 
-\subsection{Growth along trajectories and a protein-dependent growth function}
-
-Signature-based rates are noisy, and they are measured on RNA. Once the trajectories have converged, a final \emph{growth pass} re-estimates the mass gain of each trajectory from the data:
-\begin{itemize}
-\item an OT problem is solved with the source marginal relaxed (KL penalty) and the target marginal nearly hard, starting from the prior weights~\eqref{eq:marginals};
-\item the source weights are iteratively replaced by the row marginals of the coupling;
-\item the log of the final weight gives the log mass gain of each trajectory over $[t_j, t_{j+1}]$, i.e.\ an effective growth rate $R^{\mathrm{OT}}_n$. Its mean is fixed by the population sizes if known, otherwise by the prior.
-\end{itemize}
-A neural network $R(u, P)$, a function of the proteins and of the stimuli $u$, is then trained so that its integral along each reconstructed path matches the measured gain:
+Signature-based rates are noisy, and they are measured on RNA rather than on the regulators themselves. Once the trajectories have converged, a final growth pass therefore re-estimates the mass gain of each trajectory from the data. Starting from the prior weights~\eqref{eq:marginals}, an OT problem is solved with a relaxed source marginal and a nearly hard target marginal, and the source weights are iteratively replaced by the row marginals of the coupling. The logarithm of the final weight gives the log mass gain of each trajectory over $[t_j, t_{j+1}]$, i.e.\ an effective growth rate $R^{\mathrm{OT}}_n$, whose mean is fixed by the population sizes when they are known and by the prior otherwise. A neural network $R(u, P)$ of the proteins and of the stimuli $u$ is then trained so that its integral along each reconstructed path matches this gain,
 \begin{equation}\label{eq:Rfit}
 \int_{t_j}^{t_{j+1}} R\bigl(u(s), P_n(s)\bigr)\,ds \;\approx\; R^{\mathrm{OT}}_n\,\Delta t,
 \end{equation}
-with a quadrature along the path. Making growth a function of the proteins has two advantages. All proteins live on the same normalised scale, which stabilises the regression. And the growth function becomes part of the mechanistic model, so it responds to perturbations of the network.
+the integral being computed by quadrature along the path. Making growth a function of the proteins has two advantages: the regression is stable, since all proteins live on the same normalised scale, and the growth function becomes part of the mechanistic model, so that it responds to perturbations of the network.
 
-\subsection{Branching simulations and perturbations}
+\subsection{Branching simulations}
 
-With $R$, the calibrated model simulates a \emph{population} rather than a set of independent cells. Cells evolve with the PDMP and are resampled at regular intervals with weights $\exp\int R$ (a Feynman--Kac particle system~\cite{delmoral2004feynman}). The log population size is tracked along the way. Perturbations can act on growth directly: a stimulus (e.g.\ a drug) can shift the net rate, possibly only in cells expressing given target genes. This opens the way to predicting effects on population size, e.g.\ of cell death inducers~\cite{savary2023fnrms}, and not only on expression.
-
-\subsection{Dilution}
-
-The degradation rates $d_1$ exclude dilution by growth (Section~\ref{sec:dilution}). With proliferation, the dynamics~\eqref{eq:ode} should include it. This is part of (i) for time series, and central for (ii).
+Equipped with $R$, the calibrated model simulates a population rather than a set of independent cells. Cells evolve according to the PDMP and are resampled at regular intervals with weights $\exp\int R$, which defines a Feynman--Kac particle system~\cite{delmoral2004feynman}, and the size of the population is tracked along the way. Perturbations can then act on growth directly: a stimulus such as a drug can shift the net rate, possibly only in the cells that express given target genes. This opens the way to predicting effects on population size, for instance of cell death inducers~\cite{savary2023fnrms}, and not only on expression. Finally, since literature degradation rates exclude dilution by growth (Section~\ref{sec:dilution}), the dynamics~\eqref{eq:ode} must include it as soon as cells proliferate, which concerns time series and becomes central for snapshots.
 
 %======================================================================
 \section{Protein equilibrium in a proliferating population}\label{sec:theory}
@@ -171,158 +124,115 @@ The degradation rates $d_1$ exclude dilution by growth (Section~\ref{sec:dilutio
 
 \subsection{Proteins as a memory}
 
-Let $u(t) \in [0,1]^G$ denote the normalised transcriptional forcing, i.e.\ $\mathbf{k}_z/k_1$ when the cell is in mode $z$. Then~\eqref{eq:ode} reads $\dot P = d_1 \odot (u - P)$, whose stationary solution is
+Let $u(t) \in [0,1]^G$ denote the normalised transcriptional forcing of a cell, equal to $\mathbf{k}_z/k_1$ when the cell is in mode $z$. Equation~\eqref{eq:ode} then reads $\dot P = d_1 \odot (u - P)$, whose stationary solution is
 \begin{equation}\label{eq:memory}
 P_i(0) = \int_0^{\infty} d_{1,i}\, e^{-d_{1,i}s}\, u_i(-s)\,ds .
 \end{equation}
-\textbf{The protein is an exponential average of the past transcriptional activity, with memory $1/d_{1,i}$.} For a median protein half-life of 46\,h~\cite{schwanhausser2011global}, this memory ($\approx 66$\,h) covers several cell cycles. Proliferation acts on this memory through two mechanisms.
-\begin{enumerate}
-\item \textbf{Dilution} (per cell, deterministic). Cell growth dilutes concentrations, which shifts the equilibrium of each cell (Section~\ref{sec:dilution}).
-\item \textbf{Selection} (population level). The population over-represents descendants of fast-dividing states. An observed cell therefore carries a protein history biased towards those states (Section~\ref{sec:balanced}).
-\end{enumerate}
-As in (i), growth is a function of the protein state, $R = R(P)$, with $b = b(P)$ for the birth rate.
+The protein level is thus an exponential average of past transcriptional activity, with a memory of $1/d_{1,i}$. For a median protein half-life of 46\,h~\cite{schwanhausser2011global}, this memory, of about 66\,h, covers several cell cycles, and proliferation acts on it through two distinct mechanisms. Dilution by cell growth acts on each cell deterministically and shifts its equilibrium (Section~\ref{sec:dilution}). Selection acts at the level of the population, which over-represents the descendants of fast-dividing states, so that an observed cell carries a protein history biased towards those states (Section~\ref{sec:balanced}). As in Section~\ref{sec:popdyn}, growth is a function of the protein state, $R = R(P)$, and so is the birth rate $b = b(P)$.
 
-\paragraph{Orders of magnitude.}
-With $d_1 \approx 0.015\,\mathrm{h}^{-1}$ (median half-life 46\,h) and a doubling time of 24\,h ($b \approx 0.029\,\mathrm{h}^{-1}$), dilution \emph{dominates} degradation for a typical protein. Differences in growth rates between states are of the same order as $d_1$, so selection is not negligible either.
+Both effects are of the same order as degradation itself. With $d_1 \approx 0.015\,\mathrm{h}^{-1}$, corresponding to the median half-life of 46\,h, and a doubling time of 24\,h, i.e.\ $b \approx 0.029\,\mathrm{h}^{-1}$, dilution even dominates degradation for a typical protein, and differences in growth rates between states are comparable to $d_1$.
 
-\subsection{Dilution: the per-cell equilibrium}\label{sec:dilution}
+\subsection{Dilution and the per-cell equilibrium}\label{sec:dilution}
 
-Proteome-wide turnover measurements separate degradation from dilution. In Schwanhäusser et al.~\cite{schwanhausser2011global} (pulsed SILAC in NIH3T3 fibroblasts), the total amount of each protein is assumed to double over one cell cycle. The degradation rate constant is then obtained as the slope of the labelling ratios \emph{minus} the dilution rate $\ln 2/t_{cc}$, with a measured cell-cycle duration $t_{cc} = 27.5$\,h (Supplementary Information, Eq.~S4). The authors note that half-lives longer than the cell cycle are therefore sensitive to $t_{cc}$, since the loss of such proteins is dominated by dilution. Mathieson et al.~\cite{mathieson2018turnover} work mostly with non-dividing primary cells, where turnover essentially reflects degradation. The rates $d_1$ used by CardamomOT are therefore \emph{pure degradation} rates.
+Proteome-wide turnover measurements separate degradation from dilution. Schwanhäusser et al.~\cite{schwanhausser2011global} measured protein turnover by pulsed SILAC in NIH3T3 fibroblasts, assuming that the total amount of each protein doubles over one cell cycle; the degradation rate constant is then obtained as the slope of the labelling ratios minus the dilution rate $\ln 2/t_{cc}$, with a measured cell-cycle duration $t_{cc} = 27.5$\,h (Supplementary Information, Eq.~S4). The authors note that half-lives longer than the cell cycle are consequently sensitive to $t_{cc}$, since the loss of such proteins is dominated by dilution. Mathieson et al.~\cite{mathieson2018turnover} worked mostly with non-dividing primary cells, in which turnover essentially reflects degradation. The rates $d_1$ used by CardamomOT are therefore pure degradation rates.
 
-The model works with concentrations: at division, both daughters inherit the concentrations of the mother. But between divisions, the volume grows and concentrations are diluted at the growth rate, which equals the birth rate $b$ in balanced growth. This term must therefore be added explicitly:
+The model describes concentrations, so that both daughters inherit the concentrations of their mother at division. Between divisions, however, the volume of the cell grows and concentrations are diluted at the growth rate, which equals the birth rate $b$ in balanced growth. This term must be added explicitly:
 \begin{equation}\label{eq:ode_dil}
-\frac{dP}{dt} = d_1 \odot \frac{\kon(P)}{k_1} - \bigl(d_1 + b(P)\bigr) \odot P .
+\frac{dP}{dt} = d_1 \odot \frac{\kon(P)}{k_1} - \bigl(d_1 + b(P)\bigr) \odot P ,
 \end{equation}
-The \textbf{per-cell equilibrium without stimulus} then solves
+and the equilibrium of a cell in the absence of stimulus then solves
 \begin{equation}\label{eq:fixed_dil}
 P^\ast = \frac{d_1}{d_1 + b(P^\ast)} \odot \frac{\kon(P^\ast)}{k_1}.
 \end{equation}
-Proteins of fast-dividing cells are compressed, more strongly so for stable proteins ($d_1 \ll b$). They remain in $[0,1]$, so the normalisation is preserved. The same reasoning holds for mRNA. In~\cite{schwanhausser2011global}, mRNA half-lives are computed from 4sU labelling ratios without dilution correction, so their $d_0$ already includes part of the dilution. In any case, mRNA half-lives (median $\approx 9$\,h) are short compared with cell cycles, so the effect is minor there.
+The protein levels of fast-dividing cells are compressed, all the more so for stable proteins ($d_1 \ll b$), while remaining in $[0,1]$, so that the normalisation is preserved. The same reasoning applies to mRNA, but in~\cite{schwanhausser2011global} mRNA half-lives are computed from 4sU labelling ratios without dilution correction, so that $d_0$ already includes part of the dilution, and mRNA half-lives, with a median of about 9\,h, are short compared with cell cycles anyway.
 
-\begin{rem}[Birth versus net rate]
-Dilution involves the birth rate $b$, not the net rate $r = b - \delta$. Signature-based estimation produces a birth term and a death term separately, and both should be kept. Reference rates per cell type (doubling times) usually constrain the net rate only. When death is negligible, $b \approx \max(r, 0)$.
-\end{rem}
+Note that dilution involves the birth rate $b$ and not the net rate $r = b - \delta$. Signature-based estimation provides both terms, and both must be kept, whereas reference rates per cell type, such as doubling times, usually constrain only the net rate. When death is negligible, $b \approx \max(r, 0)$.
 
-\subsection{Selection: balanced growth}\label{sec:balanced}
+\subsection{Selection and balanced growth}\label{sec:balanced}
 
-\paragraph{Population equation.}
-Let $x$ be the state of a cell (proteins, and possibly modes), $\mathcal{L}$ the generator of the PDMP including dilution, and $R(x)$ the net growth rate. The unnormalised population density $n(t,x)$ satisfies
+Let $x$ denote the state of a cell (its proteins, and possibly its modes), $\mathcal{L}$ the generator of the PDMP including dilution, and $R(x)$ the net growth rate. The unnormalised density of the population, $n(t,x)$, satisfies
 \begin{equation}\label{eq:pop}
 \partial_t n = \mathcal{L}^{*} n + R\, n .
 \end{equation}
-A population at equilibrium is in \emph{balanced growth}~\cite{perthame2007transport}: $n(t,x) = e^{\lambda t}\rho(x)$, with $\rho$ a probability density solving the eigenproblem
+A population at equilibrium is in balanced growth~\cite{perthame2007transport}: $n(t,x) = e^{\lambda t}\rho(x)$, where the probability density $\rho$ solves the eigenproblem
 \begin{equation}\label{eq:perron}
 \mathcal{L}^{*}\rho + (R - \lambda)\rho = 0, \qquad \int \rho = 1 .
 \end{equation}
-The Perron eigenvalue $\lambda$ is the growth rate of the population, and $\rho$ is the distribution of states seen in a snapshot. Its shape is stationary even though the population grows. This is the setting of StationaryOT~\cite{zhang2021stationaryot}, which approximates~\eqref{eq:perron} by operator splitting: a growth step (weighting by $e^{R\Delta t}$) followed by a transport step (entropic OT). We keep the growth step and replace the transport step by the mechanistic model. The normalised version of~\eqref{eq:pop} is the Feynman--Kac semigroup simulated by the branching simulations of (i).
+The Perron eigenvalue $\lambda$ is the growth rate of the population, and $\rho$ is the distribution of states observed in a snapshot, whose shape is stationary even though the population grows. This is precisely the setting of StationaryOT~\cite{zhang2021stationaryot}, which approximates~\eqref{eq:perron} by operator splitting, alternating a growth step, in which cells are weighted by $e^{R\Delta t}$, with a transport step solved by entropic OT. We keep the growth step and replace the transport step by the mechanistic model: the normalised version of~\eqref{eq:pop} is the Feynman--Kac semigroup that the branching simulations of Section~\ref{sec:popdyn} sample.
 
-\paragraph{Selection does not move fixed points.}
-With deterministic dynamics~\eqref{eq:ode_dil}, the solutions of~\eqref{eq:perron} are combinations of Dirac masses at the stable fixed points~\eqref{eq:fixed_dil}. Asymptotically, the population concentrates on the attractor with the largest $R$. Selection \emph{reweights basins} but does not move fixed points: only dilution does. Beyond dilution, selection affects protein levels through stochasticity (bursts, mode switches) combined with the memory~\eqref{eq:memory}.
+Selection does not move fixed points. With the deterministic dynamics~\eqref{eq:ode_dil}, the solutions of~\eqref{eq:perron} are combinations of Dirac masses at the stable fixed points~\eqref{eq:fixed_dil}, and the population asymptotically concentrates on the attractor with the largest growth rate. Selection thus reweights basins without displacing them, which only dilution does. Beyond dilution, selection affects protein levels through stochasticity, i.e.\ bursts and mode switches, combined with the memory~\eqref{eq:memory}. Two results make this effect explicit.
 
 \begin{prop}[Weak form]\label{prop:weak}
 If $\rho$ satisfies~\eqref{eq:perron}, then for every test function $\varphi$,
 \[
 \E_\rho[\mathcal{L}\varphi] = -\Cov_\rho(R, \varphi), \qquad \lambda = \E_\rho[R].
 \]
-In particular, for $\varphi(x) = P_i$, since the mean drift of the PDMP is the deterministic field~\eqref{eq:ode_dil}:
+In particular, for $\varphi(x) = P_i$, since the mean drift of the PDMP is the deterministic field~\eqref{eq:ode_dil},
 \begin{equation}\label{eq:weak_mean}
 \E_\rho\Bigl[d_{1,i}\tfrac{\koni(P)}{k_{1,i}} - \bigl(d_{1,i} + b(P)\bigr)P_i\Bigr] = -\Cov_\rho(R, P_i).
 \end{equation}
 \end{prop}
 \begin{proof}
-Integrate~\eqref{eq:perron} against $\varphi$. With $\varphi = 1$ this gives $\lambda = \E_\rho[R]$. For general $\varphi$, it gives $\E_\rho[\mathcal{L}\varphi] + \E_\rho[R\varphi] - \E_\rho[R]\E_\rho[\varphi] = 0$.
+Integrating~\eqref{eq:perron} against $\varphi$ gives $\E_\rho[\mathcal{L}\varphi] + \E_\rho[R\varphi] - \lambda\,\E_\rho[\varphi] = 0$, and the choice $\varphi = 1$ gives $\lambda = \E_\rho[R]$.
 \end{proof}
 
-\noindent Interpretation: if $R$ correlates positively with $P_i$, the population maintains $P_i$ \emph{above} the deterministic balance. The mean drift is negative and selection compensates for it. The earlier method CARDAMOM~\cite{ventre2023one} assumed $P_c = \kon(P_c)/k_1$ for every cell (quasi-stationarity). Equation~\eqref{eq:weak_mean} is a \emph{weak} version of that assumption (averaged over the population), \emph{corrected for growth}. It is cheap to evaluate and differentiable in $\theta$, so it can serve as a loss (Section~\ref{sec:weak_loss}).
+When growth correlates positively with $P_i$, the population therefore maintains $P_i$ above the deterministic balance: the mean drift is negative, and selection compensates for it. The earlier method CARDAMOM~\cite{ventre2023one} assumed that $P_c = \kon(P_c)/k_1$ for every cell. Equation~\eqref{eq:weak_mean} is a weak version of this quasi-stationarity assumption, averaged over the population and corrected for growth. It is cheap to evaluate and differentiable in $\theta$, so that it can serve as a loss (Section~\ref{sec:weak_loss}).
 
 \begin{prop}[Ancestral lineage and mean protein per state]\label{prop:ancestral}
-Assume a finite set of states $z \in \{1,\dots,K\}$ (cell types or modes), a generator $Q$ of transitions between states, net rates $r_z$, birth rates $b_z$, and a forcing $\bar u_z$ constant per state. Let $\rho$ be the left Perron eigenvector, $\rho^\top(Q + \mathrm{diag}(r)) = \lambda \rho^\top$. The ancestral lineage of a typical cell, followed backwards in time, is a Markov chain with generator~\cite{georgii2003ancestral}
+Consider a finite set of states $z \in \{1,\dots,K\}$, such as cell types or modes, with a generator $Q$ of transitions between states, net rates $r_z$, birth rates $b_z$, and a forcing $\bar u_z$ constant in each state. Let $\rho$ be the left Perron eigenvector, $\rho^\top(Q + \mathrm{diag}(r)) = \lambda \rho^\top$. The ancestral lineage of a typical cell, followed backwards in time, is a Markov chain with generator~\cite{georgii2003ancestral}
 \begin{equation}\label{eq:B}
 B_{zy} = \frac{\rho_y Q_{yz}}{\rho_z}\ (y \neq z), \qquad B_{zz} = Q_{zz} + r_z - \lambda,
 \end{equation}
-whose rows sum to $0$. The mean protein of gene $i$ in cells of state $z$ is
+whose rows sum to zero, and the mean protein level of gene $i$ in cells of state $z$ is
 \begin{equation}\label{eq:resolvent}
 m_i = \bigl(d_{1,i} I + \mathrm{diag}(b) - B\bigr)^{-1} d_{1,i}\,\bar u_i \in \mathbb{R}^K .
 \end{equation}
 \end{prop}
 \begin{proof}[Sketch]
-Among the $n_z(t)$ cells in state $z$ at time $t$, the fraction that has just arrived from $y$ during $dt$ is $n_y Q_{yz}\,dt / n_z = \rho_y Q_{yz}\,dt/\rho_z$. Births in $z$ come from parents in $z$ and do not change the ancestral state, and the Perron equation gives the diagonal. Along the backward chain $Z$, the solution of~\eqref{eq:ode_dil} is $P_i(0) = \int_0^\infty d_{1,i}\bar u_{i,Z(s)}\exp\bigl(-\int_0^s (d_{1,i} + b_{Z(v)})dv\bigr)ds$. Its expectation given $Z(0) = z$ is the resolvent~\eqref{eq:resolvent}.
+Among the $n_z(t)$ cells in state $z$ at time $t$, the fraction that has just arrived from $y$ during $dt$ is $n_y Q_{yz}\,dt / n_z = \rho_y Q_{yz}\,dt/\rho_z$. Births in $z$ come from parents in $z$ and leave the ancestral state unchanged, and the Perron equation gives the diagonal. Along the backward chain $Z$, the solution of~\eqref{eq:ode_dil} is $P_i(0) = \int_0^\infty d_{1,i}\bar u_{i,Z(s)}\exp\bigl(-\int_0^s (d_{1,i} + b_{Z(v)})dv\bigr)ds$, whose expectation given $Z(0) = z$ is the resolvent~\eqref{eq:resolvent}.
 \end{proof}
 
-\noindent Without proliferation, $B$ is the usual time reversal of $Q$, and if moreover cells stay long in their state, $m \approx \bar u$: we recover the current initialisation at the mode levels. Equation~\eqref{eq:resolvent} is the exact correction at the level of states. It costs $G$ linear systems of size $K\times K$. The same transition generator $Q$ as in (i) can be used here.
-
-\paragraph{Gaussian approximation.}
-Near a fixed point $P^\ast$, let $J$ be the Jacobian of~\eqref{eq:ode_dil}, $D$ the effective burst diffusion, and $\Sigma$ the solution of the Lyapunov equation $J\Sigma + \Sigma J^\top + D = 0$. If $R(P) \approx R(P^\ast) + \beta^\top(P - P^\ast)$, the equilibrium within a basin is Gaussian with covariance $\Sigma$ and mean
+Without proliferation, $B$ reduces to the usual time reversal of $Q$, and if cells moreover stay long in each state, $m \approx \bar u$, which is the current initialisation at the mode levels. Equation~\eqref{eq:resolvent} provides the exact correction at the level of states, for the cost of $G$ linear systems of size $K\times K$, and it can use the same generator $Q$ as the transition prior of Section~\ref{sec:popdyn}. Within a basin, a Gaussian approximation gives an order of magnitude of the selection effect. Let $J$ be the Jacobian of~\eqref{eq:ode_dil} at a fixed point $P^\ast$, $D$ the effective diffusion due to bursts, and $\Sigma$ the solution of the Lyapunov equation $J\Sigma + \Sigma J^\top + D = 0$. If $R(P) \approx R(P^\ast) + \beta^\top(P - P^\ast)$, the equilibrium within the basin is Gaussian with covariance $\Sigma$ and mean
 \begin{equation}\label{eq:gauss}
 m = P^\ast - J^{-1}\Sigma\beta ,
 \end{equation}
-which is consistent with~\eqref{eq:weak_mean}. This gives an order of magnitude of the selection effect per basin.
+in agreement with~\eqref{eq:weak_mean}.
 
 \subsection{Identifiability}
 
-From a snapshot alone, dynamics and growth cannot be identified separately~\cite{weinreb2018fundamental}. Moreover, only $R - \lambda$ affects the shape of $\rho$. In our setting, several sources of information reduce this degeneracy:
-\begin{itemize}
-\item the dynamics is constrained by the mechanistic model, with known degradation rates and dilution;
-\item reference proliferation rates per type fix the absolute scale of $R$, and $\lambda = \E_\rho[R]$ provides a consistency check;
-\item allowed transitions between types restrict the possible flows.
-\end{itemize}
-This is the main argument for a mechanistic counterpart of StationaryOT.
+From a snapshot alone, dynamics and growth cannot be identified separately~\cite{weinreb2018fundamental}, and only $R - \lambda$ affects the shape of $\rho$. In our setting, however, the dynamics is constrained by the mechanistic model, with known degradation rates and dilution; reference proliferation rates fix the absolute scale of $R$, with $\lambda = \E_\rho[R]$ as a consistency check; and transition rates between types restrict the possible flows. Together, these constraints remove much of the degeneracy, which is the main argument for a mechanistic counterpart of StationaryOT.
 
 %======================================================================
-\section{(ii) CardamomOT-stat: inference from a snapshot at equilibrium}\label{sec:stat}
+\section{CardamomOT-stat: inference from a snapshot at equilibrium}\label{sec:stat}
 %======================================================================
 
 \subsection{Setting}
 
 \begin{conj}
-The snapshot (for each sample, without stimulus) is a sample of the balanced-growth distribution $\rho$ of the model $(\theta, d_0, d_1, R)$ with dilution.
+The snapshot of each sample, in the absence of stimulus, is drawn from the balanced-growth distribution $\rho$ of the model $(\theta, d_0, d_1, R)$ with dilution.
 \end{conj}
 
-\noindent Inputs:
-\begin{itemize}
-\item a count matrix (one or several samples);
-\item per-cell birth and death rates estimated from signatures, possibly anchored per cell type (as in (i));
-\item degradation rates $d_0, d_1$;
-\item optionally, cell types with transition rates (as in (i)), and a prior network $\theta^0$.
-\end{itemize}
-Outputs: the GRN $\theta$, protein levels for every cell, a growth function $R(P)$, and a calibrated generative model whose branching simulations should reproduce the snapshot over time.
+The method takes as input a count matrix, possibly made of several samples, per-cell birth and death rates estimated from signatures and possibly anchored per cell type as in Section~\ref{sec:popdyn}, the degradation rates $d_0$ and $d_1$, and optionally transition rates between cell types and a prior network $\theta^0$. It returns the GRN $\theta$, protein levels for every cell, a growth function $R(P)$, and a calibrated generative model whose branching simulations should reproduce the snapshot over time.
 
 \subsection{Initialisation}
 
-The mixture is fitted as in CardamomOT, giving the modes of each cell. Initial proteins can be obtained at three levels of refinement:
-\begin{enumerate}[label=(\alph*)]
-\item \textbf{Modes + dilution}: proteins placed between mode levels according to the RNA, as in CardamomOT, then rescaled by the dilution factor $d_1/(d_1 + b_c)$ of~\eqref{eq:fixed_dil}.
-\item \textbf{Ancestral closed form} (Prop.~\ref{prop:ancestral}). We need a transition generator $Q$ between types or clusters:
-  \begin{itemize}
-  \item either from known transition rates;
-  \item or from StationaryOT~\cite{zhang2021stationaryot}, run on the snapshot with growth weights $e^{r_c\Delta t}$ and the allowed transitions, then aggregated per type ($Q \approx (T - I)/\Delta t$, with $T$ the transition matrix).
-  \end{itemize}
-  Each cell's protein is then placed around $m_{z(c)}$ according to its own RNA.
-\item \textbf{Full loop} below, initialised by (a) or (b).
-\end{enumerate}
+The mixture is fitted as in CardamomOT, which gives the modes of each cell, and initial protein levels can be obtained with increasing refinement. The simplest option places proteins between mode levels according to the RNA, as in CardamomOT, and rescales them by the dilution factor $d_1/(d_1 + b_c)$ of~\eqref{eq:fixed_dil}. A better option uses the ancestral closed form of Proposition~\ref{prop:ancestral}, which requires a generator $Q$ between types or clusters. $Q$ can come from known transition rates or, failing that, from StationaryOT~\cite{zhang2021stationaryot}, run on the snapshot with growth weights $e^{r_c\Delta t}$ and the allowed transitions and aggregated per type, with $Q \approx (T - I)/\Delta t$ for the resulting transition matrix $T$. The protein level of each cell is then placed around $m_{z(c)}$ according to its own RNA. Either option can finally serve as the starting point of the full loop described below.
 
 \subsection{Iterative loop}\label{sec:loop}
 
-At each iteration $k$:
-\begin{enumerate}[label=\arabic*.]
-\item \textbf{Network.} Fit $\theta$ by regression of the modes on the current proteins $P_c^{(k)}$, as in CardamomOT, adding the stationarity loss $\mathcal{L}_{\mathrm{stat}}$ (Section~\ref{sec:weak_loss}).
-\item \textbf{Growth.} Fit $\hat R(P)$ and $\hat b(P)$ by regression of the per-cell rates on $P_c^{(k)}$, with a penalty towards the reference rates per type. Set $\hat\lambda$ as the mean of $\hat R$.
-\item \textbf{Equilibrium simulation.} Run the branching simulation of (i) from $P_c^{(k)}$ ($\theta^{(k+1)}$, dilution, no stimulus) over a horizon $H$ (Section~\ref{sec:horizon}), with resampling weights $\exp\int(\hat R - \hat\lambda)$. The resulting cloud $\{\tilde P_n\}$ approximates the balanced-growth distribution of the current model.
-\item \textbf{Matching.} Couple particles and observed cells by OT, with the mechanistic cost of CardamomOT (and the transition prior~\eqref{eq:transition} if available). Both marginals are uniform, since the cells \emph{are} a sample of $\rho$. Each cell receives the barycentre of its matched particles,
-  \[
-  P_c^{\mathrm{new}} = \frac{\sum_n \gamma_{nc}\tilde P_n}{\sum_n \gamma_{nc}} \approx \E_\rho[P \mid \text{observations of } c],
-  \]
-  which is the full-model analogue of~\eqref{eq:resolvent}.
-\item \textbf{Damping.} $P_c^{(k+1)} = (1-\eta)P_c^{(k)} + \eta P_c^{\mathrm{new}}$. Optionally, refine the modes as in CardamomOT.
-\end{enumerate}
+Each iteration of the loop updates in turn the network, the growth function and the protein levels. The network $\theta$ is fitted by regression of the modes on the current proteins $P_c^{(k)}$, as in CardamomOT, with the addition of the stationarity loss $\mathcal{L}_{\mathrm{stat}}$ of Section~\ref{sec:weak_loss}. The growth function $\hat R(P)$, together with the birth rate $\hat b(P)$, is fitted by regression of the per-cell rates on $P_c^{(k)}$, with a penalty towards the reference rates per type, and $\hat\lambda$ is set to the mean of $\hat R$. The branching simulation of Section~\ref{sec:popdyn} is then run from $P_c^{(k)}$ under the new network, with dilution and without stimulus, over a horizon $H$ (Section~\ref{sec:horizon}) and with resampling weights $\exp\int(\hat R - \hat\lambda)$. The resulting cloud of particles $\{\tilde P_n\}$ approximates the balanced-growth distribution of the current model.
 
-\noindent The loop stops when the stationarity residual~\eqref{eq:weak_mean}, the drift of the simulated cloud between $H/2$ and $H$, and the changes in $P$ and $\theta$ are all small.
+Particles and observed cells are then coupled by OT, with the mechanistic cost of CardamomOT and, when available, the transition prior~\eqref{eq:transition}. Both marginals are uniform, since the observed cells are themselves a sample of $\rho$, and each cell receives the barycentre of its matched particles,
+\[
+P_c^{\mathrm{new}} = \frac{\sum_n \gamma_{nc}\tilde P_n}{\sum_n \gamma_{nc}} \approx \E_\rho[P \mid \text{observations of } c],
+\]
+which is the full-model analogue of~\eqref{eq:resolvent}. The update is damped, $P_c^{(k+1)} = (1-\eta)P_c^{(k)} + \eta P_c^{\mathrm{new}}$, and the modes can be refined as in CardamomOT. The loop stops when the stationarity residual~\eqref{eq:weak_mean}, the drift of the simulated cloud between $H/2$ and $H$, and the changes in $P$ and $\theta$ are all small.
 
 \begin{algorithm}[H]
 \caption{CardamomOT-stat (sketch)}
 \begin{algorithmic}[1]
 \Require snapshot, modes $z_c$, per-cell rates (anchored), $d_0, d_1$, optional transitions and $\theta^0$
-\State $P^{(0)} \gets$ initialisation (a) or (b)
+\State $P^{(0)} \gets$ initialisation (dilution or ancestral closed form)
 \For{$k = 0, 1, \dots$}
   \State $\theta^{(k+1)} \gets \argmin_\theta \sum_c \mathrm{loss}(\kon(P^{(k)}_c), \mathbf{k}_{z_c}) + \mu\,\mathcal{L}_{\mathrm{stat}}(\theta; P^{(k)}, \hat R) + \lambda_1\|\theta - \theta^0\|_1$
   \State $\hat R, \hat b \gets$ anchored regression on $P^{(k)}$; $\hat\lambda \gets \mathrm{mean}_c\,\hat R(P^{(k)}_c)$
@@ -336,135 +246,71 @@ At each iteration $k$:
 
 \subsection{Simulation horizon and time steps}\label{sec:horizon}
 
-The population reaches equilibrium on two time scales:
-\begin{itemize}
-\item \textbf{protein relaxation}, $\sim 1/(d_1 + b)$, which dilution shortens;
-\item \textbf{relaxation of the composition}, the inverse of the spectral gap of $\mathcal{L} + R$. At the level of states, this is the spectral gap of $Q + \mathrm{diag}(r)$, set by the transition rates and by the differences in growth rates.
-\end{itemize}
-Proposed settings:
-\begin{itemize}
-\item $H$ of 3 to 5 times the larger of these two scales, using a low quantile of $d_1 + b$ rather than its minimum, so that a single very stable protein does not dictate the horizon;
-\item at later iterations, warm starts allow much shorter horizons;
-\item time steps for the weights well below $1/\max(d_1 + b)$ and $1/\max|\hat R - \hat\lambda|$;
-\item convergence monitored through the slope of the log population size (which should approach $\hat\lambda$) and the moments of the cloud.
-\end{itemize}
+The simulated population reaches equilibrium on two time scales: the relaxation of proteins, of order $1/(d_1 + b)$ and shortened by dilution, and the relaxation of the composition of the population, given by the inverse of the spectral gap of $\mathcal{L} + R$, which at the level of states is the spectral gap of $Q + \mathrm{diag}(r)$ and depends on the transition rates and on the differences in growth rates. We propose a horizon $H$ of three to five times the larger of these two scales, computed from a low quantile of $d_1 + b$ rather than from its minimum, so that a single very stable protein does not dictate the horizon. At later iterations, warm starts allow much shorter horizons. The time steps used to integrate the weights must remain well below $1/\max(d_1 + b)$ and $1/\max|\hat R - \hat\lambda|$, and convergence can be monitored through the slope of the log population size, which should approach $\hat\lambda$, and through the moments of the cloud.
 
 \subsection{Stationarity loss}\label{sec:weak_loss}
 
-Proposition~\ref{prop:weak} turns the equilibrium assumption into equations that $\theta$ must satisfy. For a family of test functions $\{\varphi_\ell\}$:
+Proposition~\ref{prop:weak} turns the equilibrium assumption into equations that $\theta$ must satisfy. For a family of test functions $\{\varphi_\ell\}$, we define
 \begin{equation}\label{eq:Lstat}
-\mathcal{L}_{\mathrm{stat}}(\theta) = \sum_{\ell}\Bigl(\frac1N\sum_c \bigl[\mathcal{L}_\theta\varphi_\ell(P_c) + (\hat R(P_c) - \hat\lambda)\varphi_\ell(P_c)\bigr]\Bigr)^2 .
+\mathcal{L}_{\mathrm{stat}}(\theta) = \sum_{\ell}\Bigl(\frac1N\sum_c \bigl[\mathcal{L}_\theta\varphi_\ell(P_c) + (\hat R(P_c) - \hat\lambda)\varphi_\ell(P_c)\bigr]\Bigr)^2 ,
 \end{equation}
-For $\varphi = P_i$, we have $\mathcal{L}_\theta\varphi = d_{1,i}\koni(P)/k_{1,i} - (d_{1,i} + b(P))P_i$. The loss is differentiable in $\theta$ and costs about as much as the regression itself. It asks the \emph{population}, not each cell, to be at equilibrium under $\theta$ given growth. This is what distinguishes the approach from the cell-wise quasi-stationarity of CARDAMOM. The choice of test functions is discussed in Section~\ref{sec:open}.
+where, for $\varphi = P_i$, $\mathcal{L}_\theta\varphi = d_{1,i}\koni(P)/k_{1,i} - (d_{1,i} + b(P))P_i$. This loss is differentiable in $\theta$ and costs about as much as the regression itself. It requires the population, rather than each cell, to be at equilibrium under $\theta$ given growth, which is what distinguishes the approach from the cell-wise quasi-stationarity of CARDAMOM. The choice of test functions is discussed in Section~\ref{sec:open}.
 
 %======================================================================
-\section{(iii) Growth-aware initial conditions in time series}\label{sec:init}
+\section{Growth-aware initial conditions in time series}\label{sec:init}
 %======================================================================
 
-\subsection{Setting}
+In time-course experiments, the first timepoint is often an untreated population at equilibrium, whose protein levels should reflect that equilibrium rather than the RNA of each cell alone. The same ideas then apply, under the following assumption.
 
 \begin{conj}
-The cells at the first timepoint (and the control samples without stimulus) are in balanced growth under the model, with the stimulus at its initial value (usually off).
+The cells at the first timepoint, and the control samples without stimulus, are in balanced growth under the model, with the stimulus at its initial value (usually off).
 \end{conj}
 
-\noindent This assumption is specific to each experiment. It is therefore \textbf{declared by the user}. Otherwise, the usual initialisation is kept, possibly with dilution. A stationarity residual at the first timepoint is reported as a diagnostic.
+Since this assumption is specific to each experiment, it is declared by the user; otherwise, the usual initialisation is kept, possibly corrected for dilution, and the stationarity residual at the first timepoint is reported as a diagnostic. When the assumption holds, the iterative loop of Section~\ref{sec:loop}, without the network update, is run on the first timepoint only after each update of $\theta$ in CardamomOT, with a warm start from the previous iteration and a short horizon. The reconstruction of trajectories then starts from these updated proteins, so that initial conditions become a function of the current network instead of being fixed once and for all from the RNA. At the first iteration, growth is given by the per-cell rates; once the function $R(u, P)$ learnt along trajectories is available, it takes over, and the agreement between both sources at the first timepoint provides a further diagnostic.
 
-\subsection{Initial proteins updated with the network}
+The stationarity loss~\eqref{eq:Lstat}, computed on the first timepoint and on the controls, is moreover added to the regression of the GRN. Without it, a network can explain the time course while letting the initial population drift spontaneously in the absence of stimulus, in which case part of the intrinsic relaxation of the system would be mistaken for an effect of the stimulus. This maintenance constraint separates the dynamics driven by the stimulus from the intrinsic dynamics, and it stabilises control simulations and perturbation predictions: simulated without stimulus from the first timepoint, the control population should remain stable, up to growth.
 
-In the CardamomOT loop, after each update of $\theta$, steps 2--5 of the loop of (ii) are run \emph{on the first timepoint only}, warm-started from the previous iteration, with a short horizon. Trajectory reconstruction then starts from these updated proteins. Initial conditions thus become a function of the current network, instead of being fixed once and for all from the RNA.
-
-For the growth function, the per-cell rates are used at the first iteration. Once the function $R(u, P)$ learnt along trajectories (i) is available, it takes over, and the agreement between both sources at the first timepoint is itself a diagnostic.
-
-\subsection{Maintenance constraint on the network}
-
-We add $\mu\,\mathcal{L}_{\mathrm{stat}}$~\eqref{eq:Lstat}, computed on the first timepoint and on controls, to the GRN regression. Without this constraint, a network can explain the time course while letting the initial population \emph{drift spontaneously} without stimulus. The response would then be partly intrinsic relaxation mistaken for an effect of the stimulus. The constraint has two effects:
-\begin{itemize}
-\item it separates the stimulus-driven dynamics from the intrinsic dynamics;
-\item it stabilises control simulations and perturbation predictions.
-\end{itemize}
-A natural test is to simulate the control without stimulus from the first timepoint: the distribution should remain stable, up to growth.
-
-\subsection{Points of attention}
-\begin{itemize}
-\item \textbf{Circularity.} Initial proteins depend on $\theta$ and conversely. Damping, a short warm-started horizon, and freezing the initial proteins after a few iterations keep the loop stable.
-\item \textbf{Samples.} The equilibrium is computed separately for each sample, with its own basal parameters.
-\item \textbf{Scope.} This part will be developed and validated on simulations first, where the equilibrium assumption holds by construction.
-\end{itemize}
+The main difficulty is circularity, since initial proteins depend on $\theta$ and conversely; damping, short warm-started horizons and freezing the initial proteins after a few iterations keep the loop stable. The equilibrium is computed separately for each sample, with its own basal parameters. This part will be developed and validated on simulations first, where the equilibrium assumption holds by construction.
 
 %======================================================================
 \section{Validation plan}\label{sec:validation}
 %======================================================================
 
-\subsection{Simulations (to be built)}
+\subsection{Simulations}
 
-Synthetic data must contain proliferation, death and dilution, and come from branching simulations.
-\begin{itemize}
-\item \textbf{Networks:} the networks of the CardamomOT benchmarks, plus motifs where proliferation matters: a self-renewing progenitor feeding differentiated non-dividing states (tree), a bistable switch with different growth in each attractor, and a cycle.
-\item \textbf{Growth:} a known $R(P)$ and $b(P)$ driven by a few genes. Vary $b/d_1$ (strength of dilution) and the spread of $R$ relative to $d_1$ (strength of selection).
-\item \textbf{Sampling:} for (i), time series from a non-equilibrium initial condition. For (ii), branching simulation until stationarity of the composition, then one snapshot. For (iii), a perturbation time course started from that equilibrium.
-\item \textbf{Signatures:} the per-cell rates given to the methods are noisy versions of the true ones, optionally anchored per type, to mimic estimation from gene signatures. Transition rates are given exactly, approximately, or not at all.
-\item \textbf{Comparisons:}
-  \begin{itemize}
-  \item (i): with and without growth, transition and lineage constraints;
-  \item (ii)--(iii): current initialisation, initialisation with dilution, ancestral closed form, full loop;
-  \item all methods with and without the growth information, to quantify what it brings.
-  \end{itemize}
-\item \textbf{Metrics:} GRN accuracy (AUPR), error on hidden proteins, recovery of $R$ and of population sizes, stationarity of simulations of the calibrated model, and fate probabilities compared with the ground truth, with Waddington-OT (i) and with StationaryOT (ii).
-\end{itemize}
+The synthetic data still have to be built, and they must contain proliferation, death and dilution, generated by branching simulations. Besides the networks of the CardamomOT benchmarks, we will consider motifs in which proliferation matters: a self-renewing progenitor feeding differentiated non-dividing states, a bistable switch with different growth rates in each attractor, and a cycle. Growth will be given by known functions $R(P)$ and $b(P)$ driven by a few genes, and we will vary the ratio $b/d_1$, which sets the strength of dilution, and the spread of $R$ relative to $d_1$, which sets the strength of selection. Time series for Section~\ref{sec:popdyn} will start from a non-equilibrium initial condition, snapshots for Section~\ref{sec:stat} will be drawn after the composition of the population has stabilised, and time courses for Section~\ref{sec:init} will start from that equilibrium. To mimic estimation from gene signatures, the per-cell rates given to the methods will be noisy versions of the true ones, optionally anchored per type, and transition rates will be given exactly, approximately, or not at all.
+
+These simulations will allow us to compare inference with and without growth, transition and lineage constraints in time series, and the different initialisations (mode levels, dilution, ancestral closed form, full loop) for snapshots and time courses, always with and without growth information to quantify what it brings. Performance will be measured by the accuracy of the inferred GRN (AUPR), the error on hidden proteins, the recovery of $R$ and of population sizes, the stationarity of simulations of the calibrated model, and fate probabilities, compared with the ground truth, with Waddington-OT for time series and with StationaryOT for snapshots.
 
 \subsection{Experimental data}
 
-\paragraph{Time series, for (i).} The iPSC reprogramming time course of Schiebinger et al.~\cite{schiebinger2019optimal}, already analysed with the published CardamomOT, is the reference dataset for growth-weighted OT. It allows a direct comparison with Waddington-OT trajectories and with its growth estimates.
+For time series, the iPSC reprogramming time course of Schiebinger et al.~\cite{schiebinger2019optimal}, already analysed with the published CardamomOT, is the reference dataset for growth-weighted OT, and allows a direct comparison with the trajectories and growth estimates of Waddington-OT.
 
-\paragraph{RMS2V3, for (ii).} The first application of CardamomOT-stat is a patient-derived 3D organoid model of fusion-negative rhabdomyosarcoma (FN-RMS), established by Savary et al.~\cite{savary2023fnrms}. These organoids preserve the molecular features of the tumours and can be expanded in 3D for several months. In culture, they therefore form a self-renewing population, which is a natural candidate for the balanced-growth assumption. The single-cell data show proliferative, quiescent and differentiated compartments, with very different net growth rates. This is exactly the situation where dilution and selection should shape protein levels, and where reference rates per compartment can anchor the growth function. Checks:
-\begin{itemize}
-\item the equilibrium assumption, through the stationarity residual;
-\item the consistency between the inferred $\hat\lambda$ and the reference rates;
-\item simulations of the calibrated model reproduce the snapshot over time;
-\item inferred transitions and fates compared with StationaryOT;
-\item the inferred GRN compared with known regulators.
-\end{itemize}
+For snapshots, the first application of CardamomOT-stat will be a patient-derived 3D organoid model of fusion-negative rhabdomyosarcoma (FN-RMS), established by Savary et al.~\cite{savary2023fnrms}. These organoids preserve the molecular features of the original tumours and can be expanded in 3D for several months, so that in culture they form a self-renewing population, a natural candidate for the balanced-growth assumption. Their single-cell profiles show proliferative, quiescent and differentiated compartments with very different net growth rates, which is exactly the situation in which dilution and selection should shape protein levels, and in which reference rates per compartment can anchor the growth function. We will check the equilibrium assumption through the stationarity residual, the consistency between the inferred $\hat\lambda$ and the reference rates, and the ability of the calibrated model to reproduce the snapshot over time; we will also compare the inferred transitions and fates with those of StationaryOT, and the inferred GRN with known regulators.
 
 %======================================================================
 \section{Roadmap}
 %======================================================================
 
 \begin{enumerate}[label=\textbf{M\arabic*}]
-\item \textbf{Consolidate (i):} settle the formulation of the transition prior~\eqref{eq:transition}; keep birth and death rates separately; add dilution~\eqref{eq:ode_dil} to the dynamics and to the branching simulations.
-\item \textbf{Simulations:} branching simulator with dilution, run either out of equilibrium (time series) or to equilibrium (snapshots), with the scenarios of Section~\ref{sec:validation}.
-\item \textbf{Ancestral closed form}~\eqref{eq:resolvent} and dilution~\eqref{eq:fixed_dil} as initialisation options. Low cost, immediate gain.
-\item \textbf{Stationarity diagnostic}~\eqref{eq:weak_mean}, to measure the departure from equilibrium on real data (RMS2V3) before investing further.
-\item \textbf{CardamomOT-stat:} full loop on simulations, then RMS2V3.
-\item \textbf{(iii)} on simulations: initial proteins updated with the network, and maintenance constraint.
-\item \textbf{Paper:} (i) and (ii) on simulations and real data, (iii) validated on simulations.
+\item Consolidate the population dynamics of Section~\ref{sec:popdyn}: benchmark the transition prior~\eqref{eq:transition} with exact, approximate or missing rates, keep birth and death rates separately, and add dilution~\eqref{eq:ode_dil} to the dynamics and to the branching simulations.
+\item Build the simulations: a branching simulator with dilution, run either out of equilibrium for time series or to equilibrium for snapshots, with the scenarios of Section~\ref{sec:validation}.
+\item Implement the ancestral closed form~\eqref{eq:resolvent} and the dilution correction~\eqref{eq:fixed_dil} as initialisation options, a low-cost step with an immediate gain.
+\item Compute the stationarity diagnostic~\eqref{eq:weak_mean} on RMS2V3, to measure the departure from equilibrium on real data before investing further.
+\item Run the full CardamomOT-stat loop on simulations, then on RMS2V3.
+\item Develop growth-aware initial conditions and the maintenance constraint on simulations.
+\item Write the paper: population dynamics and CardamomOT-stat on simulations and real data, growth-aware initial conditions validated on simulations.
 \end{enumerate}
 
 %======================================================================
 \section{Decisions and open questions}\label{sec:open}
 %======================================================================
 
-\paragraph{Decided.}
-\begin{itemize}
-\item Growth (and birth) rates are functions of proteins; RNA-based rates are regression targets.
-\item Degradation rates from the literature are pure degradation; dilution at the birth rate is modelled explicitly.
-\item Equilibrium at the first timepoint is declared by the user for time-course data. CardamomOT-stat is developed under this assumption, starting with RMS2V3.
-\end{itemize}
+Three choices are settled. Growth and birth rates are functions of the proteins, and rates estimated from RNA signatures only serve as regression targets. Literature degradation rates are pure degradation rates, so that dilution at the birth rate is modelled explicitly. And for time-course data, equilibrium at the first timepoint is declared by the user, whereas CardamomOT-stat is developed under this assumption, starting with RMS2V3.
 
-\paragraph{Open: test functions for the stationarity loss.}
-This is a mathematical question.
-\begin{itemize}
-\item \textbf{First moments}, global and per type ($\varphi = \mathds{1}_{\tau} P_i$). They give $G\times K$ equations, do not involve the burst noise, and form the natural minimal choice.
-\item \textbf{Second moments.} They involve the burst noise (the jump part of $\mathcal{L}$), and hence constrain $\theta$ through the covariance structure, at the price of depending on burst-size parameters.
-\item \textbf{Kernel version.} The supremum over test functions in the unit ball of a reproducing kernel Hilbert space has a closed form, as a double sum over cells, as for kernel Stein discrepancies~\cite{liu2016ksd}. This avoids choosing $\varphi$ by hand. The jump part of the PDMP generator makes the closed form less direct than for diffusions.
-\item \textbf{Localised test functions} (bumps in protein space), as in weak-form identification of dynamics~\cite{messenger2021weak}: many equations at low cost, robust to noise.
-\end{itemize}
+The main open question is mathematical: which test functions should enter the stationarity loss? First moments, global and per type ($\varphi = \mathds{1}_{\tau} P_i$), give $G\times K$ equations that do not involve the noise of bursts, and are the natural minimal choice. Second moments involve this noise, through the jump part of $\mathcal{L}$, and thus constrain $\theta$ through the covariance structure, at the price of depending on burst-size parameters. A kernel version, taking the supremum over test functions in the unit ball of a reproducing kernel Hilbert space, would have a closed form as a double sum over cells, as for kernel Stein discrepancies~\cite{liu2016ksd}, and would avoid choosing $\varphi$ by hand, although the jump part of the PDMP generator makes this closed form less direct than for diffusions. Finally, localised test functions, i.e.\ bumps in protein space, as in weak-form identification of dynamics~\cite{messenger2021weak}, provide many equations at low cost and are robust to noise.
 
-\paragraph{Other open points.}
-\begin{itemize}
-\item Separating birth and death from signatures, given that reference rates are net rates.
-\item The role of modes in the equilibrium simulation: purely protein-driven (as in the PDMP), or with explicit mode switching when transitions between types are known.
-\item Several samples with different compositions: one $\rho$ per sample with a shared $\theta$ and $R$, and sample-specific basal parameters.
-\end{itemize}
+Other points remain open: how to separate birth and death from signatures when reference rates are net rates; whether the equilibrium simulation should remain purely protein-driven, as in the PDMP, or include explicit mode switching when transitions between types are known; and how to handle several samples with different compositions, presumably with one distribution $\rho$ per sample, a shared $\theta$ and $R$, and sample-specific basal parameters.
 
 \begin{thebibliography}{99}
 

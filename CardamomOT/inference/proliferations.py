@@ -17,9 +17,13 @@ class ProliferationMLP(nn.Module):
     """
     Two-hidden-layer MLP: [stimuli, protein levels] → net proliferation rate R (inputs
     standardised). The first n_stim inputs are the inference stimuli (0 = proteins only).
+    With two_heads, a second small network regresses the prior birth and death rates (b, δ) of the states on
+    the same inputs: the birth dilutes the proteins in the simulations (predict_birth), as the prior birth of
+    the real cells in the inferred trajectories. R alone drives the branching: the net growth of the OT
+    marginals also absorbs composition changes (e.g. a rising quiescent fraction), not a division rate.
     """
 
-    def __init__(self, n_inputs: int, hidden_size: int = 64, n_stim: int = 0) -> None:
+    def __init__(self, n_inputs: int, hidden_size: int = 64, n_stim: int = 0, two_heads: bool = False) -> None:
         super().__init__()
         self.register_buffer('x_mean', torch.zeros(n_inputs))
         self.register_buffer('x_std', torch.ones(n_inputs))
@@ -27,6 +31,8 @@ class ProliferationMLP(nn.Module):
         # Output scale: R = r_mean + r_scale * net (targets are ~1e-3 per hour; identity for older nets)
         self.register_buffer('r_mean', torch.tensor(0.0))
         self.register_buffer('r_scale', torch.tensor(1.0))
+        self.register_buffer('two_heads', torch.tensor(int(two_heads)))
+        self.register_buffer('split_scale', torch.tensor(1.0))  # prior rates = split_scale * softplus(z)
         self.net = nn.Sequential(
             nn.Linear(n_inputs, hidden_size),
             nn.Tanh(),
@@ -34,6 +40,18 @@ class ProliferationMLP(nn.Module):
             nn.Tanh(),
             nn.Linear(hidden_size, 1),
         )
+        if two_heads:
+            self.split_net = nn.Sequential(
+                nn.Linear(n_inputs, hidden_size // 2),
+                nn.Tanh(),
+                nn.Linear(hidden_size // 2, 2),
+            )
+
+    def prior_rates(self, x: torch.Tensor):
+        """(b0, δ0): prior birth and death rates regressed on the inputs (two_heads only)."""
+        z = self.split_net((x - self.x_mean) / self.x_std)
+        sp = self.split_scale * torch.nn.functional.softplus(z)
+        return sp[..., 0], sp[..., 1]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.r_mean + self.r_scale * self.net((x - self.x_mean) / self.x_std).squeeze(-1)
@@ -48,6 +66,42 @@ class ProliferationMLP(nn.Module):
         self.eval()
         with torch.no_grad():
             return self.forward(torch.as_tensor(prot, dtype=torch.float32)).numpy()
+
+    def _inputs(self, prot, stim=None):
+        prot = np.asarray(prot, dtype=np.float32)
+        k = int(self.n_stim)
+        if k > 0:
+            stim = np.zeros(k) if stim is None else np.asarray(stim, dtype=np.float32)[..., :k]
+            prot = np.concatenate([np.broadcast_to(stim, prot.shape[:-1] + (k,)), prot], axis=-1)
+        return torch.as_tensor(prot, dtype=torch.float32)
+
+    def predict_rates(self, prot: np.ndarray, stim=None):
+        """(birth, death) of the states: regressed prior rates (two heads), else (max(R, 0), max(−R, 0))."""
+        self.eval()
+        with torch.no_grad():
+            x = self._inputs(prot, stim)
+            if int(self.two_heads):
+                return tuple(v.numpy() for v in self.prior_rates(x))
+            R = self.forward(x).numpy()
+        return np.maximum(R, 0.0), np.maximum(-R, 0.0)
+
+    def predict_birth(self, prot: np.ndarray, stim=None) -> np.ndarray:
+        """Birth rate b of the states (dilution)."""
+        return self.predict_rates(prot, stim)[0]
+
+    def predict_death(self, prot: np.ndarray, stim=None) -> np.ndarray:
+        """Death rate δ of the states."""
+        return self.predict_rates(prot, stim)[1]
+
+
+def load_proliferation_mlp(path, n_inputs):
+    """Saved ProliferationMLP (one or two heads, from the state dict); strict=False keeps the networks saved
+    before input standardisation."""
+    state = torch.load(path, map_location='cpu', weights_only=True)
+    model = ProliferationMLP(int(n_inputs), two_heads=any(k.startswith('split_net.') for k in state))
+    model.load_state_dict(state, strict=False)
+    model.eval()
+    return model
 
 
 def interval_stimulus(prot, times_data, ns=1):
@@ -111,6 +165,8 @@ def train_proliferation_mlp(
     patience: int = 50,
     seed: int = 0,
     verb: bool = True,
+    birth_prior: np.ndarray = None,
+    death_prior: np.ndarray = None,
 ) -> ProliferationMLP:
     """
     Fit R(u, P) so that, for each trajectory n and interval k,
@@ -121,6 +177,10 @@ def train_proliferation_mlp(
     unbalanced PFM) makes the population growth of each interval, log mean_n exp(∫R), match
     the one of the targets: the pathwise least squares alone fit the mean log gain and
     underestimate it (Jensen).
+
+    With birth_prior and death_prior ((T * N,) prior birth and death rates of the states), R is fitted as above
+    (the data only see the net growth), then a small network regresses (b, δ) on the states (held-out
+    trajectories for early stopping), giving the birth (dilution) of the simulated cells (predict_birth).
 
     A fraction val_fraction of the trajectories is held out: training stops when their loss
     has not improved for `patience` epochs and the best weights are kept. The fit quality is
@@ -147,6 +207,7 @@ def train_proliferation_mlp(
     Y = target[ok].astype(np.float32)
     K = np.broadcast_to(np.arange(Km1)[:, None], (Km1, N))[ok]
     traj = np.broadcast_to(np.arange(N)[None, :], (Km1, N))[ok]
+    two_heads = birth_prior is not None and death_prior is not None
 
     # Held-out trajectories (whole paths, so that validation pairs are not neighbours of training ones)
     rng = np.random.default_rng(seed)
@@ -183,7 +244,7 @@ def train_proliferation_mlp(
             lme.append(torch.logsumexp(integ, 0) - np.log(len(sel)))
         return (((torch.stack(lme) - mass_target) / dt_groups) ** 2).mean()
 
-    model = ProliferationMLP(G, hidden_size=hidden_size, n_stim=n_stim)
+    model = ProliferationMLP(G, hidden_size=hidden_size, n_stim=n_stim, two_heads=two_heads)
     flat = X[tr].reshape(-1, G)
     sd = flat.std(axis=0)
     model.x_mean.copy_(torch.tensor(flat.mean(axis=0)))
@@ -258,8 +319,63 @@ def train_proliferation_mlp(
         growth_target=[log_mean_exp(Y[g]) for g in groups_of(all_idx)],
         growth_mlp=[log_mean_exp(pred[g]) for g in groups_of(all_idx)],
         interval_start=[float(np.sort(np.unique(times_data))[i]) for i in intervals],
+        two_heads=bool(two_heads),
     )
+    if two_heads:
+        _fit_split(model, prot, times_data, ns, with_stim, birth_prior, death_prior, n_val, seed, verb)
     if verb:
         print(f"[ProliferationMLP] R² of the path mean rates: train {model.diagnostics['r2_train']:.3f}, "
               f"held-out {model.diagnostics['r2_val']:.3f}")
     return model
+
+
+def _fit_split(model, prot, times_data, ns, with_stim, birth_prior, death_prior, n_val, seed=0, verb=True,
+               n_epochs=300, lr=1e-2, patience=30):
+    """Regression of the prior birth and death rates of the states on their inputs (split_net of model), held-out
+    trajectories for early stopping; diagnostics: mean regressed and prior birth / death."""
+    T = len(np.unique(times_data))
+    N = len(times_data) // T
+    X = np.asarray(prot, dtype=np.float32)
+    if with_stim and ns > 0:
+        X = np.concatenate([interval_stimulus(prot, times_data, ns), X[:, ns:]], axis=1).astype(np.float32)
+    else:
+        X = X[:, ns:]
+    B = np.nan_to_num(np.asarray(birth_prior, dtype=np.float32))
+    D = np.nan_to_num(np.asarray(death_prior, dtype=np.float32))
+    rng = np.random.default_rng(None if seed is None else seed + 1)
+    val_traj = rng.choice(N, n_val, replace=False) if n_val else np.array([], dtype=int)
+    is_val = np.isin(np.tile(np.arange(N), T), val_traj)
+    Xt, Bt, Dt = torch.tensor(X), torch.tensor(B), torch.tensor(D)
+    s = float(max(B.mean(), D.mean(), 1e-6))
+    model.split_scale.fill_(s)
+    opt = torch.optim.Adam(model.split_net.parameters(), lr=lr)
+
+    def loss(idx):  # relative to the scale of the rates
+        b, d = model.prior_rates(Xt[idx])
+        return (((b - Bt[idx]) / s) ** 2 + ((d - Dt[idx]) / s) ** 2).mean()
+
+    tr, va = torch.as_tensor(np.flatnonzero(~is_val)), torch.as_tensor(np.flatnonzero(is_val))
+    best, best_state, wait = np.inf, None, 0
+    for _ in range(n_epochs):
+        opt.zero_grad()
+        l = loss(tr)
+        l.backward()
+        opt.step()
+        with torch.no_grad():
+            vl = float(loss(va)) if len(va) else float(l)
+        if vl < best - 1e-9:
+            best, wait = vl, 0
+            best_state = {k: v.clone() for k, v in model.split_net.state_dict().items()}
+        else:
+            wait += 1
+            if wait >= patience:
+                break
+    if best_state is not None:
+        model.split_net.load_state_dict(best_state)
+    stim = interval_stimulus(prot, times_data, ns) if (with_stim and ns > 0) else None
+    b, d = model.predict_rates(np.asarray(prot)[:, ns:], stim)
+    model.diagnostics.update(two_heads=True, birth_mlp=float(np.mean(b)), death_mlp=float(np.mean(d)),
+                             birth_prior=float(B.mean()), death_prior=float(D.mean()), split_val_loss=float(best))
+    if verb:
+        print(f"[ProliferationMLP] Birth / death regressed on the states: mean birth "
+              f"{np.mean(b):.4f} (prior {B.mean():.4f}), mean death {np.mean(d):.4f} (prior {D.mean():.4f}) h^-1")

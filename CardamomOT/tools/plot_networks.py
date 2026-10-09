@@ -174,7 +174,7 @@ def reseau_top_regulateurs(matrix, gene_names=None,
     return G
 
 
-def plot_network(p, seuil=0.3, net_toplot='inter_simul', net_index=0, train="full", ns=1):
+def plot_network(p, seuil=0.3, net_toplot='inter_simul', net_index=0, train="full", ns=1, sample_index=0):
     """Visualise the inferred GRN for a project directory.
 
     Loads ``net_toplot.npy`` and plots the top regulators using
@@ -195,9 +195,14 @@ def plot_network(p, seuil=0.3, net_toplot='inter_simul', net_index=0, train="ful
     ns : int
         Number of leading rows/columns to skip in ``net_toplot.npy``
         (default 1, which drops the basal/stimulus node).
+    sample_index : int
+        Sample whose network is shown when ``net_toplot.npy`` is per sample (network conditions).
     """
     adata = sc.read_h5ad(f'{p}Data/data_{train}.h5ad')
-    grn_mat = np.load(f'{p}cardamomOT/{net_toplot}.npy')[ns:, ns:]
+    grn_mat = np.load(f'{p}cardamomOT/{net_toplot}.npy')
+    if grn_mat.ndim == 4:   # (n_samples, G, G, n_networks): network of one sample's condition
+        grn_mat = grn_mat[sample_index]
+    grn_mat = grn_mat[ns:, ns:]
     genes_init = list(adata.var_names)
     if grn_mat.ndim < 3: 
         grn_slice = grn_mat

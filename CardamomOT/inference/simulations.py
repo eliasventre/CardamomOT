@@ -70,11 +70,12 @@ def flow(time, d1, P, ns=1):
     return Pnew
 
 @njit(cache=True)
-def step_ode(d1, ks, inter, basal, dt, scale, P, ns=1):
+def step_ode(d1, ks, inter, basal, dt, scale, P, ns=1, cfac=np.ones(1)):
         """
-        Euler step for the deterministic limit model.
+        Euler step for the deterministic limit model; cfac: target factor d1 / (d1 + b) with dilution at the
+        birth rate b (d1 then being d1 + b), ones otherwise.
         """
-        a = kon_ref(P, ks, inter, basal)
+        a = kon_ref(P, ks, inter, basal) * cfac
         Pnew = scale*a + (P[-1, :] - scale*a)*np.exp(-d1*dt)
         for s in range(ns):
             Pnew[s] = P[-1, s]  # preserve stimulus dimensions 0..ns-1
@@ -98,14 +99,16 @@ class ApproxODE:
         self.euler_step = 1e-2/np.max(d)
 
 
-    def simulation(self, d1, ks, timepoints, scale, ns=1, verb=False):
+    def simulation(self, d1, ks, timepoints, scale, ns=1, verb=False, cfac=None):
         """
         Simulation of the deterministic limit model, which is relevant when
         promoters and mRNA are much faster than proteins.
         1. Nonlinear ODE system involving proteins only
         2. Mean level of mRNA given protein levels
+        Dilution at the birth rate b: d1 = d1 + b and cfac = d1 / (d1 + b) (target factor).
         """
         G = d1.size
+        cfac = np.ones(G) if cfac is None else np.asarray(cfac, dtype=np.float64)
         dt = self.euler_step
         if np.size(timepoints) > 1:
             dt = np.min([dt, np.min(timepoints[1:] - timepoints[:-1])])
@@ -115,7 +118,7 @@ class ApproxODE:
         # Core loop for simulation and recording
         for t in timepoints:
             while T < t:
-                self.state['P'] = step_ode(d1, ks, self.inter, self.basal, dt, scale, self.state['P'].reshape((1, -1)), ns)
+                self.state['P'] = step_ode(d1, ks, self.inter, self.basal, dt, scale, self.state['P'].reshape((1, -1)), ns, cfac)
                 T += dt
                 c += 1
             sim += [np.array([(self.state['P'][i]) for i in range(1,G)], dtype=type)]
@@ -230,6 +233,7 @@ def simulate_next_prot_ode(d, a, basal, inter, t, scale, **kwargs) -> Simulation
         ns = kwargs.get('ns', 1)
         stim_vals = kwargs.get('stim_vals', None)  # schedule values at current time ti
         verb = kwargs.get('verb', False)
+        cfac = kwargs.get('cfac', None)  # dilution: target factor d1 / (d1 + b), d being d1 + b
         if np.size(t) == 1:
             t = np.array([t])
         if np.any(t != np.sort(t)):
@@ -246,7 +250,7 @@ def simulate_next_prot_ode(d, a, basal, inter, t, scale, **kwargs) -> Simulation
             if p0 is not None:
                 network.state['P'][1:ns] = p0[1:ns]  # stim2..stimN from p0
             network.state['P'][0] = 1  # backward-compat: stim1 always active
-        sim = network.simulation(d, a, t, scale, ns=ns, verb=verb)
+        sim = network.simulation(d, a, t, scale, ns=ns, verb=verb, cfac=cfac)
         p = sim['P']
         return Simulation(t, p)
 

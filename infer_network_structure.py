@@ -19,6 +19,8 @@ Output files:
     - cardamom/inter.npy: gene interaction matrix (G×G)
     - cardamom/basal.npy: basal expression parameters (G×1)
     - cardamom/alpha.npy: cellular scaling factors
+    - cardamomOT/couplings.npz: final soft couplings of the trajectories between consecutive observed times
+      (sparse: src / tgt = rows of data_<split>.h5ad, w = mass, sample, t_from, t_to; CardamomOT.tools.velocity)
 """
 import sys; sys.path += ['../']
 import numpy as np
@@ -354,22 +356,13 @@ def main(argv):
             print(f"[infer_network_structure] Warning: could not load KO_OV_inference.txt: {e}")
 
     # ─── LOAD TRANSITION RATES (optional) ───────────────────────────────────
-    transition_rates = None
-    tr_path = find_data_file(input_dir(p), 'transition_rates')
-    if tr_path is not None:
-        transition_rates = pd.read_csv(tr_path, sep=None, engine='python', index_col=0)
-        transition_rates.index = transition_rates.index.astype(str)
-        transition_rates.columns = transition_rates.columns.astype(str)
-        print(f"[infer_network_structure] Loaded transition rates from {tr_path} "
-              f"shape={transition_rates.shape}")
-
-    # ─── LOAD POPULATION SIZES (optional) ───────────────────────────────────
-    # Two columns, no header: time, total cell number. Sets the absolute growth of the growth OT pass.
-    ps_path = find_data_file(input_dir(p), 'population_sizes')
-    if ps_path is not None:
-        ps = pd.read_csv(ps_path, sep=None, engine='python', header=None)
-        model.population_sizes = {float(t): float(n) for t, n in zip(ps.iloc[:, 0], ps.iloc[:, 1])}
-        print(f"[infer_network_structure] Loaded population sizes from {ps_path}: {model.population_sizes}")
+    from CardamomOT.inputs import load_transition_rates
+    transition_rates = load_transition_rates(p)  # default matrix, or {'default': ..., dataset_id: ...} with matrices per sample
+    if transition_rates is not None:
+        _m = transition_rates
+        print(f"[infer_network_structure] Loaded transition rates: " + (f"shape={_m.shape}" if hasattr(_m, 'shape') else
+              "default " + ('yes' if _m.get('default') is not None else 'no') + ", own matrix for " +
+              (', '.join(k for k in _m if k != 'default') or 'no sample')))
 
     model.fit_network(adata, intensity_prior=100, verb=1, stimulus_schedule=stim_sched,
                       basal_init=basal_init, inter_init=inter_init,
@@ -387,6 +380,9 @@ def main(argv):
     np.save(os.path.join(cardamom_dir, 'inter_t'), model.inter_t)
     np.save(os.path.join(cardamom_dir, 'basal_tmp'), model.basal_tmp)
     np.save(os.path.join(cardamom_dir, 'inter_tmp'), model.inter_tmp)
+    # Network conditions: condition of each sample, shared network and edges that differ
+    stim_names = ['Stimulus'] if ns == 1 else [f'Stimulus_{i}' for i in range(ns)]
+    model.save_network_conditions(cardamom_dir, gene_names=stim_names + list(adata.var_names))
     np.save(os.path.join(cardamom_dir, 'data_prot'), model.prot)
     np.save(os.path.join(cardamom_dir, 'data_rna'), model.rna)
     np.save(os.path.join(cardamom_dir, 'data_times'), model.times_data)
@@ -394,15 +390,24 @@ def main(argv):
     np.save(os.path.join(cardamom_dir, 'proba_traj'), model.proba_traj)
     np.save(os.path.join(cardamom_dir, 'data_kon_theta'), model.kon_theta)
     np.save(os.path.join(cardamom_dir, 'data_kon_beta'), model.kon_beta)
-    if model.kon_beta_harissa is not None:
-        np.save(os.path.join(cardamom_dir, 'data_kon_beta_harissa'), model.kon_beta_harissa)
     np.save(os.path.join(cardamom_dir, 'alpha'), model.alpha)
-    np.save(os.path.join(cardamom_dir, 'n_iter_inference'), np.array([model.n_iter_final]))
+    # Final basin of each training cell for each gene (EMD and network): infer_test learns from them
+    np.save(os.path.join(cardamom_dir, 'basins_final'), np.argmax(model.proba, axis=-1).astype(np.int8))
+    # Context of the last iteration (Sinkhorn counter, mode-to-mode OT weight, basin probability weight)
+    ctx = model.final_context
+    np.save(os.path.join(cardamom_dir, 'n_iter_inference'),
+            np.array([ctx['n_iter_reg'], ctx['weight_init'], ctx['weight_prob']], dtype=float))
     np.save(os.path.join(cardamom_dir, 'degradations'), model.d)
     if model.R_opt is not None:
         np.save(os.path.join(cardamom_dir, 'data_R_opt'), model.R_opt)
     # Real cell (row of data_<split>.h5ad) behind each trajectory state, -1 if none
     np.save(os.path.join(cardamom_dir, 'data_traj_real_idx'), model.traj_real_idx)
+    # Final soft couplings, indexed by the rows of data_<split>.h5ad (cells never reached have no entry)
+    if model.couplings:
+        from CardamomOT.tools.velocity import save_couplings
+        save_couplings(os.path.join(cardamom_dir, 'couplings.npz'), model.couplings)
+    # Trajectory states at a timepoint observed for their sample (False: virtual state, copy of the previous one)
+    np.save(os.path.join(cardamom_dir, 'data_traj_valid'), model._valid())
     # Cell type behind each trajectory state (stratifies the batches of infer_network_simul)
     ct_path = os.path.join(cardamom_dir, 'data_cell_types.npy')
     if model.traj_cell_types is not None:

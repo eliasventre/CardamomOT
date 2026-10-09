@@ -10,7 +10,8 @@ A method is a module exposing
 - C     : ((n_stimuli + G) x (n_stimuli + G)) signed network, stimuli first, C[i, j] = effect of i on j
           (only |C| is used by the selection).
 
-Built-in methods live in this folder (otvelo_corr, otvelo_granger). A custom method is a file
+Built-in methods live in this folder (otvelo_corr, otvelo_granger, wot_granger: Granger regression through
+the couplings of run_classical_OT.py). A custom method is a file
 <project>/network_methods/<name>.py defining build_network, selected with
 model.network_method = '<name>' (or a path to any .py file); its optional DEFAULTS dict gives
 default parameters, overridden by model.network_method_params.
@@ -20,7 +21,8 @@ import importlib.util
 import os
 
 BUILTIN = {'otvelo_corr': 'CardamomOT.inference.global_networks.otvelo_corr',
-           'otvelo_granger': 'CardamomOT.inference.global_networks.otvelo_granger'}
+           'otvelo_granger': 'CardamomOT.inference.global_networks.otvelo_granger',
+           'wot_granger': 'CardamomOT.inference.global_networks.wot_granger'}
 
 
 def load_network_method(name, project_path=None):
@@ -44,7 +46,10 @@ def load_network_method(name, project_path=None):
 
 def build_global_network(name, adata, stim, seed=0, params=None, project_path=None):
     """Run a network method with its DEFAULTS updated by params."""
+    import inspect
     module = load_network_method(name, project_path)
     kwargs = dict(getattr(module, 'DEFAULTS', {}))
     kwargs.update(params or {})
+    if 'project_path' in inspect.signature(module.build_network).parameters:
+        kwargs['project_path'] = project_path  # methods reading outputs of earlier steps (wot_granger)
     return module.build_network(adata, stim, seed=seed, **kwargs)

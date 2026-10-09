@@ -276,7 +276,7 @@ CardamomOT/
 │
 └── scripts/
     ├── infer_mixture.py          ← Individual pipeline scripts
-    ├── select_genes_and_split.py
+    ├── select_genes.py
     ├── infer_network_structure.py
     ├── infer_network_simul.py
     ├── simulate_network.py

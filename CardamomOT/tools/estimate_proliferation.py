@@ -463,7 +463,7 @@ def estimate_growth_rates(adata, proliferation_genes=None, death_genes=None,
                            delta_max=1.7, delta_min=0.3, delta_center=0.1, delta_width=0.2,
                            senescence_gating=True,
                            gamma_center=0.15, gamma_width=0.3,
-                           hours_per_day=24.0,
+                           hours_per_day=24.0, return_components=False,
                            **score_genes_kwargs):
     """
     Estimate a per-cell net growth rate (birth - death) from literature gene
@@ -520,7 +520,8 @@ def estimate_growth_rates(adata, proliferation_genes=None, death_genes=None,
 
     Returns
     -------
-    net_rate : (N,) array, in hour⁻¹ (see `hours_per_day` above).
+    net_rate : (N,) array, in hour⁻¹ (see `hours_per_day` above); with return_components,
+    (net_rate, birth_rate, death_rate), birth already gated (net = birth - death).
     """
     score_prolif, score_death, score_senescence, senescence_available = score_gene_sets(
         adata, proliferation_genes, death_genes, senescence_genes, species,
@@ -534,7 +535,26 @@ def estimate_growth_rates(adata, proliferation_genes=None, death_genes=None,
         birth = birth * (1.0 - gate)
 
     net_rate_per_day = birth - death
+    if return_components:
+        return net_rate_per_day / hours_per_day, birth / hours_per_day, death / hours_per_day
     return net_rate_per_day / hours_per_day
+
+
+def split_net_change(birth, death, change):
+    """
+    Birth and death rates after a change of the net rate (net' = birth - death + change), shared according to
+    the weight of birth in each cell, w = birth / (birth + death): a decrease lowers the birth by w |change|
+    (down to 0), the death absorbing the rest; an increase lowers the death by (1 - w) change (down to 0), the
+    birth absorbing the rest. Keeps birth, death >= 0 and birth - death = net'.
+    """
+    birth, death = np.asarray(birth, dtype=float), np.asarray(death, dtype=float)
+    change = np.broadcast_to(np.asarray(change, dtype=float), birth.shape)
+    net = birth - death + change
+    w = birth / np.maximum(birth + death, 1e-12)
+    b_neg = np.maximum(birth + w * change, 0.0)
+    d_pos = np.maximum(death - (1.0 - w) * change, 0.0)
+    b = np.where(change < 0, b_neg, net + d_pos)
+    return b, b - net
 
 
 def combine_growth_rates_with_reference(lit_rates, group_labels, reference_rates):

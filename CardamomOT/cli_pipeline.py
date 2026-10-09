@@ -27,6 +27,14 @@ PIPELINE_STEPS = [
                         "needed and allowed, store a depth factor per cell (obs['depth_factor'])",
     },
     {
+        "id": "fit_population_anchors",
+        "name": "Population anchors",
+        "script": "fit_population_anchors.py",
+        "description": "Correct the prescribed proliferation / transition rates of each sample on the evolution of "
+                        "its cell types and population sizes (small growth and transition model), borrow them for "
+                        "the samples without constraint",
+    },
+    {
         "id": "get_proliferation_rates",
         "name": "Proliferation rates",
         "script": "get_proliferation_rates.py",
@@ -34,10 +42,23 @@ PIPELINE_STEPS = [
                         "signatures (runs on the full gene set, before gene selection)",
     },
     {
-        "id": "select_genes_and_split",
+        "id": "split_dataset",
+        "name": "Train/test split",
+        "script": "split_dataset.py",
+        "description": "Split the cells into train/test (obs['split'] of Data/data.h5ad)",
+    },
+    {
+        "id": "run_classical_OT",
+        "name": "Classical OT",
+        "script": "run_classical_OT.py",
+        "description": "Waddington-OT-style couplings per sample (every gene, train cells): cell-type "
+                        "transitions, fate genes, velocities",
+    },
+    {
+        "id": "select_genes",
         "name": "Gene selection",
-        "script": "select_genes_and_split.py",
-        "description": "Filter differentially expressed genes and split cells into train/test",
+        "script": "select_genes.py",
+        "description": "Select the genes on the train cells, write data_full/train/test",
     },
     {
         "id": "build_reference_network",

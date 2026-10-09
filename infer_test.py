@@ -4,11 +4,12 @@ infer_test.py
 Infer trajectories and simulate on test set using pre-learned model parameters.
 
 Held-out validation with everything learned on the training cells kept fixed:
-1. basins of the test cells from the training mixture parameters (per sample);
-2. protein trajectories by the inference loop with the core network fixed (inter.npy /
-   basal.npy): OT couplings and basin updates combining EMD and network, continuing the
-   training schedule (last training iteration n_iter_inference.npy: same basin weights and
-   low Sinkhorn regularization as at the end of the training);
+1. basins of the test cells from the training mixture parameters (per sample): one EMD per gene with the
+   masses of the test cells (force_basins, mean_forcing_em), the network term of the training basin update
+   replaced by a logistic regression of the final training basins (basins_final.npy) on the mixture probabilities;
+2. protein trajectories in a single pass with the core network fixed (inter.npy / basal.npy): OT couplings
+   with the final training regularization (n_iter_inference.npy), the alpha of each state copied from the
+   nearest training state of the same time and sample (alpha.npy, data_prot.npy, data_kon_beta.npy);
 3. trajectories and kon_theta recomputed with the simulation network (*_simul.npy), then
    simulation from the test cells at the first timepoint;
 4. AnnData objects equivalent to the training ones (compared to Data/data_test.h5ad by
@@ -31,6 +32,8 @@ Required input files (from training pipeline):
     - cardamomOT/mixture_parameters.npy, n_networks.npy: mixture model parameters
     - cardamomOT/pi_zinb.npy: zero-inflation parameters
     - cardamomOT/inter.npy, basal.npy: core inferred network (used for infer_test)
+    - cardamomOT/basins_final.npy, proba_init.npy, alpha.npy, data_prot.npy, data_kon_beta.npy, data_times.npy,
+      data_samples.npy, data_traj_valid.npy: training basins and trajectories
     - cardamomOT/basal_simul.npy, inter_simul.npy: adapted network parameters
     - cardamomOT/basal_t_simul.npy, inter_t_simul.npy: temporal network parameters
     - cardamomOT/ratios.npy, degradations.npy, degradations_temporal.npy: kinetics
@@ -200,21 +203,35 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
     # ─── SET CORE NETWORK FOR TRAJECTORY INFERENCE ──────────────────────────
     # infer_test uses the raw inferred network (inter/basal), not the simul ones;
     # basal (n_samples, G_tot, n_networks): rows of the test samples
+    def _inter_rows(arr, axis=0):
+        # Per-sample interactions (network conditions: one more axis) take the test samples' rows too
+        return _sample_rows(arr, axis) if np.ndim(arr) == 4 + axis else arr
+
     if inter_core is not None and basal_core is not None:
         model.basal = _sample_rows(basal_core)
-        model.inter = inter_core
+        model.inter = _inter_rows(inter_core)
     else:
         model.basal = _sample_rows(basal_simul)
-        model.inter = inter_simul
+        model.inter = _inter_rows(inter_simul)
     basal_simul = _sample_rows(basal_simul)
     basal_t_simul = _sample_rows(basal_t_simul, axis=1)  # (T-1, n_samples, G_tot, n_networks)
+    inter_simul = _inter_rows(inter_simul)
+    inter_t_simul = _inter_rows(inter_t_simul, axis=1)   # (T-1, [n_samples,] G_tot, G_tot, n_networks)
 
-    # Last training iteration: the test loop continues its schedule with the network fixed
+    # Context of the last training iteration (regularization, mode-to-mode OT weight, basin probability weight)
     it_path = os.path.join(cardamom_dir, 'n_iter_inference.npy')
-    n_iter_offset = int(np.load(it_path)[0]) if os.path.exists(it_path) else None
-    if n_iter_offset is None:
+    context = None
+    if os.path.exists(it_path):
+        it_saved = np.atleast_1d(np.load(it_path)).astype(float)
+        n_reg = int(it_saved[0])
+        context = {'n_iter_reg': n_reg, 'weight_init': it_saved[1] if len(it_saved) > 1 else 0.0,
+                   'weight_prob': it_saved[2] if len(it_saved) > 2 else max(.96**(n_reg - 1), .1)}
+    else:
         print("[infer_test] Warning: n_iter_inference.npy not found (older run): "
-              f"test loop starts at iteration {model.min_n_loops}")
+              f"context of iteration {model.min_n_loops}")
+
+    # Training arrays of the single-pass test inference (basin calibration, alphas of the nearest states)
+    train = load_train_arrays(p, cardamom_dir, train_ids if 'dataset_id' in adata.obs else None)
 
     # d_t and ratios are needed by estimate_trajectories inside infer_test
     model.ratios = ratios
@@ -274,13 +291,13 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
             basal_ref_test = None
 
     # ─── LOAD OPTIONAL TRANSITION RATES ─────────────────────────────────
-    transition_rates_test = None
-    tr_path = find_data_file(input_dir(p), 'transition_rates')
-    if tr_path is not None:
-        transition_rates_test = pd.read_csv(tr_path, sep=None, engine='python', index_col=0)
-        transition_rates_test.index = transition_rates_test.index.astype(str)
-        transition_rates_test.columns = transition_rates_test.columns.astype(str)
-        print(f"[infer_test] Loaded transition rates from {tr_path} shape={transition_rates_test.shape}")
+    from CardamomOT.inputs import load_transition_rates
+    transition_rates_test = load_transition_rates(p)  # default matrix, or {'default': ..., dataset_id: ...} with matrices per sample
+    if transition_rates_test is not None:
+        _m = transition_rates_test
+        print(f"[infer_test] Loaded transition rates: " + (f"shape={_m.shape}" if hasattr(_m, 'shape') else
+              "default " + ('yes' if _m.get('default') is not None else 'no') + ", own matrix for " +
+              (', '.join(k for k in _m if k != 'default') or 'no sample')))
 
     # ─── TRAJECTORY INFERENCE ON TEST SET ────────────────────────────────
     # Classifies cells into modes (fixed kz/c) then infers OT couplings with
@@ -290,7 +307,7 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
         model.infer_test(adata, verb=1, stimulus_schedule=stim_sched,
                          basal_ref=basal_ref_test,
                          transition_rates=transition_rates_test,
-                         n_iter_offset=n_iter_offset)
+                         context=context, train=train)
         print(f"[infer_test] Test trajectory inference completed")
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -356,6 +373,10 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
         print(f"[infer_test] Using inferred timepoints for simulation: {sim_times}")
 
     # ─── NETWORK SIMULATION ───────────────────────────────────────────────
+    # Same simulation as for the training cells: proliferation MLP (branching, birth rate of the dilution)
+    if model.simulate_with_proliferation:
+        from simulate_network import attach_proliferation
+        attach_proliferation(model, p, tag='[infer_test]')
     print(f"[infer_test] Simulating network dynamics on test set...")
     try:
         model.simulate_network(sim_times, stimulus_schedule=stim_sched_simul)
@@ -415,11 +436,19 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
         data_beta = _nb_sample(vect_kon_beta, times_data_test, s_test[:len(vect_kon_beta)] if s_test is not None else None, d_tr)
         data_netw_theta = _nb_sample(vect_kon_theta, times_data_test, s_test[:len(vect_kon_theta)] if s_test is not None else None, d_tr)
         data_sim = _nb_sample(vect_kon_sim, times_simulation_test, s_sim, d_sim)
+        # Same draws at the reference depth (s = 1), shown by the report with cell_depth_for_representation
+        ref_depth = {}
+        if depth_cells is not None:
+            ref_depth = dict(beta=_nb_sample(vect_kon_beta, times_data_test, s_test[:len(vect_kon_beta)] if s_test is not None else None)[1:],
+                             theta=_nb_sample(vect_kon_theta, times_data_test, s_test[:len(vect_kon_theta)] if s_test is not None else None)[1:],
+                             sim=_nb_sample(vect_kon_sim, times_simulation_test, s_sim)[1:])
 
         # RNA trajectory data
         data_rna_traj = np.zeros((G + 1, rna_test.shape[0]))
         data_rna_traj[0, :] = times_data_test
         data_rna_traj[1:, :] = rna_test[:, ns:].T
+        if d_tr is not None:  # counts of the real test cells (the inference works at the reference depth)
+            data_rna_traj[1:, :] *= np.ravel(d_tr)[None, :]
 
         stim = model.stimulus
         prior = model.prior_network_pen
@@ -429,6 +458,10 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
             a = ad.AnnData(X=matrix_2d.T)
             a.var = adata.var.copy()
             a.obs['time'] = obs_times
+            if suffix in ref_depth:
+                a.layers['reference_depth'] = ref_depth[suffix].T
+            if suffix == 'rna_traj' and d_tr is not None:
+                a.obs['depth_factor'] = np.ravel(d_tr)  # depth of the real test cell behind each state
             a.write(os.path.join(cardamom_dir,
                                  f'adata_{suffix}_test_stim{stim}_prior{prior}.h5ad'))
             print(f"[infer_test] Saved adata_{suffix}_test_stim{stim}_prior{prior}.h5ad")
@@ -447,12 +480,38 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
         sys.exit(1)
 
 
+def load_train_arrays(p, cardamom_dir, train_ids):
+    """
+    Training arrays used by the test inference (final basins, trajectories, alphas); exits if the run predates
+    them or does not match data_train.h5ad.
+    """
+    names = {'prot': 'data_prot', 'kon_beta': 'data_kon_beta', 'alpha': 'alpha', 'times_data': 'data_times',
+             'samples_data': 'data_samples', 'valid': 'data_traj_valid', 'proba_init': 'proba_init',
+             'basins_final': 'basins_final'}
+    paths = {k: os.path.join(cardamom_dir, v + '.npy') for k, v in names.items()}
+    missing = [os.path.basename(v) for v in paths.values() if not os.path.exists(v)]
+    train_path = os.path.join(p, 'Data', 'data_train.h5ad')
+    if missing or not os.path.exists(train_path):
+        print(f"[infer_test] Error: {', '.join(missing) or 'data_train.h5ad'} missing (rerun infer_network_structure)")
+        sys.exit(1)
+    train = {k: np.load(v) for k, v in paths.items()}
+    obs = ad.read_h5ad(train_path, backed='r').obs
+    train['cell_times'] = obs['time'].to_numpy(dtype=float)
+    if len(train['cell_times']) != train['basins_final'].shape[0]:
+        print("[infer_test] Error: training basins do not match data_train.h5ad (rerun infer_network_structure)")
+        sys.exit(1)
+    train['sample_ids'] = list(np.sort(obs['dataset_id'].unique())) if 'dataset_id' in obs and train_ids is not None else [0]
+    return train
+
+
 def _restrict_slots(model, keep):
     """Model trajectories restricted to the slots `keep` (bool (N,)), every timepoint."""
     T = len(np.unique(model.times_data))
-    for attr in ('prot', 'rna', 'kon_beta', 'times_data', 'samples_data'):
+    n = len(model.times_data)  # length before any restriction (times_data itself is restricted in the loop)
+    for attr in ('prot', 'rna', 'kon_beta', 'kon_theta', 'traj_real_idx', 'R_opt', 'R_stim_offset', 'samples_data',
+                 'times_data'):
         arr = getattr(model, attr, None)
-        if arr is not None and len(arr) == len(model.times_data):
+        if arr is not None and np.ndim(arr) >= 1 and len(arr) == n:
             arr = np.asarray(arr)
             setattr(model, attr, arr.reshape((T, -1) + arr.shape[1:])[:, keep].reshape((-1,) + arr.shape[1:]))
 
@@ -523,6 +582,9 @@ def validation_pass(p, opts, adata_rem, removed, refs, cardamom_dir):
         x = np.random.negative_binomial(n_param, p_param)
         x = np.where(np.random.uniform(0, 1, x.shape) < pzc, 0, x)  # pzc (1 or N, genes)
         a = ad.AnnData(X=x.astype(float))
+        if depth is not None:  # same draw at the reference depth (s = 1)
+            x_ref = np.random.negative_binomial(n_param, np.clip((cc / (cc + 1.0))[:, ns:], 1e-6, 1 - 1e-6))
+            a.layers['reference_depth'] = np.where(np.random.uniform(0, 1, x_ref.shape) < pzc, 0, x_ref).astype(float)
         a.var = train.var.copy()
         a.obs['time'] = m.times_simul
         a.obs['dataset_id'] = r

@@ -24,7 +24,8 @@ PARAMETER_GROUPS = [
         'estimate_proliferation_rates', 'simulate_with_proliferation', 'select_genes', 'build_prior_network',
         'simulate_perturbations', 'run_test', 'split', 'train_rate', 'species']),
     ('Gene selection', [
-        'num_max_genes', 'n_query_genes', 'n_entropy_genes', 'network_method', 'k_in_steiner', 'closure_min',
+        'num_max_genes', 'n_query_genes', 'n_entropy_genes', 'network_method', 'sample_network_combination',
+        'k_in_steiner', 'closure_min',
         'min_entropy_change', 'min_nb_separation']),
     ('Literature prior network', [
         'prior_network_pen', 'max_free_params', 'literature_selection', 'literature_depth', 'literature_resources']),
@@ -34,9 +35,11 @@ PARAMETER_GROUPS = [
     ('NB mixture and samples', [
         'mean_forcing_em', 'batch_size_mixture', 'soft_em_refinement', 'integrate_samples', 'ref_sample_integration']),
     ('Network inference', [
-        'force_basins', 'temporal_basins', 'min_n_loops', 'max_iter', 'batch_size_traj', 'n_network_fits']),
+        'force_basins', 'temporal_basins', 'min_n_loops', 'max_iter', 'batch_size_traj', 'n_network_fits',
+        'constrain_basal_uniform', 'network_condition_pen']),
     ('Proliferation and simulation', [
-        'growth_reg_source', 'prolif_uses_stimulus', 'simulation_stochastic']),
+        'growth_reg_source', 'prolif_uses_stimulus', 'simulation_stochastic', 'protein_dilution']),
+    ('Report', ['classifier_method', 'embedding_method_visualization', 'cell_depth_for_representation']),
     ('Reproducibility', ['seed']),
 ]
 
@@ -50,7 +53,7 @@ SHEETS = {
         'Parameters of the model for this project, grouped by use: empty value = default of CardamomOT/model/base.py; '
         'a filled value overrides it, and the command-line options override the workbook.'),
     'gene_lists': (
-        [('genes_queries', 'Genes of interest for the gene selection (select_genes_and_split with select_genes = True), one per row'),
+        [('genes_queries', 'Genes of interest for the gene selection (select_genes with select_genes = True), one per row'),
          ('proliferation_signatures', 'Proliferation marker genes (get_proliferation_rates), replace the built-in list'),
          ('death_signatures', 'Death marker genes (get_proliferation_rates), replace the built-in list'),
          ('senescence_signatures', 'Senescence / arrest marker genes (get_proliferation_rates), replace the built-in list')],
@@ -72,13 +75,20 @@ SHEETS = {
         'Schedule of the inference stimuli for the held-out cells (infer_test): test split and samples removed '
         'from the inference (perturbation_inference, remove_from_inference). Empty: the inference schedule.'),
     'stimulus_simulation_schedule': (
-        [('sample_id', 'Optional: dataset_id whose schedule these rows replace (empty or "all": default)'),
-         ('time', 'Simulated timepoint (optional: without times, rows follow the sorted simulated timepoints)'),
+        [('scenario', 'Optional: name of an alternative schedule of the simulations (empty: default schedule); '
+                      'perturbation_simulation chooses the scenarios of each condition (column schedules)'),
+         ('sample_id', 'Optional: dataset_id whose schedule these rows replace (empty or "all": default; '
+                       'default schedule only)'),
+         ('time', 'Simulated timepoint; the value holds from this time on and applies to the simulated '
+                  'intervals ending after it (optional: without times, rows follow the sorted simulated timepoints)'),
          ('stimulus_1', 'Inference stimulus 1 during the simulations (default: its inference schedule)'),
-         ('STIM1', 'Perturbation stimulus STIM1 of perturbation_simulation (default: 0 at the first time, 1 after)')],
-        'Schedules of the simulations, one row per simulated timepoint: inference stimuli (stimulus_k, acting '
-        'on the genes and, through the RATEk of perturbation_inference, on proliferation and death), then '
-        'perturbation stimuli (STIMk, as in perturbation_simulation).'),
+         ('STIM1', 'Perturbation stimulus STIM1 of perturbation_simulation (default: 0 at the first time, 1 after)'),
+         ('comment', 'Free comment (ignored)')],
+        'Schedules of the simulations: inference stimuli (stimulus_k, acting on the genes and, through the RATEk '
+        'of perturbation_inference, on proliferation and death), then perturbation stimuli (STIMk, as in '
+        'perturbation_simulation). Rows with a scenario name give alternative schedules (e.g. alternating '
+        'inference and perturbation stimuli), simulated for the conditions that ask for them; a value applies '
+        'to the simulated intervals ending at or after its time, so switching times should be simulated times.'),
     'perturbation_inference': (
         [('sample_id', 'dataset_id of a measured sample carrying genetic perturbations (KO / OV), or "all" '
                        'for the row describing the inference stimuli (STIMk / RATEk)'),
@@ -110,6 +120,8 @@ SHEETS = {
                    "TARGET:delta, comma-separated; TARGET = a gene list of gene_lists, GENE1+GENE2..., a gene or "
                    "'all'; delta (per time unit) added to R of a cell at the maximal score, e.g. "
                    "ferroptosis_sensitive:-0.01 (needs the proliferation MLP)"),
+         ('schedules', "Schedules simulated for this condition, comma-separated: 'default' and/or scenario "
+                       "names of stimulus_simulation_schedule, 'all' = default + every scenario (empty: default)"),
          ('comment', 'Free comment (ignored)')],
         'In-silico perturbations simulated by simulate_network_KOV, one condition per row '
         '(add STIM2, STIM3... for several perturbation stimuli; their effects add up).'),
@@ -120,16 +132,26 @@ SHEETS = {
     'proliferation_rates': (
         [('cell_type', 'Cell type (as in obs cell_type_proliferation, else cell_type_transition, else cell_type)'),
          ('net_rate_per_hour', 'Reference net proliferation rate (birth - death), in h^-1; without the inference '
-                               'stimulus if perturbation_inference gives its effect on this cell type (RATEk)')],
-        'Anchors of the net proliferation rates per cell type (get_proliferation_rates); every cell type '
-        'needs a value.'),
+                               'stimulus if perturbation_inference gives its effect on this cell type (RATEk)'),
+         ('sample_id', 'Optional: dataset_id these anchors are for (empty or "all": default of the samples that '
+                       'have none of their own)')],
+        'Anchors of the net proliferation rates per cell type (fit_population_anchors, get_proliferation_rates); '
+        'every cell type needs a value. Rows with a sample_id anchor that sample only (a sample with rows of its own '
+        'ignores the default ones); a sample without anchors borrows those of the best-fitting sample.'),
     'population_sizes': (
-        [('time', 'Timepoint'), ('population_size', 'Total population size at this timepoint')],
-        'Absolute population sizes, anchoring the growth estimated by optimal transport.'),
+        [('time', 'Timepoint'), ('population_size', 'Total population size at this timepoint (any unit: only the '
+                                                    'ratios between times of a sample are used)'),
+         ('sample_id', 'Optional: dataset_id of the sample (empty or "all": default of the samples without rows)')],
+        'Population sizes per sample and time: they constrain the absolute growth in fit_population_anchors and in '
+        'the growth estimated by optimal transport.'),
     'transition_rates': (
-        [('from \\ to', 'Source cell type (rows) and target cell types (header): allowed transition rates')],
-        'Cell-type transition rate matrix constraining optimal transport: first column = source cell types, '
-        'header = target cell types (as in obs cell_type_transition, else cell_type).'),
+        [('from \\ to', 'Source cell type (rows) and target cell types (header): transition rates in h^-1 '
+                        '(off-diagonal, 0 = no direct transition; diagonal ignored)')],
+        'Cell-type transition rate matrix (Markov generator) constraining optimal transport through the '
+        'probabilities expm(Q dt): first column = source cell types, header = target cell types '
+        '(as in obs cell_type_transition, else cell_type). To give a matrix per sample, add a column sample_id '
+        'right of the matrix (one value per row of the block, or one block per sample); rows without sample_id '
+        'are the default of the samples without block of their own.'),
 }
 
 def _is_empty(v):
@@ -208,6 +230,35 @@ def create_workbook(path):
         _style_header(wb.create_sheet(name), columns)
     _fill_parameter_rows(wb['model_parameters'])
     wb.save(path)
+
+
+def upgrade_workbook(path, out=None):
+    """
+    Brings an existing workbook to the current layout without touching the values of the kept sheets: the header
+    sample_id of proliferation_rates and population_sizes, and the removal of the former sheet doubling_times. Saved in
+    place (out=None) or as `out`. Returns what was changed.
+    """
+    from openpyxl import load_workbook
+    from openpyxl.comments import Comment
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = load_workbook(path)
+    added = []
+    for sheet, pos in (('proliferation_rates', 3), ('population_sizes', 3)):
+        ws = wb[sheet] if sheet in wb.sheetnames else None
+        if ws is not None and 'sample_id' not in [c.value for c in ws[1]]:
+            doc = dict(SHEETS[sheet][0])['sample_id']
+            c = ws.cell(row=1, column=max(pos, ws.max_column + 1), value='sample_id')
+            c.font, c.fill, c.alignment = Font(bold=True, color='FFFFFF'), PatternFill('solid', fgColor='1F3864'), Alignment(horizontal='center')
+            c.comment = Comment(doc, 'CardamomOT', width=320, height=90)
+            ws.column_dimensions[c.column_letter].width = 16
+            added.append(f'column sample_id of {sheet}')
+    if 'doubling_times' in wb.sheetnames:
+        del wb['doubling_times']
+        added.append('sheet doubling_times removed (population constraints: proliferation_rates, transition_rates, '
+                     'population_sizes)')
+    if added:
+        wb.save(out or path)
+    return added
 
 
 def _truthy(v):
@@ -387,30 +438,65 @@ def export(wb, out_dir):
                    key=lambda c: int(c.split('_')[1]))
     s_pert = sorted([c for c in ss_all.columns if re.fullmatch(r'STIM\d+', c) and ss_all[c].notna().any()],
                     key=lambda c: int(c[4:]))
-    ss, ss_over = _split_samples(ss_all)
+    if 'scenario' in ss_all:
+        scen = ss_all['scenario'].map(lambda v: '' if _is_empty(v) else str(_clean(v)))
+    else:
+        scen = pd.Series([''] * len(ss_all), index=ss_all.index, dtype=str)
+    ss, ss_over = _split_samples(ss_all[scen == ''])
     _add_overrides(overrides, 'simulation', ss_over, s_inf + s_pert)
-    if (s_inf or s_pert) and len(ss.dropna(subset=s_inf + s_pert, how='all')):
-        rows = ss.dropna(subset=s_inf + s_pert, how='all')
-        if 'time' in rows and rows['time'].notna().all() and len(rows):
+    bad = [c for c in ss_all.columns if re.fullmatch(r'stimulus_\d+', c) and int(c.split('_')[1]) > n_inf
+           and ss_all[c].notna().any()]
+    if bad:
+        print(f"[CardamomOT] Warning: stimulus_simulation_schedule columns {bad} beyond the {n_inf} inference "
+              f"stimuli of stimulus_inference_schedule: ignored")
+        s_inf = [c for c in s_inf if c not in bad]
+
+    def sim_matrix(rows, what):
+        # (values: inference then perturbation stimuli, row times or None) of a simulation schedule
+        rows = rows.dropna(subset=s_inf + s_pert, how='all')
+        timed = 'time' in rows and rows['time'].notna().all() and len(rows) > 0
+        if timed:
             rows = rows.sort_values('time')
         if not s_inf:
             # Inference stimuli not given: default schedule (0 at the first time, 1 after)
-            print(f"[CardamomOT] Warning: sheet stimulus_simulation_schedule has perturbation stimuli but no inference "
-                  f"stimulus column: default 0 at the first time and 1 after for the {n_inf} inference stimuli")
+            print(f"[CardamomOT] Warning: {what} has perturbation stimuli but no inference stimulus column: "
+                  f"default 0 at the first time and 1 after for the {n_inf} inference stimuli")
             inf = np.ones((len(rows), n_inf))
             inf[0] = 0
         else:
-            inf = rows[s_inf].astype(float).to_numpy()
+            inf = rows[s_inf].astype(float).ffill().fillna(1.0).to_numpy()
         pert = rows[s_pert].astype(float).fillna(1.0).to_numpy() if s_pert else np.zeros((len(rows), 0))
-        np.savetxt(os.path.join(out_dir, 'stimulus_schedule_simulate.txt'), np.hstack([inf, pert]), fmt='%g')
+        return np.hstack([inf, pert]), ([float(t) for t in rows['time']] if timed else None)
+
+    if (s_inf or s_pert) and len(ss.dropna(subset=s_inf + s_pert, how='all')):
+        vals, times = sim_matrix(ss, 'sheet stimulus_simulation_schedule')
+        np.savetxt(os.path.join(out_dir, 'stimulus_schedule_simulate.txt'), vals, fmt='%g')
+        if times is not None:
+            write('stimulus_schedule_simulate_times.txt', '\n'.join(f'{t:g}' for t in times) + '\n')
+    # Alternative scenarios: {name: {"time": [...] or null, "values": [[...]], "n_inference": n}}
+    scenarios = {}
+    for name in sorted(set(scen) - {''}):
+        rows = ss_all[scen == name]
+        default_rows, per_sample = _split_samples(rows)
+        if per_sample:
+            print(f"[CardamomOT] Warning: scenario '{name}' of stimulus_simulation_schedule: per-sample rows "
+                  f"{sorted(per_sample)} ignored (scenarios have one schedule for every sample)")
+        if not (s_inf or s_pert) or not len(default_rows.dropna(subset=s_inf + s_pert, how='all')):
+            print(f"[CardamomOT] Warning: scenario '{name}' of stimulus_simulation_schedule has no value: ignored")
+            continue
+        vals, times = sim_matrix(default_rows, f"scenario '{name}' of stimulus_simulation_schedule")
+        scenarios[name] = {'time': times, 'values': vals.tolist(), 'n_inference': n_inf}
+    if scenarios:
+        import json
+        json.dump(scenarios, open(os.path.join(out_dir, 'simulation_scenarios.json'), 'w'), indent=1)
 
     pt = read_sheet(wb, 'perturbation_simulation')
-    pcols = [c for c in pt.columns if c in ('KO', 'OV') or re.fullmatch(r'(STIM|RATE)\d+', str(c))]
+    pcols = [c for c in pt.columns if c in ('KO', 'OV', 'schedules') or re.fullmatch(r'(STIM|RATE)\d+', str(c))]
     if pcols and len(pt):
         lines = ['\t'.join(pcols)]
         for _, r in pt.iterrows():
             cells = ['0' if _is_empty(r[c]) else str(_clean(r[c])) for c in pcols]
-            if any(c != '0' for c in cells):
+            if any(v != '0' for c, v in zip(pcols, cells) if c != 'schedules'):
                 lines.append('\t'.join(cells))
         if len(lines) > 1:
             write('KO_OV_Stim_simulate.txt', '\n'.join(lines) + '\n')
@@ -447,13 +533,30 @@ def export(wb, out_dir):
         if vals:
             write(f'{col}.txt', '\n'.join(f'{float(v):g}' for v in vals) + '\n')
 
-    for sheet, name, cols in [('proliferation_rates', 'proliferation_rates.txt', ['cell_type', 'net_rate_per_hour']),
-                              ('population_sizes', 'population_sizes.txt', ['time', 'population_size'])]:
-        df = read_sheet(wb, sheet)
-        if all(c in df for c in cols):
-            df = df.dropna(subset=cols)
-            if len(df):
-                write(name, '\n'.join(f'{_clean(a)}\t{_clean(b)}' for a, b in zip(df[cols[0]], df[cols[1]])) + '\n')
+    # Population sizes: rows without sample_id = default, the others per sample
+    ps = read_sheet(wb, 'population_sizes')
+    if all(c in ps for c in ('time', 'population_size')):
+        ps = ps.dropna(subset=['time', 'population_size'])
+        if len(ps):
+            import json
+            default, per_sample = _split_samples(ps)
+            entry = lambda d: {f'{float(_clean(t)):g}': float(_clean(n)) for t, n in zip(d['time'], d['population_size'])}
+            spec = {'default': entry(default) if len(default) else None,
+                    'samples': {sid: entry(d) for sid, d in per_sample.items() if len(d)}}
+            json.dump(spec, open(os.path.join(out_dir, 'population_sizes.json'), 'w'), indent=1)
+
+    # Proliferation anchors: rows without sample_id = default (proliferation_rates.txt), the others per sample (json)
+    pr = read_sheet(wb, 'proliferation_rates')
+    if all(c in pr for c in ('cell_type', 'net_rate_per_hour')):
+        pr = pr.dropna(subset=['cell_type', 'net_rate_per_hour'])
+        default, per_sample = _split_samples(pr)
+        if len(default):
+            write('proliferation_rates.txt', '\n'.join(f'{_clean(a)}\t{_clean(b)}' for a, b in
+                                                      zip(default['cell_type'], default['net_rate_per_hour'])) + '\n')
+        if per_sample:
+            import json
+            json.dump({sid: {str(_clean(a)): float(b) for a, b in zip(d['cell_type'], d['net_rate_per_hour'])}
+                       for sid, d in per_sample.items()}, open(os.path.join(out_dir, 'proliferation_rates_samples.json'), 'w'), indent=1)
 
     if overrides:
         import json
@@ -469,9 +572,15 @@ def export(wb, out_dir):
 
     tr = read_sheet(wb, 'transition_rates')
     if len(tr) and tr.shape[1] > 1:
-        tr = tr.set_index(tr.columns[0])
-        tr.index = tr.index.astype(str)
-        tr.to_csv(os.path.join(out_dir, 'transition_rates.csv'))
+        first = tr.columns[0]
+        default, per_sample = _split_samples(tr)
+        for sid, d in [(None, default)] + list(per_sample.items()):
+            if not len(d):
+                continue
+            m = d.drop(columns=[c for c in ('sample_id',) if c in d]).set_index(first)
+            m.index = m.index.astype(str)
+            m = m.dropna(axis=1, how='all')
+            m.to_csv(os.path.join(out_dir, 'transition_rates.csv' if sid is None else f'transition_rates__{sid}.csv'))
 
 
 # ---------------------------------------------------------------------------
@@ -502,6 +611,62 @@ def removed_samples(project, present=None):
             del ref[s]
         ref = {s: r for s, r in ref.items() if s in removed}
     return removed, ref
+
+
+def proliferation_sample_anchors(project):
+    """{dataset_id: {cell type: net rate (h^-1)}} of the rows of proliferation_rates with a sample_id ({} if none)."""
+    import json
+    path = os.path.join(input_dir(project), 'proliferation_rates_samples.json')
+    return json.load(open(path)) if os.path.exists(path) else {}
+
+
+def population_sizes(project):
+    """({time: size} or None default, {dataset_id: {time: size}}) of the population_sizes sheet."""
+    import json
+    path = os.path.join(input_dir(project), 'population_sizes.json')
+    if not os.path.exists(path):
+        return None, {}
+    spec = json.load(open(path))
+    conv = lambda d: {float(t): float(n) for t, n in d.items()} if d else None
+    return conv(spec.get('default')), {s: conv(d) for s, d in spec.get('samples', {}).items()}
+
+
+def sample_population_sizes(project, sample):
+    """{time: size} of a sample (its rows, else the default rows), None if none."""
+    default, per = population_sizes(project)
+    return per.get(str(sample)) or default
+
+
+def fitted_anchors(project):
+    """Corrected anchors of fit_population_anchors.py (cardamomOT/population_anchors.json), None if absent."""
+    import json
+    path = os.path.join(os.path.abspath(project), 'cardamomOT', 'population_anchors.json')
+    return json.load(open(path)) if os.path.exists(path) else None
+
+
+def load_transition_rates(project, fitted=True):
+    """
+    Transition rate matrices: None, the default DataFrame (no per-sample block), or {'default': DataFrame or None,
+    dataset_id: DataFrame} (for NetworkModel._load_ot_constraints). Those of fit_population_anchors.py (corrected on
+    the proportions, per sample) if it was run and fitted some, else those of the transition_rates sheet (fitted=False:
+    always the sheet).
+    """
+    import glob
+    anchors = fitted_anchors(project) if fitted else None
+    if anchors and anchors.get('transitions'):
+        out = {'default': None}
+        for sid, t in anchors['transitions'].items():
+            m = pd.DataFrame(0.0, index=t['types'], columns=t['types'])
+            for a_, row in t['matrix'].items():
+                for b_, v in row.items():
+                    m.loc[a_, b_] = v
+            out[sid] = m
+        return out
+    d = input_dir(project)
+    read = lambda f: pd.read_csv(f, sep=None, engine='python', index_col=0).rename(index=str).rename(columns=str)
+    default = read(os.path.join(d, 'transition_rates.csv')) if os.path.exists(os.path.join(d, 'transition_rates.csv')) else None
+    per = {os.path.basename(f)[len('transition_rates__'):-4]: read(f) for f in sorted(glob.glob(os.path.join(d, 'transition_rates__*.csv')))}
+    return {'default': default, **per} if per else default
 
 
 def project_parameters(project):

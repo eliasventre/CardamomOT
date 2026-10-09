@@ -6,7 +6,8 @@ KO/OV predictions) and write it in the project directory.
 
 Usage:
     python report_results.py -i <project_path> [--stimulus <float>] [--prior <float>] [-o <out.pdf>]
-(split, report_net_index, report_normalize, report_log1p, report_n_umap: model_parameters sheet)
+(split, report_net_index, report_normalize, report_log1p, report_n_umap, cell_depth_for_representation,
+embedding_method_visualization: model_parameters sheet)
 
 If --stimulus/--prior are given neither on the command line nor in the workbook, they are read from
 the most recent cardamomOT/adata_sim_stim*_prior*.h5ad (fallback: model defaults).
@@ -73,15 +74,24 @@ def main(argv):
     if ko_ov_file is not None:
         import anndata as ad
         genes = list(ad.read_h5ad(os.path.join(p, 'Data', f'data_{split}.h5ad'), backed='r').var_names)
-        for combo in load_perturbations(ko_ov_file, genes):
-            perturbations.append((combo_label(combo), combo_description(combo), combo_genes(combo)))
+        # One simulation per (condition, schedule scenario), as in simulate_network_KOV
+        from CardamomOT.tools.perturbations import condition_runs
+        from CardamomOT.config import simulation_scenarios
+        for combo, scenario, label in condition_runs(load_perturbations(ko_ov_file, genes),
+                                                     list(simulation_scenarios(input_dir(p)))):
+            desc = combo_description(combo) + ('' if scenario == 'default' else f' · schedule {scenario}')
+            perturbations.append((label, desc, combo_genes(combo)))
         print(f"[report_results] {len(perturbations)} perturbations in {ko_ov_file}")
     else:
         print("[report_results] No KO_OV_Stim_simulate.txt: perturbation section will be empty")
 
     try:
         out = generate_report(p, split, stimulus, prior, perturbations, out_path=out_path,
-                              net_index=net_index, normtransform=norm, logtransform=log, n_umap=n_umap)
+                              net_index=net_index, normtransform=norm, logtransform=log, n_umap=n_umap,
+                              depth_embeddings=bool(model.cell_depth_for_representation),
+                              embedding_method_visualization=str(model.embedding_method_visualization),
+                              protein_dilution=bool(model.protein_dilution),
+                              classifier_method=str(model.classifier_method))
     except FileNotFoundError as e:
         print(f"[report_results] Error: {e}")
         sys.exit(1)

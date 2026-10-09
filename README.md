@@ -153,7 +153,9 @@ Each step takes `-i` and only the hard-to-calibrate options it uses; the rest co
 ```bash
 python -m CardamomOT.cli step estimate_cell_depth     -i my_project
 python -m CardamomOT.cli step get_proliferation_rates -i my_project   # if estimate_proliferation_rates
-python -m CardamomOT.cli step select_genes_and_split  -i my_project --prior 1
+python -m CardamomOT.cli step split_dataset           -i my_project   # obs['split'] of Data/data.h5ad (train/test/full)
+python -m CardamomOT.cli step select_genes            -i my_project --prior 1   # on the train cells only
+python -m CardamomOT.cli step run_classical_OT        -i my_project   # if run_classical_OT (default): WOT-style analysis, every gene
 python -m CardamomOT.cli step build_reference_network -i my_project   # if build_prior_network and the selection did not use the literature
 python -m CardamomOT.cli step get_degradation_rates   -i my_project
 python -m CardamomOT.cli step infer_mixture           -i my_project --mean-forcing 0.5
@@ -195,6 +197,8 @@ If your experiment contains several biological conditions that should share a co
 adata.obs['dataset_id'] = ...   # string or integer label per cell
 ```
 
+Samples may have **different timepoints** (each sample is transported between its own consecutive timepoints; see docs/advanced.md, *Samples with their own timepoints*).
+
 When `dataset_id` is present, CARDAMOM automatically:
 - Identifies unique samples and builds one set of **per-sample basal parameters** `θ_basal(s)` for each sample `s`.
 - Solves a **single joint optimisation** over shared interaction weights `inter` and all per-sample basals simultaneously — so perturbation information is exploited during network inference.
@@ -204,6 +208,9 @@ When `dataset_id` is present, CARDAMOM automatically:
 
 **Keeping per-sample basals close to each other (`constrain_basal_uniform`):**
 By default the per-sample basals are free to diverge, which gives maximum flexibility but may overfit when samples differ only by targeted perturbations. Setting `model.constrain_basal_uniform = λ` (e.g. `λ = 100–1000`) adds an L2 penalty that pushes each gene's free-sample basals toward their common mean. The penalty is applied **per (sample, gene) pair**: a sample's basal for a given gene is excluded from the penalty if and only if that specific gene has a non-zero `basal_ref` for that sample (i.e. a KO or OV prior — see below). Concretely, for a `KO_CHGA` sample, only the CHGA basal is excluded; all other genes in that sample are still constrained to stay close to the wild-type values.
+
+**One network per biological condition (`network_condition`):**
+Samples governed by different networks (e.g. naive vs tumour-bearing) can be grouped with `adata.obs['network_condition']` (one value per `dataset_id`). With ≥ 2 conditions each has its own network θ_c = θ_shared + Δ_c, with an L1 penalty on Δ_c controlled by `network_condition_pen` (default 1; large = common network, 0 = independent networks). `inter*.npy` then have a leading sample axis; `network_differences.csv` lists the rewired edges. See docs/advanced.md, *Network conditions*.
 
 ---
 
@@ -276,7 +283,7 @@ Controls how strongly the **prior interaction graph** (`ref_network.csv`) penali
 ./run.sh experimental_datasets/Kameneva 1.0 1.0 0.5 0.5 0   # relaxed basin weights, not per timepoint
 ```
 
-**Scripts using `--stimulus` / `--prior`:** `infer_network_structure.py`, `infer_network_simul.py`, `check_sim_to_data.py`, `infer_test.py`, `check_test_to_train.py`, `check_KOV_to_sim.py`, `report_results.py` (and `--prior` alone: `select_genes_and_split.py`, gene budget with a hard prior). Output file names embed `stimulus` and `prior` values (e.g. `adata_sim_stim1.0_prior0.5.h5ad`) so runs with different settings are kept separate.
+**Scripts using `--stimulus` / `--prior`:** `infer_network_structure.py`, `infer_network_simul.py`, `check_sim_to_data.py`, `infer_test.py`, `check_test_to_train.py`, `check_KOV_to_sim.py`, `report_results.py` (and `--prior` alone: `select_genes.py`, gene budget with a hard prior). Output file names embed `stimulus` and `prior` values (e.g. `adata_sim_stim1.0_prior0.5.h5ad`) so runs with different settings are kept separate.
 
 ---
 
@@ -372,7 +379,7 @@ Every run of `get_proliferation_rates.py` — run right after `estimate_cell_dep
 adata.obs['proliferation_net_rate']   # float, net proliferation rate per cell (birth − death)
 ```
 
-It runs directly on `Data/data.h5ad` (all genes) rather than after gene selection, because differential-expression filtering could otherwise discard many of the literature marker genes needed to score the signature. Since the rate is stored in `adata.obs` (per-cell, not per-gene), it survives the later gene-subsetting and train/test splitting done by `select_genes_and_split.py` unchanged — no need to re-estimate it per split.
+It runs directly on `Data/data.h5ad` (all genes) rather than after gene selection, because differential-expression filtering could otherwise discard many of the literature marker genes needed to score the signature. Since the rate is stored in `adata.obs` (per-cell, not per-gene), it survives the later gene-subsetting and train/test splitting done by `split_dataset.py` / `select_genes.py` unchanged — no need to re-estimate it per split.
 
 By default this uses built-in **human** proliferation/death marker gene signatures (moscot/Waddington-OT style — see `CardamomOT/tools/estimate_proliferation.py`), scored with `scanpy.tl.score_genes` and mapped to a rate with the same shifted-logistic curve as moscot. `get_proliferation_rates.py` always (re)computes and overwrites `adata.obs['proliferation_net_rate']`, even if that column is already present. If you set it yourself from an external measurement (e.g. EdU staining) and want to keep it, skip the step entirely instead: `--no-use-proliferation` on `cardamomot pipeline`, or `use_proliferation=0` on `run.sh` (both default to running the step).
 
@@ -404,17 +411,15 @@ To bias the OT cost toward biologically plausible cell-type transitions, fill th
 
 | from \ to | TypeA | TypeB | TypeC |
 |---|---|---|---|
-| TypeA | 0.3 | 0.1 | 0.01 |
-| TypeB | 0.05 | 0.2 | 0.05 |
-| TypeC | 0.01 | 0.05 | 0.3 |
+| TypeA | | 0.02 | 0 |
+| TypeB | 0 | | 0.01 |
+| TypeC | 0 | 0 | |
 
-(sheet `transition_rates`: rows = source type at t1, columns = target type at t2; instantaneous rates ≥ 0, higher = more likely)
+(sheet `transition_rates`: rows = source type at t1, columns = target type at t2; off-diagonal entries = instantaneous transition rates ≥ 0 in hour⁻¹, 0 = no direct transition; the diagonal is ignored)
 
 Row/column names must match the values of `adata.obs['cell_type_transition']` if present, else `cell_type_proliferation`, else `cell_type`. All-or-nothing: if any cell type is missing from the matrix (or no grouping is found), the OT runs without transition constraint.
 
-At each pair of consecutive timepoints separated by Δt, transition probabilities are computed as `exp(rate × Δt)` and each row is rescaled to sum to `n_types` (number of cell types), so the mean weight per row equals 1 and the overall cost scale is preserved on average.
-
-The OT pairwise distance is then divided element-wise by these weights: a transition with weight > 1 becomes cheaper (preferred), and a transition with weight < 1 becomes more expensive (penalised). The weights therefore adapt automatically to the interval Δt — short intervals produce weights close to 1 for all transitions, while long intervals amplify the contrast between fast and slow transitions. Missing cell types default to index 0.
+The matrix defines a continuous-time Markov generator Q between cell types (diagonal = minus the row sum of the rates). At each pair of consecutive timepoints separated by Δt, the type-to-type transition probabilities are Π = expm(Q·Δt) (matrix exponential: indirect transitions, e.g. A → B → C, are accounted for). The entropic OT kernel exp(−C/ε) is multiplied by Π, i.e. the term −ε·log Π(type of source, type of target) is added to the OT cost. Transitions that cannot occur within Δt (Π = 0) get a factor 1e-12, which forbids them in practice while keeping Sinkhorn stable. With short intervals Π ≈ identity (cells mostly keep their type); with long intervals indirect transitions become possible.
 
 Both corrections are active simultaneously when the corresponding files are present. They apply during training (`infer_network_structure.py`) and on the test set (`infer_test.py`).
 
@@ -513,7 +518,8 @@ python ./utils/old_to_new/add_degradations_to_ad.py -i my_project
 ### Customizing Parameters
 
 See source files to modify:
-- `select_genes_and_split.py`: gene selection criteria
+- `split_dataset.py`: train/test split of the cells (obs['split'])
+- `select_genes.py`: gene selection criteria (train cells only)
 - `infer_mixture.py`: burst kinetics parameters
 - `infer_network_*.py`: network inference algorithms
 

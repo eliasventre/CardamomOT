@@ -41,9 +41,16 @@ def _run_script(script: str, args: List[str]) -> int:
 def pipeline_steps(cfg, project=None) -> List[str]:
     """Steps of a run given the configured NetworkModel `cfg` (pipeline parameters) of `project`."""
     steps = ['estimate_cell_depth']
+    # Population constraints (rates, transition rates, population sizes) corrected on the proportions of the types
+    from .inputs import load_transition_rates, population_sizes
+    has_constraints = project is not None and (load_transition_rates(project, fitted=False) is not None
+                                               or any(population_sizes(project)))
+    if cfg.estimate_proliferation_rates or has_constraints:
+        steps.append('fit_population_anchors')
     if cfg.estimate_proliferation_rates:
         steps.append('get_proliferation_rates')
-    steps.append('select_genes_and_split')
+    # Classical OT on the train cells before the selection (wot_granger uses its couplings)
+    steps += ['split_dataset'] + (['run_classical_OT'] if cfg.run_classical_OT else []) + ['select_genes']
     # The selection builds the literature prior only with literature_selection and a hard prior
     lit_selection = cfg.select_genes and cfg.literature_selection and cfg.prior_network_pen == 0
     if cfg.build_prior_network and not lit_selection:
@@ -64,6 +71,42 @@ def pipeline_steps(cfg, project=None) -> List[str]:
     return steps
 
 
+def _has_layer(path, layer='reference_depth') -> bool:
+    import h5py
+    with h5py.File(path, 'r') as f:
+        return 'layers' in f and layer in f['layers']
+
+
+def report_steps(cfg, project) -> List[str]:
+    """
+    Steps to rebuild the final report with the current visualisation parameters (embedding_method_visualization,
+    cell_depth_for_representation, classifier_method, report_*): every check script of the run (they draw the model
+    outputs shown by the report), run_classical_OT if its outputs are missing or from an earlier version, then the
+    report. The inference steps are never rerun.
+    """
+    import os
+    import numpy as np
+    cdir = os.path.join(project, 'cardamomOT')
+    checks = [s for s in pipeline_steps(cfg, project) if s.startswith('check_')]
+    steps = []
+    vel = os.path.join(cdir, 'classical_OT', 'velocity.npz')
+    stale = not os.path.exists(vel) or 'Z' not in np.load(vel).files
+    if not stale:
+        # Classical OT on other cells than CardamomOT's (earlier train/test split)
+        import anndata as ad
+        v = np.load(vel, allow_pickle=True)
+        ref = os.path.join(project, 'Data', f'data_{cfg.split}.h5ad')
+        if 'transported' in v.files and os.path.exists(ref):
+            stale = set(v['obs_names'][v['transported'].astype(bool)].astype(str)) != \
+                set(ad.read_h5ad(ref, backed='r').obs_names.astype(str))
+    if cfg.run_classical_OT and stale:
+        steps.append('run_classical_OT')
+    if not os.path.exists(os.path.join(cdir, 'couplings.npz')):
+        print("Warning: no cardamomOT/couplings.npz (soft couplings of CardamomOT): rerun infer_network_structure "
+              "for the teaser page (not done by --report-only)")
+    return steps + checks + ['report_results']
+
+
 def hard_values(args: argparse.Namespace) -> dict:
     """{option: value} of the hard-to-calibrate options given on the command line."""
     return {h: getattr(args, h.replace('-', '_')) for h in HARD_OPTIONS
@@ -76,7 +119,15 @@ def _pipeline(args: argparse.Namespace) -> None:
     opts = StepOptions(p=str(Path(args.input)) + '/',
                        values={HARD_OPTIONS[h]: float(v) for h, v in values.items() if float(v) >= 0})
     cfg = settings(opts)
-    steps = pipeline_steps(cfg, opts.p)
+    steps = report_steps(cfg, opts.p) if args.report_only else pipeline_steps(cfg, opts.p)
+    if args.from_step:  # resume: the earlier steps' outputs are reused
+        if args.from_step not in steps:
+            sys.exit(f"--from {args.from_step}: not a step of this pipeline {steps}")
+        steps = steps[steps.index(args.from_step):]
+        print(f"Resuming from {args.from_step}: steps {steps}")
+    if args.report_only:
+        print(f"Report only on {args.input}: embedding_method_visualization={cfg.embedding_method_visualization}, cell_depth_for_representation="
+              f"{cfg.cell_depth_for_representation}, classifier_method={cfg.classifier_method}; steps: {steps}")
     print(f"Pipeline on {args.input}: split={cfg.split}, select_genes={cfg.select_genes}, "
           f"build_prior_network={cfg.build_prior_network}, estimate_proliferation_rates="
           f"{cfg.estimate_proliferation_rates}, run_test={cfg.run_test}, simulate_perturbations="
@@ -122,6 +173,11 @@ def main() -> None:
     p_pipe = subparsers.add_parser('pipeline', help='run the full analysis pipeline')
     p_pipe.add_argument('-i', '--input', required=True, help='project directory')
     add_hard_options(p_pipe)
+    p_pipe.add_argument('--report-only', action='store_true',
+                        help='rebuild the final report with the current visualisation parameters (embedding_method_visualization, '
+                             'cell_depth_for_representation, classifier_method, report_*): every check script, then the report')
+    p_pipe.add_argument('--from', dest='from_step', default=None,
+                        help='resume the pipeline at this step (e.g. infer_network_simul), reusing earlier outputs')
     p_pipe.set_defaults(func=_pipeline)
 
     p_step = subparsers.add_parser('step', help='run an individual step')

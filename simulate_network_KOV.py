@@ -35,9 +35,18 @@ import os
 import copy
 import torch
 from CardamomOT.tools.perturbations import (find_perturbation_file, load_perturbations, combo_label,
-                                            perturbation_schedule, rate_target_genes)
-from CardamomOT.config import n_inference_stimuli, simulation_schedule
+                                            perturbation_schedule, rate_target_genes, condition_runs)
+from CardamomOT.config import (n_inference_stimuli, simulation_schedule, simulation_scenarios,
+                               schedule_reference_times)
 
+
+
+def _received(inter_t, ind):
+    """Sum of the last interactions received by gene ind: scalar, or (1, n_samples, 1) for per-sample networks."""
+    last = np.asarray(inter_t)[-1]
+    if last.ndim == 4:   # (n_samples, G, G, n_networks)
+        return last[:, :, ind, :].sum(axis=(1, 2))[None, :, None]
+    return np.sum(last[:, ind])
 
 def main(argv):
     """
@@ -80,10 +89,17 @@ def main(argv):
     # ─── STIMULUS SCHEDULES (inference stimuli, then perturbation stimuli) ──
     n_stimuli = n_inference_stimuli(input_dir(p))
     try:
-        stim_sched, pert_sched = simulation_schedule(input_dir(p), n_stimuli)
+        schedules = {'default': simulation_schedule(input_dir(p), n_stimuli, with_times=True)}
     except ValueError as e:
         print(f"[simulate_network_KOV] Error: {e}")
         sys.exit(1)
+    # Alternative schedules (scenarios of stimulus_simulation_schedule), unusable ones ignored with a warning
+    for name in simulation_scenarios(input_dir(p)):
+        try:
+            schedules[name] = simulation_schedule(input_dir(p), n_stimuli, scenario=name, with_times=True)
+        except ValueError as e:
+            print(f"[simulate_network_KOV] Warning: scenario '{name}' ignored: {e}")
+    runs = condition_runs(combos, [n for n in schedules if n != 'default'])
 
     print(f"[simulate_network_KOV] Data: {adata.shape[1]} genes, n_stimuli={n_stimuli}")
 
@@ -100,7 +116,7 @@ def main(argv):
         model.inter_t = np.load(os.path.join(p, 'cardamomOT', 'inter_t_simul.npy'))
         model.inter = np.load(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))
         # Validate n_stimuli against loaded inter (authoritative for simulation)
-        n_stimuli_inter = model.inter.shape[0] - adata.shape[1]
+        n_stimuli_inter = model.inter.shape[-2] - adata.shape[1]  # inter: ([n_samples,] G_tot, G_tot, n_networks)
         if n_stimuli_inter != model.n_stimuli:
             print(f"[simulate_network_KOV] Warning: correcting n_stimuli from {model.n_stimuli} "
                   f"to {n_stimuli_inter} based on loaded inter_simul.npy")
@@ -201,12 +217,9 @@ def main(argv):
         prolif_path = os.path.join(p, 'cardamomOT', 'prolif_network.pt')
         n_prot_path = os.path.join(p, 'cardamomOT', 'prolif_network_n_proteins.npy')
         if os.path.exists(prolif_path) and os.path.exists(n_prot_path):
-            from CardamomOT.inference.proliferations import ProliferationMLP
-            n_proteins = int(np.load(n_prot_path)[0])
-            prolif_net = ProliferationMLP(n_proteins)
-            # strict=False: networks saved before input standardisation keep identity scaling
-            prolif_net.load_state_dict(torch.load(prolif_path, map_location='cpu', weights_only=True), strict=False)
-            prolif_net.eval()
+            from CardamomOT.inference.proliferations import load_proliferation_mlp
+            # One head (net rate) or two (birth, death); older networks keep identity input scaling
+            prolif_net = load_proliferation_mlp(prolif_path, int(np.load(n_prot_path)[0]))
             model.prolif_network = prolif_net
             model.simulate_with_proliferation = True
             stim_pkl = os.path.join(p, 'cardamomOT', 'stimulus_rates.pkl')
@@ -219,20 +232,26 @@ def main(argv):
         else:
             print("[simulate_network_KOV] Warning: simulate_with_proliferation = True but prolif_network.pt not found (run infer_network_simul first)")
 
-    def sample_schedules(k):
+    def sample_schedules(k, scenario):
         """{sample index: t -> value} of perturbation stimulus k for the samples with their own schedule."""
         from CardamomOT.schedules import override_function
+        if scenario != 'default':   # a scenario is the schedule of every sample
+            return {}
         out = {s: override_function(ov, times, k) for s, ov in pert_overrides.items()}
         return {s: f for s, f in out.items() if f is not None}
 
-    # Simulate perturbations
-    print(f"[simulate_network_KOV] Starting simulation of {len(combos)} perturbations...")
-    for idx, combo in enumerate(combos, start=1):
+    # Simulate perturbations (each condition under each of its schedules)
+    print(f"[simulate_network_KOV] Starting simulation of {len(runs)} runs ({len(combos)} perturbations)...")
+    for idx, (combo, scenario, label) in enumerate(runs, start=1):
         model_combo = copy.deepcopy(model)
         kos = combo['KO']   # list of (gene, pct_or_None)
         ovs = combo['OV']
-        label = combo_label(combo)
-        print(f"\n[simulate_network_KOV] Simulating condition {idx}/{len(combos)}: {label}")
+        stim_sched, pert_sched, rows_t = schedules[scenario]
+        ref_t = None if rows_t is None else schedule_reference_times(rows_t, times)
+        if scenario != 'default':
+            model_combo._stim_overrides = {}
+        print(f"\n[simulate_network_KOV] Simulating condition {idx}/{len(runs)}: {label}"
+              + ('' if scenario == 'default' else f" (schedule scenario {scenario})"))
 
         # Reset model to clean (unperturbed) baseline.
         # Use the per-sample 3-D basal when available so that simulate_trajectories_unitary
@@ -258,9 +277,9 @@ def main(argv):
                 ind = ns + adata.var_names.get_loc(gene)
                 if pct is None:
                     if model_combo.basal_t.ndim == 4:
-                        model_combo.basal_t[:, :, ind] = -100 - np.sum(model_combo.inter_t[-1, :, ind])
+                        model_combo.basal_t[:, :, ind] = -100 - _received(model_combo.inter_t, ind)
                     else:
-                        model_combo.basal_t[:, ind] = -100 - np.sum(model_combo.inter_t[-1, :, ind])
+                        model_combo.basal_t[:, ind] = -100 - _received(model_combo.inter_t, ind)
                     print(f"[simulate_network_KOV]   KO 100%: {gene} (index {ind})")
                 else:
                     factor = max(1.0 - pct / 100.0, 1e-12)
@@ -280,9 +299,9 @@ def main(argv):
                 ind = ns + adata.var_names.get_loc(gene)
                 if pct is None:
                     if model_combo.basal_t.ndim == 4:
-                        model_combo.basal_t[:, :, ind] = 100 + np.sum(model_combo.inter_t[-1, :, ind])
+                        model_combo.basal_t[:, :, ind] = 100 + _received(model_combo.inter_t, ind)
                     else:
-                        model_combo.basal_t[:, ind] = 100 + np.sum(model_combo.inter_t[-1, :, ind])
+                        model_combo.basal_t[:, ind] = 100 + _received(model_combo.inter_t, ind)
                     print(f"[simulate_network_KOV]   OV 100%: {gene} (index {ind})")
                 else:
                     factor = 1.0 / max(1.0 - pct / 100.0, 1e-12)
@@ -305,8 +324,8 @@ def main(argv):
                     else:
                         print(f"[simulate_network_KOV]   Warning: stimulus {k} target '{gene}' not found in data")
                 model_combo.perturbation_stimulus.append(
-                    dict(signs=signs, schedule=perturbation_schedule(pert_sched, times, k),
-                         sample_schedules=sample_schedules(k)))
+                    dict(signs=signs, schedule=perturbation_schedule(pert_sched, times, k, ref_t),
+                         sample_schedules=sample_schedules(k, scenario)))
         except ValueError as e:
             print(f"[simulate_network_KOV]   Error: {e}")
             continue
@@ -326,8 +345,8 @@ def main(argv):
                         weights[[adata.var_names.get_loc(g) for g in genes_t]] = 1.0 / len(genes_t)
                     model_combo.rate_perturbation.append(
                         dict(weights=weights, scale=scale, delta=float(delta),
-                             schedule=perturbation_schedule(pert_sched, times, k),
-                             sample_schedules=sample_schedules(k)))
+                             schedule=perturbation_schedule(pert_sched, times, k, ref_t),
+                             sample_schedules=sample_schedules(k, scenario)))
                     print(f"[simulate_network_KOV]   Rate {k}: {target} ({'all cells' if genes_t is None else len(genes_t)}"
                           f"{'' if genes_t is None else ' genes'}) {delta:+g} per time unit at maximal score")
         except ValueError as e:
@@ -336,7 +355,7 @@ def main(argv):
 
         # Simulate dynamics
         try:
-            model_combo.simulate_network(times, stimulus_schedule=stim_sched)
+            model_combo.simulate_network(times, stimulus_schedule=stim_sched, schedule_times=ref_t)
             cardamom_dir = os.path.join(p, 'cardamomOT')
             np.save(os.path.join(cardamom_dir, f'data_prot_simul_{label}'), model_combo.prot)
             np.save(os.path.join(cardamom_dir, f'data_kon_simul_{label}'), model_combo.kon_theta)
@@ -347,7 +366,7 @@ def main(argv):
             print(f"[simulate_network_KOV]   Error simulating condition {idx}: {e}")
             continue
 
-    print(f"\n[simulate_network_KOV] Completed simulation of all {len(combos)} conditions")
+    print(f"\n[simulate_network_KOV] Completed simulation of all {len(runs)} runs")
 
 if __name__ == "__main__":
    main(sys.argv[1:])

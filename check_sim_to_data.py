@@ -54,18 +54,20 @@ def growth_log_weights(R_opt, times_data):
     return np.vstack([np.zeros((1, N)), np.cumsum(gain, axis=0)]).ravel()
 
 
-def growth_resample(L, times_data, samples, seed=0):
+def growth_resample(L, times_data, samples, seed=0, valid=None):
     """
     Indices of the trajectory states drawn with weights exp(L) within each (sample, time): the
     trajectories with the expansion of their population, i.e. what a simulation with proliferation
-    should reproduce (multinomial resampling, as in the branching simulation).
+    should reproduce (multinomial resampling, as in the branching simulation). Virtual states
+    (valid = False: time not observed for their sample) are left as they are.
     """
     rng = np.random.default_rng(seed)
     idx = np.arange(len(L))
     samples = np.zeros(len(L), dtype=int) if samples is None else np.asarray(samples)[:len(L)]
+    valid = np.ones(len(L), dtype=bool) if valid is None else np.asarray(valid, dtype=bool)
     for t in np.unique(times_data):
         for s in np.unique(samples):
-            g = np.flatnonzero((times_data == t) & (samples == s))
+            g = np.flatnonzero((times_data == t) & (samples == s) & valid)
             if len(g) and np.ptp(L[g]) > 1e-12:   # uniform weights (first time): states kept as they are
                 w = np.exp(L[g] - L[g].max())
                 idx[g] = g[rng.choice(len(g), len(g), replace=True, p=w / w.sum())]
@@ -225,6 +227,18 @@ def main(argv):
     data_netw_theta[1:, :] = np.random.negative_binomial((k1_tr*vect_kon_theta)[:, ns:].T, (c_tr / (c_tr + s_tr))[:, ns:].T)
     data_netw_theta[1:, :] = np.where(zero_mask, 0, data_netw_theta[1:, :])
 
+    # Same draws at the reference depth (s = 1): layer 'reference_depth', shown by the report with
+    # cell_depth_for_representation (the observed data then divided by their depth factor)
+    ref_depth = {}
+    if depth_cells is not None:
+        def _draw_ref(k1, kon, c, pz):
+            x = np.random.negative_binomial((k1 * kon)[:, ns:].T, (c / (c + 1.0))[:, ns:].T)
+            return np.where(np.random.uniform(0, 1, x.shape) < pz.T, 0, x).T
+        ref_depth['beta'] = _draw_ref(k1_tr, vect_kon_beta, c_tr, pz_tr)
+        ref_depth['theta'] = _draw_ref(k1_tr, vect_kon_theta, c_tr, pz_tr)
+        if mrna_simul is None:
+            ref_depth['sim'] = _draw_ref(k1_sim, vect_kon_sim, c_sim, pz_sim)
+
     cardamom_dir = os.path.join(p, 'cardamomOT')
 
     # Growth of the trajectories: the OT selection removes the proliferation (one descendant per
@@ -234,16 +248,34 @@ def main(argv):
     R_opt_path = os.path.join(cardamom_dir, 'data_R_opt.npy')
     R_opt = np.load(R_opt_path) if os.path.exists(R_opt_path) else None
     L_growth = growth_log_weights(R_opt, times_data) if (R_opt is not None and len(R_opt) == len(times_data)) else None
-    growth_idx = growth_resample(L_growth, times_data, samples_traj, seed=model.seed or 0) if L_growth is not None else None
+    valid_path = os.path.join(cardamom_dir, 'data_traj_valid.npy')
+    traj_valid = np.load(valid_path) if os.path.exists(valid_path) else np.ones(len(times_data), dtype=bool)
+    growth_idx = (growth_resample(L_growth, times_data, samples_traj, seed=model.seed or 0, valid=traj_valid)
+                  if L_growth is not None else None)
     if sim_prolif:
         print("[check_sim_to_data] Simulation with proliferation: growth-weighted trajectories written "
               + ("(adata_*_growth_*.h5ad)" if growth_idx is not None else "— skipped, data_R_opt.npy missing"))
+
+    sample_names = (sorted(adata.obs['dataset_id'].astype(str).unique()) if 'dataset_id' in adata.obs else None)
+
+    def _with_samples(A, idx):
+        # obs['dataset_id'] of each state / simulated cell (the classifier of cell_type is per sample)
+        if sample_names is not None and idx is not None and len(idx) == A.n_obs:
+            A.obs['dataset_id'] = np.asarray(sample_names)[np.minimum(np.asarray(idx, dtype=int), len(sample_names) - 1)]
+        return A
 
     def _write_states(X, name, var_names=None):
         # Trajectory-state AnnData (+ growth weights), and its growth-resampled version if needed
         A = ad.AnnData(X=X)
         A.var = adata.var.copy()
         A.obs['time'] = times_data
+        _with_samples(A, samples_traj)
+        A.obs['observed'] = traj_valid  # False: virtual state (time not observed for its sample)
+        if name in ref_depth:
+            A.layers['reference_depth'] = ref_depth[name]
+        if name == 'rna_traj' and 'depth_factor' in adata.obs and real_idx is not None:
+            # Depth of the real cell behind each state (counts of the real cells), even if the run did not use it
+            A.obs['depth_factor'] = state_depth(adata.obs['depth_factor'].values.astype(float), real_idx)
         if L_growth is not None:
             A.obs['growth_log_weight'] = L_growth
         A.write(os.path.join(cardamom_dir, f'adata_{name}_{tag}.h5ad'))
@@ -265,6 +297,9 @@ def main(argv):
         adata_sim = ad.AnnData(X=data_sim[1:, ].T)
         adata_sim.var = adata.var.copy()
         adata_sim.obs['time'] = times_simulation
+        _with_samples(adata_sim, _sim_sample_idx(samples_traj, times_simulation))
+        if 'sim' in ref_depth:
+            adata_sim.layers['reference_depth'] = ref_depth['sim']
         adata_sim.uns['proliferation'] = sim_prolif
         pop_path = os.path.join(cardamom_dir, 'data_log_population.npy')
         if sim_prolif and os.path.exists(pop_path):

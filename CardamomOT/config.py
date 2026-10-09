@@ -320,24 +320,52 @@ def n_inference_stimuli(data_dir) -> int:
     return int(arr.shape[1])
 
 
-def simulation_schedule(data_dir, n_stimuli):
+def simulation_schedule(data_dir, n_stimuli, scenario=None, with_times=False):
     """
-    Stimulus schedules of the simulations, stimulus_schedule_simulate.txt of the exported inputs: one row per
-    simulated time, first the n_stimuli columns of the inference stimuli, then one column per
-    perturbation stimulus of KO_OV_Stim_simulate.txt (STIM1, STIM2...). Returns (inference
-    stimuli (rows, n_stimuli) or None, perturbation stimuli (rows, k) or None). Without file, the
-    inference schedule is used and the perturbation stimuli take their default (0 at the first time, 1 after).
+    Stimulus schedules of the simulations, stimulus_schedule_simulate.txt of the exported inputs (or the
+    scenario of simulation_scenarios.json): one row per time, first the n_stimuli columns of the inference
+    stimuli, then one column per perturbation stimulus of KO_OV_Stim_simulate.txt (STIM1, STIM2...). Returns
+    (inference stimuli (rows, n_stimuli) or None, perturbation stimuli (rows, k) or None), and with with_times
+    the reference times of the rows: their times, 'simulation' (rows on the sorted simulated times) or
+    None (inference schedule: rows on the inference times). Without file, the inference schedule is used and
+    the perturbation stimuli take their default (0 at the first time, 1 after).
     """
-    path = Path(data_dir) / "stimulus_schedule_simulate.txt"
-    if path.exists():
+    out = lambda inf, pert, times: (inf, pert, times) if with_times else (inf, pert)
+    if scenario not in (None, 'default'):
+        spec = simulation_scenarios(data_dir).get(scenario)
+        if spec is None:
+            raise ValueError(f"no simulation scenario '{scenario}' in stimulus_simulation_schedule")
+        arr = np.atleast_2d(np.asarray(spec['values'], dtype=float))
+        times = 'simulation' if spec.get('time') is None else np.asarray(spec['time'], dtype=float)
+    else:
+        path = Path(data_dir) / "stimulus_schedule_simulate.txt"
+        if not path.exists():
+            inf = find_stimulus_schedule(data_dir)
+            return out((np.loadtxt(inf, ndmin=2) if inf is not None else None), None, None)
         arr = np.loadtxt(path, ndmin=2)
-        if arr.shape[1] < n_stimuli:
-            raise ValueError(f"{path} has {arr.shape[1]} column(s), fewer than the {n_stimuli} inference stimuli")
-        print(f"[CardamomOT] Simulation schedule from {path}: {n_stimuli} inference stimuli"
-              + (f", {arr.shape[1] - n_stimuli} perturbation stimuli" if arr.shape[1] > n_stimuli else ""))
-        return arr[:, :n_stimuli], (arr[:, n_stimuli:] if arr.shape[1] > n_stimuli else None)
-    inf = find_stimulus_schedule(data_dir)
-    return (np.loadtxt(inf, ndmin=2) if inf is not None else None), None
+        t_path = Path(data_dir) / "stimulus_schedule_simulate_times.txt"
+        times = np.loadtxt(t_path, ndmin=1) if t_path.exists() else 'simulation'
+    if arr.shape[1] < n_stimuli:
+        raise ValueError(f"simulation schedule{'' if scenario in (None, 'default') else f' {scenario}'} has "
+                         f"{arr.shape[1]} column(s), fewer than the {n_stimuli} inference stimuli")
+    print(f"[CardamomOT] Simulation schedule{'' if scenario in (None, 'default') else f' (scenario {scenario})'}: "
+          f"{n_stimuli} inference stimuli" + (f", {arr.shape[1] - n_stimuli} perturbation stimuli"
+                                              if arr.shape[1] > n_stimuli else ""))
+    return out(arr[:, :n_stimuli], (arr[:, n_stimuli:] if arr.shape[1] > n_stimuli else None), times)
+
+
+def simulation_scenarios(data_dir):
+    """Alternative simulation schedules {name: {'time': [...] or None, 'values': [[...]]}} (simulation_scenarios.json)."""
+    import json
+    path = Path(data_dir) / "simulation_scenarios.json"
+    return json.load(open(path)) if path.exists() else {}
+
+
+def schedule_reference_times(times_rows, times_sim):
+    """Reference times of the schedule rows (see simulation_schedule) for the sorted simulated times times_sim."""
+    if isinstance(times_rows, str):
+        return np.sort(np.asarray(times_sim, dtype=float))
+    return times_rows
 
 
 def read_stimulus_targets(data_dir: Path) -> Optional[List[List[str]]]:

@@ -18,6 +18,7 @@ Required input files:
 
 Output files:
     - cardamomOT/adata_beta.h5ad: simulated data from mixture model
+    - cardamomOT/identity_mixture.csv: cell-type identity kept by the mixture (obs['cell_type']; identity_diagnostic)
     - Check/mixture_vs_data/ directory: comparison plots
 """
 
@@ -127,13 +128,46 @@ def main(argv):
          if (depth_factor_used(p) and 'depth_factor' in adata.obs) else 1.0)
     data_beta[1:, :] = np.random.negative_binomial(((k1c + 1e-6)*vect_kon_beta)[:, ns:].T, (cc / (cc + s))[:, ns:].T)
     data_beta[1:, :] = np.where(zero_mask, 0, data_beta[1:, :])
+    # Same draw at the reference depth (s = 1): representation with cell_depth_for_representation
+    ref_depth = None
+    if np.ndim(s):
+        ref_depth = np.random.negative_binomial(((k1c + 1e-6)*vect_kon_beta)[:, ns:], (cc / (cc + 1.0))[:, ns:])
+        ref_depth = np.where(zero_mask.T, 0, ref_depth).astype(float)
 
     # Save synthetic data 
     adata_beta = ad.AnnData(X=data_beta[1:, :].T)
     adata_beta.var = adata.var.copy()
+    adata_beta.obs_names = adata.obs_names.astype(str)
+    adata_beta.uns['model_draws'] = True
+    if ref_depth is not None:
+        adata_beta.layers['reference_depth'] = ref_depth
     adata_beta.obs['time'] = times_data
+    # Sample and depth of each cell (the cell-type classifiers are per sample)
+    for key in ('dataset_id', 'depth_factor'):
+        if key in adata.obs:
+            adata_beta.obs[key] = adata.obs[key].values
     adata_beta.write(os.path.join(p, 'cardamomOT', 'adata_beta.h5ad'))
     print(f"[check_mixture_to_data] Saved synthetic data to {os.path.join(p, 'cardamomOT', 'adata_beta.h5ad')}")
+
+    # Cell-type identity kept by the mixture vs the classifier's own limit on the real cells
+    if 'cell_type' in adata.obs and adata.obs['cell_type'].nunique() > 1:
+        from CardamomOT.tools.characterize_cell_type import identity_diagnostic
+        pi_path = os.path.join(p, 'cardamomOT', 'proba_init.npy')
+        modes = None
+        if os.path.exists(pi_path):
+            pi = np.load(pi_path, mmap_mode='r')
+            if pi.shape[0] == adata.n_obs:
+                modes = np.argmax(pi[:, ns:, :], axis=2)
+        # Real cells and draws in the representation of the report (cell_depth_for_representation)
+        from CardamomOT.tools.characterize_cell_type import representation
+        rep = bool(settings(opts).cell_depth_for_representation)
+        real = adata.copy()
+        real.X = representation(adata, rep, 'observed')
+        idt = identity_diagnostic(real, representation(adata_beta, rep, 'model'), modes, seed=0)
+        idt.to_csv(os.path.join(p, 'cardamomOT', 'identity_mixture.csv'), index=False)
+        rec = idt[idt.version != 'observed'].groupby(['classifier', 'version'])['recall'].mean()
+        print("[check_mixture_to_data] Cell-type identity (mean recall over the types): "
+              + "; ".join(f"{c}, {v}: {r:.2f}" for (c, v), r in rec.items()))
 
     if compute_ot:
         # Compute optimal transport distance (Wasserstein)

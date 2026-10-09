@@ -78,7 +78,6 @@ def main(argv):
 
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
     configure(model, opts)  # workbook, then the command-line options
-    recompute_proliferations = bool(model.simulate_with_proliferation)  # trains the proliferation MLP
     print(f"[infer_network_simul] stimulus={model.stimulus}, prior_network_pen={model.prior_network_pen}")
 
     # Load inferred network parameters
@@ -93,20 +92,24 @@ def main(argv):
         model.rna = np.load(os.path.join(p, 'cardamomOT', 'data_rna.npy'))
         model.times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
         model.samples_data = np.load(os.path.join(p, 'cardamomOT', 'data_samples.npy'))
+        model.load_network_conditions(os.path.join(p, 'cardamomOT'))  # one network per condition, if any
+        valid_path = os.path.join(p, 'cardamomOT', 'data_traj_valid.npy')
+        model.traj_valid = np.load(valid_path) if os.path.exists(valid_path) else None
         model.kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta.npy'))
         model.kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta.npy'))
         model.alpha = np.load(os.path.join(p, 'cardamomOT', 'alpha.npy'))
         model.proba_traj = np.load(os.path.join(p, 'cardamomOT', 'proba_traj.npy'))
         model.n_networks = np.load(os.path.join(p, 'cardamomOT', 'n_networks.npy'))
-        kon_beta_h_path = os.path.join(p, 'cardamomOT', 'data_kon_beta_harissa.npy')
-        if os.path.exists(kon_beta_h_path):
-            model.kon_beta_harissa = np.load(kon_beta_h_path)
-            print("[infer_network_simul] Loaded kon_beta_harissa for Harissa-mode network re-inference")
         ct_path = os.path.join(p, 'cardamomOT', 'data_cell_types.npy')
         if os.path.exists(ct_path):
             cell_types = np.load(ct_path)
             if len(cell_types) == len(model.times_data):
                 model.traj_cell_types = cell_types
+        # Real cell behind each state and per-cell birth rates (dilution of the proteins)
+        idx_path_ = os.path.join(p, 'cardamomOT', 'data_traj_real_idx.npy')
+        if os.path.exists(idx_path_):
+            model.traj_real_idx = np.load(idx_path_)
+        model._load_ot_constraints(adata)
         R_opt_path = os.path.join(p, 'cardamomOT', 'data_R_opt.npy')
         if os.path.exists(R_opt_path):
             model.R_opt = np.load(R_opt_path)
@@ -120,7 +123,7 @@ def main(argv):
         sys.exit(1)
 
     # Load reference network if available
-    G_tot = model.inter.shape[0]
+    G_tot = model.inter.shape[-2]   # inter: ([n_samples,] G_tot, G_tot, n_networks)
     ns = model.n_stimuli
     genes_only = [g.upper() for g in adata.var_names]   # no stimulus prefix
     model.ref_network = np.ones((G_tot, G_tot, model.n_networks))
@@ -153,7 +156,7 @@ def main(argv):
     # Effects of the inference stimuli on the net rate (perturbation_inference, RATEk): part of R_opt removed
     # before training the proliferation MLP, model saved for the simulations
     stim_pkl = os.path.join(p, 'cardamomOT', 'stimulus_rates.pkl')
-    if recompute_proliferations and model.R_opt is not None:
+    if model.simulate_with_proliferation and model.R_opt is not None:
         from CardamomOT.stimulus_rates import load_effects, slot_offsets, StimulusRateModel
         from CardamomOT.schedules import sample_names
         effects = load_effects(p)
@@ -277,7 +280,6 @@ def main(argv):
 
     # Adapt parameters for simulation
     print("[infer_network_simul] Adapting parameters for simulation...")
-    model.recompute_proliferations = recompute_proliferations
     model.refine_network_degradations(stimulus_schedule=stim_sched)
     print("[infer_network_simul] Parameter adaptation completed")
 
@@ -290,6 +292,8 @@ def main(argv):
         np.save(os.path.join(cardamom_dir, 'inter_simul'), model.inter)
         np.save(os.path.join(cardamom_dir, 'basal_t_simul'), model.basal_t)
         np.save(os.path.join(cardamom_dir, 'inter_t_simul'), model.inter_t)
+        stim_names = ['Stimulus'] if ns == 1 else [f'Stimulus_{i}' for i in range(ns)]
+        model.save_network_conditions(cardamom_dir, gene_names=stim_names + list(adata.var_names), suffix='_simul')
         np.save(os.path.join(cardamom_dir, 'ratios'), model.ratios)
         np.save(os.path.join(cardamom_dir, 'degradations_temporal.npy'), model.d_t)
         if model.prolif_network is not None:

@@ -36,7 +36,7 @@ cardamomot step infer_mixture -i /path/to/project --mean-forcing 0.5
 ```
 - Run a single analysis step
 - Useful for debugging or re-running specific steps
-- Available steps: `infer_mixture`, `select_genes_and_split`, `infer_network_structure`, etc.
+- Available steps: `infer_mixture`, `select_genes`, `infer_network_structure`, etc.
 
 ## Common Workflows
 

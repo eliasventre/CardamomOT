@@ -67,9 +67,9 @@ entry_points={
 ```python
 PIPELINE_STEPS = [
     {
-        "id": "select_genes_and_split",
+        "id": "select_genes",
         "name": "Gene selection",
-        "script": "select_genes_and_split.py",
+        "script": "select_genes.py",
         "description": "...",
     },
     # ... more steps
@@ -110,7 +110,7 @@ if not validate_project_structure(Path(project_path)):
 - Returns dict of parameter names/values
 
 **Step-to-Parameters Mapping**:
-- `select_genes_and_split` → `n_genes`, `temporal_quantile`
+- `select_genes` → `n_genes`, `temporal_quantile`
 - `infer_mixture` → `mean_forcing`
 - `infer_network` → `scale_penalty`, `max_iterations`
 - Other steps → Basic options
@@ -263,7 +263,7 @@ def interactive_parameter_input(step_id, project_path):
 Edit `PIPELINE_STEPS` dict:
 ```python
 {
-    "id": "select_genes_and_split",
+    "id": "select_genes",
     "defaults": {
         "n_genes": 500,  # Changed from 1000
         "temporal_quantile": 0.5,

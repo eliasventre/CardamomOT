@@ -114,21 +114,22 @@ def rate_target_genes(target, genes, input_dir=None):
 def load_perturbations(file_path, genes=None):
     """
     Conditions [{'KO': [(gene, pct)], 'OV': [(gene, pct)], 'STIM': {k: [(gene, sign)]},
-    'RATE': {k: [(target, delta)]}}] of the table.
+    'RATE': {k: [(target, delta)]}, 'SCHEDULES': [names]}] of the table (SCHEDULES: 'default', scenario names
+    of stimulus_simulation_schedule or 'all'; ['default'] if empty).
     """
     if file_path is None or not os.path.exists(file_path):
         raise FileNotFoundError(f"Perturbation table not found: {file_path}")
     with open(file_path) as f:
         lines = [line for line in f.read().splitlines() if line.strip() and not line.lstrip().startswith('#')]
     header = [h.strip().upper() for h in lines[0].split('\t')]
-    idx = {k: header.index(k) for k in ('KO', 'OV') if k in header}
+    idx = {k: header.index(k) for k in ('KO', 'OV', 'SCHEDULES') if k in header}
     # Perturbation stimuli: STIM (= STIM1), STIM1, STIM2...
     stim_cols = {(1 if h == 'STIM' else int(h[4:])): j for j, h in enumerate(header)
                  if h == 'STIM' or re.fullmatch(r'STIM\d+', h)}
     # Net-rate effects: RATE (= RATE1), RATE1, RATE2... (schedule of the stimulus of same index)
     rate_cols = {(1 if h == 'RATE' else int(h[4:])): j for j, h in enumerate(header)
                  if h == 'RATE' or re.fullmatch(r'RATE\d+', h)}
-    if not idx and not stim_cols and not rate_cols:
+    if not set(idx) - {'SCHEDULES'} and not stim_cols and not rate_cols:
         raise ValueError(f"{os.path.basename(file_path)} must contain a 'KO', 'OV', 'STIM' or 'RATE' column")
     combos = []
     for line in lines[1:]:
@@ -138,8 +139,9 @@ def load_perturbations(file_path, genes=None):
                                else [parse_gene_with_pct(g) for g in c.split(',') if g.strip()])
         stims = {k: parse_stim(parts[j].strip() if j < len(parts) else '', genes) for k, j in sorted(stim_cols.items())}
         rates = {k: parse_rate(parts[j].strip() if j < len(parts) else '') for k, j in sorted(rate_cols.items())}
+        sched = [x.strip() for x in cell('SCHEDULES').split(',') if x.strip() and x.strip() != '0']
         combo = dict(KO=gene_list(cell('KO')), OV=gene_list(cell('OV')), STIM={k: v for k, v in stims.items() if v},
-                     RATE={k: v for k, v in rates.items() if v})
+                     RATE={k: v for k, v in rates.items() if v}, SCHEDULES=sched or ['default'])
         if combo['KO'] or combo['OV'] or combo['STIM'] or combo['RATE']:
             combos.append(combo)
     return combos
@@ -161,6 +163,27 @@ def combo_label(combo):
     return label
 
 
+def condition_runs(combos, scenarios):
+    """
+    Simulations of the conditions: [(combo, scenario, label)], one per schedule asked by the condition
+    (SCHEDULES; 'default' = default schedule, label combo_label; a scenario adds _SCEN_<name>; 'all' = default
+    + every scenario of `scenarios`). Unknown scenarios are ignored with a warning.
+    """
+    runs, unknown = [], set()
+    for combo in combos:
+        asked = combo.get('SCHEDULES') or ['default']
+        names = (['default'] + sorted(scenarios)) if 'all' in asked else asked
+        for name in dict.fromkeys(names):
+            if name != 'default' and name not in scenarios:
+                unknown.add(name)
+                continue
+            runs.append((combo, name, combo_label(combo) + ('' if name == 'default' else f'_SCEN_{name}')))
+    if unknown:
+        print(f"[CardamomOT] Warning: schedules {sorted(unknown)} of perturbation_simulation are not scenarios of "
+              f"stimulus_simulation_schedule: ignored")
+    return runs
+
+
 def combo_description(combo):
     """Readable description of a condition."""
     fmt = lambda g, pct: f"{g} ({pct:g}%)" if pct is not None else g
@@ -180,16 +203,21 @@ def combo_genes(combo):
     return [g for g, _ in combo['KO'] + combo['OV'] + [x for t in combo.get('STIM', {}).values() for x in t]]
 
 
-def perturbation_schedule(columns, times, k):
+def perturbation_schedule(columns, times, k, times_ref=None):
     """
     Value of perturbation stimulus k (1-based) at each simulated time: column k of `columns` (the
-    perturbation part of stimulus_schedule_simulate.txt, config.simulation_schedule; one row per
-    sorted simulated time), default 0 at the first time and 1 after. Returns a function t -> value.
+    perturbation part of a simulation schedule, config.simulation_schedule), the row of the last reference
+    time <= t (times_ref; None = one row per sorted simulated time), default 0 at the first time and 1 after.
+    Missing rows hold the last value; extra rows are ignored with a warning. Returns a function t -> value.
     """
     times = np.sort(np.asarray(times, dtype=float))
     if columns is None or columns.shape[1] < k:
         return lambda t: 0.0 if t <= times[0] else 1.0
     vals = np.asarray(columns, dtype=float)[:, k - 1]
-    if len(vals) != len(times):
-        raise ValueError(f"stimulus_schedule_simulate.txt has {len(vals)} rows but {len(times)} simulated times")
-    return lambda t: float(vals[max(0, int(np.searchsorted(times, t, side='right')) - 1)])
+    ref = times if times_ref is None else np.sort(np.asarray(times_ref, dtype=float))
+    if len(vals) > len(ref):
+        print(f"[CardamomOT] Warning: simulation schedule has {len(vals)} rows for {len(ref)} times: "
+              f"rows beyond ignored")
+        vals = vals[:len(ref)]
+    ref = ref[:len(vals)]
+    return lambda t: float(vals[max(0, int(np.searchsorted(ref, float(t) + 1e-9, side='right')) - 1)])

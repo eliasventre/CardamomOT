@@ -5,7 +5,7 @@ Weight of an edge A -> B: 1 when OmniPath holds a path A -> ... -> B of at most 
 last edge is transcriptional (TF -> target) and whose intermediates are not among the genes, or when
 the literature does not cover the pair; 1 / (k + 1) when every such path goes through k observed
 genes; 0 without any path (raised to prior_network_pen during inference). Same computation as the
-prior written by the gene selection (select_genes_and_split with select_genes, see CardamomOT/inference/
+prior written by the gene selection (select_genes.py with select_genes, see CardamomOT/inference/
 literature.py): this script is only needed for a gene list chosen without it.
 
 Usage:
@@ -35,7 +35,7 @@ def main(argv):
         if os.path.exists(data_path):
             break
     else:
-        raise FileNotFoundError("No Data/data_full.h5ad nor Data/data_train.h5ad: run select_genes_and_split first")
+        raise FileNotFoundError("No Data/data_full.h5ad nor Data/data_train.h5ad: run split_dataset and select_genes first")
     genes = list(ad.read_h5ad(data_path, backed='r').var_names)
     out = os.path.join(p, 'cardamomOT', 'ref_network.csv')
     os.makedirs(os.path.dirname(out), exist_ok=True)

@@ -30,6 +30,14 @@ The optional inputs described in this page are cells of the workbook `Data/Carda
 
 **Per-sample schedules and held-out samples.** In the three schedule sheets, rows without `sample_id` (or `all`) give the default schedule of every sample; rows with a `sample_id` (a `dataset_id` of the data) replace it for that sample (e.g. an untreated control at 0). They are used per cell everywhere: mixture, OT trajectories, network inference, degradation rates, rate effects of the inference stimuli, simulations (also the per-sample `STIMk` of `stimulus_simulation_schedule` in `simulate_network_KOV`, with per-sample basals). Without a default simulation (or test) schedule, the samples keep their inference schedule. A sample marked `remove_from_inference` (True / 1) in `perturbation_inference` is held out entirely: excluded from the gene selection, `data_full` and `data_train`, all its cells in `data_test` (also with `split = full`), and `run_test` then runs `infer_test` even without a train split. `infer_test` validates it by simulating from the first-timepoint training states of its `reference_sample` (default: the largest training sample), with that sample's mixture and basal and the removed sample's `stimulus_test_schedule`, up to its last observed time (`cardamomOT/adata_sim_validation_<sample>_stim*_prior*.h5ad`; report section 6: predicted vs observed, baseline = data of the reference sample at the same times). The held-out cells of the training samples use `stimulus_test_schedule` (default: the inference schedule). A sample described in the workbook (schedule rows, KO/OV, `remove_from_inference`) but absent from the data is ignored with a warning.
 
+**Population constraints per sample.** The population dynamics are constrained only by the sheets `proliferation_rates` (net rate per `cell_type_proliferation` type, without stimulus), `transition_rates` (matrix between the `cell_type_transition` types) and `population_sizes` (size per time, any unit), each with an optional `sample_id` (`dataset_id`; for the matrix, a column right of it); rows without `sample_id` are the default of the samples without rows of their own. A value is an information: give it for the samples that have it. The step `fit_population_anchors` (before `get_proliferation_rates`; also run when transition rates or population sizes are given) makes them consistent with the data: for each sample, a small model of growth and transitions between its types (`CardamomOT/inference/population_fit.py`: dn/dt = (diag(r) + Qᵀ − diag(Q1)) n, with r = r₀ + effects of the inference stimuli (`RATEk` on cell types) × the inference schedule of the sample over each interval) is fitted on the proportions of the types over time (noise floor 2 points, between-library variability) and, if given, on the population sizes (log size between the known times, sd 0.1; **partial anchors**: sizes at some times only, two at least): the net rates r₀ are corrected around the prescribed ones (prior ±0.002 h⁻¹, ±0.01 h⁻¹ when population sizes are given: measured sizes dominate the prescribed rates) and the transitions between types are free nuisance parameters that are **not kept**; prescribed transition rates (growth of each transition type from the corrected rates and its composition in proliferation types) are corrected the same way. A sample without rates takes the sample with rates whose rates, refitted on its proportions (and sizes), cost least (data misfit + distance to the prescribed rates); with population sizes but no sample with rates, its rates are fitted from its proportions and sizes alone (prior: its mean growth, sd 0.02 h⁻¹). A sample observed at one timepoint cannot be fitted: its rates are kept, or borrowed as they are. Without any constraint nothing is done. Result: `cardamomOT/population_anchors.json` (corrected rates, source, fit quality; transitions per sample), read by `get_proliferation_rates` (each sample anchored on its own cells; samples not in the file keep their literature estimate) and by the inference (OT: each sample its own transition matrix). The proportions alone identify only differences of rates: the absolute level comes from the prescribed rates or the population sizes. The population sizes are used there only: the growth OT pass of `fit_network` takes the mean growth of the anchored prior. Specifications for samples absent from the data are ignored with a warning. An older workbook is brought to this layout (sheet `doubling_times` removed, `sample_id` columns added) with `CardamomOT.inputs.upgrade_workbook(path)`.
+
+**Simulation scenarios (several schedules).** `stimulus_simulation_schedule` takes an optional `scenario` column: rows without scenario give the default schedule (with its per-sample rows), rows with a scenario name give an alternative schedule for every sample (per-sample rows of a scenario are ignored with a warning), exported to `cardamomOT/inputs/simulation_scenarios.json`. The column `schedules` of `perturbation_simulation` lists the schedules simulated for each condition (`default`, scenario names, or `all`; empty = default); `simulate_network_KOV`, `check_KOV_to_sim` and the report then run / read one simulation per (condition, schedule), the scenario adding `_SCEN_<name>` to the label (e.g. a `normal` default with both stimuli on from t0, and an `alternating` scenario switching the inference stimulus and `STIM1`). Unknown scenario names and scenarios without values are ignored with a warning. With times, the rows of a simulation schedule are a step function: a value holds from its time on and applies to the simulated intervals ending at or after it (switches therefore happen at simulated times, `times_simulation`); without times, rows follow the sorted simulated times. `simulate_network` simulates the default schedule.
+
+**Samples with their own timepoints.** Samples need not share their timepoints (e.g. 0, 12, 36, 72 h for one and 0, 12, 48, 96 h for another): they only share the network (interactions) and the degradation rates, their basals being per sample (and possibly pulled together, `constrain_basal_uniform`). The trajectories keep one row per (timepoint of the union, slot); a sample's states at the timepoints it misses are **virtual** (copies of its previous observed state, `cardamomOT/data_traj_valid.npy` = False, `obs['observed']` of the trajectory AnnData) and every interval joins **consecutive observed timepoints of its sample**: OT transport, switching times (alpha), flow-matching states, degradation rates (d1 and d0/d1, an interval of observed times feeding every inference interval it covers), growth rates (a virtual state takes the rate of its interval). Virtual states are left out of the network fits, errors, degradation inference and report comparisons. A sample starting after the first timepoint starts its trajectories from its first observed cells; its simulations start at the first timepoint (warning).
+
+**Rates of the simulations (`times_simulation`).** Temporal degradation rates and network scalings are inferred per inference interval (piecewise constant, smoothed by a Gaussian of width `smooth_degradations_sigma` intervals, automatic by default, and strength `smooth_degradations_strength`). A simulated interval takes the mean, over its duration, of `(1 − strength) ×` the inferred rate in force `+ strength ×` that rate smoothed by the same heat kernel (time mapped piecewise linearly onto the interval index; constant extrapolation beyond the inference times); a simulated interval whose bounds are inference times keeps its inferred rates (no second smoothing). Previously the rates of the nearest inference interval start were copied.
+
 **Inference stimuli (`perturbation_inference`, row `sample_id = all`).** `STIMk`: possible direct targets of inference stimulus k (column k of `stimulus_inference_schedule`), as a gene list of `gene_lists` or comma-separated genes (empty: every gene). `RATEk`: effect of stimulus k on the net proliferation rate (per hour), `TARGET:delta` entries scaled by the stimulus value: on a `cell_type_proliferation` type, delta is added to its rate of `proliferation_rates`, which is then the rate **without** the stimulus; on a gene list / `GENE1+GENE2` / gene, delta × an mRNA signature score in [0, 1] (mean over the genes of log1p counts / 99th percentile; counts normalised by library size only when the transcriptome is scored). Nothing filled = one stimulus, every gene a possible target, no rate effect; the stimuli described must match the columns of `stimulus_inference_schedule`. Uses: (1) `get_proliferation_rates` adds u_k(t) · delta to the prior rate of each cell (u over the interval starting at its time; rate without stimulus kept in `obs['proliferation_net_rate_base']`); (2) `infer_network_simul` removes the stimulus part from the growth targets (`R_opt`) so that the proliferation MLP learns the rate without stimulus, cell types of the states being predicted from their mRNA by a logistic regression trained on the observed cells (`cardamomOT/stimulus_rates.pkl`); (3) the branching simulations add it back with the schedule of `stimulus_simulation_schedule`, on mRNA drawn from the simulated proteins. With the inference schedule the simulations are unchanged (up to the classifier); other schedules (stimulus removed, given later...) then also change proliferation and death. Example (Copycat_sc): `proliferation_rates` Proliferative 0.35/24, Quiescent −0.031/24 h⁻¹ (without vincristine), `RATE1 = Proliferative:-0.00875` (−0.21 day⁻¹): with the stimulus at 1, Proliferative grows at 0.14 day⁻¹.
 
 `model_parameters` (`parameter`, `value`, `description`; parameters grouped by use, pipeline steps first, listed with an empty value = default of `base.py`; existing workbooks are brought to the current layout at each run, keeping their values) fixes `NetworkModel` attributes for the project: every step applies it (`run_options.configure`), then its command-line options: precedence **default of `base.py` < workbook < command line**. The command line only takes the project (`-i`) and the hard-to-calibrate parameters `--stimulus`, `--prior`, `--mean-forcing`, `--force-basins`, `--temporal-basins` (those each step uses, `run_options.STEP_OPTIONS`); everything else — `split`, `train_rate`, `select_genes`, `build_prior_network`, `estimate_proliferation_rates`, `run_test`, `simulate_perturbations`, `simulate_with_proliferation`, `species`, and the step settings (`allow_depth_correction`, `depth_method`, `literature_depth`, `literature_resources`, `integrate_samples`, `ref_sample_integration`, `soft_em_refinement`, `senescence_gating`, `overwrite_degradation_rates`, `report_*`) — is a parameter. A removed option stops the step with the name of the parameter to set. Values are cast to the type of the default; dicts/lists/None are written as Python literals. Any attribute of `NetworkModel` can be added as a row, not only the listed ones.
@@ -40,7 +48,13 @@ Within a sample and a timepoint, cells differ in sequencing depth (capture effic
 
 **Diagnostic**, within homogeneous groups (sample, time, cell type; cell types too small within their (sample, time) pooled), on the 1000 most variable reference genes expressed in > 5% of the cells: spread of the depth factor (q95/q05), share of the within-group gene-pair correlation explained by the log depth, share of the genes whose NB modes at the mixture initialization are closer than the depth spread, the extrinsic noise Var[c]/E[c]² of each group (Fang & Pachter: mode of the normalized covariances, refined on the group's Poisson genes; the strength of the factor common to all genes, technical or biological — Copycat_sc: 0.17–0.64, about twice higher in proliferating than in quiescent cells), and the correlation of depth with `obs['doublet_score']` if present (doublets must be filtered upstream: a depth factor does not correct them). The correction is recommended when more than 50% of the correlation is due to depth or more than 50% of the genes have modes closer than the spread. Outputs: `cardamomOT/depth_diagnostic.csv` (per group) and `depth_diagnostic.json` (global indicators and decision), shown in section 0 of the final report.
 
-**Depth factor.** If recommended and `model.allow_depth_correction = True` (default), the factor of `model.depth_method` is written to `obs['depth_factor']` of `Data/data.h5ad` (`X` untouched) and follows into `data_full/train/test`. **Use:** the NB mixture, gene selection, network steps and simulations use it only if `model.use_depth_factor = True` (default `False`: s_i = 1, an existing factor is kept but ignored; report page 0 states it). **Computation:** with `model.compute_depth_factor = False` (default `True`), `estimate_cell_depth` computes nothing: it reads and summarises an existing `obs['depth_factor']`, never removes it, and leaves the previous diagnostic files. Methods (`CardamomOT/inference/depth_methods/`, interface `compute(X, lib, groups, **params) -> s`, custom ones in `<project>/depth_methods/<name>.py`): `'group_median'` (default) — s_i = library of the cell / median library of its group; `'poissonian'` — Fang & Pachter (bioRxiv 2025, [pachterlab/FP_2025](https://github.com/pachterlab/FP_2025)), run within each group: the extrinsic noise s_g is the mode of the normalized covariances Cov(Xa, Xb)/(E[Xa]E[Xb]) between genes of mean > 0.1; "Poisson" genes are those whose 95% bootstrap interval of normalized variance (Var − E)/E² contains s_g (s_g re-estimated on them until stable); s_i is the Poisson MLE of the cell size on the group's Poisson genes (their sum over the sum of their group means; `reference='global'` for global means). Running it per group matters: the extrinsic noise differs between groups (Copycat_sc: 0.4–0.6 for proliferating cells, 0.2–0.34 for quiescent ones), and pooled heterogeneous cells inflate the covariances (only 27 Poisson genes out of 10,000 with pooled moments, thousands per group). On Copycat_sc both methods agree (correlation 0.99 of log s). Libraries of `group_median` exclude the 50 most expressed genes.
+**Depth factor.** If recommended and `model.allow_depth_correction = True` (default), the factor of `model.depth_method` is written to `obs['depth_factor']` of `Data/data.h5ad` (`X` untouched) and follows into `data_full/train/test`. **Use:** the NB mixture, gene selection, network steps and simulations use it only if `model.use_depth_factor = True` (default `False`: s_i = 1, an existing factor is kept but ignored; report page 0 states it). **Computation:** with `model.compute_depth_factor = False` (default `True`), `estimate_cell_depth` computes nothing: it reads and summarises an existing `obs['depth_factor']`, never removes it, and leaves the previous diagnostic files. Methods (`CardamomOT/inference/depth_methods/`, interface `compute(X, lib, groups, **params) -> s`, parameters in `model.depth_method_params`, custom ones in `<project>/depth_methods/<name>.py`), each with a `reference` (groups = (sample, time), with the cell type if `depth_by_cell_type`):
+
+- `'poissonian'` (default) — Fang & Pachter (bioRxiv 2025, [pachterlab/FP_2025](https://github.com/pachterlab/FP_2025)): the extrinsic noise s is the mode of the normalized covariances Cov(Xa, Xb)/(E[Xa]E[Xb]) between genes of mean > 0.1; "Poisson" genes are those whose 95% bootstrap interval of normalized variance (Var − E)/E² contains s (re-estimated on them until stable); s_i is the Poisson MLE of the cell size on the Poisson genes. `reference`:
+  - `'sample_any'`: within each group (time-resolved), s_i relative to the group means (mean 1 per group): the extrinsic noise differs between groups (Copycat_sc: 0.4–0.6 for proliferating cells, 0.2–0.34 for quiescent ones), and depth differences between the groups (separate libraries) are not corrected;
+  - `'sample_all'`: on the cells of the whole sample at once, as in the paper (one population), s_i relative to the sample means: the pooled heterogeneity leaves few Poisson genes (Copycat_sc: 37–60 per sample, against thousands per time), hence noisy factors (within-time rank correlation 0.83 with `'sample_any'`);
+  - `'sample_pairwise'` (default): the `'sample_any'` factors (precise within a time) times a scale λ^α per group: for each pair of groups of a sample, r = median over the genes Poisson in both of the log ratio of their means (robust to a minority of genes changing between them), then log λ fitted by least squares on log λ_t − log λ_t′ = r (weights = shared genes, mean of log λ 0 in the sample; with every pair, the mean of the ratios to the other groups); `alpha` in [0, 1] (default 1) = share of the correction (0 = `'sample_any'`). It corrects the depth differences between the libraries of the times, but so would it a global change of mRNA content (no spike-in to tell them apart). Copycat_sc: median 636 / 2575 / 167 shared genes per pair (RD / RMS2 / RMS9), λ 0.73–1.31 (RD), 0.92–1.18 (RMS2), 0.90–1.16 (RMS9), following the library sizes; within-time ranking of the cells unchanged.
+- `'group_median'` — s_i = library of the cell / median library of its population: `reference='sample_any'` (default, its group) or `'sample_all'` (its whole sample: standard library-size normalisation). Libraries of `group_median` exclude the 50 most expressed genes.
 
 **Groups of the estimation.** s_i is estimated within (sample, time) groups by default (`model.depth_by_cell_type = False`); the diagnostic always uses (sample, time, cell type). Estimating within cell types is circular: cell types derive from expression, and normalising each type to its own median depth pulls the intermediate cells towards their type and artificially separates the types (Copycat_sc, proliferating vs quiescent: silhouette 0.18 without correction, 0.36–0.39 with (time, cell type) groups, 0.23–0.25 with (time) groups, 0.24 with a global `normalize_total`). The price is that depth differences between cell types of a sample and time (e.g. larger proliferating cells) are partly treated as technical.
 
@@ -48,16 +62,553 @@ Within a sample and a timepoint, cells differ in sequencing depth (capture effic
 
 ## Gene selection (`select_genes`, `genes_queries` (sheet `gene_lists`))
 
-With `select_genes = False`, `select_genes_and_split.py` keeps all the genes of `Data/data.h5ad`. With `select_genes = True`, the genes of the model are selected from the whole transcriptome (raw counts) within a budget of `model.num_max_genes = 100` genes (`CardamomOT/inference/gene_selection.py`):
+`split_dataset.py` first writes `obs['split']` in `Data/data.h5ad` (`full` for every cell with `split = 'full'`; `train` / `test` / `unused` with `split = 'train'`; `test` for the samples with `remove_from_inference`), then `select_genes.py` selects the genes on the `train` (or `full`) cells only, so that the test cells do not leak into the selection, and writes `data_full` (cells of the inference samples), `data_train` and `data_test` restricted to the selected genes. With `select_genes = False`, `select_genes.py` keeps all the genes of `Data/data.h5ad`. With `select_genes = True`, the genes of the model are selected from the whole transcriptome (raw counts) within a budget of `model.num_max_genes = 100` genes (`CardamomOT/inference/gene_selection.py`):
 
 1. **Gene universe**: protein-coding (`gene_type`/`gene_biotype` column of `adata.var` if present, else by name), non mitochondrial/ribosomal genes expressed in at least 3 cells.
    **Variability floor**, applied to every gene, queries included (a gene that the NB mixture will fit with a single basin is useless to the model): (i) the largest BUB-entropy change between consecutive timepoints (Gandrillon MDE, already computed for the entropy genes) must reach `min_entropy_change = 0.1` bit; (ii) for the candidate terminals, then on demand for each gene the Steiner tree or the closure would add (a failing gene is removed from the graph and the selection redone; most network genes are never checked), the **initialization of the NB mixture** — the same as in `infer_mixture`, on `batch_size_mixture` cells per timepoint: one mode per timepoint and per cell type with a common rate, the most diverse labelling kept — must separate its extreme modes by `min_nb_separation = 0.15`, the separation of two NB modes `kmin < kmax` with rate `c` being `(kmax − kmin) · sqrt(2 / ((kmin + kmax)(c + 1)))` (mean gap over the pooled standard deviation). On Copycat_sc, the ~100 nearly unexpressed genes previously picked as closure regulators have MDE ≤ 0.04 and separation ≤ 0.06, against ≥ 0.15 and ≥ 0.2 for expressed genes. On RD136 the entropy floor keeps 7013 of 11082 genes; the NB check costs ~4 s.
-2. **Terminal genes**, chosen by a **round robin over groups** — each timepoint and each cell type (`cell_type_selection`, else `cell_type`) against the rest, Wilcoxon scores on log-normalised counts (scanpy): each group in turn takes its best-scored candidate not yet taken, so that all timepoints and cell types are covered:
+2. **Terminal genes**, chosen among the high-entropy genes (below; the entropy changes between consecutive timepoints already carry the time information, so there are no timepoint groups) by a **round robin over the cell types** (`cell_type_selection`, else `cell_type`), each against the rest with Wilcoxon scores on log-normalised counts (scanpy): each cell type in turn takes its best candidate not yet taken, the genes significantly DE in it (adjusted p < 0.05, positive score) first, so that all cell types are covered (without cell types: by decreasing entropy change):
    - at most `n_query_genes = 20` genes of `genes_queries` (sheet `gene_lists`) (one per line or comma-separated);
-   - at least `n_entropy_genes = 20` genes among the **entropy genes** of O. Gandrillon's workflow ([From_fastq_to_CardamomOT](https://github.com/ogandril/From_fastq_to_CardamomOT), `CardamomOT/inference/gandrillon.py`): genes in the top `n_top_entropy = 200` of each transition for the 1-D Wasserstein distance of their counts between consecutive timepoints (KD), and in the top 200 for the absolute change of their discrete entropy (MDE), estimated per timepoint with the BUB estimator (Paninski 2003; Python port identical to the R code, on at most `n_cells_entropy = 1000` cells per timepoint).
+   - the fate drivers of the classical OT (`n_driver_genes`, round robin over the fates);
+   - at least `n_entropy_genes = 20` genes (raised to two per cell type if lower) among the **entropy genes** of O. Gandrillon's workflow ([From_fastq_to_CardamomOT](https://github.com/ogandril/From_fastq_to_CardamomOT), `CardamomOT/inference/gandrillon.py`): genes in the top `n_top_entropy = 200` of each transition for the 1-D Wasserstein distance of their counts between consecutive timepoints (KD), and in the top 200 for the absolute change of their discrete entropy (MDE), estimated per timepoint with the BUB estimator (Paninski 2003; Python port identical to the R code, on at most `n_cells_entropy = 1000` cells per timepoint).
 
    `n_query_genes + n_entropy_genes` must be lower than `num_max_genes`: the rest of the budget goes to the paths.
 3. **Coarse global network** on the `n_hvg_selection = 3000` most variable genes (all candidate terminals always kept), with the stimulus as a source node, built by `model.network_method` (see below).
 4. **Edge probabilities**: the same method is run on permuted data (each gene permuted independently across cells, removing every gene–gene dependence), and each edge gets the probability of being real `w = 1 − q`, `q` being the tail FDR of its `|C|` against the null (`P_null(|C| ≥ x) / P_real(|C| ≥ x)`, made monotone). With `null_network = 'hybrid'` (default), gene-to-gene edges are judged against a permutation **within each (sample, time)** — an edge must rest on cell-to-cell co-variation beyond shared temporal trends, which CardamomOT explains by the stimulus and the basals —, and stimulus edges against a permutation **across all cells** (a stimulus can only explain trends); `'within_time'` or `'all_cells'` use one null for both. Edges with `w < min_edge_prob = 0.05` are dropped. With `literature_selection = True` (default, whatever the prior), the gene-to-gene probabilities are then reweighted by **literature feasibility** (see [Prior interaction network](#prior-interaction-network-build_reference_network)): with the odds of `w` multiplied by a likelihood ratio LR = P(feasible | edge) / P(feasible | no edge), estimated on the covered pairs with `w` as soft labels (so a literature that agrees little with the data weighs little; `literature_weight = 1` is an exponent on LR, 0 = data only). Pairs the literature does not cover and stimulus edges are unchanged, and `w = 0` stays 0: the literature reweights the data edges, it does not create any (RD136, depth 3: LR 1.58 for feasible, 0.87 for infeasible pairs; 9 of the 100 genes change).
 
-**Several samples (`dataset_id`).** The selection runs before the integration of the samples, so every dynamic signal is computed **within each sample**, a difference between samples (cell line, batch) never being taken for a dynamics: entropy changes (KD/MDE on the transitions of each sample), NB basins at initialization (best separation over the samples: a gene with two basins in one sample is useful to the per-sample mixtures) and Wilcoxon groups of the round robin ((sample, time) and (sample, cell type) against the rest of the sample) — candidates are the **union** over samples; highly variable genes with the sample as `batch_key`; **one network per sample** with its own nulls and its own stimulus schedule (per-sample rows of `stimulus_inference_schedule`), turned into edge probabilities W_s, then combined as W = Σ w_s W_s with w_s ∝ cells × transitions of the sample (a **consensus**: the network is shared by the samples; raw network amplitudes are not comparable between samples, probabilities are). Literature and Steiner tree then work on the combined W. Samples measured at a single timepoint add no dynamics (but count for the NB check with cell types); samples marked `remove_from_inference` are excluded. With one sample nothing changes.
+5. **Directed Steiner tree on the most probable paths**: edges `i → j` (the `k_in_steiner = 10` most probable regulators of each gene, the `k_stim_steiner = 10` most probable targets of each stimulus, ties broken by `|C|`) cost `−log(w · edge_prior)`, so the path cost is minus the log-probability of the path, and `edge_prior = 0.9` makes every extra step cost something. From the stimuli (each terminal reached from the nearest one), the cheapest path to a required terminal is added repeatedly; a path may go through other terminals. A terminal left without incoming edge after filtering keeps its best one (probability floored at 0.001, used only as a last resort); required terminals that still cannot be connected are kept.
+6. **Regulatory closure**: the goal is that CardamomOT on the selection approaches the full-transcriptome network restricted to it, which fails when important regulators of the selected genes are missing (hidden common regulators create spurious edges, hidden mediators remove links). The gene bringing the most probable regulation to the selected genes (sum of its `w ≥ min_edge_prob` towards them) is therefore added, repeatedly, while it brings at least `closure_min = 0.5`. The log reports the share of the probable regulation entering the selected genes that comes from inside the selection (on RD136: 24% for the 40 required terminals alone, 74% after closure).
+   Genes perturbed in sheet `perturbation_simulation` and sheet `perturbation_inference` are always selected (required terminals, exempt from the variability floor), so that the in-silico perturbations target genes of the model. Gene lists accept `#` comments.
+7. **Budget saturation**: if budget remains, the next genes of the two round robins (queries and entropy genes alternately) are tried, each with its path, and added if they fit.
+
+
+**Several samples (`dataset_id`).** The selection runs before the integration of the samples, so every dynamic signal is computed **within each sample**, a difference between samples (cell line, batch) never being taken for a dynamics: entropy changes (KD/MDE on the transitions of each sample), NB basins at initialization (best separation over the samples: a gene with two basins in one sample is useful to the per-sample mixtures) and Wilcoxon groups of the round robin ((sample, time) and (sample, cell type) against the rest of the sample) — candidates are the **union** over samples; highly variable genes with the sample as `batch_key`; **one network per sample** with its own nulls and its own stimulus schedule (per-sample rows of `stimulus_inference_schedule`), turned into edge probabilities W_s, then combined according to `sample_network_combination`: `'consensus'` = W = Σ w_s W_s with w_s ∝ cells × transitions of the sample (the network is shared by the samples: an edge must be supported in several of them; raw network amplitudes are not comparable between samples, probabilities are), `'any'` = probabilistic OR W = 1 − Π (1 − W_s) (an edge supported in one sample is a candidate: independent condition networks), with a **closure balanced over the samples** (each step serves the sample whose regulation of the selection comes least from inside it, with the gene bringing it the most probable regulation, at least `closure_min` in that sample). `'auto'` (default) = `'any'` with ≥ 2 network conditions and `network_condition_pen = 0`, else `'consensus'`. With a consensus, an edge supported in a single sample cannot pass 0.6 (Copycat_sc, weights 0.27/0.57/0.17: 1450 edges ≥ 0.6 in one sample, 12 in two, 0 in three, hence 6 edges ≥ 0.6 inside the selection); with `'any'` and the balanced closure, inside-regulation shares of 41/40/40% per sample (consensus 25/62/31%). Literature and Steiner tree then work on the combined W; `gene_selection_report.csv` gives, per gene, the samples in which it has an edge inside the selection (`edge_samples`, exponents of the gene page of the report). Samples measured at a single timepoint add no dynamics (but count for the NB check with cell types); samples marked `remove_from_inference` are excluded. With one sample nothing changes.
+
+Without time information, there is no network: the required terminals are selected. Outputs: `cardamomOT/gene_selection_report.csv` (each selected gene, its role — query, entropy, steiner, regulator —, the group that picked it, whether it was required, its parent in the tree (`steiner_parent`), path cost, probability of the edge from its parent, its regulators (`is_regulated_by`) and targets (`regulates`) inside the selection — every edge of the global network with probability ≥ `selection_edge_prob = 0.6` that is literature-feasible (path of at most `literature_depth` edges, last one TF → target; `*`: pair not covered by the literature, kept as in the prior), stimuli included —, `connected` (at least one such edge), and the groups where it is significantly up, adjusted p < 0.05) and `cardamomOT/global_network.npz` (`C`, the null networks `C_null` (gene edges) and `C_null_stim` (stimulus edges), edge probabilities `W` (and, with the literature, `W_data` before reweighting and the feasibility `F`), `genes`; stimuli first), and with the literature `cardamomOT/ref_network.csv`, the literature prior of the selection (below).
+
+### Global network methods
+
+`model.network_method` names the method building the coarse network; `model.network_method_params` (dict) overrides its parameters. Built in: `'otvelo_granger'` (default), `'wot_granger'` and `'otvelo_corr'` (`CardamomOT/inference/global_networks/`). `'otvelo_corr'` — OTVelo-Corr (Zhao et al., *PLOS Comput Biol* 2024; reimplemented from [sandstede-lab/OT-Velocity](https://github.com/sandstede-lab/OT-Velocity), identical to it up to machine precision): entropic fused Gromov–Wasserstein couplings between consecutive timepoints on log(x+1) counts, gene velocities through the couplings, time-lagged correlation of the velocities; one network per sample, averaged with cell weights. Parameters: `n_cells` (500 per timepoint), `n_pcs` (50, coupling costs on principal components), `eps` (0.01), `alpha` (0.5). `'otvelo_granger'` (OTVelo-Granger, eq. 2.7–2.8 of the same paper, identical to the reference code when all regulators are candidates): for each interval, an elastic net regresses the velocities of each gene at t+1 on the velocities at t (mapped through the coupling) of its `k_candidates = 50` strongest OTVelo-Corr regulators, its own past and the stimuli; coefficients summed over intervals. Much sparser than Corr (indirect and confounded correlations removed). Extra parameters: `k_candidates`, `l1_ratio` (r = 0.5, the paper's value), `en_alpha`, `scale` and `stim_weight`. The paper's penalty λ = 1 was calibrated on ~10 genes: the regressors are velocities averaged through the coupling, which shrink as the coupling gets diffuse (PCA of thousands of noisy genes), so that with λ = 1 almost every coefficient is null on a whole-transcriptome universe (Copycat_sc, 5078 genes: 0.001% of the pairs, 98% of the genes without any edge). Hence: regressors and responses scaled to unit RMS per interval (`scale = True`; not centred, the mean velocity being the stimulus effect), so that λ acts as a correlation threshold; stimuli penalised `stim_weight = 10` times less (they play the role of the intercept, otherwise absorbed by the genes with a mean velocity at low λ); `en_alpha = 'auto'` = min(1, sqrt(50 / G)), the paper's value up to 50 genes. On Copycat_sc (edges with w ≥ 0.6 against the hybrid null): median in-degree 3 for 50 genes, 5 for 200, 13 for 1000, 21 for 5078 genes, no isolated gene from 200 genes on, 65–90% of the genes targeted by the stimulus. For comparison `'otvelo_corr'` gives 9 significant edges per gene on 5078 genes, but concentrated on hubs: median in-degree 0 and 70% of the genes without any edge.
+
+**Custom method**: write `my_project/network_methods/<name>.py` defining
+
+```python
+DEFAULTS = dict(...)                       # optional default parameters
+
+def build_network(adata, stim, seed=0, **params):
+    # adata: raw counts (cells x genes), obs['time'] (and obs['dataset_id'] if several samples)
+    # stim : (n_times, n_stimuli) stimulus schedule per sorted timepoint
+    # return C: ((n_stimuli + n_genes) x (n_stimuli + n_genes)), stimuli first, C[i, j] = effect of i on j
+    ...
+```
+
+and set `model.network_method = '<name>'` (or a path to any `.py` file). Only `|C|` is used by the Steiner tree.
+
+---
+
+## Classical OT (`run_classical_OT`, default True)
+
+Before CardamomOT, `run_classical_OT.py` runs a Waddington-OT / moscot-style analysis on **every gene** and the train cells (all the cells with `split = 'full'`), per sample (`CardamomOT/tools/classical_ot.py`, no external package): log1p(counts / `depth_factor` if computed, else `normalize_total`), genes expressed in ≥ 10 train cells, PCA (50 components) fitted on the train cells; between consecutive timepoints of each sample, entropic unbalanced OT (scaling algorithm) on squared Euclidean distances divided by their median, WOT defaults ε = 0.05, λ1 = 1 (source relaxed: growth), λ2 = 50 (target nearly strict), source marginal ∝ exp(r Δt) with r = `obs['proliferation_net_rate']` if present. At most `classical_ot_max_cells = 5000` cells per (sample, time) are transported.
+
+Outputs (`cardamomOT/classical_OT/`): `transitions.csv` (cell-type flows, fate and ancestor probabilities per sample and interval; `sample = all`: pooled, each sample of mass 1), `fate_genes.csv` (per cell type: genes up in its **immediate ancestors** against the ancestors of the other cells — coupling weights pooled over intervals and samples —, and genes up in the cell type against the other cells; weighted Welch t, log fold change, ranks, `top10_both`), `velocity.npz` and `couplings.npz`. Velocities: barycentric, (mean of the descendants − x) / Δt, or (x − mean of the ancestors) / Δt at the last time, in the PCA space of the UMAP of `Data/data.h5ad` (`cardamomOT/umap_data.npz`); the other cells (test, unused, beyond `classical_ot_max_cells`) by Gaussian-kernel regression over their 30 nearest transported cells in the PCA space of the transport, within their sample and timepoint.
+
+Report: a Sankey of the cell-type flows across every timepoint (a link leaves its node with width ∝ the fate probability and reaches its target with width ∝ the ancestor probability) with the table of the top-10 fate genes, the velocity field on the UMAP of every cell, then a **teaser** comparing it with the velocity field of CardamomOT on the same UMAP. CardamomOT's velocities come from the final soft couplings of its trajectories (`cardamomOT/couplings.npz`, written by `infer_network_structure`: same costs, marginals and regularisation as the trajectory OT, computed once with the final network in the growth pass, sparse — top 50 targets per state —, indexed by the rows of `data_<split>.h5ad`); the cells never reached by the trajectories and those outside `data_<split>` get a Gaussian-kernel velocity in the space of the model mRNAs (log1p, counts / `depth_factor` if computed).
+
+## Report visualisation (`embedding_method_visualization`, `cell_depth_for_representation`, `classifier_method`)
+
+These parameters only change the figures of the report, never a computation (the depth factor of the mixture, of the network inference, of the classical OT and of the kernel regressions of the velocities follows `use_depth_factor`):
+
+- `embedding_method_visualization` (`'umap'` default, `'pca'`, `'phate'`): every 2-D embedding of the report. One mRNA embedding is learned on the observed cells and every model output (trajectories, NB mixture, network modes, simulations, perturbations, test and validation, learned dynamics) is projected onto it; one protein embedding is learned on the protein trajectories and the simulated proteins are projected onto it (the data page of the whole transcriptome and the integration diagnostic keep their own embeddings). PHATE (`pip install phate`) suits trajectories; points not used to fit it (perturbations, test cells) are placed by a kNN extension (inverse-distance mean of the coordinates of their 10 nearest fitted points), UMAP and PCA use their own `transform`.
+- `cell_depth_for_representation` (default `True`): every mRNA shown (data UMAP, generative model, perturbations, test and validation, learned dynamics), and the counts on which the cell-type classifiers are trained and applied, are counts / depth factor (log1p for the embeddings) — the observed cells and the reference trajectories divided by their depth factor, the NB draws of the models taken **at the reference depth** (layer `reference_depth`, drawn without s_i by `check_mixture_to_data`, `check_sim_to_data`, `check_KOV_to_sim` and `infer_test` when the run uses depth factors). Formerly `cell_depth_for_embeddings` (still read from older workbooks, with a warning). With `False`, raw counts, and model draws at the depth of the cells they mimic (compatible with the raw data). Without a depth factor, both are the same.
+- `classifier_method` (`'random_forest'` default, `'logistic'`): classifiers of the cell types of the model outputs (one per sample, trained on the observed cells, in the representation above). The random forest uses the counts and fine co-expression; the logistic regression (standardised log1p counts, multinomial, balanced class weights, L2 penalty C chosen by 3-fold cross-validation on the training cells of the sample, balanced accuracy, every time pooled) relies less on co-expression, which models with genes independent given their state cannot reproduce. Balanced weights raise the recall of the rare types but also their predicted share: compare the model outputs with the cross-validated data of the same classifier (identity page), not with the observed shares. The notebooks use `train_classifier(adata, **classifier_options(p))` (method and representation of the project). The page "cell-type identity in the NB mixture" always shows both.
+
+`./run.sh <project> [hard options] --report-only` (or `cardamomot pipeline -i <project> --report-only`) rebuilds the report with the current visualisation parameters: it reruns every check script of the run (`check_mixture_to_data`, `check_sim_to_data`, `check_test_to_train`, `check_KOV_to_sim`, as configured), `run_classical_OT` if its outputs are missing or from an earlier version, then the report; the inference steps (including `infer_test`) are never rerun.
+
+`./run.sh <project> [hard options] --from <step>` (or `cardamomot pipeline -i <project> --from <step>`) resumes the pipeline at `<step>` (e.g. `infer_network_simul`), reusing the outputs of the earlier steps.
+
+**`'wot_granger'`**: the same Granger regression (unit-RMS scaling, `stim_weight`, `en_alpha = 'auto'`) through the **couplings of the classical OT** (`run_classical_OT`, which runs before `select_genes`: every gene, train cells, growth) instead of the OTVelo couplings: a gene regulates another when its velocity at t predicts the velocity of the other at t + 1 along the inferred trajectories (regulators and targets of the genes of interest). The couplings are fixed: the null networks are regressions through the same couplings on the permuted cells. Parameters: `n_cells` (2000 per time, the cells carrying most coupling mass first), `k_candidates`, `en_alpha`, `l1_ratio`, `scale`, `stim_weight`.
+
+**Fate drivers** (`n_driver_genes = 20`, terminals of the selection after the queries, before the entropy genes): `run_classical_OT` chains its row-normalised couplings backwards to get, for every transported cell, the probability that its descendants at the last time of its sample belong to each cell type (`classical_OT/fate.npz`); a driver of a fate is a gene whose expression correlates with that probability **within each earlier timepoint** (no time confounding), over the cells not yet of that type (priming rather than markers), Fisher-combined over the timepoints, BH q ≤ 0.05 (`classical_OT/fate_drivers.csv`). As co-expressed modules (e.g. the cell cycle) dominate several fates, drivers are taken in round robin over the fates a gene being redundant when its expression correlates (|r| ≥ 0.3) with **two** drivers already taken at once (column `representative`): each co-expressed module keeps two genes, and a gene linked to a single one stays (finer signals). They are subject to the gene universe and the variability floor like the other terminals (role `driver` in `gene_selection_report.csv`). Budget: n_query + n_driver + n_entropy (+ perturbed genes) must leave room for the Steiner paths and the closure.
+
+**Entropy pre-selection** (`entropy_preselection = True`): the queries, the fate drivers and every gene of the network (hence of the Steiner paths and of the closure) are taken among the entropy candidates (Gandrillon KD & MDE, top `n_top_entropy` per transition) only; the perturbed genes are always kept. The listed stimulus targets (`stimulus_targets`) are possible interactions only, they never enter the universe: a stimulus whose listed targets are in the data but none in the network has no stimulus edge (none in the data: unconstrained).
+
+**Fate prediction** (in `selection_preservation.json`, all network methods): cross-validated R² (5 folds, ridge) of the fate probabilities of the classical OT on every gene, predicted from the expression at t of the selected genes with the timepoint as covariate (cells before the last time), against the time only, random gene sets of the same size, and every gene (PCA). The classical OT on every gene is the common reference of every selection method.
+
+**Trajectory preservation of the selection** (`cardamomOT/selection_preservation.json`, written by `select_genes` when `run_classical_OT` was run; shown on the gene-list page of the report): the classical OT is rerun on the selected genes only (same cells, preprocessing and parameters) and compared with the one on every gene by the weighted cosine of the velocities of the transported cells in the full PCA space (1 = same directions) and the mean Jensen-Shannon distance of the cell-type fate distributions (0 = same transitions), with random gene sets of the same size as baseline.
+
+## Prior interaction network (`build_reference_network`)
+
+The gene selection (`select_genes = True`, `literature_selection = True`, `prior_network_pen = 0`, `build_prior_network = True`) writes the literature prior of the selected genes to `cardamomOT/ref_network.csv`. For a gene list chosen otherwise, build it with:
+
+```bash
+cardamomot step build_reference_network -i my_project   # literature_depth, literature_resources, species
+```
+
+Both use `CardamomOT/inference/literature.py`. Literature: OmniPath post-translational interactions (directed) and TF → target interactions (CollecTRI, plus less curated resources by default, see below), downloaded once (organism detected from the gene names, or `--species`) and cached in `~/.cache/cardamomot` (`CARDAMOMOT_CACHE`). A CardamomOT edge A → B means that protein A changes the transcription of B, possibly through unobserved intermediates, so it is **feasible** when the literature holds a path A → … → B of at most `depth` edges (`literature_depth = 3`) whose **last edge is transcriptional** (a signalling-only path changes the activity of B, not its mRNA) and whose intermediates are **not among the selected genes** (a path through an observed gene is already a chain of the network). No sign and no length weight through unobserved intermediates (the effect looks direct): such edges get 1. When every path goes through `k ≥ 1` selected genes, the edge gets `1/(k+1)` instead of 0 (the network may still need a direct edge; a missing edge is the costly error, since with `--prior 0` it can never be inferred, whereas CardamomOT's sparsity removes inactive allowed edges). Covered pairs without any path get 0, and pairs the literature does not cover (regulator absent from OmniPath, or target without any TF → target edge) a neutral 1, so that understudied genes are not penalised. On RD136 (3000 genes): 69% of the genes covered as regulators, 49% as targets; 3% of the covered pairs feasible at depth 2, 18% at depth 3, 41% at depth 4. `literature_resources`: `'extended'` (default: OmniPath and CollecTRI + PathwayExtra, KinaseExtra, LigRecExtra, DoRothEA A–D, TFtarget, 4× more edges) or `'core'` (OmniPath + CollecTRI). Extended does not loosen the prior: it covers almost all genes (97% vs 66% of the targets of a 100-gene selection), so fewer pairs keep the neutral weight (100-gene RD136 selection, depth 3: 61% of the edges allowed with core, 53% with extended; depth 4: 71% and 68%).
+
+**Selection and prior built together (hard prior).** With `select_genes`, `literature_selection`, `build_prior_network` and a hard prior (`--prior 0`, or `prior_network_pen = 0` in the workbook / `base.py`), the gene budget is no longer `num_max_genes` but the largest number of genes whose literature prior leaves at most `model.max_free_params = 10000` free network parameters (allowed gene → gene entries, self-regulation included, + stimulus → gene edges), found by bisection on the Steiner budget (RD136: 132 genes for 10k, 93 for 5k; the extra budget goes mostly to closure regulators). Otherwise the budget stays `num_max_genes`; the selection still uses the literature whenever `literature_selection = True` (without it, the literature is not queried at all). The selection writes the prior only in this hard-prior case, and the pipeline then skips `build_reference_network`; in every other case with `build_prior_network`, `build_reference_network` builds it after the selection, with the same parameters (`literature_depth`, `literature_resources`). With `build_prior_network = False`, a `ref_network.csv` of an earlier run is removed by the selection.
+
+The number of free interactions (`G² ×` allowed share, printed by both scripts) is the trade-off with `--prior 0`: for 5–10k free network parameters, about 95–135 genes with the defaults (extended, depth 3, ~53% allowed), 150–210 with extended at depth 2 (~22%), 90–130 with core at depth 3 (~60%).
+
+`cardamomOT/ref_network.csv` is a gene × gene interaction matrix (a user matrix can also be given as `Data/reference_network.csv`). The `--prior` parameter then controls how strongly edges absent from this prior are penalised. Values are signed weights: `0` marks an absent edge, `0 < |v| ≤ 1` leaves the sign free but makes the edge cost `1/|v|` more than a sure edge (in both the inference and the refinement, without reducing its maximal strength), and `|v| > 1` marks a sure edge whose sign is forced (`> 1` activation, `< -1` inhibition). Literature priors are 0 or 1, so they never force a sign.
+
+| `--prior` value | Effect |
+|---|---|
+| `1.0` (default) | No penalisation — all edges equally possible |
+| `0.5` | Soft penalisation — absent edges discouraged |
+| `0.0` | Hard mask — only edges present in the prior are allowed |
+
+**The same `--prior` must reach both steps** — it constrains *inference* in `infer_network_structure` and the *simulation reference network* in `infer_network_simul` (and the file tags of the checks and report). The pipeline forwards it to all of them.
+
+```bash
+# Easiest: build_prior_network = True in the workbook (literature_depth = 3 by default; 1 = faster), then
+cardamomot pipeline -i my_project --prior 0.5
+
+# Or step by step — same --prior everywhere:
+cardamomot step infer_network_structure -i my_project --prior 0.5
+cardamomot step infer_network_simul     -i my_project --prior 0.5
+```
+
+---
+
+## Custom stimulus schedule (sheet `stimulus_inference_schedule`)
+
+By default one stimulus is `0` at the first timepoint and `1` at all subsequent ones. To define a custom schedule, fill the sheet: **rows = timepoints** (optional `time` column) and **columns = stimulus channels** (`stimulus_1`, `stimulus_2`…):
+
+| time | stimulus_1 | stimulus_2 |
+|---|---|---|
+| 0 | 0 | 0 |
+| 24 | 1 | 0 |
+| 48 | 1 | 1 |
+
+- Values between 0 and 1 are allowed (partial stimulus strength).
+- If fewer rows than timepoints are provided, the last row is repeated.
+- Simulations read sheet `stimulus_simulation_schedule` (one row per simulated time): first the columns of the inference stimuli (e.g. a novel protocol), then one column per perturbation stimulus STIM1, STIM2… of `perturbation_simulation`. Without it, the inference schedule is used and the perturbation stimuli take their default (0 at the first time, 1 after).
+
+The `--stimulus` parameter controls how strongly the stimulus regulates genes in the inferred network:
+
+| `--stimulus` value | Effect |
+|---|---|
+| `1.0` (default) | Full stimulus influence |
+| `0.0` | Stimulus has no regulatory influence |
+
+---
+
+## NB mixture initialization (times and cell types)
+
+Each gene's mixture (`infer_mixture`) starts from one NB mode per timepoint with a common rate, the lowest and highest modes giving the initial extreme basins. When the cells carry a cell type (`cell_type_selection`, else `cell_type`), the same is done per cell type, and the labelling whose extreme modes are the most separated (groups with fewer than 50 cells or 5% of the cells left out: their extreme modes may be chance) (NB separation, see gene selection) gives the initial `kmin`, `kmax` and `c`; the hard EM then bounds the extreme modes by the means of the extreme groups of that labelling. Genes varying between cell types more than over time (e.g. cell-cycle genes in an asynchronous population) thus get distinct basins (Copycat_sc, MKI67: one mode with the temporal initialization, two with the cell-type one). Without cell types the initialization is unchanged.
+
+### Possible targets of the stimuli (`perturbation_inference`, row `all`, `STIMk`) — optional
+
+`STIMk` of the row `all`: a gene list of `gene_lists` or comma-separated genes, k = column of `stimulus_inference_schedule`. Stimulus edges are then restricted to the listed genes: in the gene selection (Steiner tree from the stimuli; the listed genes join the network universe) and in the network inference and simulation (`ref_network` stimulus rows set to 0 outside the list). A column naming no gene of the data means **no constraint** for that stimulus (not "no target").
+
+## Multiple experimental samples (`dataset_id`)
+
+If your experiment contains several biological conditions that share a gene regulatory network but have **different basal transcription rates** (e.g. different cell lines, donors, or perturbation backgrounds):
+
+```python
+adata.obs['dataset_id'] = ...   # string or integer label per cell
+```
+
+CardamomOT then:
+- Builds one set of **per-sample basal parameters** `θ_basal(s)` for each sample.
+- Runs a single joint optimisation over shared interaction weights and all per-sample basals simultaneously.
+- Saves `basal.npy` with shape `(n_samples, G, n_networks)`.
+
+**Keeping per-sample basals close (`constrain_basal_uniform`):** set `model.constrain_basal_uniform = λ` (e.g. `λ = 100–1000`) to add an L2 penalty pushing each sample's basals toward their common mean. Genes with a non-zero `basal_ref` entry for a given sample (e.g. a KO prior) are excluded from the penalty for that sample.
+
+### Network conditions (`network_condition`): one network per biological condition
+
+Samples that are expected to be governed by **different regulatory networks** (naive vs tumour-bearing, wild type vs knockout line, untreated vs chronically stimulated) can be grouped into network conditions, a level above `dataset_id`:
+
+```python
+adata.obs['network_condition'] = ...   # one value per dataset_id (several dataset_id may share one)
+```
+
+With two conditions or more, each condition c has its own network θ_c = θ_shared + Δ_c, inferred jointly (fused lasso, as in joint graphical lasso / NetDes-Duo): the sparsity penalty applies to each condition network (weighted by its share of the samples, so that a common network costs as now) and an L1 penalty `network_condition_pen × sparsity penalty` applies to the deviations Δ_c (in effective units: the literature prior weights the networks, not the deviations). The L1 makes most Δ_c exactly 0 (values within 1e-2 of the median over conditions are fused), so an edge is either shared or **rewired** in some condition; a sign change costs twice its magnitude.
+
+- `network_condition_pen` (model_parameters sheet, default 1): large (≳ 10) = one common network (current behaviour); 0 = independent networks per condition; in between, an edge differs between conditions only if the data of a condition justify it about as much as a new edge.
+- Basals stay per `dataset_id` (and `constrain_basal_uniform` still pulls all samples together, across conditions); schedules, KO/OV and `remove_from_inference` stay defined per `dataset_id`.
+- The literature prior (`ref_network`, `inter_ref`) constrains every condition network (structure) and the shared one (reference / sign bounds); with `hard_forcing_ref` the deviations are pinned to 0.
+- Refinement: one multiplicative correction per edge, shared by the conditions (their differences are kept).
+- Outputs: `inter.npy`, `inter_simul.npy` are per sample `(n_samples, G, G, n_networks)` (each sample with its condition's network; `inter_t*.npy` `(T-1, n_samples, G, G, n_networks)`), `network_conditions.json` (condition of each sample), `inter_shared[_simul].npy` (median network over the conditions) and `network_differences[_simul].csv` (edges that differ, one column per condition, `sign_change`). Every step routes cells to their sample's network (OT, alpha, filtering, degradations, simulations, KO/OV, test, report: one GRN section per condition and a page of the differences).
+- Without `network_condition` (or with a single value) nothing changes. Not supported with `simulate_full_with_harissa`.
+
+**Cell types per sample (random forest).** With several samples, the cell types of the simulated, reconstructed and test cells (report, KO/OV comparisons: `tools.characterize_cell_type`) are predicted by **one random forest per sample** (`dataset_id`), each trained on the observed cells of that sample — one classifier for all samples is too fragile, even after integration. Each cell is classified by the forest of its sample (the stage AnnData written by `check_sim_to_data` / `check_KOV_to_sim` carry `obs['dataset_id']`; older ones are labelled from `data_samples.npy`). A sample without a forest of its own (a sample held out of the inference, fewer than 50 cells or a single type) uses the one **indicated** by the `reference_sample` of `perturbation_inference` (also the sample whose cells start its validation simulation), else the one with the **closest name** (longest common prefix: `RMS2_ctrl` → `RMS2_trt`). A single sample keeps a single forest.
+
+
+The report compares the condition networks (page "similarity between network conditions", `cardamomOT/network_similarity_<tag>.csv`), self-regulations excluded: cosine of the signed weights, Jaccard index of the signed edge sets (an edge is shared if non-zero with the same sign), and, as a function of k, the Jaccard index of the k strongest edges of two networks and the recall of the k strongest edges of one among the edges of the other. The table of differing edges also leaves out self-regulations.
+
+### Per-sample mixtures and integration level (`integrate_samples` in [0, 1], default 1)
+
+With two samples or more, `infer_mixture` assumes that **each sample identifies its own mixture modes, but that the mRNA level of each mode may differ between samples** (capture efficiency, line, donor). The mixture is fitted on each sample alone (samples below `model.min_cells_integration = 200` cells are not), and the parameters are always kept per sample: `mixture_parameters.npy` is `(n_samples, M+1, G)` and `pi_zinb.npy` `(n_samples, G)`, samples ordered as `np.unique(obs['dataset_id'])`; every step routes cells to their sample's mixture (trajectory inference, network and degradation inference, simulation, NB sampling of the check scripts), each sample being normalised by its own maximal mode. Not supported with `simulate_full_with_harissa`.
+
+`model.integrate_samples = λ` (model_parameters sheet) sets how much the samples are pulled towards a **common target** per gene — the parameters of the reference sample `model.ref_sample_integration` (a `dataset_id` value, or `--ref-sample <id>`), or, if `None` (default), the cell-weighted average of the sample mode means, recalibrated to keep the mean and, when possible, the variance of the gene over all cells:
+
+- mode means and dispersion are interpolated in log scale (zero inflation linearly) between each sample's own fit (λ = 0) and the target (λ = 1); with the average target, a factor common to all samples rescales the means to keep the total mean of the gene, and a common factor on the dispersion keeps its total variance when possible;
+- counts are transported accordingly, mode by mode, by randomized quantile matching from each sample's fit to its parameters at level λ (each cell keeps the mode given by its own sample; counts stay integers). With λ > 0, `Data/data_{full,train,test}.h5ad` are rewritten with these counts in `X` and the raw counts in `layers['counts_raw']` (a rerun always restarts from the raw counts); λ = 0 (`--no-integrate-samples`) keeps raw counts and each sample's own parameters;
+- λ = 1: all samples share the same parameters (still stored per sample).
+
+Safeguards: a gene keeps raw counts and **its own fit** for a sample (parameters and mode responsibilities of that sample; the target would describe another sample's expression, e.g. a gene expressed in one sample only) if that sample's mixture does not really separate two modes, i.e. a mode weight below `min_mode_weight_integration = 0.05`, an ON/OFF mean ratio below `min_mode_ratio_integration = 2`, or an "ON" mode closer (in log) to the OFF level of the other samples than to their ON level (typically a gene never activated in that sample, whose EM splits zeros from low counts); or keeps raw counts with the target parameters (classified with the target modes, so that the perturbation stays visible against the common level) if the gene is listed for that sample in sheet `perturbation_inference` (such samples are also left out of the target of that gene). Genes supported in no sample take the pooled-fit parameters. Outputs: `mixture_parameters_samples.npy` (own fits) and `integration_report.csv` (per sample and gene: own, target and used mode means). With a single sample, nothing changes.
+
+**Cell-type identity check** (`check_mixture_to_data`, report page "cell-type identity in the NB mixture", `cardamomOT/identity_mixture.csv`): one mixture draw per real cell is classified by per-sample classifiers trained on the other real cells (cross-fitting; a random forest and a logistic regression on log1p counts, both in the representation of `cell_depth_for_representation`, the forest relying more on fine co-expression), against two references: the real cells themselves (the classifier's own limit with these genes) and the real cells with the counts of each gene shuffled among cells of the same sample, time and mode (the best a model with these modes and genes independent given them can do). A drop real → shuffled means the modes are too coarse for that type; shuffled → draws, the NB fit.
+
+Note that integration removes level differences of the modes between samples, whether technical or biological; differences in mode *proportions* (which cells are ON) are kept, and are then explained by the per-sample basals.
+
+---
+
+## Regularisation targets (`basal_ref`, `inter_ref`)
+
+Place reference arrays in `Data/` to anchor the optimiser:
+
+| File | Shape | Role |
+|---|---|---|
+| `basal_ref.npy` / `.csv` | `(G,)` or `(n_samples, G, n_networks)` | Regularisation target for basal parameters |
+| `inter_ref.npy` / `.csv` | `(G, G)` or `(G, G, n_networks)` | Regularisation target for interactions |
+| `basal_init.npy` / `.csv` | same as `basal_ref` | Warm-start values (not regularised) |
+| `inter_init.npy` / `.csv` | same as `inter_ref` | Warm-start values for interactions |
+
+CSV files must have gene names matching `adata.var_names` as row and column indices.
+
+---
+
+## KO/OV inference with per-sample priors (sheet `perturbation_inference`)
+
+When `dataset_id` is present, you can encode prior knowledge about which genes are knocked out or overexpressed in each sample:
+
+| sample_id | KO | OV |
+|---|---|---|
+| wt | | |
+| ko_CHGA | CHGA | |
+| ov_STMN2 | | STMN2 |
+| ko_CHGA_ov_STMN2 | CHGA | STMN2 |
+
+(sheet `perturbation_inference` of `Data/CardamomOT_inputs.xlsx`)
+
+- `sample_id` must match `adata.obs['dataset_id']`.
+- `KO` genes are forced to `basal = −100` (silent during inference).
+- `OV` genes are forced to `basal = +100` (always active).
+- Multiple genes per cell: `CHGA,POSTN`.
+
+During inference, this replaces `basal_ref` for the affected genes/samples and saves `cardamomOT/basal_ref_mask.npy` for use by `simulate_network_KOV`.
+
+```bash
+cardamomot step infer_network_structure -i my_project
+# the perturbation_inference sheet is read automatically
+```
+
+---
+
+## In-silico perturbation simulation (sheet `perturbation_simulation`)
+
+After training, simulate arbitrary KO/OV combinations by defining them in:
+
+| KO | OV |
+|---|---|
+| | |
+| CHGA | STMN2 |
+| POSTN | S100B,STMN2 |
+| CHGA-80 | STMN2-60 |
+
+(sheet `perturbation_simulation`; an empty row = wild type)
+
+Each row produces one independent simulation saved as `cardamomOT/adata_sim_KO_*_OV_*_stim*.h5ad`.
+
+**Partial KO/OV (`GENE-X` syntax):** append `-X` (0 < X < 100) for a partial perturbation of strength X%:
+
+| Mode | Creation rate factor | Effect |
+|---|---|---|
+| `KO X%` | `× (1 − X/100)` | Reduced production → lower steady-state |
+| `OV X%` | `× 1/(1 − X/100)` | Increased production → higher steady-state |
+
+Output files use the `pctX` suffix to distinguish partial from complete perturbations (`KO_CHGApct80_OV_STMN2pct60`).
+
+**Perturbation stimuli (`STIM1`, `STIM2`… columns, optional; `STIM` = `STIM1`).** Instead of genes forced from the start, a row can define new stimuli with their targets, each gene followed by `+` (activated) or `-` (inhibited): `CHGA+STMN2-` (or `CHGA+,STMN2-`; gene names containing `-` are recognised). On each target its effect is that of an interaction of ±(100 + the sum of the |interactions| received by the gene), which dominates them as a KO/OV does, multiplied by the value of the stimulus, which follows its column in sheet `stimulus_simulation_schedule` (column n_stimuli + k for STIMk; default 0 at the first time and 1 after) — e.g. a drug added at some time, or removed. Several stimuli add their effects, each with its schedule (e.g. two drugs given at different times); KO, OV and stimuli can be combined in a row; files are labelled `..._STIM1_CHGAup-STMN2dn`. The perturbed genes (KO, OV and stimulus targets) are always selected by the gene selection.
+
+```
+KO      OV      STIM1               STIM2
+0       0       FTH1-FTL-NCOA4-     0
+CHGA    0       STMN2+              VEGFA-
+```
+
+**Effects on the net proliferation rate (`RATE1`, `RATE2`… columns, optional; `RATE` = `RATE1`).** A drug acting on survival or division (not, or not only, on transcription) is given as `TARGET:delta` entries, comma-separated: `delta` (per time unit, e.g. `-0.01` for a death rate of 0.01 per hour) is added to the net rate R of a cell at the maximal score of `TARGET`, in proportion to its score, scaled by the value of perturbation stimulus k (same schedule as `STIMk`, which may be empty). `TARGET` is a gene list of the `gene_lists` sheet (any extra column, exported as `gene_list_<name>.txt`), genes joined by `+` (`FTH1+FTL+TFRC`), a gene, or `all` (every cell). The score of a cell is the mean over the genes of its protein level divided by the 99th percentile of the trajectories, clipped to [0, 1], evaluated along each simulated path as R. It acts in the branching simulation (proliferation MLP, `simulate_with_proliferation`; without the MLP the base rate is 0). The population size of each condition (`log` mean growth factor per interval, relative to t0) is saved (`data_log_population_<label>.npy`, `uns['log_population']`) and plotted in the overview of report section 3, the per-perturbation pages giving the population relative to WT at the last time; labels end with `..._RATE1_<target><delta>`.
+
+```
+KO      OV      STIM1                     RATE1
+0       0       0                         iron_lysosome_high:-0.01
+0       0       VEGFA-SLC2A3-PDK1-        iron_lysosome_high:-0.01,all:-0.002
+```
+
+```bash
+cardamomot step simulate_network_KOV -i my_project
+```
+
+Visualise results with:
+
+```python
+from CardamomOT import plot_results_sim_kov, compare_cell_types
+
+p, stim, prior = "my_project/", 1.0, 1.0
+compare_cell_types(p, "KO_CHGA_OV_none", split="full", stim=stim, prior=prior)
+plot_results_sim_kov(p, "KO_CHGA_OV_none", stim=stim, prior=prior)
+```
+
+---
+
+## Literature degradation rates (`get_degradation_rates`)
+
+`get_degradation_rates.py` writes per-gene mRNA (`adata.var['d0']`) and protein
+(`adata.var['d1']`) degradation rates in **hour⁻¹** (`d = ln 2 / t½`, `t½` in hours, the time unit
+of `adata.obs['time']`), together with their provenance (`d0_source`, `d1_source`), and a per-gene
+report in `cardamomOT/degradation_rates_report.csv`. The reference tables ship with the package
+(`CardamomOT/data/halflife/`, see its `README.md` for the sources and validation), so no network
+access is needed.
+
+**Species.** The organism is detected from the gene names — mouse (MGI) symbols such as `Gata1`,
+human (HGNC) symbols such as `GATA1`, or Ensembl ids (`ENSMUSG…` / `ENSG…`). You can force it with the
+parameter `species = 'mouse'` (or `'human'`) of the model_parameters sheet; the same value (or, when
+`'auto'`, the same detection) is used by `get_proliferation_rates` and the literature prior.
+
+**Reference half-lives.** Each species uses its own table:
+
+| Species | mRNA | protein |
+|---|---|---|
+| mouse | Schwanhäusser et al. 2011 (corrected 2013), NIH3T3 — median 9.9 h | same — median 48 h |
+| human | RNADecayCafe v1.1 (Vock et al. 2025), 11 cell lines — median 2.5 h | Mathieson et al. 2018, primary cells — median 81 h |
+
+The two species are therefore not on the same absolute scale (different cell types and methods).
+
+**Genes absent from the table** of their species are estimated, on that species' scale, from
+their ortholog in the other species' table (linearly recalibrated on the orthologs measured in
+both) and from biologically related measured genes: paralogs (weighted by protein identity), the
+most specific HGNC gene family, and the genes with the most similar Gene Ontology annotation. The
+weights of these sources are fitted by cross-validation on the measured genes; when nothing is
+known (mostly lncRNAs) the median of the table is used. Gene names are matched through official
+symbols, Ensembl ids, previous symbols and synonyms (e.g. `Hist1h4a` → `H4c1`, `OCT4` → `POU5F1`).
+
+Rates are then clipped to [median/10, 10 × median] of the dataset. Existing `d0`/`d1` columns are
+kept unless `overwrite_degradation_rates = True`, so you can supply your own rates in `adata.var` beforehand.
+
+## Population dynamics: proliferation, death, and transition rates
+
+### Net proliferation rate — default behaviour
+
+CardamomOT only ever uses the *net* rate (birth − death), never the two terms separately, stored as:
+
+```python
+adata.obs['proliferation_net_rate']   # net proliferation rate per cell (birth − death)
+```
+
+**This is populated automatically, with no configuration needed.** Every run of
+`get_proliferation_rates.py` (step "Proliferation rates" in the standard pipeline — the *first*
+step, run before gene selection) estimates it from literature proliferation/death gene
+signatures, following moscot's / Waddington-OT's approach (Schiebinger et al. 2019) — see
+`CardamomOT/tools/estimate_proliferation.py`. It runs directly on `Data/data.h5ad` (all genes)
+rather than after DE gene selection, since that filtering could otherwise discard many of the
+literature marker genes needed to score the signature; because the rate lives in `adata.obs`
+(per-cell), it is unaffected by the later gene-subsetting and train/test splitting done by
+`split_dataset.py` / `select_genes.py`.
+
+1. Each cell is scored against a proliferation gene set and a death gene set using
+   `scanpy.tl.score_genes` (control-gene-bin corrected mean expression), on an internal
+   total-count-normalised + log1p-transformed **copy** of the data — `score_genes` assumes that
+   scale (moscot's own tutorials normalise/log-transform before scoring; moscot itself does not do
+   it internally, it's left to the caller). The transformation is never applied to, or saved on,
+   `adata` itself: CardamomOT's inference requires raw counts throughout, so only the resulting
+   per-cell scores are kept — `adata.X` is read back unchanged afterwards.
+2. Each score is mapped to a rate via the same shifted-logistic curve moscot uses:
+   `rate(score) = rate_min + (rate_max - rate_min) / (1 + exp(-4/width · (score - center)))`,
+   with moscot's own published defaults (verified against its source):
+   `beta_max=1.7, beta_min=0.3, beta_center=0.25, beta_width=0.5` for birth, and
+   `delta_max=1.7, delta_min=0.3, delta_center=0.1, delta_width=0.2` for death.
+3. The net rate `beta(score_prolif) - delta(score_death)` is a **per-day** rate — like moscot/WOT
+   themselves, whose `TemporalProblem` computes elapsed time from a `day` obs field and raises the
+   per-timepoint growth score to that many days (`broadinstitute/wot`'s `OTModel.compute_transport_map`:
+   `G = cell_growth_rate ** (t1 - t0)`, with `t0`/`t1` in days). CardamomOT instead expresses
+   `adata.obs['time']` and every internal kinetic rate in **hours** (e.g. `NetworkModel`'s default
+   degradation rates correspond to a 9h mRNA / 46h protein half-life), so it is divided by 24
+   (`hours_per_day` in `estimate_growth_rates`) before being written to `obs['proliferation_net_rate']`
+   — this makes it directly usable as `Δt` in hours in the OT-marginal correction below, with no
+   further rescaling needed. Pass `hours_per_day=1` to `estimate_growth_rates` to recover the raw
+   moscot-equivalent day⁻¹ rate if your own `adata.obs['time']` happens to be in days instead.
+
+The marker gene lists are those of the species detected from the gene names (or given with
+parameter `species`), copied verbatim from moscot's shipped defaults
+(`moscot.utils.data.proliferation_markers`/`apoptosis_markers`): Tirosh et al. 2016 cell-cycle genes
+for proliferation, MSigDB Hallmark Apoptosis for human death markers (MSigDB Hallmark P53 Pathway
+for mouse — moscot does not use a symmetric death gene set across species).
+
+`get_proliferation_rates.py` always (re)computes and overwrites `adata.obs['proliferation_net_rate']`,
+even if that column is already present. If you have your own values (e.g. supplied from an external
+measurement, such as EdU staining or a growth-curve-derived estimate) and want to keep them, skip the
+step entirely instead: keep `estimate_proliferation_rates = False` (default; model_parameters sheet), or
+uncheck **Proliferation rates** in `cardamomot run`.
+
+Once populated, the OT marginals between consecutive timepoints t₁ and t₂ are modified:
+- **Source marginal** µᵢ ∝ exp(+netᵢ · Δt/2) — cells with higher net growth carry more weight as trajectory sources
+- **Target marginal** νⱼ ∝ exp(−netⱼ · Δt/2) — fast-growing cells at t₂ are down-weighted (they represent fewer distinct lineages)
+
+### Birth, death and protein dilution (`protein_dilution`)
+
+`get_proliferation_rates` keeps the **birth** and **death** rates of each cell separately (`obs['proliferation_birth_rate']`, `obs['proliferation_death_rate']`, net = birth − death; without stimulus: `obs['proliferation_*_rate_base']`), from the proliferation and death signatures (birth gated by senescence). Anchoring: the mean net rate of each cell type is set to its anchor (`proliferation_rates`, rates **without** stimulus, as corrected by `fit_population_anchors`), the signatures giving the heterogeneity within each type; the stimulus effects of `stimulus_rates` are added afterwards. Every change of the net rate (anchoring, stimulus effects `stimulus_rates`) is shared between birth and death by the weight of birth in the cell, w = birth / (birth + death) (`estimate_proliferation.split_net_change`): a decrease lowers the birth by w |Δ| (down to 0) and the death absorbs the rest; an increase lowers the death by (1 − w) Δ (down to 0) and the birth absorbs the rest — birth, death ≥ 0 and birth − death = net. Without signatures, birth = max(net, 0).
+
+The literature protein degradation rates d1 are **pure degradation** (Schwanhäusser: dilution subtracted with t_cc = 27.5 h; Mathieson: mostly non-dividing cells). With `protein_dilution = True` (default), the proteins of a cell are also diluted at its birth rate b (growth between divisions; `article/stationary_proliferation.tex`, eq. ode_dil): dP/dt = d1 u − (d1 + b) P = (d1 + b)(c u − P), c = d1 / (d1 + b), u the normalised transcriptional forcing (mode k_z/k1 along the inferred trajectories, kon(P)/k1 in the network model). In `fit_network`, each trajectory state uses the birth rate of its real cell: relaxation rate d1 + b and mode targets compressed by c (protein steps, OT costs, switching times α, flow-matching states, timepoints missed by a sample), initial proteins at the compressed equilibrium. Dilution is independent of `simulate_with_proliferation`, which only controls the selection (branching, population weights).
+
+After the inference (`infer_network_simul`, `refine_network_degradations`), the trajectories are re-estimated with the same prior birth rates, and d1 per interval and the ratio d0/d1 are refitted on the ODE dP/dt = d1 (kon − P) − b P with the prior birth rate of the real cell of each state, the one used to build the trajectories, so that the pair (d1, b) is consistent. d1 refitted with the dilution is a pure degradation rate: the dilution is counted once, in the refit and in the simulations alike. In the simulations, the birth rate is that prior birth too: with `simulate_with_proliferation`, its regression on the state of each simulated cell (a small network trained with the proliferation MLP on the prior birth and death of the states, without the stimulus when its effects are given apart); otherwise the prior birth of the trajectory slot of each cell at the inference interval containing the simulated one (the slot following the cell through the resampling). The net rate R(P) of the MLP drives only the branching: fitted on the OT marginals, it also absorbs composition changes (e.g. a growing quiescent fraction under treatment), which are not division rates. In the simulations, each cell is diluted at its birth rate over each interval, evaluated at its start state (PDMP: the protein flow decays at d1 + b, the bursts unchanged; ODE: rate d1 + b and target × d1 / (d1 + b)); the parts of the net rate from the RATE effects and the inference stimuli are shared between birth and death by the same rule as above.
+
+### Refining proliferation rates
+
+Five optional levers, from least to most involved:
+
+**1. Species** — the built-in marker gene lists follow the species detected from the gene names
+(`Mki67` → mouse, `MKI67` → human). To override the detection, set the parameter `species`
+(`auto`, `human` or `mouse`; default `auto`) in the model_parameters sheet; it applies to
+`get_degradation_rates` and the literature prior as well.
+
+**2. Score on the unfiltered gene set** — if `Data/data.h5ad` was already prepared with a
+pre-filtered gene set (e.g. by an upstream pipeline), the literature marker genes may be missing
+from it entirely. Place the unfiltered dataset alongside it as `Data/data_complete.h5ad`:
+
+```
+my_project/Data/
+├── data.h5ad            # gene-filtered — this is what gets updated
+└── data_complete.h5ad   # full gene set — used only to score the signature, never modified
+```
+
+`get_proliferation_rates.py` detects `data_complete.h5ad` automatically and scores the
+proliferation/death signatures on it instead of `data.h5ad`. The resulting per-cell rates are then
+mapped onto the matching cells of `data.h5ad` by cell name (`adata.obs_names`) — every cell in
+`data.h5ad` is assumed to also be present in `data_complete.h5ad` (the converse need not hold,
+e.g. if `data_complete.h5ad` also contains cells later excluded by QC). `data_complete.h5ad` is
+read-only from this script's perspective: only `Data/data.h5ad` is ever written to, and
+`split_dataset.py` and `select_genes.py` (the next pipeline steps) only ever read `Data/data.h5ad` — it is
+not aware of `data_complete.h5ad`. If `data_complete.h5ad` is absent, `data.h5ad` is used directly
+for both scoring and output, as in the default behaviour above.
+
+**3. Custom marker genes** — override the built-in lists entirely, e.g. for a disease- or
+lineage-specific signature not well captured by the generic defaults (cell-cycle/apoptosis genes
+are fairly conserved across contexts, but a cancer model with an altered p53 pathway, or a
+lineage-specific death program, may warrant its own signature). Fill the columns
+`proliferation_signatures`, `death_signatures` (and `senescence_signatures`) of the sheet `gene_lists`,
+one gene per row (e.g. MKI67, TOP2A, CCNB2 / BAX, CASP3, FAS).
+
+**4. Anchor to a known rate** — if you have a trusted population-level growth rate per cell type
+(e.g. measured from a growth curve on sorted populations), fill the sheet `proliferation_rates`. Grouping uses
+`adata.obs['cell_type_proliferation']` if present, else `cell_type_transition`, else
+`cell_type` (if none is present, the unanchored estimate is kept) — add `cell_type_proliferation` during preprocessing if
+you want a coarser or finer grouping for this task specifically, without touching `cell_type` itself:
+
+| cell_type | net_rate_per_hour |
+|---|---|
+| TypeA | 0.10 |
+| TypeB | -0.02 |
+
+The rate is per HOUR, matching `adata.obs['time']`, NOT moscot/WOT's day⁻¹ convention (see "Net
+proliferation rate — default behaviour" above): divide a day⁻¹ growth-curve rate by 24.
+
+No unit conversion is applied: the values are added directly to the
+(already hour⁻¹) literature estimate via `combine_growth_rates_with_reference`, so a day⁻¹ value
+left unconverted would be 24× too strong or too weak.
+
+The literature-based per-cell estimate is then recentred, within each cell type present in this
+sheet, so its mean matches the reference value exactly — while keeping the per-cell heterogeneity
+coming from the gene signature. Anchoring is all-or-nothing: if any cell type of the data is
+absent from the sheet, a warning lists them and all cells keep the raw (unanchored) literature
+estimate, since a partial anchoring would bias the relative rates. Concretely, for a cell type `g`
+with reference rate `r_g`:
+
+```
+final_rate[cell] = lit_rate[cell] - mean(lit_rate[g]) + r_g      for cell in g
+```
+
+**5. Full manual override** — set `adata.obs['proliferation_net_rate']` yourself and skip the
+`get_proliferation_rates` step entirely (`estimate_proliferation_rates = False`, see
+default behaviour above); the step no longer detects and preserves pre-existing values on its own,
+it always overwrites them when run.
+
+All of the underlying functions (`score_gene_sets`, `estimate_growth_rates`,
+`combine_growth_rates_with_reference`) are also available as a public API for use outside the
+CLI pipeline, e.g. in a preprocessing notebook:
+
+```python
+from CardamomOT import estimate_growth_rates, combine_growth_rates_with_reference
+
+net = estimate_growth_rates(adata, species="mouse")
+adata.obs['proliferation_net_rate'] = combine_growth_rates_with_reference(
+    net, adata.obs['cell_type'].values, {"TypeA": 2.3, "TypeB": -0.1}
+)
+```
+
+### Cell-type transition rates (sheet `transition_rates`) — opt-in
+
+To bias the OT cost toward biologically plausible transitions:
+
+| from \ to | TypeA | TypeB | TypeC |
+|---|---|---|---|
+| TypeA | | 0.02 | 0 |
+| TypeB | 0 | | 0.01 |
+| TypeC | 0 | 0 | |
+
+(sheet `transition_rates`: rows = source type at t1, columns = target type at t2; off-diagonal entries = instantaneous transition rates ≥ 0 in hour⁻¹, 0 = no direct transition; the diagonal is ignored)
+
+Row/column names must match `adata.obs['cell_type_transition']` if that column is present, else `cell_type_proliferation` (the grouping used for [proliferation rates](#anchor-to-a-known-rate)), else `cell_type`. The matrix defines a continuous-time Markov generator Q between cell types (diagonal = minus the row sum of the rates). At each pair of consecutive timepoints separated by Δt, the type-to-type transition probabilities are Π = expm(Q·Δt) (matrix exponential: indirect transitions, e.g. A → B → C, are accounted for). The entropic OT kernel exp(−C/ε) is multiplied by Π, i.e. the term −ε·log Π(type of source, type of target) is added to the OT cost. Transitions that cannot occur within Δt (Π = 0) get a factor 1e-12, which forbids them in practice while keeping Sinkhorn stable. With short intervals Π ≈ identity (cells mostly keep their type); with long intervals indirect transitions become possible. The constraint is all-or-nothing: if no grouping column is found, or any cell type of the data is absent from the matrix rows or columns, a warning is printed and the OT runs without any transition constraint.
+
+### Clonal lineage constraint (`adata.obs['lineage']`) — opt-in
+
+If `adata.obs['lineage']` is present (e.g. a clonal barcode from lineage tracing), the OT cost is
+adjusted so that a cell only maps to a cell of the same lineage at the next timepoint: cross-lineage
+pairs get a very large (but finite) additive penalty rather than being excluded outright, so Sinkhorn
+stays numerically stable even when a batch happens to contain no same-lineage target — the constraint
+degrades gracefully for that batch instead of breaking convergence. Cells with no lineage annotation
+(NaN/empty) are left unconstrained. No CSV is needed — the barcode is compared cell-to-cell, not
+aggregated by type.
+
+---
+
+## Proliferation-aware simulation (`simulate_with_proliferation`)
+
+CardamomOT learns a net proliferation rate R = birth − death **as a function of the inferred protein state**, R(P), from the unbalanced optimal-transport couplings of the final trajectories, and can simulate with it.
+
+### How it works
+
+**1. Growth OT pass (`infer_network_structure`, always run).**
+Once the inference loop has converged, the network is fixed and one extra OT pass is run on the final trajectories (same costs and batches as the last iteration; trajectories are not modified, and the growth estimate is not fed back into the network inference). At each interval t_k → t_k+1, following Waddington-OT:
+
+- the source marginal (trajectory states at t_k) starts from the prior growth `exp(R_prior · Δt)` — from `adata.obs['proliferation_net_rate']`, or uniform if none is given (only relative rates are then learned);
+- the target marginal (observed cells at t_k+1) is kept nearly hard, while the source one is relaxed (`model.growth_reg_source`, × log G, default 2): states whose neighbourhood at t_k+1 is over-represented gain mass, the others lose it;
+- the log mass gain of each state, `log(N · row marginal)`, is shifted so that the population growth of the interval, `mean_n exp(·)`, equals the prior one (anchored by `fit_population_anchors` on the population sizes, if the sheet `population_sizes` is filled: they are used there only, not again here).
+
+The rate `R_opt = log mass gain / Δt` of each trajectory state (NaN at the last time) is saved to `cardamomOT/data_R_opt.npy`, and the real cell behind each state to `data_traj_real_idx.npy`. `model.n_growth_iter` (default 1) repeats the pass with the source weights set to the row marginals (WOT growth iterations); more iterations amplify the per-state noise.
+
+**2. Fitting R(P) along paths (`infer_network_simul`).**
+In the spirit of unbalanced probability flow matching (Maddu, Chardès & Shelley 2026), R is not regressed on the noisy per-state values but on their integral along trajectories: each trajectory is interpolated across all timepoints (shape-preserving PCHIP on the recomputed protein levels), and a two-hidden-layer MLP (64 units, Tanh, standardised inputs) is fitted so that
+
+```
+∫_{t_k}^{t_k+1} R(P_n(s)) ds  ≈  R_opt[n, k] · Δt_k       (trapezoidal rule, model.n_growth_nodes = 5 nodes)
+```
+
+plus a total-mass term making the population growth of each interval, `log mean_n exp(∫R)`, match that of the targets (the pathwise least squares alone fit the mean *log* gain and would underestimate it; `lambda_mass` = 10, both residuals divided by Δt so that they are rates). The inputs are the inference stimuli of the interval (constant along it, those of its end timepoint, as in the simulation) and the proteins, `R(u, P)` (`model.prolif_uses_stimulus = True`; a stimulus constant over all intervals has no effect, its weights stay at zero). The output is scaled by the mean and sd of the target rates. 20 % of the trajectories are held out: training stops when their loss has not improved for 50 epochs and the best weights are kept. The weights are saved to `cardamomOT/prolif_network.pt`, the fit quality (R² of the path mean rates on training and held-out paths, population growth per interval) to `prolif_network_diagnostics.json` (report section 4).
+
+**3. Branching simulation (`simulate_network` / `simulate_network_KOV`).**
+R is re-evaluated on the **simulated** protein states: each cell's state is recorded at the same quadrature nodes within every interval, its log weight is `∫ R(P(s)) ds` along its own simulated path, and the N cells are resampled multinomially **within each sample** (no Poisson extinction at R ≈ 0, and per-sample basals stay consistent).
+
+**4. Reference of the simulation.** The OT selection keeps one descendant per ancestor: trajectories (and the NB mixture / network stages computed on them) describe the population *without* proliferation, while the observed data include it. When the simulation used the MLP (`cardamomOT/simulation_with_proliferation.npy`, written by `simulate_network`), `check_sim_to_data` also writes `adata_{beta,theta,prot_traj}_growth_<tag>.h5ad`: the trajectory states resampled within each (sample, time) with weights `exp(L_n(t))`, `L_n(t_k) = Σ_{j<k} R_opt[j, n] Δt_j` (what a branching simulation should reproduce if R were exact). The report then uses them as trajectory stages, and a page of section 4 compares the cell-type proportions of the data, raw trajectories, growth-weighted trajectories and simulation (total variation to the data per time).
+
+### Pipeline usage
+
+Set `simulate_with_proliferation = True` in the model_parameters sheet: `infer_network_simul` then trains the MLP, and
+`simulate_network` / `simulate_network_KOV` use it (one parameter, so the three steps are always consistent).
+
+```bash
+cardamomot pipeline -i my_project
+# or step by step
+cardamomot step infer_network_simul  -i my_project --stimulus 1.0 --prior 1.0
+cardamomot step simulate_network     -i my_project
+cardamomot step simulate_network_KOV -i my_project
+```
+
+### Notes
+
+- `simulate_with_proliferation` is **off by default**. `infer_network_structure` always runs the growth OT pass and saves `R_opt` — enabling it later has no cost (rerun from `infer_network_simul`).
+- If `prolif_network.pt` is absent when the simulations run (`infer_network_simul` not rerun), they print a warning and fall back to standard simulation.
+- scRNA-seq only identifies *relative* growth: the absolute level of R comes from the prior (zero mean growth if no prior), itself anchored on the population sizes by `fit_population_anchors` when they are given.
+- The final PDF report (`report_results.py`, section 4) compares prior and learned rates per cell and per cell type, shows the implied population growth and the proteins driving R(P).

@@ -129,6 +129,11 @@ def ks_of(ks, s_idx):
     return ks[min(s_idx, ks.shape[0] - 1)] if np.ndim(ks) == 3 else ks
 
 
+def inter_of(inter, s_idx):
+    """Interactions of sample s_idx: per-sample when inter is 4-D (S, G, G, n_networks) (network conditions), else shared."""
+    return inter[min(s_idx, inter.shape[0] - 1)] if np.ndim(inter) == 4 else inter
+
+
 def s1_of(s1, s_idx):
     """mRNA-to-protein factor of sample s_idx: per-sample when s1 is 2-D (S, G), else shared."""
     return s1[min(s_idx, s1.shape[0] - 1)] if np.ndim(s1) == 2 else s1
@@ -146,11 +151,13 @@ def _kon_per_sample(y_prot, ks, inter, basal, samples_data=None):
     """
     kon_ref_vector with per-sample basal and mixture support.
 
-    When neither basal is 3-D (n_samples, G, n_networks) nor ks is 3-D (n_samples, G, n_modes),
-    or samples_data is None, delegates to kon_ref_vector directly. Otherwise routes each cell
-    to its sample's slices via samples_data.
+    When neither basal is 3-D (n_samples, G, n_networks) nor ks is 3-D (n_samples, G, n_modes)
+    nor inter is 4-D (n_samples, G, G, n_networks), or samples_data is None, delegates to
+    kon_ref_vector directly. Otherwise routes each cell to its sample's slices via samples_data.
     """
-    if (basal.ndim < 3 and np.ndim(ks) < 3) or samples_data is None:
+    if (basal.ndim < 3 and np.ndim(ks) < 3 and np.ndim(inter) < 4) or samples_data is None:
+        if np.ndim(inter) == 4:
+            raise ValueError("per-sample interactions (network conditions) need samples_data")
         return kon_ref_vector(y_prot, ks, inter, basal)
     samples_id = np.sort(np.unique(samples_data))
     out = np.zeros((y_prot.shape[0], y_prot.shape[1]))
@@ -159,7 +166,7 @@ def _kon_per_sample(y_prot, ks, inter, basal, samples_data=None):
         if not np.any(mask):
             continue
         basal_s = basal[min(s_idx, basal.shape[0] - 1)] if basal.ndim == 3 else basal
-        out[mask] = kon_ref_vector(y_prot[mask], ks_of(ks, s_idx), inter, basal_s)
+        out[mask] = kon_ref_vector(y_prot[mask], ks_of(ks, s_idx), inter_of(inter, s_idx), basal_s)
     return out
 
     
@@ -167,9 +174,12 @@ def _kon_per_sample(y_prot, ks, inter, basal, samples_data=None):
 def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, vect_rna_end,
                             vect_proba_init, vect_proba_end, mode_init, mode_end, alpha, s1, ks, d1, delta_t, basal, inter, loss='CE',
                             compute_with_proba=1, n_iter=1, intensity_prior=1, q=.9,
-                            n_stimuli=1, stim_vals=np.ones(1), scale_proteins=1) -> np.ndarray:
+                            n_stimuli=1, stim_vals=np.ones(1), scale_proteins=1, weight_fixed=-1.0,
+                            b_init=np.zeros(0)) -> np.ndarray:
     """
-    OT cost between n1 trajectory ends and n2 real cells. Only the cost is
+    OT cost between n1 trajectory ends and n2 real cells (weight_fixed >= 0: fixed weight of the
+    mode-to-mode term, else decreasing with n_iter while n_iter < intensity_prior). b_init (n1,): birth rate
+    of each source (dilution: rate d1 + b, mode targets times d1 / (d1 + b)); empty = no dilution. Only the cost is
     returned: the (n1, n2, G) end states are never stored; recompute them
     with find_next_prot for the sampled pairs.
     """
@@ -190,7 +200,7 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
         log_vect_rna_init[:, g] /= max(scale_rna, 1)
         log_vect_rna_end[:, g] /= max(scale_rna, 1)
 
-    weight_init: float = (n_iter < intensity_prior) * (1 / n_iter)**(1 - 1/n_iter)
+    weight_init: float = weight_fixed if weight_fixed >= 0 else (n_iter < intensity_prior) * (1 / n_iter)**(1 - 1/n_iter)
 
     for i in prange(n1):  # parallelize cell-by-cell
 
@@ -201,6 +211,14 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
         proba_init_i = vect_proba_init[i]
         kon_init_i = vect_kon_init[i]
         alpha_i = alpha[i]
+        # Dilution at the birth rate of the source: rate d1 + b, targets compressed by d1 / (d1 + b)
+        if b_init.shape[0] == n1:
+            d1_i = d1 + b_init[i]
+            c_i = d1 / d1_i
+        else:
+            d1_i = d1.copy()
+            c_i = np.ones_like(d1)
+        mode_init_i = mode_init_i * c_i
 
         prot_end_i = np.zeros((n2, G))
         local_dist_i = np.zeros(n2)
@@ -210,7 +228,7 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
 
         # --- Loop over target cells j ---
         for j in range(0, n2):
-            prot_end_i[j, :] = find_next_prot(d1, prot_init_i, rna_init_i * scale_proteins, vect_rna_end[j] * scale_proteins, mode_init_i, mode_end[j], alpha_i, s1, delta_t)
+            prot_end_i[j, :] = find_next_prot(d1_i, prot_init_i, rna_init_i * scale_proteins, vect_rna_end[j] * scale_proteins, mode_init_i, mode_end[j] * c_i, alpha_i, s1, delta_t)
         prot_full_i[:, ns:] = prot_end_i
 
         # Per-gene normalisation of the end states and of the initial state
@@ -298,25 +316,23 @@ def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
         inter = inter_ref * (np.abs(inter_ref) >= seuil_intensity)
         return inter, np.tile(inter, (T,) + (1,) * inter.ndim)
     
-    if basal_ref.ndim == 3:
-        n_samples, G, n_networks = basal_ref.shape
-    else:
-        G, n_networks = basal_ref.shape
+    G, n_networks = basal_ref.shape[-2:]
 
     kon_vector = _kon_per_sample(prot_traj, ks, inter_ref, basal_ref, samples_data=samples_data)
 
+    # With per-sample interactions (network conditions), an edge is removed from every sample at once
     def core_filter(inter_ref, kon_vector, genes_list):
 
-            inter_t = np.zeros((T, G, G, n_networks))
+            inter_t = np.zeros((T,) + inter_ref.shape)
             variations = np.zeros((n_networks, G, G, T))
             variations_ref = np.zeros((n_networks, G, G, T))
             inter_tmp = inter_ref.copy()
             for g1 in genes_list:
                 for n in range(n_networks):
-                    inter_tmp[g1, :, n] = 0
+                    inter_tmp[..., g1, :, n] = 0
                     kon_vector_nog1 = _kon_per_sample(prot_traj, ks, inter_tmp, basal_ref, samples_data=samples_data)
                     for g2 in range(0, G):
-                        val = abs(inter_ref[g1, g2, n])
+                        val = np.max(np.abs(inter_ref[..., g1, g2, n]))
                         if val >= seuil_intensity:
                             diff = (kon_vector_nog1.reshape(T, N_traj, G) - 
                                                 kon_vector.reshape(T, N_traj, G))**2
@@ -326,8 +342,8 @@ def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
                             max_val = np.max(variations[n, g1, g2, :])
                             if max_val >= seuil_variations/np.sqrt(G):
                                 tmax: int = np.argmax(variations[n, g1, g2, :])
-                                inter_t[tmax:, g1, g2, n] = inter_ref[g1, g2, n]
-                                inter_tmp[g1, g2, n] = inter_ref[g1, g2, n]
+                                inter_t[tmax:, ..., g1, g2, n] = inter_ref[..., g1, g2, n]
+                                inter_tmp[..., g1, g2, n] = inter_ref[..., g1, g2, n]
             return inter_t
 
     try:

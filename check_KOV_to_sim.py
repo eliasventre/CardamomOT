@@ -36,7 +36,9 @@ from CardamomOT.inputs import depth_factor_used
 
 # Shared loader (KO / OV / STIM columns), kept under the old names for other scripts
 from CardamomOT.tools.perturbations import (find_perturbation_file, load_perturbations, combo_label,
+                                            condition_runs,
                                             parse_gene_with_pct as _parse_gene_with_pct, gene_label as _gene_label)
+from CardamomOT.config import simulation_scenarios
 
 
 def load_ko_ov_combinations(file_path, genes=None):
@@ -156,12 +158,13 @@ def main(argv):
     # Create AnnData objects for each perturbation combination
     print(f"[check_KOV_to_sim] Creating AnnData objects for {len(combos)} KO/OV combinations")
 
-    for idx, combo in enumerate(combos, start=1):
+    # One simulation per (condition, schedule scenario), as in simulate_network_KOV
+    runs = condition_runs(combos, list(simulation_scenarios(input_dir(p))))
+    for idx, (combo, scenario, label) in enumerate(runs, start=1):
         kos = combo["KO"]
         ovs = combo["OV"]
 
-        label = combo_label(combo)
-        print(f"[check_KOV_to_sim] Processing combination {idx}/{len(combos)}: {label}")
+        print(f"[check_KOV_to_sim] Processing combination {idx}/{len(runs)}: {label}")
         
         file_prefix = os.path.join(p, f"cardamomOT/data_kon_simul_{label}.npy")
         prot_prefix = os.path.join(p, f"cardamomOT/data_prot_simul_{label}.npy")
@@ -192,6 +195,15 @@ def main(argv):
 
         # Create AnnData object for simulated RNA
         adata_sim = ad.AnnData(X=data_sim[1:, ].T)
+        _idx = _sim_sample_idx(samples_traj, times_simulation)
+        if 'dataset_id' in adata.obs and _idx is not None and len(_idx) == adata_sim.n_obs:
+            # sample of each simulated cell (the classifier of cell_type is per sample)
+            _names = np.asarray(sorted(adata.obs['dataset_id'].astype(str).unique()))
+            adata_sim.obs['dataset_id'] = _names[np.minimum(_idx.astype(int), len(_names) - 1)]
+        if depth_cells is not None:
+            # Same draw at the reference depth (s = 1), shown by the report with cell_depth_for_representation
+            x = np.random.negative_binomial((k1_sim * vect_kon_sim)[:, ns:], (c_sim / (c_sim + 1.0))[:, ns:])
+            adata_sim.layers['reference_depth'] = np.where(np.random.uniform(0, 1, x.shape) < pz_sim, 0, x)
         adata_sim.var = adata.var.copy()
         adata_sim.obs["combo_label"] = label
         adata_sim.obs['time'] = times_simulation
