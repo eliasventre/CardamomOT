@@ -6,7 +6,7 @@ inference use them.
 
 Population constraints (workbook), each for all samples (rows without sample_id) or for one sample (sample_id):
 - net proliferation rates per cell type of the proliferation grouping (sheet proliferation_rates, obs
-  cell_type_proliferation);
+  cell_type_proliferation), with optional birth and death rates;
 - transition rates between the cell types of the transition grouping (sheet transition_rates, obs cell_type_transition);
 - population sizes per time (sheet population_sizes).
 A rate that does not reproduce the evolution of the proportions of the types (and of the population size, if given) of
@@ -18,24 +18,33 @@ types (CardamomOT.inference.population_fit):
   between the types are free (small prior): they absorb the conversion between types and are NOT kept;
 - prescribed transition rates (for the types of the transition grouping) are fitted around the prescribed ones, the
   growth of each type being that of the corrected rates (composition of the type in cell_type_proliferation).
-Only what was prescribed is kept, corrected. A sample without rates takes, from the samples with rates, the one whose
-rates fitted on its proportions (and sizes) stay the closest to the data and to the prescribed ones (lowest cost); with
+Only what was prescribed is kept, corrected; prescribed birth and death rates follow the correction of their net
+rate, shared between them by estimate_proliferation.split_net_change. A sample without rates takes, from the samples
+with rates, the one whose rates fitted on its proportions (and sizes) stay the closest to the data and to the
+prescribed ones (lowest cost); with
 population sizes but no sample with rates, its rates are fitted from its proportions and sizes alone (weak prior: its
 mean growth). Without any constraint in the workbook nothing is done (no anchor, the stale output is removed). A sample
 observed at a single timepoint cannot be fitted: its rates are kept as prescribed, or taken from the first reference.
+
+CardamomOT-stat (parameter CardamomOT_method = 'stat', or automatically when obs has no 'time'): each sample is a
+snapshot in balanced growth, its times (if any) are ignored, and the same corrections are fitted so that the composition
+of the sample is the stationary (Perron) composition of the model of growth and transitions (population_fit.
+fit_stationary); population sizes of a sample give its growth rate (log-linear in their times), which fixes the absolute
+level of its rates. Rates and compositions may differ between samples.
 
 Usage:
     python fit_population_anchors.py -i <project_path>
 
 Required input files:
-    - Data/data.h5ad: obs['cell_type_proliferation'] (else cell_type_transition, else cell_type), obs['time'],
-      obs['dataset_id']
+    - Data/data.h5ad: obs['cell_type_proliferation'] (else cell_type_transition, else cell_type), obs['time'] (absent:
+      CardamomOT-stat), obs['dataset_id']
     - sheets proliferation_rates, transition_rates, population_sizes of Data/CardamomOT_inputs.xlsx (at least one row)
 
 Output files:
-    - cardamomOT/population_anchors.json: per sample, the corrected 'rates' (net rate without stimulus per type), their
-      'source' (specified / borrowed from <sample> / population sizes) and the fit; and the corrected 'transitions' per
-      sample. get_proliferation_rates.py and the inference read it in place of the sheets.
+    - cardamomOT/population_anchors.json: per sample, the corrected 'rates' (net rate without stimulus per type), the
+      corrected 'birth' and 'death' of the types where both were prescribed, their 'source' (specified / borrowed
+      from <sample> / population sizes) and the fit; and the corrected 'transitions' per sample.
+      get_proliferation_rates.py and the inference read it in place of the sheets.
 """
 import sys; sys.path += ['../']
 import json
@@ -46,9 +55,11 @@ import numpy as np
 import pandas as pd
 
 from CardamomOT import find_data_file, resolve_cell_type_obs
-from CardamomOT.inference.population_fit import fit_population, DEFAULTS as FIT_DEFAULTS
-from CardamomOT.inputs import input_dir, proliferation_sample_anchors, load_transition_rates, population_sizes
-from CardamomOT.run_options import parse_step_options
+from CardamomOT.inference.population_fit import fit_population, fit_stationary, growth_from_sizes, DEFAULTS as FIT_DEFAULTS
+from CardamomOT.inputs import (input_dir, proliferation_sample_anchors, load_transition_rates, population_sizes,
+                               read_proliferation_rates)
+from CardamomOT.tools.estimate_proliferation import split_net_change
+from CardamomOT.run_options import parse_step_options, settings
 from CardamomOT.stimulus_rates import load_effects, cell_values, split_effects
 
 TAG = "[fit_population_anchors]"
@@ -56,11 +67,27 @@ log = lambda *a: print(TAG, *a, flush=True)
 
 
 def default_rates(path, types):
-    """{type: rate} of the default rows of proliferation_rates (cell types matched case-insensitively), None if absent."""
+    """{type: {'net', 'birth', 'death'}} of the default rows of proliferation_rates (cell types matched
+    case-insensitively), None if absent."""
     if path is None:
         return None
-    s = pd.read_csv(path, sep=None, engine='python', header=None, index_col=0).iloc[:, 0]
-    return match_types({str(k).strip(): float(v) for k, v in s.items()}, types, 'default proliferation_rates')
+    return match_types(read_proliferation_rates(path), types, 'default proliferation_rates')
+
+
+def birth_death_of(spec, types):
+    """{type: (birth, death)} of the types of a proliferation specification with both rates given."""
+    return {t: (spec[t]['birth'], spec[t]['death']) for t in types
+            if spec[t].get('birth') is not None and spec[t].get('death') is not None}
+
+
+def corrected_birth_death(bd, prior, r0, types):
+    """Birth and death per type after the correction r0 - prior of their net rate, shared by split_net_change."""
+    out = {}
+    for t, (b, d) in bd.items():
+        i = types.index(t)
+        nb, nd = split_net_change(np.array([b]), np.array([d]), r0[i] - prior[i])
+        out[t] = (float(nb[0]), float(nd[0]))
+    return out
 
 
 def match_types(rates, types, what):
@@ -108,7 +135,16 @@ def stimulus_inputs(p, effects, types, times, sid, tu, all_samples):
 
 def fit_report(res):
     txt = f"rmse {res['rmse'] * 100:.2f} points"
+    if res.get('growth') is not None:
+        txt += f", growth rate {res['growth']:+.5f} h^-1" + (
+            f" (measured {res['growth_obs']:+.5f})" if res.get('growth_obs') is not None else '')
     return txt + (f", log population sizes rmse {res['size_rmse']:.3f}" if res.get('size_rmse') is not None else '')
+
+
+def composition(obs, sid, col, types):
+    """(proportions (K,), cells) of the types in all the cells of the sample (stationary snapshot: times pooled)."""
+    c = obs.loc[obs['_sid'] == sid, col].astype(str).value_counts().reindex(types, fill_value=0).to_numpy(dtype=float)
+    return c / max(c.sum(), 1.0), float(c.sum())
 
 
 def main(argv):
@@ -135,7 +171,16 @@ def main(argv):
     obs = A.obs.copy()
     obs['_sid'] = obs['dataset_id'].astype(str) if 'dataset_id' in obs else '0'
     samples = sorted(obs['_sid'].unique())
+    # CardamomOT-stat (method 'stat', or no obs['time']): each sample is a stationary snapshot, times ignored
+    method = str(settings(opts).CardamomOT_method).strip().lower()
+    stat = method == 'stat' or 'time' not in obs
+    if 'time' not in obs:
+        obs['time'] = 0.0
+        log("No obs['time']: CardamomOT-stat anchoring (stationary composition of each sample)")
+    elif stat:
+        log("CardamomOT_method = 'stat': stationary anchoring, the times of the cells are ignored")
     tu = np.sort(obs['time'].astype(float).unique())
+    stat_growth = lambda sid: growth_from_sizes(size_of[sid]) if stat else None
     effects = load_effects(p)
     for sid in sorted((set(own_rates) | set(sizes_own)) - set(samples)):
         log(f"Warning: constraints given for sample {sid} absent from the data: ignored")
@@ -144,7 +189,7 @@ def main(argv):
     # ---------------------------------------------------------------- proliferation rates
     col = resolve_cell_type_obs(A, 'proliferation')
     result = dict(samples={}, transitions={})
-    corrected = {}          # sample -> {'rates': array, 'source': .., 'prior': array, 'fit': dict}
+    corrected = {}          # sample -> {'rates': array, 'bd': {type: (birth, death)}, 'source': .., 'prior': array, 'fit': dict}
     if col is None:
         log("Warning: obs has none of the cell type columns of the proliferation grouping: proliferation rates not fitted")
     else:
@@ -154,6 +199,9 @@ def main(argv):
                 for sid in samples}
 
         def fit_sample(sid, prior, r_sd=None):
+            if stat:
+                f, n = composition(obs, sid, col, types)
+                return fit_stationary(f, n, r_prior=prior, growth=stat_growth(sid), r_sd=r_sd)
             times, f, n = proportions(obs, sid, col, types)
             if len(times) < 2:
                 return None
@@ -164,7 +212,7 @@ def main(argv):
         for sid in samples:
             if spec[sid] is None:
                 continue
-            prior = np.array([spec[sid][t] for t in types])
+            prior = np.array([spec[sid][t]['net'] for t in types])
             res = fit_sample(sid, prior)
             if res is None:
                 log(f"{sid}: observed at a single timepoint, its prescribed rates are kept as they are")
@@ -174,7 +222,8 @@ def main(argv):
                     + f" h^-1 ({fit_report(res)}; transitions fitted, not kept: "
                     + ', '.join(f"{types[i]}->{types[j]} {res['Q'][i, j]:.5f}" for i in range(len(types)) for j in range(len(types))
                                 if i != j and res['Q'][i, j] > 1e-5) + ")")
-            corrected[sid] = dict(rates=res['r0'], source='specified', prior=prior, fit=res)
+            bd = corrected_birth_death(birth_death_of(spec[sid], types), prior, res['r0'], types)
+            corrected[sid] = dict(rates=res['r0'], bd=bd, source='specified', prior=prior, fit=res)
         # 2. the other samples: the best reference among the corrected ones, else their population sizes alone
         refs = list(corrected)
         for sid in samples:
@@ -191,25 +240,33 @@ def main(argv):
                     if best is None or res['cost'] < best[1]['cost']:
                         best = (ref, res)
                 ref, res = best
-                corrected[sid] = dict(rates=res['r0'], source=f'borrowed from {ref}', prior=corrected[ref]['rates'], fit=res)
+                bd = corrected_birth_death(corrected[ref]['bd'], corrected[ref]['rates'], res['r0'], types)
+                corrected[sid] = dict(rates=res['r0'], bd=bd, source=f'borrowed from {ref}', prior=corrected[ref]['rates'], fit=res)
                 log(f"{sid}: no prescribed rate, fitted around those of {ref} (closest): "
                     + ', '.join(f"{t} {b:+.5f}" for t, b in zip(types, res['r0'])) + " h^-1")
                 continue
-            times, _, _ = proportions(obs, sid, col, types)
-            s = sizes_at(size_of[sid], times, sid)
-            if s is None:
-                continue
-            k = np.flatnonzero(np.isfinite(s))
-            g = (np.log(s[k[-1]]) - np.log(s[k[0]])) / (times[k[-1]] - times[k[0]])
+            if stat:
+                gr = stat_growth(sid)
+                if gr is None:
+                    continue
+                g = gr[0]
+            else:
+                times, _, _ = proportions(obs, sid, col, types)
+                s = sizes_at(size_of[sid], times, sid)
+                if s is None:
+                    continue
+                k = np.flatnonzero(np.isfinite(s))
+                g = (np.log(s[k[-1]]) - np.log(s[k[0]])) / (times[k[-1]] - times[k[0]])
             prior = np.full(len(types), g)
             res = fit_sample(sid, prior, r_sd=FIT_DEFAULTS['sd_r_free'])
-            corrected[sid] = dict(rates=res['r0'], source='population sizes', prior=prior, fit=res)
+            corrected[sid] = dict(rates=res['r0'], bd={}, source='population sizes', prior=prior, fit=res)
             log(f"{sid}: rates fitted on its proportions and population sizes (mean growth {g:+.5f} h^-1): "
                 + ', '.join(f"{t} {b:+.5f}" for t, b in zip(types, res['r0'])) + f" h^-1 ({fit_report(res)})")
         for sid, c in corrected.items():
             fit = c['fit']
             result['samples'][sid] = dict(
                 rates={t: float(r) for t, r in zip(types, c['rates'])}, source=c['source'], types=types,
+                birth={t: b for t, (b, _) in c['bd'].items()}, death={t: d for t, (_, d) in c['bd'].items()},
                 fit=dict(rmse_points=None if fit.get('rmse') is None else float(fit['rmse'] * 100),
                          size_log_rmse=fit.get('size_rmse'),
                          prescribed={t: float(r) for t, r in zip(types, c['prior'])}))
@@ -246,6 +303,9 @@ def main(argv):
             return P @ corrected[sid]['rates'], P @ E
 
         def fit_T(sid, Q0):
+            if stat:
+                f, n = composition(obs, sid, tcol, ttypes)
+                return fit_stationary(f, n, r_fixed=growth_of(sid)[0], q_prior=Q0, growth=stat_growth(sid))
             times, f, n = proportions(obs, sid, tcol, ttypes)
             if len(times) < 2:
                 return None

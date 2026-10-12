@@ -86,6 +86,16 @@ def find_next_prot(d1, P0, M0, M1, mode_init, mode_end, alpha, s, delta_t):
     return mode_end * s + (Pint - mode_end * s) * np.exp(-d1*delta_t*(1-alpha))
 
 
+@njit(cache=True)
+def find_next_prot2(d1, d1_end, P0, mode_init, mode_end, alpha, s, delta_t):
+    """
+    Flow of find_next_prot whose relaxation rate also switches at alpha: d1 (source: d1 + its birth) before,
+    d1_end (target: d1 + its birth) after; targets mode_init / mode_end already compressed by the dilution.
+    """
+    Pint = mode_init * s + (P0 - mode_init * s) * np.exp(-d1*delta_t*alpha)
+    return mode_end * s + (Pint - mode_end * s) * np.exp(-d1_end*delta_t*(1-alpha))
+
+
 def count_errors(vect_prot, vect_kon, vect_proba, ks, Y, X, loss='CE', compute_with_proba=0, n_stimuli=1):
 
     N, G = vect_prot.shape
@@ -175,13 +185,13 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
                             vect_proba_init, vect_proba_end, mode_init, mode_end, alpha, s1, ks, d1, delta_t, basal, inter, loss='CE',
                             compute_with_proba=1, n_iter=1, intensity_prior=1, q=.9,
                             n_stimuli=1, stim_vals=np.ones(1), scale_proteins=1, weight_fixed=-1.0,
-                            b_init=np.zeros(0)) -> np.ndarray:
+                            b_init=np.zeros(0), b_end=np.zeros(0)) -> np.ndarray:
     """
     OT cost between n1 trajectory ends and n2 real cells (weight_fixed >= 0: fixed weight of the
-    mode-to-mode term, else decreasing with n_iter while n_iter < intensity_prior). b_init (n1,): birth rate
-    of each source (dilution: rate d1 + b, mode targets times d1 / (d1 + b)); empty = no dilution. Only the cost is
-    returned: the (n1, n2, G) end states are never stored; recompute them
-    with find_next_prot for the sampled pairs.
+    mode-to-mode term, else decreasing with n_iter while n_iter < intensity_prior). b_init (n1,), b_end (n2,): birth
+    rates of the sources and of the targets (dilution: rate d1 + b, mode targets times d1 / (d1 + b)), switched at
+    alpha like the modes; empty = no dilution. Only the cost is returned: the (n1, n2, G) end states are never
+    stored; recompute them with find_next_prot2 for the sampled pairs.
     """
     n1, G = vect_rna_init.shape
     n2 = vect_rna_end.shape[0]
@@ -211,7 +221,7 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
         proba_init_i = vect_proba_init[i]
         kon_init_i = vect_kon_init[i]
         alpha_i = alpha[i]
-        # Dilution at the birth rate of the source: rate d1 + b, targets compressed by d1 / (d1 + b)
+        # Dilution at the birth rate of the source before alpha: rate d1 + b, targets compressed by d1 / (d1 + b)
         if b_init.shape[0] == n1:
             d1_i = d1 + b_init[i]
             c_i = d1 / d1_i
@@ -226,9 +236,15 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
         prot_full_i = np.empty((n2, G + ns))
         prot_full_i[:, :ns] = stim_vals * scale_proteins
 
-        # --- Loop over target cells j ---
+        # --- Loop over target cells j (birth rate of the target after alpha) ---
         for j in range(0, n2):
-            prot_end_i[j, :] = find_next_prot(d1_i, prot_init_i, rna_init_i * scale_proteins, vect_rna_end[j] * scale_proteins, mode_init_i, mode_end[j] * c_i, alpha_i, s1, delta_t)
+            if b_end.shape[0] == n2:
+                d1_j = d1 + b_end[j]
+                c_j = d1 / d1_j
+            else:
+                d1_j = d1_i
+                c_j = c_i
+            prot_end_i[j, :] = find_next_prot2(d1_i, d1_j, prot_init_i, mode_init_i, mode_end[j] * c_j, alpha_i, s1, delta_t)
         prot_full_i[:, ns:] = prot_end_i
 
         # Per-gene normalisation of the end states and of the initial state
@@ -266,8 +282,16 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
 
 def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init, y_rna_init,
                     y_kon_end_true, y_kon_end, y_prot_end, y_rna_end, mode_init, mode_end,
-                    basal, inter, ks, delta_t, tol=0.6, n_pas=25, samples_data=None, stim_vals=np.ones(1), scale_proteins=1):
-    
+                    basal, inter, ks, delta_t, tol=0.6, n_pas=25, samples_data=None, stim_vals=np.ones(1), scale_proteins=1,
+                    d1_end=None):
+    """
+    Switching fractions: for each gene whose mode changes, the earliest fraction of the step at which the network
+    commits it to its new mode (blended with the previous value by the size of the change). d1 / d1_end: relaxation
+    rates before / after the switch (d1 + birth of the source / of the target; d1_end=None: d1). Genes whose mode
+    does not change take the mean fraction of the switching genes of their row (weighted by the change; 1/2 if
+    none): the birth rate switches at the same time in their equation.
+    """
+    d1_end = d1 if d1_end is None else d1_end
     stim_vals = np.asarray(stim_vals, dtype=float)
     ns = stim_vals.shape[-1]  # (ns,) or one row per cell (per-sample schedules)
     s1 = s1_rows(s1, samples_data)
@@ -281,8 +305,7 @@ def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init
     t = 1 / n_pas
 
     while t < 1 and np.min(cnt) < 1:
-        y_prot[:, ns:] = find_next_prot(d1, y_prot_init[:, ns:], y_rna_init[:, ns:] * scale_proteins, 
-                    y_rna_end[:, ns:] * scale_proteins, mode_init, mode_end, 
+        y_prot[:, ns:] = find_next_prot2(d1, d1_end, y_prot_init[:, ns:], mode_init, mode_end,
                     np.minimum(alpha / t, 1.0), s1, t * delta_t)
         kon_new = _kon_per_sample(y_prot, ks, inter, basal, samples_data=samples_data)  # shape (N, G)
 
@@ -296,6 +319,11 @@ def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init
 
         t += 1 / n_pas
 
+    # Genes without change of mode: the mean switching fraction of the row
+    w_sum = weights.sum(axis=1)
+    mean_alpha = np.where(w_sum > 0, (weights * alpha).sum(axis=1) / np.maximum(w_sum, EPS), 0.5)
+    still = weights <= 0
+    alpha[still] = np.broadcast_to(mean_alpha[:, None], alpha.shape)[still]
     return alpha
 
 

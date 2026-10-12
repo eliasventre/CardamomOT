@@ -160,13 +160,19 @@ class GeneRegulatoryODE_softmax(nn.Module):
         # Per-cell ratio g = kon_beta_nonscaled / kon_beta at both ends of the interval (None: no correction)
         self._g0 = self._g1 = None
         self._t0 = self._t1 = None
-        # Per-cell birth rate (dilution of the proteins, None: no dilution)
-        self._birth = None
+        # Per-cell birth rate (dilution of the proteins, None: no dilution), at both ends of the interval
+        self._birth = self._birth_end = None
+        self._tb0 = self._tb1 = None
 
-    def set_birth(self, birth=None):
+    def set_birth(self, birth=None, birth_end=None, t0=None, t1=None):
         """Birth rate b (batch,) of the rows of X in the next odeint calls: dilution term - b P of the genes
-        (dP/dt = d (kon - P) - b P = d kon - (d + b) P); None clears it."""
-        self._birth = None if birth is None else torch.as_tensor(np.asarray(birth, dtype=np.float32))
+        (dP/dt = d (kon - P) - b P = d kon - (d + b) P); with birth_end (birth of the end states) and t0, t1, b is
+        linear in time from birth to birth_end (the switch from the start to the end state, averaged over the
+        interval); None clears it."""
+        as_t = lambda b: None if b is None else torch.as_tensor(np.asarray(b, dtype=np.float32))
+        self._birth = as_t(birth)
+        self._birth_end = None if birth is None or t0 is None else as_t(birth_end)
+        self._tb0, self._tb1 = (None, None) if self._birth_end is None else (float(t0), float(t1))
 
     def set_g_interpolation(self, t0, t1, g0=None, g1=None):
         """Per-cell ratios g0, g1 (batch, G_genes) at t0 and t1, linearly interpolated in time
@@ -228,7 +234,12 @@ class GeneRegulatoryODE_softmax(nn.Module):
         d_eff: torch.Tensor = torch.nn.functional.softplus(self.d_param.to(X.device))
         dXdt = d_eff * (kon - X)
         if self._birth is not None:  # dilution at the birth rate of each cell
-            dXdt = dXdt - self._birth.to(X.device)[:, None] * X
+            b = self._birth.to(X.device)
+            if self._birth_end is not None:
+                t_f = float(t.detach()) if torch.is_tensor(t) else float(t)
+                w = min(1.0, max(0.0, (t_f - self._tb0) / max(self._tb1 - self._tb0, 1e-10)))
+                b = (1.0 - w) * b + w * self._birth_end.to(X.device)
+            dXdt = dXdt - b[:, None] * X
         mask = torch.ones(self.G, device=X.device)
         mask[:ns] = 0.0
         dXdt = dXdt * mask.unsqueeze(0)
@@ -482,6 +493,7 @@ def infer_ratio_d0_d1_unitary(
             X0_np = X_prot[mask0]
             X1_np = X_prot[mask1]
             b0_np = None if birth is None else np.asarray(birth, dtype=np.float32)[mask0]
+            b1_np = None if birth is None else np.asarray(birth, dtype=np.float32)[mask1]
             if len(X0_np) == 0 or len(X1_np) == 0:
                 continue
 
@@ -524,7 +536,8 @@ def infer_ratio_d0_d1_unitary(
                 device=device,
             ).to(device)
             ode.eval()
-            ode.set_birth(None if b0_np is None else b0_np[:n_pairs])  # dilution of the start states
+            # Dilution: birth of the start states, linear towards that of the end states
+            ode.set_birth(None if b0_np is None else b0_np[:n_pairs], None if b1_np is None else b1_np[:n_pairs], t0, t1s)
 
             X0_t = torch.tensor(X0_np, dtype=torch.float32)
             X0_t[:, :ns] = torch.tensor(stim0)
@@ -737,8 +750,8 @@ def inference_degradation_prot(
                 if n_p > 0:
                     lab0 = None if strata is None else np.asarray(strata)[mask_s][t_s == unique_t[ti]][:n_p]
                     g01 = (None, None) if g_s is None else (g_s[t_s == unique_t[ti]][:n_p], g_s[t_s == unique_t[ti + 1]][:n_p])
-                    b0 = None if b_s is None else b_s[t_s == unique_t[ti]][:n_p]
-                    all_pairs.append((s_idx, t0, t1, X0_np[:n_p], X1_np[:n_p], stim0, stim1, lab0, g01, b0))
+                    b01 = (None, None) if b_s is None else (b_s[t_s == unique_t[ti]][:n_p], b_s[t_s == unique_t[ti + 1]][:n_p])
+                    all_pairs.append((s_idx, t0, t1, X0_np[:n_p], X1_np[:n_p], stim0, stim1, lab0, g01, b01))
 
         old_loss  = 1e16
 
@@ -746,12 +759,12 @@ def inference_degradation_prot(
             optimizer.zero_grad()
             total_loss, total_count = 0.0, 0
 
-            for (s_idx, t0, t1, X0_full, X1_full, stim0, stim1, lab0, (g0, g1), b0) in all_pairs:
+            for (s_idx, t0, t1, X0_full, X1_full, stim0, stim1, lab0, (g0, g1), (b0, b1)) in all_pairs:
                 ode = ode_funcs[s_idx]
                 ode.stim_vals.copy_(torch.tensor(stim1, dtype=torch.float32))
                 idxs = _draw_minibatch(X0_full.shape[0], batch_size, lab0)
                 ode.set_g_interpolation(t0, t1, None if g0 is None else g0[idxs], None if g1 is None else g1[idxs])
-                ode.set_birth(None if b0 is None else b0[idxs])
+                ode.set_birth(None if b0 is None else b0[idxs], None if b1 is None else b1[idxs], t0, t1)
                 X0 = torch.tensor(X0_full[idxs], dtype=torch.float32, device=device)
                 X1 = torch.tensor(X1_full[idxs], dtype=torch.float32, device=device)
                 X0[:, :ns] = torch.tensor(stim0, dtype=torch.float32)
@@ -801,8 +814,8 @@ def inference_degradation_prot(
         if n_pairs > 0:
             lab0 = None if strata is None else np.asarray(strata)[mask0][:n_pairs]
             g01 = (None, None) if g_ratio is None else (g_ratio[mask0][:n_pairs], g_ratio[mask1][:n_pairs])
-            b0 = None if birth is None else birth[mask0][:n_pairs]
-            pairs.append((float(t0), float(t1), X0_np[:n_pairs], X1_np[:n_pairs], stim0, stim1, lab0, g01, b0))
+            b01 = (None, None) if birth is None else (birth[mask0][:n_pairs], birth[mask1][:n_pairs])
+            pairs.append((float(t0), float(t1), X0_np[:n_pairs], X1_np[:n_pairs], stim0, stim1, lab0, g01, b01))
 
     stim_first = pairs[0][5] if pairs else np.ones(ns, dtype=np.float32) * scale_proteins
     if np.ndim(ks) == 3 or np.ndim(theta_inter) == 4:
@@ -822,11 +835,11 @@ def inference_degradation_prot(
         optimizer.zero_grad()
         total_loss, total_count = 0.0, 0
 
-        for (t0, t1, X0_full, X1_full, stim0, stim1, lab0, (g0, g1), b0) in pairs:
+        for (t0, t1, X0_full, X1_full, stim0, stim1, lab0, (g0, g1), (b0, b1)) in pairs:
             ode_func.stim_vals.copy_(torch.tensor(stim1, dtype=torch.float32))
             idxs = _draw_minibatch(X0_full.shape[0], batch_size, lab0)
             ode_func.set_g_interpolation(t0, t1, None if g0 is None else g0[idxs], None if g1 is None else g1[idxs])
-            ode_func.set_birth(None if b0 is None else b0[idxs])
+            ode_func.set_birth(None if b0 is None else b0[idxs], None if b1 is None else b1[idxs], t0, t1)
             X0: torch.Tensor = torch.tensor(X0_full[idxs], dtype=torch.float32, device=device)
             X1: torch.Tensor = torch.tensor(X1_full[idxs], dtype=torch.float32, device=device)
 

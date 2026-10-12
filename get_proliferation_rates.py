@@ -56,9 +56,10 @@ Optional input files:
       expression — see CardamomOT.tools.estimate_proliferation. Pass
       an empty file (or set senescence_gating = False) to disable this and
       recover the plain birth - death estimate.
-    - sheet proliferation_rates of Data/CardamomOT_inputs.xlsx: cell_type, net_rate_per_hour
-      anchors the literature estimate's per-cell-type
-      mean to a trusted population-level rate. Grouping uses
+    - sheet proliferation_rates of Data/CardamomOT_inputs.xlsx: cell_type, net_rate_per_hour, and optionally
+      birth_rate_per_hour / death_rate_per_hour, anchors the literature estimate's per-cell-type
+      mean to a trusted population-level rate (birth and death separately where they are given,
+      each scaled to its reference mean; otherwise the net rate is shifted). Grouping uses
       `adata.obs['cell_type_proliferation']` if present, else
       `cell_type_transition`, else `cell_type`; if no grouping is found or
       any cell type is missing from the file, the unanchored estimate is
@@ -70,9 +71,11 @@ Optional input files:
 Output files:
     - Data/data.h5ad: updated in place with obs['proliferation_net_rate'] (birth - death), and the birth and death
       rates obs['proliferation_birth_rate'], obs['proliferation_death_rate'] (birth: dilution of the proteins);
-      without stimulus: obs['proliferation_*_rate_base']. Anchoring: the net rates per cell type of the
+      without stimulus: obs['proliferation_*_rate_base']. Anchoring: the rates per cell type of the
       proliferation_rates sheet, as corrected per sample by fit_population_anchors.py (cardamomOT/population_anchors.json)
-      if it was run; each change of the net rate (anchoring, stimulus) is shared between birth and death by
+      if it was run, done time by time (rates constant in time apart from the stimulus effects; all times together
+      in CardamomOT-stat or without obs['time']); types with reference birth and death get both (estimate_proliferation.anchor_birth_death), the
+      others their net rate, each change of the net rate (anchoring, stimulus) being shared between birth and death by
       estimate_proliferation.split_net_change (w = birth / (birth + death)).
       (Data/data_complete.h5ad, if used, is never written to)
 """
@@ -84,10 +87,10 @@ import numpy as np
 import pandas as pd
 
 from CardamomOT import find_data_file, read_gene_list, resolve_cell_type_obs, ensure_raw_counts
-from CardamomOT.inputs import input_dir
+from CardamomOT.inputs import input_dir, read_proliferation_rates
 from CardamomOT.config import CELL_TYPE_OBS_KEYS
 from CardamomOT.tools.estimate_proliferation import (
-    estimate_growth_rates, combine_growth_rates_with_reference, split_net_change,
+    estimate_growth_rates, combine_growth_rates_with_reference, split_net_change, anchor_birth_death,
 )
 from CardamomOT.inference.halflife_db import detect_species
 
@@ -103,7 +106,8 @@ def set_rates(obs, birth, death, suffix=''):
 
 
 def assign_proliferation_rates(adata, prolif_path, species='human', proliferation_genes=None,
-                                death_genes=None, senescence_genes=None, senescence_gating=True, sample_specs=None):
+                                death_genes=None, senescence_genes=None, senescence_gating=True, sample_specs=None,
+                                times=None):
     """
     Compute and assign adata.obs['proliferation_net_rate'] (birth − death) in place.
 
@@ -127,10 +131,17 @@ def assign_proliferation_rates(adata, prolif_path, species='human', proliferatio
     estimate_proliferation.estimate_growth_rates for why that estimate is in
     hours rather than moscot/WOT's native day^-1.
 
-    sample_specs : {dataset_id: {'rates': {cell type: rate}}} anchors of the samples with their own (rows of
-    proliferation_rates with a sample_id, or corrected by fit_population_anchors.py); each of them is anchored on its
-    own cells, the other samples together on the default (prolif_path). A sample with neither own nor default anchors
-    keeps its literature estimate.
+    sample_specs : {dataset_id: {'rates': {cell type: {'net', 'birth', 'death'}}}} anchors of the samples with their
+    own (rows of proliferation_rates with a sample_id, or corrected by fit_population_anchors.py); each of them is
+    anchored on its own cells, the other samples together on the default (prolif_path). A sample with neither own nor
+    default anchors keeps its literature estimate.
+
+    times : (N,) time of each cell (NaN: unknown), or None. Given (temporal method), the anchoring is done time by
+    time: the reference rates (without stimulus) are the mean rates of each cell type at every time, the rates being
+    constant in time apart from the stimulus effects added afterwards (add_stimulus_effects). None (CardamomOT-stat,
+    or no obs['time']): all the cells of a sample are anchored together.
+    A sample without anchors is then anchored time by time on its own mean birth and death rates over all times per
+    cell type (its literature estimate re-anchored in time); with times None, it keeps its literature estimate.
     """
     prefix = "[get_proliferation_rates]"
     kwargs = {'species': species, 'senescence_gating': senescence_gating}
@@ -156,20 +167,50 @@ def assign_proliferation_rates(adata, prolif_path, species='human', proliferatio
     for sid, v in specs.items():
         groups.append((sid, samples == sid, v.get('rates') if v.get('rates') else prolif_path))
     birth, death = birth_lit.copy(), death_lit.copy()
+    t_key = None if times is None else np.where(np.isfinite(np.asarray(times, dtype=float)), np.asarray(times, dtype=float), -np.inf)
+    # Without anchors (temporal method): each sample is anchored time by time on its own mean rates over all times
+    ct_key = resolve_cell_type_obs(adata, 'proliferation')
+    if t_key is not None and ct_key is not None:
+        labels_all = adata.obs[ct_key].astype(str).to_numpy()
+        expanded = []
+        for name, m, rates_src in groups:
+            if rates_src is not None:
+                expanded.append((name, m, rates_src))
+                continue
+            for sid in np.unique(samples[m]):
+                ms = m & (samples == sid)
+                spec = {c: dict(net=float(birth_lit[ms & (labels_all == c)].mean() - death_lit[ms & (labels_all == c)].mean()),
+                                birth=float(birth_lit[ms & (labels_all == c)].mean()),
+                                death=float(death_lit[ms & (labels_all == c)].mean()))
+                        for c in np.unique(labels_all[ms])}
+                print(f"{prefix} [{sid}] No anchors: re-anchored time by time on its mean rates over all times per '{ct_key}'")
+                expanded.append((sid, ms, spec))
+        groups = expanded
     for name, m, rates_src in groups:
-        b_g, d_g = anchor_group(prefix, name if len(groups) > 1 else None, adata[m], net_lit[m], birth_lit[m], death_lit[m],
-                                rates_src)
-        birth[m], death[m] = b_g, d_g
+        # Time by time (temporal method), else all the cells of the group together
+        blocks = [m] if t_key is None else [m & (t_key == t) for t in np.unique(t_key[m])]
+        for k, mt in enumerate(blocks):
+            label = name if len(groups) > 1 else None
+            if t_key is not None:
+                t = t_key[mt][0]
+                label = f"{label + ', ' if label else ''}t={'?' if np.isinf(t) else f'{t:g}'}"
+            b_g, d_g = anchor_group(prefix, label, adata[mt], net_lit[mt], birth_lit[mt], death_lit[mt], rates_src,
+                                    quiet=k > 0)
+            birth[mt], death[mt] = b_g, d_g
+        if t_key is not None and len(blocks) > 1:
+            print(f"{prefix}{' [' + name + ']' if len(groups) > 1 else ''} Anchored time by time ({len(blocks)} times)")
     set_rates(adata.obs, birth, death)
     print(f"{prefix} Rates: mean birth {adata.obs['proliferation_birth_rate'].mean():.4f}, death "
           f"{adata.obs['proliferation_death_rate'].mean():.4f}, net {adata.obs['proliferation_net_rate'].mean():.4f} h^-1")
 
 
-def anchor_group(prefix, name, adata, net_lit, birth_lit, death_lit, rates_src):
+def anchor_group(prefix, name, adata, net_lit, birth_lit, death_lit, rates_src, quiet=False):
     """
     Birth and death of the cells of one group (`adata`: its cells; name: sample, None if single group) anchored on the
-    reference net rates `rates_src` (path of a rates table, or {cell type: rate}): the mean net rate of each cell type
-    is its reference, the change shared between birth and death (split_net_change); the literature estimate without.
+    reference rates `rates_src` (path of a rates table, or {cell type: {'net', 'birth', 'death'}}): in a cell type
+    with reference birth and death, each is scaled to its reference mean (anchor_birth_death); in the others, the mean
+    net rate is shifted to its reference, the change shared between birth and death (split_net_change). The
+    literature estimate without anchors. quiet: no summary line (blocks after the first time of a group).
     """
     tag = prefix if name is None else f"{prefix} [{name}]"
     anchors = read_anchors(adata, rates_src, "using unanchored literature estimate") if rates_src is not None else None
@@ -178,11 +219,20 @@ def anchor_group(prefix, name, adata, net_lit, birth_lit, death_lit, rates_src):
         return birth_lit, death_lit
     if anchors is None:
         return birth_lit, death_lit
-    labels, rates, celltype_col = anchors
+    labels, spec, celltype_col = anchors
+    rates = {c: v['net'] for c, v in spec.items()}
+    bd = {c: (v['birth'], v['death']) for c, v in spec.items() if v.get('birth') is not None and v.get('death') is not None}
     change = combine_growth_rates_with_reference(net_lit, labels, rates) - net_lit
-    print(f"{tag} Anchored literature proliferation rates per '{celltype_col}' ({len(rates)} types)"
-          + (f": {rates_src}" if isinstance(rates_src, str) else ': ' + ', '.join(f'{c} {r:+.4f}' for c, r in rates.items())))
-    return split_net_change(birth_lit, death_lit, change)
+    birth, death = split_net_change(birth_lit, death_lit, change)
+    # Types with birth / death references: scaled from the literature estimate, not from the net-shifted one
+    m = np.isin(labels, list(bd))
+    birth[m], death[m] = anchor_birth_death(birth_lit[m], death_lit[m], labels[m], bd)
+    if not quiet:
+        print(f"{tag} Anchored literature proliferation rates per '{celltype_col}' ({len(rates)} types)"
+              + (f" ({rates_src})" if isinstance(rates_src, str) else '') + ': '
+              + ', '.join(f'{c} net {v["net"]:+.4f}' + (f' (birth {bd[c][0]:.4f}, death {bd[c][1]:.4f})' if c in bd else '')
+                          for c, v in spec.items()) + ' h^-1')
+    return birth, death
 
 
 def add_stimulus_effects(adata_target, adata_score, p):
@@ -239,10 +289,11 @@ def add_stimulus_effects(adata_target, adata_score, p):
 
 def read_anchors(adata, prolif_path, fallback):
     """
-    Reference rates per cell type (sheet proliferation_rates: cell_type, rate per hour),
+    Reference rates per cell type (sheet proliferation_rates: net, and optionally birth and death, per hour),
     grouped by adata.obs['cell_type_proliferation'], else 'cell_type_transition', else 'cell_type'.
-    Returns (labels per cell, {cell type: rate}, column) or None (message ending with fallback)
-    when no grouping exists or a cell type has no rate (partial anchoring is worse than none).
+    prolif_path: path of the exported table, or {cell type: {'net', 'birth', 'death'}}.
+    Returns (labels per cell, {cell type: {'net', 'birth', 'death'}}, column) or None (message ending with fallback)
+    when no grouping exists or a cell type has no net rate (partial anchoring is worse than none).
     """
     prefix = "[get_proliferation_rates]"
     celltype_col = resolve_cell_type_obs(adata, 'proliferation')
@@ -250,22 +301,19 @@ def read_anchors(adata, prolif_path, fallback):
         print(f"{prefix} Warning: found {prolif_path} but adata.obs has none of "
               f"{list(CELL_TYPE_OBS_KEYS['proliferation'])}; {fallback}")
         return None
+    user_rates = read_proliferation_rates(prolif_path)
     if isinstance(prolif_path, dict):
-        user_rates = pd.Series({str(k).strip(): float(v) for k, v in prolif_path.items()})
         prolif_path = 'the anchors of the sample'
-    else:
-        user_rates = pd.read_csv(prolif_path, sep=None, engine='python', header=None, index_col=0).iloc[:, 0]
-        user_rates.index = user_rates.index.astype(str).str.strip()
     labels = adata.obs[celltype_col].astype(str).values
     # Cell types matched case-insensitively
-    by_lower = {k.lower(): float(v) for k, v in user_rates.items()}
-    user_rates = pd.Series({c: by_lower[c.lower()] for c in set(labels) if c.lower() in by_lower})
-    missing = sorted(set(labels) - set(user_rates.index))
+    by_lower = {k.lower(): v for k, v in user_rates.items() if v.get('net') is not None}
+    user_rates = {c: by_lower[c.lower()] for c in sorted(set(labels)) if c.lower() in by_lower}
+    missing = sorted(set(labels) - set(user_rates))
     if missing:
         print(f"{prefix} Warning: cell type(s) {missing} of adata.obs['{celltype_col}'] "
               f"not found in {prolif_path}; {fallback}")
         return None
-    return labels, user_rates.to_dict(), celltype_col
+    return labels, user_rates, celltype_col
 
 
 def main(argv):
@@ -335,7 +383,9 @@ def main(argv):
         prolif_path = None
         for sid, v in fitted['samples'].items():
             if v.get('rates'):
-                sample_specs[sid] = dict(rates=v['rates'])
+                b, d = v.get('birth') or {}, v.get('death') or {}
+                sample_specs[sid] = dict(rates={t: dict(net=r, birth=b.get(t), death=d.get(t))
+                                                for t, r in v['rates'].items()})
         print(f"[get_proliferation_rates] Anchors corrected by fit_population_anchors.py for {sorted(sample_specs)}")
     else:
         for sid, rates in proliferation_sample_anchors(p).items():
@@ -348,7 +398,7 @@ def main(argv):
               f"cannot be scored reliably, no literature estimate")
         samples = (adata_target.obs['dataset_id'].astype(str).to_numpy() if 'dataset_id' in adata_target.obs
                    else np.array(['0'] * adata_target.n_obs))
-        net = np.full(adata_target.n_obs, np.nan)
+        net, birth, death = (np.full(adata_target.n_obs, np.nan) for _ in range(3))
         # Per sample: its own anchors, else the default ones
         for sid in np.unique(samples):
             m = samples == sid
@@ -356,13 +406,17 @@ def main(argv):
             src = own.get('rates') or prolif_path
             anchors = read_anchors(adata_target[m], src, "no proliferation rate assigned") if src is not None else None
             if anchors is not None:
-                labels, rates, celltype_col = anchors
-                net[m] = np.array([rates[l] for l in labels], dtype=float)
+                labels, spec, celltype_col = anchors
+                get = lambda key: np.array([np.nan if spec[l].get(key) is None else spec[l][key] for l in labels], dtype=float)
+                net[m], birth[m], death[m] = get('net'), get('birth'), get('death')
                 print(f"[get_proliferation_rates] Rates of {'the sample ' + sid if isinstance(src, dict) else src} assigned "
                       f"uniformly per '{celltype_col}' to {sid}")
         if np.isfinite(net).any():
             net = np.where(np.isfinite(net), net, 0.0)
-            set_rates(adata_target.obs, np.maximum(net, 0.0), np.maximum(-net, 0.0))  # negligible death
+            # Reference birth / death where given, else negligible death
+            given = np.isfinite(birth) & np.isfinite(death)
+            set_rates(adata_target.obs, np.where(given, birth, np.maximum(net, 0.0)),
+                      np.where(given, death, np.maximum(-net, 0.0)))
             add_stimulus_effects(adata_target, adata_score, p)
         elif 'proliferation_net_rate' in adata_target.obs.columns:
             print("[get_proliferation_rates] Warning: keeping the existing adata.obs['proliferation_net_rate'] "
@@ -406,10 +460,17 @@ def main(argv):
         print(f"[get_proliferation_rates] Loaded {len(senescence_genes)} senescence/arrest marker "
               f"genes from {senescence_genes_path}")
 
+    # Anchoring time by time (temporal method); all times together in CardamomOT-stat or without obs['time']
+    stat = str(cfg.CardamomOT_method).strip().lower() == 'stat' or 'time' not in adata_target.obs
+    times = None
+    if not stat:
+        t_src = adata_score.obs['time'] if 'time' in adata_score.obs else adata_target.obs['time'].reindex(adata_score.obs_names)
+        times = pd.to_numeric(t_src, errors='coerce').to_numpy(dtype=float)
+    print(f"[get_proliferation_rates] Anchoring {'of all the cells of each sample together (CardamomOT-stat)' if stat else 'time by time'}")
     assign_proliferation_rates(adata_score, prolif_path, species=species,
                                 proliferation_genes=proliferation_genes, death_genes=death_genes,
                                 senescence_genes=senescence_genes, senescence_gating=senescence_gating,
-                                sample_specs=sample_specs)
+                                sample_specs=sample_specs, times=times)
 
     if using_complete:
         missing = adata_target.obs_names.difference(adata_score.obs_names)

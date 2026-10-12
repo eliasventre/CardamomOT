@@ -21,8 +21,9 @@ CACHE = os.path.join('cardamomOT', 'inputs')
 # other attributes of NetworkModel can be added as rows)
 PARAMETER_GROUPS = [
     ('Pipeline: steps and data', [
-        'estimate_proliferation_rates', 'simulate_with_proliferation', 'select_genes', 'build_prior_network',
-        'simulate_perturbations', 'run_test', 'split', 'train_rate', 'species']),
+        'CardamomOT_method', 'estimate_proliferation_rates', 'simulate_with_proliferation', 'select_genes', 'build_prior_network',
+        'simulate_perturbations', 'run_test', 'run_classical_OT', 'split', 'train_rate', 'species',
+        'senescence_gating', 'overwrite_degradation_rates', 'classical_ot_max_cells']),
     ('Gene selection', [
         'num_max_genes', 'n_query_genes', 'n_entropy_genes', 'network_method', 'sample_network_combination',
         'k_in_steiner', 'closure_min',
@@ -38,8 +39,10 @@ PARAMETER_GROUPS = [
         'force_basins', 'temporal_basins', 'min_n_loops', 'max_iter', 'batch_size_traj', 'n_network_fits',
         'constrain_basal_uniform', 'network_condition_pen']),
     ('Proliferation and simulation', [
-        'growth_reg_source', 'prolif_uses_stimulus', 'simulation_stochastic', 'protein_dilution']),
-    ('Report', ['classifier_method', 'embedding_method_visualization', 'cell_depth_for_representation']),
+        'growth_reg_source', 'prolif_uses_stimulus', 'simulation_stochastic', 'simulate_full_with_harissa',
+        'protein_dilution']),
+    ('Report', ['classifier_method', 'embedding_method_visualization', 'cell_depth_for_representation',
+                'report_net_index', 'report_normalize', 'report_log1p', 'report_n_umap']),
     ('Reproducibility', ['seed']),
 ]
 
@@ -132,12 +135,19 @@ SHEETS = {
     'proliferation_rates': (
         [('cell_type', 'Cell type (as in obs cell_type_proliferation, else cell_type_transition, else cell_type)'),
          ('net_rate_per_hour', 'Reference net proliferation rate (birth - death), in h^-1; without the inference '
-                               'stimulus if perturbation_inference gives its effect on this cell type (RATEk)'),
+                               'stimulus if perturbation_inference gives its effect on this cell type (RATEk). '
+                               'May be left empty if birth and death are both given'),
          ('sample_id', 'Optional: dataset_id these anchors are for (empty or "all": default of the samples that '
-                       'have none of their own)')],
-        'Anchors of the net proliferation rates per cell type (fit_population_anchors, get_proliferation_rates); '
-        'every cell type needs a value. Rows with a sample_id anchor that sample only (a sample with rows of its own '
-        'ignores the default ones); a sample without anchors borrows those of the best-fitting sample.'),
+                       'have none of their own)'),
+         ('birth_rate_per_hour', 'Optional reference birth (division) rate, in h^-1: anchors the birth rate of the '
+                                 'cells of this type (dilution of the proteins); with the net rate, gives the death rate'),
+         ('death_rate_per_hour', 'Optional reference death rate, in h^-1: anchors the death rate of the cells of this '
+                                 'type; with the net rate, gives the birth rate')],
+        'Anchors of the proliferation rates per cell type (fit_population_anchors, get_proliferation_rates); every '
+        'cell type needs a net rate, given directly or as birth - death. Birth and death, when given, anchor the two '
+        'rates separately; otherwise the change of the net rate is shared between them. Rows with a sample_id anchor '
+        'that sample only (a sample with rows of its own ignores the default ones); a sample without anchors borrows '
+        'those of the best-fitting sample.'),
     'population_sizes': (
         [('time', 'Timepoint'), ('population_size', 'Total population size at this timepoint (any unit: only the '
                                                     'ratios between times of a sample are used)'),
@@ -234,28 +244,38 @@ def create_workbook(path):
 
 def upgrade_workbook(path, out=None):
     """
-    Brings an existing workbook to the current layout without touching the values of the kept sheets: the header
-    sample_id of proliferation_rates and population_sizes, and the removal of the former sheet doubling_times. Saved in
-    place (out=None) or as `out`. Returns what was changed.
+    Brings an existing workbook to the current layout without touching the values of the kept sheets: the headers
+    sample_id of proliferation_rates and population_sizes, birth_rate_per_hour / death_rate_per_hour of
+    proliferation_rates, and the removal of the former sheet doubling_times. Saved in place (out=None) or as `out`.
+    Returns what was changed.
     """
     from openpyxl import load_workbook
     from openpyxl.comments import Comment
     from openpyxl.styles import Font, PatternFill, Alignment
     wb = load_workbook(path)
     added = []
-    for sheet, pos in (('proliferation_rates', 3), ('population_sizes', 3)):
+    for sheet, column, pos in (('proliferation_rates', 'sample_id', 3), ('population_sizes', 'sample_id', 3),
+                               ('proliferation_rates', 'birth_rate_per_hour', 4),
+                               ('proliferation_rates', 'death_rate_per_hour', 5)):
         ws = wb[sheet] if sheet in wb.sheetnames else None
-        if ws is not None and 'sample_id' not in [c.value for c in ws[1]]:
-            doc = dict(SHEETS[sheet][0])['sample_id']
-            c = ws.cell(row=1, column=max(pos, ws.max_column + 1), value='sample_id')
+        if ws is not None and column not in [c.value for c in ws[1]]:
+            doc = dict(SHEETS[sheet][0])[column]
+            c = ws.cell(row=1, column=max(pos, ws.max_column + 1), value=column)
             c.font, c.fill, c.alignment = Font(bold=True, color='FFFFFF'), PatternFill('solid', fgColor='1F3864'), Alignment(horizontal='center')
             c.comment = Comment(doc, 'CardamomOT', width=320, height=90)
-            ws.column_dimensions[c.column_letter].width = 16
-            added.append(f'column sample_id of {sheet}')
+            ws.column_dimensions[c.column_letter].width = max(16, len(column) + 4)
+            added.append(f'column {column} of {sheet}')
     if 'doubling_times' in wb.sheetnames:
         del wb['doubling_times']
         added.append('sheet doubling_times removed (population constraints: proliferation_rates, transition_rates, '
                      'population_sizes)')
+    # Descriptions of the sheets in the readme sheet
+    if 'readme' in wb.sheetnames:
+        for row in wb['readme'].iter_rows(min_col=1, max_col=2):
+            name, cell = row[0].value, row[1]
+            if name in SHEETS and cell.value != SHEETS[name][1]:
+                cell.value = SHEETS[name][1]
+                added.append(f'readme description of {name}')
     if added:
         wb.save(out or path)
     return added
@@ -362,6 +382,57 @@ def _add_overrides(overrides, kind, groups, cols):
         overrides.setdefault(kind, {})[sid] = {
             'time': [float(t) for t in rows['time']] if timed else None,
             'values': rows[cols].astype(float).fillna(1.0).to_numpy().tolist()}
+
+
+_RATE_COLUMNS = {'net': 'net_rate_per_hour', 'birth': 'birth_rate_per_hour', 'death': 'death_rate_per_hour'}
+
+
+def resolve_proliferation_row(net=None, birth=None, death=None, what=''):
+    """
+    {'net', 'birth', 'death'} of a row of proliferation_rates (h^-1, None = not given): birth and death give the net
+    rate (which they override, with a warning, if inconsistent), the net rate and one of them give the other. None if
+    no net rate can be obtained; birth and death are dropped (warning) if they would be negative.
+    """
+    num = lambda v: None if v is None or not np.isfinite(float(v)) else float(v)
+    net, birth, death = num(net), num(birth), num(death)
+    tag = f"[CardamomOT] proliferation_rates{' ' + what if what else ''}"
+    if birth is not None and death is not None:
+        if net is not None and abs(net - (birth - death)) > 1e-9:
+            print(f"{tag}: net {net:g} != birth - death {birth - death:g}: birth and death are kept")
+        net = birth - death
+    elif net is not None and birth is not None:
+        death = birth - net
+    elif net is not None and death is not None:
+        birth = net + death
+    elif net is None:
+        print(f"{tag}: no net rate (net_rate_per_hour, or birth and death): ignored")
+        return None
+    if birth is not None and (birth < 0 or death < 0):
+        print(f"{tag}: negative birth or death ({birth:g}, {death:g}): only the net rate {net:g} is kept")
+        birth = death = None
+    return dict(net=net, birth=birth, death=death)
+
+
+def _proliferation_entry(row):
+    """(cell type, resolved rates or None) of a row of the sheet proliferation_rates."""
+    cell = str(_clean(row['cell_type']))
+    vals = {k: (None if c not in row or _is_empty(row[c]) else float(row[c])) for k, c in _RATE_COLUMNS.items()}
+    return cell, resolve_proliferation_row(**vals, what=f"'{cell}'")
+
+
+def read_proliferation_rates(src):
+    """
+    {cell type: {'net', 'birth', 'death'}} (h^-1, birth / death None if not given) of a proliferation table: path of
+    proliferation_rates.txt (type, net, birth, death; older files: type, net) or such a dict (returned as it is;
+    plain {type: net} values are converted).
+    """
+    if isinstance(src, dict):
+        return {str(k).strip(): (dict(v) if isinstance(v, dict) else dict(net=float(v), birth=None, death=None))
+                for k, v in src.items()}
+    df = pd.read_csv(src, sep='\t', header=None, index_col=0, dtype={0: str}, keep_default_na=True)
+    num = lambda v: None if pd.isna(v) else float(v)
+    return {str(k).strip(): dict(net=num(r.iloc[0]), birth=num(r.iloc[1]) if len(r) > 1 else None,
+                                 death=num(r.iloc[2]) if len(r) > 2 else None) for k, r in df.iterrows()}
 
 
 def export(wb, out_dir):
@@ -545,18 +616,22 @@ def export(wb, out_dir):
                     'samples': {sid: entry(d) for sid, d in per_sample.items() if len(d)}}
             json.dump(spec, open(os.path.join(out_dir, 'population_sizes.json'), 'w'), indent=1)
 
-    # Proliferation anchors: rows without sample_id = default (proliferation_rates.txt), the others per sample (json)
+    # Proliferation anchors: rows without sample_id = default (proliferation_rates.txt: type, net, birth, death), the
+    # others per sample (json); each row resolved to (net, birth, death) by resolve_proliferation_row
     pr = read_sheet(wb, 'proliferation_rates')
-    if all(c in pr for c in ('cell_type', 'net_rate_per_hour')):
-        pr = pr.dropna(subset=['cell_type', 'net_rate_per_hour'])
+    if 'cell_type' in pr and any(c in pr for c in _RATE_COLUMNS.values()):
+        pr = pr.dropna(subset=['cell_type'])
         default, per_sample = _split_samples(pr)
-        if len(default):
-            write('proliferation_rates.txt', '\n'.join(f'{_clean(a)}\t{_clean(b)}' for a, b in
-                                                      zip(default['cell_type'], default['net_rate_per_hour'])) + '\n')
-        if per_sample:
+        table = lambda d: {k: v for k, v in (_proliferation_entry(row) for _, row in d.iterrows()) if v is not None}
+        fmt = lambda v: '' if v is None else f'{v!r}'
+        rows = table(default)
+        if rows:
+            write('proliferation_rates.txt', '\n'.join(f"{k}\t{fmt(v['net'])}\t{fmt(v['birth'])}\t{fmt(v['death'])}"
+                                                       for k, v in rows.items()) + '\n')
+        samples = {sid: t for sid, t in ((sid, table(d)) for sid, d in per_sample.items()) if t}
+        if samples:
             import json
-            json.dump({sid: {str(_clean(a)): float(b) for a, b in zip(d['cell_type'], d['net_rate_per_hour'])}
-                       for sid, d in per_sample.items()}, open(os.path.join(out_dir, 'proliferation_rates_samples.json'), 'w'), indent=1)
+            json.dump(samples, open(os.path.join(out_dir, 'proliferation_rates_samples.json'), 'w'), indent=1)
 
     if overrides:
         import json
@@ -614,7 +689,8 @@ def removed_samples(project, present=None):
 
 
 def proliferation_sample_anchors(project):
-    """{dataset_id: {cell type: net rate (h^-1)}} of the rows of proliferation_rates with a sample_id ({} if none)."""
+    """{dataset_id: {cell type: {'net', 'birth', 'death'}}} (h^-1) of the rows of proliferation_rates with a sample_id
+    ({} if none)."""
     import json
     path = os.path.join(input_dir(project), 'proliferation_rates_samples.json')
     return json.load(open(path)) if os.path.exists(path) else {}

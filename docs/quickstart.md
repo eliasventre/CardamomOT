@@ -28,7 +28,7 @@ my_project/
 
 **Project settings.** Copy the empty workbook [`CardamomOT_inputs.xlsx`](https://github.com/eliasventre/CardamomOT/blob/main/CardamomOT_inputs.xlsx) of the repository root into
 `my_project/Data/` and fill what you need (every sheet and cell is optional; empty = default; without the file,
-the pipeline creates an empty one at the first run):
+every default applies; the pipeline never writes it):
 
 | Sheet | Content |
 |---|---|
@@ -38,7 +38,7 @@ the pipeline creates an empty one at the first run):
 | `stimulus_test_schedule` | stimulus schedule of the held-out cells and samples (`infer_test`; default: the inference schedule) |
 | `stimulus_simulation_schedule`, `perturbation_simulation` | schedules and in-silico perturbations (KO, OV, STIM, RATE) of the simulations |
 | `times` | timepoints used |
-| `proliferation_rates`, `population_sizes`, `transition_rates` | anchors of the population dynamics |
+| `proliferation_rates`, `population_sizes`, `transition_rates` | anchors of the population dynamics: net (and optionally birth / death) rates per cell type, population sizes, transition rates between types |
 
 Each sheet has its own description (`readme` sheet, and comments on the header cells).
 

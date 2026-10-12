@@ -28,7 +28,7 @@ from ..config import resolve_cell_type_obs, CELL_TYPE_OBS_KEYS
 from ..inference.trajectory import ks_of, s1_of, s1_rows, inter_of
 from ..inference.mixture import _compute_nu_with_temporal_constraint
 from ..inference import (inference_network_multi, active_regulators, PrevProt, signed_floor, filter_network,
-                        minimal_repetition_choice, find_next_prot, my_otdistance, count_errors,
+                        minimal_repetition_choice, find_next_prot, find_next_prot2, my_otdistance, count_errors,
                         kon_ref_vector, inference_alpha, inference_alpha_1thread,
                         NegativeBinomialMixtureEM, predict_resp,
                         simulate_next_prot_ode, simulate_next_prot_pdmp,
@@ -78,11 +78,13 @@ def trajectory_pairs(valid, T):
     return [(a, b, np.array(sl)) for (a, b), sl in sorted(groups.items())]
 
 
-def prot_along(d1, P0, mode_init, mode_end, alpha, s, delta_t, tau):
-    """Protein at time tau in [0, delta_t] of the flow of find_next_prot (switch of the modes at alpha * delta_t)."""
+def prot_along(d1, P0, mode_init, mode_end, alpha, s, delta_t, tau, d1_end=None):
+    """Protein at time tau in [0, delta_t] of the flow of find_next_prot2 (switch of the modes, and of the rate
+    d1 -> d1_end (None: d1), at alpha * delta_t)."""
+    d1_end = d1 if d1_end is None else d1_end
     t_sw = alpha * delta_t
     p_sw = mode_init * s + (P0 - mode_init * s) * np.exp(-d1 * np.minimum(tau, t_sw))
-    return np.where(tau <= t_sw, p_sw, mode_end * s + (p_sw - mode_end * s) * np.exp(-d1 * np.maximum(tau - t_sw, 0)))
+    return np.where(tau <= t_sw, p_sw, mode_end * s + (p_sw - mode_end * s) * np.exp(-d1_end * np.maximum(tau - t_sw, 0)))
 
 
 def fill_virtual(arrays, valid, T, inside=True):
@@ -172,6 +174,7 @@ class NetworkModel:
         self.condition_names = None    # labels of the network conditions (obs['network_condition'])
 
         ### Pipeline (run.sh / cardamomot pipeline): data and steps, fixed per project in Data/CardamomOT_inputs.xlsx
+        self.CardamomOT_method = 'temporal'      # 'temporal': current pipeline; 'stat': CardamomOT-stat (stationary snapshot per sample, times only for the mixture; automatic without obs['time']); 'stat+temporal': to be specified
         self.split = 'train'                     # 'train': train/test split of the cells (train_rate per sample and time); 'full': all cells
         self.train_rate = 0.7                    # share of the cells of each (sample, time) in the train split (at least 100); the test keeps at most as many
         self.select_genes = False                # select_genes (on the train cells of split_dataset): gene selection (queries, entropy genes, global network, Steiner tree); False = all genes kept
@@ -1496,9 +1499,12 @@ class NetworkModel:
                     mode_end = self.adaptive_shrinkage(vect_rna[cell_idx, ns:] * s1_s, self.modes[cell_idx, ns:]) / s1_s
 
                     basal_s = basal[min(s_idx, basal.shape[0] - 1)] if basal.ndim == 3 else basal
-                    # Dilution of the source states at the birth rate of their real cell (rate d1 + b, targets c u)
+                    # Dilution at the birth rate of the real cell of the source before alpha, of the target after
+                    # (rate d1 + b, targets c u)
                     rate_src, c_src, b_src = self._dilution(sim_real_idx[current_indices])
+                    rate_tgt, c_tgt, b_tgt = self._dilution(cell_idx)
                     b_src = np.zeros(0) if b_src is None else b_src
+                    b_tgt = np.zeros(0) if b_tgt is None else b_tgt
                     pairwise_dist = my_otdistance(
                         kon_modified[current_indices, ns:], self.modes[cell_idx, ns:],
                         prot_init,
@@ -1512,7 +1518,7 @@ class NetworkModel:
                         n_stimuli=ns, stim_vals=np.asarray(self._stim_schedule.at(times[b], s_idx), dtype=np.float64),
                         scale_proteins=self.scale_proteins,
                         weight_fixed=-1.0 if context is None else context['weight_init'],
-                        b_init=b_src,
+                        b_init=b_src, b_end=b_tgt,
                     )
 
                     delta_t = times[b] - time
@@ -1565,9 +1571,9 @@ class NetworkModel:
                 # Trajectory update (skipped by the growth pass)
                 if N_sample and N_cells and not growth_only:
                     # --- Growth-weighted OT marginals ---
-                    # WOT convention (Schiebinger et al. 2019): both the source AND
-                    # target marginals are corrected by exp(±R·Δt/2), not just the
-                    # source by exp(R·Δt) — see docs/advanced.md#net-proliferation-rate--default-behaviour.
+                    # Symmetric convention (ours, not WOT's, which weights the source by exp(R·Δt) and keeps
+                    # the target uniform): source and target corrected by exp(±R·Δt/2), the midpoint rule for
+                    # the growth along the step — see docs/advanced.md#net-proliferation-rate--default-behaviour.
                     mu, nu, reg_m = self._traj_marginals(src_real, cell_idx, delta_t, tmp)
                     coupling = self._solve_ot(mu, nu, pairwise_dist, reg, reg_m)
 
@@ -1578,15 +1584,16 @@ class NetworkModel:
                     tgt = cell_idx[m_idx]
 
                     # End states recomputed for the sampled pairs only
-                    next_prot = find_next_prot(
-                        rate_src, prot_init, rna_modified[current_indices, ns:],
-                        vect_rna[tgt, ns:], mode_init * c_src, mode_end[m_idx] * c_src, alpha_init, s1_s, delta_t)
+                    rate_end = rate_src if b_tgt.shape[0] == 0 else rate_tgt[m_idx]
+                    c_end = c_src if b_tgt.shape[0] == 0 else c_tgt[m_idx]
+                    next_prot = find_next_prot2(
+                        rate_src, rate_end, prot_init, mode_init * c_src, mode_end[m_idx] * c_end, alpha_init, s1_s, delta_t)
 
                     # Timepoints missed by the sample inside the interval: proteins along the same flow
                     for k in range(t_idx + 1, b):
                         prot_modified[N_total * k + offset_init_s + np.arange(N_sample), ns:] = prot_along(
-                            rate_src, prot_init, mode_init * c_src, mode_end[m_idx] * c_src, alpha_init, s1_s,
-                            delta_t, times[k] - time)
+                            rate_src, prot_init, mode_init * c_src, mode_end[m_idx] * c_end, alpha_init, s1_s,
+                            delta_t, times[k] - time, d1_end=rate_end)
 
                     kon_modified[next_indices] = self.modes[tgt]
                     if self.compute_with_proba:
@@ -1961,13 +1968,14 @@ class NetworkModel:
             modes = self.adaptive_shrinkage(y_rna[:, ns:] * s1r, y_kon[:, ns:]) / s1r
             for a, b, slots in pairs:
                 idx_prev, idx_next = N_tot * a + slots, N_tot * b + slots
-                rate_p, c_p, _ = self._dilution(y_real[idx_prev])  # dilution of the source states
+                rate_p, c_p, _ = self._dilution(y_real[idx_prev])  # dilution of the source states before alpha
+                rate_n, c_n, _ = self._dilution(y_real[idx_next])  # and of the target states after
                 self._fill_prev_prot(
                     y_prot_prev, idx_next, y_alpha[a][slots], times[b] - times[a],
                     rate_p, y_prot[idx_prev, ns:],
                     y_rna[idx_prev, ns:] * self.scale_proteins,
                     y_rna[idx_next, ns:] * self.scale_proteins,
-                    modes[idx_prev] * c_p, modes[idx_next] * c_p, _rows(s1r, idx_prev))
+                    modes[idx_prev] * c_p, modes[idx_next] * c_n, _rows(s1r, idx_prev), d1_end=rate_n)
 
         # Real cell behind each trajectory state, and its cell type (None if unavailable)
         y_real = np.full(len(vect_t_sim), -1, dtype=int)
@@ -2165,19 +2173,20 @@ class NetworkModel:
                 alpha_fn = inference_alpha_1thread if len(pairs) > 1 else inference_alpha
                 def alpha_task(a, b, slots):
                     r0, r1 = N_tot * a + slots, N_tot * b + slots
-                    rate_a, c_a, _ = self._dilution(y_real[r0])  # dilution of the source states
+                    rate_a, c_a, _ = self._dilution(y_real[r0])  # dilution of the source states before alpha
+                    rate_b, c_b, _ = self._dilution(y_real[r1])  # and of the target states after
                     return delayed(alpha_fn)(
                             rate_a, s1,
                             y_alpha[a][slots],
                             y_kon[r0], kon_vector[r0], y_prot[r0], y_rna[r0],
                             y_kon[r1], kon_vector[r1], y_prot[r1], y_rna[r1],
-                            modes[r0] * c_a, modes[r1] * c_a,
+                            modes[r0] * c_a, modes[r1] * c_b,
                             basal, inter, ks, times[b] - times[a],
                             tol=self.alpha_threshold,
                             n_pas = self.n_pas if self.force_n_pas else max(self.n_pas, int(times[b] - times[a])),
                             samples_data=y_samples[r0],
                             stim_vals=self._stim_schedule.per_cell(times[b], y_samples[r0]),
-                            scale_proteins=self.scale_proteins
+                            scale_proteins=self.scale_proteins, d1_end=rate_b
                         )
                 # Same pool size as every other Parallel call: a different n_jobs makes loky respawn workers
                 alphas = Parallel(n_jobs=-1)(alpha_task(a, b, slots) for a, b, slots in pairs)
@@ -2590,14 +2599,16 @@ class NetworkModel:
             
 
     def _fill_prev_prot(self, prev, idx_next, alpha, delta_t, d1, P0, M0, M1,
-                        mode_init, mode_end, s):
+                        mode_init, mode_end, s, d1_end=None):
         """
         Fill the flow-matching states prev (PrevProt) at rows idx_next from the
         previous-time states P0, for all cells at once. For target g, regulators follow the flow
         over delta_t * alpha_mod, alpha_mod = min(alpha[:, g] + .1, 1) (+.1 lets
-        the mode stabilize). Arrays P0..mode_end and alpha are (N, G_genes).
+        the mode stabilize). Arrays P0..mode_end and alpha are (N, G_genes). d1 / d1_end: relaxation
+        rates before / after the switch of each regulator (None: d1).
         """
         ns = self.n_stimuli
+        d1_end = d1 if d1_end is None else d1_end
         for g in range(ns, len(prev.cols)):
             c = prev.cols[g]
             is_gene = c >= ns
@@ -2607,8 +2618,8 @@ class NetworkModel:
             alpha_mod = np.minimum(alpha[:, g - ns] + .1, 1)[:, None]
             # Rows as a slice or an index array (pairs of observed times of each sample)
             dest = (idx_next, is_gene) if isinstance(idx_next, slice) else np.ix_(idx_next, np.flatnonzero(is_gene))
-            prev.values[g][dest] = find_next_prot(
-                d1[..., r], P0[:, r], M0[:, r], M1[:, r], mode_init[:, r], mode_end[:, r],
+            prev.values[g][dest] = find_next_prot2(
+                d1[..., r], d1_end[..., r], P0[:, r], mode_init[:, r], mode_end[:, r],
                 np.minimum(alpha[:, r] / alpha_mod, 1),
                 s[..., r] if np.ndim(s) else s, delta_t * alpha_mod)
 
@@ -2651,21 +2662,27 @@ class NetworkModel:
 
             P0 = np.ascontiguousarray(prot_modified[rows_prev, ns:], dtype=np.float64)
             alpha_ab = np.ascontiguousarray(self.alpha[a][slots], dtype=np.float64)
-            # Dilution of the start states: rate d1 + b, mode targets compressed by c = d1 / (d1 + b)
+            # Dilution at the birth rate of the start state before alpha, of the end state after:
+            # rate d1 + b, mode targets compressed by c = d1 / (d1 + b)
             rate, c = np.asarray(d1, dtype=np.float64), 1.0
+            rate_n, c_n = rate, c
             if birth is not None:
-                rate = rate[None, :] + np.asarray(birth, dtype=np.float64)[rows_prev][:, None]
+                b_all = np.asarray(birth, dtype=np.float64)
+                rate_n = rate[None, :] + b_all[rows_next][:, None]
+                rate = rate[None, :] + b_all[rows_prev][:, None]
                 c = np.asarray(d1, dtype=np.float64)[None, :] / rate
-            prot_modified[rows_next, ns:] = find_next_prot(
-                rate, P0, kb_prev, kb_next, kb_prev * c, kb_next * c, alpha_ab, s, float(delta_t))
+                c_n = np.asarray(d1, dtype=np.float64)[None, :] / rate_n
+            prot_modified[rows_next, ns:] = find_next_prot2(
+                rate, rate_n, P0, kb_prev * c, kb_next * c_n, alpha_ab, s, float(delta_t))
             for k in range(a + 1, b):  # timepoints missed inside the interval: along the same flow
                 prot_modified[N * k + slots, ns:] = prot_along(
-                    rate, P0, kb_prev * c, kb_next * c, alpha_ab, s, delta_t, times[k] - times[a])
+                    rate, P0, kb_prev * c, kb_next * c_n, alpha_ab, s, delta_t, times[k] - times[a], d1_end=rate_n)
 
             if prot_modified_prev is not None and self.weight_prev > 0:
                 self._fill_prev_prot(
                     prot_modified_prev, rows_next, self.alpha[a][slots], delta_t,
-                    rate, prot_modified[rows_prev, ns:], kb_prev, kb_next, kb_prev * c, kb_next * c, s)
+                    rate, prot_modified[rows_prev, ns:], kb_prev, kb_next, kb_prev * c, kb_next * c_n, s,
+                    d1_end=rate_n)
         if not valid.all():
             fill_virtual([prot_modified], valid, len(times), inside=False)
 
@@ -3331,9 +3348,12 @@ class NetworkModel:
                     b0 = self.prolif_network.predict_birth(P_start, stim_cells)
                     d0 = self.prolif_network.predict_death(P_start, stim_cells)
                 else:
-                    # Inference state at the start of the interval containing time (last one beyond)
+                    # Inference interval containing time (last one beyond): mean of the rates of its start and end
+                    # states, as the birth linear in time of the refit (same dilution integral)
                     k = int(np.clip(np.searchsorted(times_train, time, side='right') - 1, 0, len(times_train) - 1))
-                    b0, d0 = b_traj[k, slot], d_traj[k, slot]
+                    k_end = min(k + 1, len(times_train) - 1)
+                    b0 = 0.5 * (b_traj[k, slot] + b_traj[k_end, slot])
+                    d0 = 0.5 * (d_traj[k, slot] + d_traj[k_end, slot])
                 delta = rate_effects(P_start[:, None, :])[:, 0]
                 b_cells = split_net_change(b0, d0, delta)[0] if np.any(delta) else np.asarray(b0, dtype=float)
 

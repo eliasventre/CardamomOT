@@ -557,6 +557,28 @@ def split_net_change(birth, death, change):
     return b, b - net
 
 
+def anchor_birth_death(birth, death, group_labels, references):
+    """
+    Birth and death rates anchored separately on reference values per group: references {group: (birth, death)}.
+    Within each such group, each rate is scaled so that its mean matches the reference (non-negative rates: the
+    relative heterogeneity between cells is kept, and a reference 0 gives 0 to every cell); a group whose estimate is
+    0 everywhere gets the reference uniformly. Other groups are left unchanged.
+    """
+    birth, death = np.array(birth, dtype=float), np.array(death, dtype=float)
+    group_labels = np.asarray(group_labels).astype(str)
+
+    def scaled(x, ref):
+        m = x.mean()
+        return x * (ref / m) if m > 1e-12 else np.full_like(x, ref)
+
+    for group, (b_ref, d_ref) in references.items():
+        mask = group_labels == str(group)
+        if mask.any():
+            birth[mask] = scaled(birth[mask], float(b_ref))
+            death[mask] = scaled(death[mask], float(d_ref))
+    return birth, death
+
+
 def combine_growth_rates_with_reference(lit_rates, group_labels, reference_rates):
     """
     Anchor per-cell literature-derived growth rates to group-level reference rates.

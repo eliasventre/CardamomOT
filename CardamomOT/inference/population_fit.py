@@ -9,6 +9,8 @@ schedule of the sample, constant over each interval) and transition rates Q[a, b
 n / sum(n) are observed: they identify r_b - r_a and the transitions only jointly, so each is held by a prior (the
 prescribed rates; transitions small unless prescribed). Population sizes N(t) (relative), when given, constrain the
 absolute growth: log N(t) - log N(t_ref) = log sum n(t) - log sum n(t_ref).
+Stationary snapshots (CardamomOT-stat, fit_stationary): the composition of a sample is the Perron vector of M, its
+growth rate (from population sizes, if any) the Perron eigenvalue.
 """
 import numpy as np
 from scipy.linalg import expm
@@ -119,3 +121,79 @@ def fit_population(f_obs, n_cells, times, effects, u, r_prior=None, r_fixed=None
     size_rmse = float(np.sqrt(np.mean((size_residuals(logn) * p['sd_logn']) ** 2))) if use_sizes else None
     return dict(r0=r0, Q=Q, pred=pred, rmse=float(np.sqrt(np.mean((pred[1:] - f_obs[1:]) ** 2))) if T > 1 else 0.0,
                 cost=float(best.cost), size_rmse=size_rmse, log_size=logn)
+
+
+def perron(M):
+    """(growth rate, stationary composition) of dn/dt = M n: eigenvalue of largest real part of the Metzler matrix M
+    and its eigenvector, normalised to sum 1 (positive)."""
+    w, v = np.linalg.eig(M)
+    k = int(np.argmax(w.real))
+    x = np.abs(v[:, k].real)
+    return float(w[k].real), x / max(x.sum(), 1e-300)
+
+
+def growth_from_sizes(sizes, sd_logn=DEFAULTS['sd_logn']):
+    """(growth rate, its standard error) of the log population sizes {time: size} (two at least), None otherwise."""
+    if not sizes:
+        return None
+    t = np.array(sorted(sizes), dtype=float)
+    y = np.log([sizes[k] for k in sorted(sizes)])
+    if len(t) < 2:
+        return None
+    tc = t - t.mean()
+    return float((tc * (y - y.mean())).sum() / (tc ** 2).sum()), float(sd_logn / np.sqrt((tc ** 2).sum()))
+
+
+def fit_stationary(f_obs, n_cells, r_prior=None, r_fixed=None, q_prior=None, growth=None, r_sd=None, **kw):
+    """
+    Rates and transitions of one sample in balanced growth (CardamomOT-stat): its composition f_obs (K,), observed on
+    n_cells cells, must be the stationary composition (Perron vector) of dn/dt = M n, M = diag(r) + Q^T - diag(Q 1).
+
+    r_prior / r_fixed, q_prior: as in fit_population. growth: (growth rate, standard error) measured independently
+    (growth_from_sizes), which fixes the absolute level of the rates. The composition gives K - 1 constraints (one more
+    with growth): rates and transitions are identified only jointly, through their priors.
+    Returns dict(r0, Q, pred (1, K), rmse, cost, size_rmse=None, growth, growth_obs).
+    """
+    p = {**DEFAULTS, **kw}
+    f_obs = np.asarray(f_obs, dtype=float).ravel()
+    K = len(f_obs)
+    fit_r = r_prior is not None
+    r_ref = np.asarray(r_prior if fit_r else r_fixed, dtype=float)
+    sd_r = float(r_sd) if r_sd is not None else p['sd_r']
+    off = ~np.eye(K, dtype=bool)
+    q_ref = np.zeros((K, K)) if q_prior is None else np.asarray(q_prior, dtype=float)
+    q_sd = np.full((K, K), p['sd_q']) if q_prior is None else np.maximum(p['q_rel_sd'] * q_ref, p['sd_q'])
+    se = np.maximum(np.sqrt(np.clip(f_obs * (1 - f_obs), 1e-12, None) / max(float(n_cells), 1)), p['se_floor'])
+
+    def unpack(x):
+        r0 = x[:K] if fit_r else r_ref
+        Q = np.zeros((K, K))
+        Q[off] = x[K if fit_r else 0:]
+        return r0, Q
+
+    def residuals(x):
+        r0, Q = unpack(x)
+        lam, pi = perron(generator(r0, Q))
+        res = [(pi - f_obs) / se / np.sqrt(max(K - 1, 1))]
+        if fit_r:
+            res.append((r0 - r_ref) / sd_r)
+        res.append(((Q - q_ref) / q_sd)[off])
+        if growth is not None:
+            res.append(np.atleast_1d((lam - growth[0]) / max(growth[1], 1e-6)))
+        return np.concatenate(res)
+
+    q0 = np.clip(q_ref[off], 1e-5, None)
+    x0 = np.concatenate([r_ref if fit_r else [], q0])
+    lo = np.concatenate([np.full(K, -0.2) if fit_r else [], np.zeros(len(q0))])
+    hi = np.concatenate([np.full(K, 0.2) if fit_r else [], np.full(len(q0), 1.0)])
+    best = None
+    for scale in (1.0, 10.0, 0.1):
+        x_start = np.clip(np.concatenate([x0[:K] if fit_r else [], x0[K if fit_r else 0:] * scale]), lo + 1e-12, hi - 1e-12)
+        sol = least_squares(residuals, x_start, bounds=(lo, hi), x_scale=np.concatenate(
+            [np.full(K, 0.003) if fit_r else [], np.full(len(q0), 0.003)]))
+        if best is None or sol.cost < best.cost:
+            best = sol
+    r0, Q = unpack(best.x)
+    lam, pi = perron(generator(r0, Q))
+    return dict(r0=r0, Q=Q, pred=pi[None, :], rmse=float(np.sqrt(np.mean((pi - f_obs) ** 2))), cost=float(best.cost),
+                size_rmse=None, growth=lam, growth_obs=None if growth is None else growth[0])
