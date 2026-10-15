@@ -4,7 +4,7 @@ Utilities for degradation rate inference and temporal epsilon estimation.
 This module provides PyTorch models and helper functions used by the
 CARDAMOM pipeline when learning gene-specific degradation parameters
 from protein dynamics.  It includes the
-:class:`GeneRegulatoryODE_softmax` neural ODE model and the
+:class:`GeneRegulatoryODE_sigmoid` neural ODE model and the
 :func:`infer_ratio_d0_d1_unitary` routine among other utilities.
 """
 
@@ -70,9 +70,29 @@ def _ks_sample(ks, s_idx):
 
 
 def _theta_sample(theta_inter, s_idx):
-    """Interactions (G, G, n_nets) of sample s_idx: per-sample (S, G, G, n_nets) when 4-D (network conditions), else shared."""
+    """Interactions (G, G) of sample s_idx: per-sample (S, G, G) when 3-D (network conditions), else shared."""
     theta_inter = np.asarray(theta_inter)
-    return theta_inter[min(s_idx, theta_inter.shape[0] - 1)] if theta_inter.ndim == 4 else theta_inter
+    return theta_inter[min(s_idx, theta_inter.shape[0] - 1)] if theta_inter.ndim == 3 else theta_inter
+
+
+def _sigmoid_ks(ks):
+    """Sigmoid bounds (..., 2, G) = (lowest mode, highest mode) of amplitudes ks (..., n_modes, G):
+    kon = k_low + (k_high - k_low) * sigmoid(Z), intermediate modes lie on the slope (unstable)."""
+    ks = np.asarray(ks)
+    return np.stack([ks[..., 0, :], ks.max(axis=-2)], axis=-2)
+
+
+def _sigmoid_pair_t(z):
+    """(1 - sigmoid(z), sigmoid(z)) on a new last axis (2-class softmax: same float arithmetic as before)."""
+    return torch.softmax(torch.stack([torch.zeros_like(z), z], dim=-1), dim=-1)
+
+
+def _sigmoid_pair_np(z):
+    """Numpy (1 - sigmoid(z), sigmoid(z)) of z (N,) -> (N, 2), stabilised like a 2-class softmax."""
+    Z = np.stack([np.zeros_like(z), z], axis=-1)
+    Z -= Z.max(axis=-1, keepdims=True)
+    exp_Z = np.exp(Z)
+    return exp_Z / exp_Z.sum(axis=-1, keepdims=True)
 
 
 def build_kon_fn(ks, theta_inter, bias, device="cpu"):
@@ -80,11 +100,9 @@ def build_kon_fn(ks, theta_inter, bias, device="cpu"):
     Return a function kon(X_numpy_or_torch) -> numpy array (batch, G)
     The function accepts either numpy arrays or torch tensors; it returns numpy.
     """
-    ks_t: torch.Tensor = torch.tensor(ks, dtype=torch.float32, device=device)
+    ks_t: torch.Tensor = torch.tensor(_sigmoid_ks(ks), dtype=torch.float32, device=device)  # (2, G)
     theta_t: torch.Tensor = torch.tensor(theta_inter, dtype=torch.float32, device=device)
     bias_t: torch.Tensor = torch.tensor(bias, dtype=torch.float32, device=device)
-    n_modes: int = ks_t.shape[0]
-    G: int = ks_t.shape[1]
 
     def kon(X):
         # X can be torch tensor or numpy -> ensure torch on device
@@ -100,10 +118,7 @@ def build_kon_fn(ks, theta_inter, bias, device="cpu"):
         else:
             squeeze_output = False
 
-        Z: torch.Tensor = torch.zeros((X_t.shape[0], G, n_modes), device=device)
-        for k in range(n_modes - 1):
-            Z[:, :, k + 1] = X_t @ theta_t[:, :, k] + bias_t[:, k]
-        base_kon: torch.Tensor = torch.softmax(Z, dim=-1)
+        base_kon: torch.Tensor = _sigmoid_pair_t(X_t @ theta_t + bias_t)
         kon_t: torch.Tensor = torch.sum(base_kon * ks_t.T.unsqueeze(0), dim=-1)
 
         if squeeze_output:
@@ -113,9 +128,9 @@ def build_kon_fn(ks, theta_inter, bias, device="cpu"):
     return kon
 
 
-class GeneRegulatoryODE_softmax(nn.Module):
+class GeneRegulatoryODE_sigmoid(nn.Module):
     """
-    ODE model for gene regulatory dynamics with generalized softmax-based kon.
+    ODE model for gene regulatory dynamics with sigmoid kon (between the lowest and the highest mode).
     Learns gene-specific degradation rates (d) and scale factors.
     Optionally multiplies kon by a per-cell ratio g(t) (mRNA-driven proteins, see set_g_interpolation).
     """
@@ -126,9 +141,9 @@ class GeneRegulatoryODE_softmax(nn.Module):
         Args:
             G           : number of genes (total, including stimuli)
             d_init      : initial degradation rates (array of size G)
-            ks          : array of shape (n_modes, G)
-            theta_inter : array of shape (G, G, n_modes-1)
-            bias        : array of shape (G, n_modes-1)
+            ks          : array of shape (n_modes, G), reduced to its (lowest, highest) modes
+            theta_inter : array of shape (G, G)
+            bias        : array of shape (G,)
             n_stimuli   : number of stimulus columns (default 1)
             stim_vals   : fixed stimulus values shape (n_stimuli,); defaults to ones
         """
@@ -146,7 +161,7 @@ class GeneRegulatoryODE_softmax(nn.Module):
         self.scale_param = nn.Parameter(torch.ones(G, dtype=torch.float32))
 
         # ----- static network parameters -----
-        self.register_buffer("ks", torch.tensor(np.asarray(ks, dtype=np.float32)))
+        self.register_buffer("ks", torch.tensor(np.asarray(_sigmoid_ks(ks), dtype=np.float32)))  # (2, G)
         self.register_buffer("theta_inter", torch.tensor(np.asarray(theta_inter, dtype=np.float32)))
         self.register_buffer("bias", torch.tensor(np.asarray(bias, dtype=np.float32)))
 
@@ -154,7 +169,6 @@ class GeneRegulatoryODE_softmax(nn.Module):
             stim_vals = np.ones(self.n_stimuli, dtype=np.float32)
         self.register_buffer("stim_vals", torch.tensor(np.asarray(stim_vals, dtype=np.float32)))
 
-        self.n_modes = int(self.ks.shape[0])
         self.lambda_scale = float(lambda_scale)
 
         # Per-cell ratio g = kon_beta_nonscaled / kon_beta at both ends of the interval (None: no correction)
@@ -199,9 +213,6 @@ class GeneRegulatoryODE_softmax(nn.Module):
         X = X.clone()
         X[:, :ns] = self.stim_vals.to(X.device)
 
-        batch_size, G = X.shape[0], self.G
-        n_modes: int = self.n_modes
-
         # ----- compute scale -----
         # First ns elements (stimuli) are fixed at 1; ns: elements are learned
         scale_raw = torch.nn.functional.softplus(self.scale_param)
@@ -211,16 +222,12 @@ class GeneRegulatoryODE_softmax(nn.Module):
         ])
 
         # scale theta_inter and bias
-        theta_scaled = self.theta_inter * scale[None, :, None]  # scale each row g
-        bias_scaled = self.bias * scale[:, None]                # scale each gene’s bias
+        theta_scaled = self.theta_inter * scale[None, :]  # scale the inputs of each target gene
+        bias_scaled = self.bias * scale                   # scale each gene’s bias
 
-        # compute softmax activations
-        Z: torch.Tensor = torch.zeros((batch_size, G, n_modes), dtype=torch.float32, device=X.device)
-        for k in range(n_modes - 1):
-            Z[:, :, k + 1] = X @ theta_scaled[:, :, k] + bias_scaled[:, k]
-
-        base_kon: torch.Tensor = torch.softmax(Z, dim=-1)
-        ks_expanded = self.ks.T.unsqueeze(0)  # (1, G, n_modes)
+        # sigmoid activations
+        base_kon: torch.Tensor = _sigmoid_pair_t(X @ theta_scaled + bias_scaled)
+        ks_expanded = self.ks.T.unsqueeze(0)  # (1, G, 2)
         kon: torch.Tensor = torch.sum(base_kon * ks_expanded.to(X.device), dim=-1)
 
         # ----- per-cell ratio g(t), linear between the interval ends -----
@@ -260,9 +267,9 @@ def fit_scale_theta(X_prot, kon_beta, bias, theta_inter, ks, ns, samples_data=No
     Args:
         X_prot      : ``(N, G)`` protein levels.
         kon_beta    : ``(N, G)`` mixture-inferred kon values.
-        bias        : ``(G, n_modes-1)`` or ``(n_samples, G, n_modes-1)`` GRN basal.
-        theta_inter : ``(G, G, n_modes-1)`` GRN interaction tensor, or per sample ``(n_samples, G, G, n_modes-1)``.
-        ks          : ``(n_modes, G)`` softmax burst-rate amplitudes.
+        bias        : ``(G,)`` or ``(n_samples, G)`` GRN basal.
+        theta_inter : ``(G, G)`` GRN interaction matrix, or per sample ``(n_samples, G, G)``.
+        ks          : ``(n_modes, G)`` burst-rate amplitudes (sigmoid between the lowest and highest).
         ns          : number of stimulus columns.
         samples_data: ``(N,)`` per-cell sample index when bias is 3-D, else None.
 
@@ -275,14 +282,13 @@ def fit_scale_theta(X_prot, kon_beta, bias, theta_inter, ks, ns, samples_data=No
     kon_beta    = np.asarray(kon_beta,  dtype=np.float64)
     bias        = np.asarray(bias,      dtype=np.float64)
     theta_inter = np.asarray(theta_inter, dtype=np.float64)
-    ks          = np.asarray(ks,        dtype=np.float64)
+    ks          = _sigmoid_ks(np.asarray(ks, dtype=np.float64))
 
     G       = X_prot.shape[1]
     N       = X_prot.shape[0]
-    n_modes = ks.shape[-2]
 
-    per_sample = (bias.ndim == 3 and samples_data is not None)
-    if (ks.ndim == 3 or theta_inter.ndim == 4) and not per_sample:
+    per_sample = (bias.ndim == 2 and samples_data is not None)
+    if (ks.ndim == 3 or theta_inter.ndim == 3) and not per_sample:
         raise ValueError('per-sample ks / interactions need a 3-D bias and samples_data')
 
     # Pre-compute all per-gene inputs before optimisation.
@@ -297,7 +303,7 @@ def fit_scale_theta(X_prot, kon_beta, bias, theta_inter, ks, ns, samples_data=No
                 if not np.any(mask_s):
                     continue
                 bias_s = bias[min(s_idx, bias.shape[0] - 1)]
-                A_g_s  = X_prot[mask_s] @ _theta_sample(theta_inter, s_idx)[:, g, :] + bias_s[g, :]
+                A_g_s  = X_prot[mask_s] @ _theta_sample(theta_inter, s_idx)[:, g] + bias_s[g]
                 sample_data_g.append((mask_s, A_g_s, _ks_sample(ks, s_idx)[:, g]))
             gene_data.append((kon_beta[:, g], sample_data_g))
 
@@ -307,19 +313,14 @@ def fit_scale_theta(X_prot, kon_beta, bias, theta_inter, ks, ns, samples_data=No
             for target, sample_data_g in gene_data:
                 pred = np.zeros(N)
                 for mask_s_, A_g_s_, ks_g in sample_data_g:
-                    N_s = int(mask_s_.sum())
-                    Z   = np.zeros((N_s, n_modes))
-                    Z[:, 1:] = s * A_g_s_
-                    Z -= Z.max(axis=1, keepdims=True)
-                    exp_Z = np.exp(Z)
-                    sigma = exp_Z / exp_Z.sum(axis=1, keepdims=True)
+                    sigma = _sigmoid_pair_np(s * A_g_s_)
                     pred[mask_s_] = (sigma * ks_g).sum(axis=1)
                 total += np.mean((pred - target) ** 2)
             return total
     else:
         gene_data = [
             (kon_beta[:, g], ks[:, g],
-             X_prot @ theta_inter[:, g, :] + bias[g, :])
+             X_prot @ theta_inter[:, g] + bias[g])
             for g in range(ns, G)
         ]
 
@@ -327,11 +328,7 @@ def fit_scale_theta(X_prot, kon_beta, bias, theta_inter, ks, ns, samples_data=No
             s = np.exp(log_s)
             total = 0.0
             for target, ks_g, A_g in gene_data:
-                Z = np.zeros((N, n_modes))
-                Z[:, 1:] = s * A_g
-                Z -= Z.max(axis=1, keepdims=True)
-                exp_Z = np.exp(Z)
-                sigma = exp_Z / exp_Z.sum(axis=1, keepdims=True)
+                sigma = _sigmoid_pair_np(s * A_g)
                 total += np.mean(((sigma * ks_g).sum(axis=1) - target) ** 2)
             return total
 
@@ -407,10 +404,9 @@ def infer_ratio_d0_d1_unitary(
     Args:
         X_prot             : ``(N, G)`` protein observations (all timepoints).
         times              : ``(N,)`` time label for each row.
-        bias               : GRN bias — ``(T-1, G, n_nets)`` or
-                             ``(T-1, n_samples, G, n_nets)``.
-        theta_inter        : ``(T-1, G, G, n_nets)`` GRN interaction tensor.
-        ks                 : ``(n_modes, G)`` softmax burst-rate amplitudes
+        bias               : GRN bias — ``(T-1, G)`` or ``(T-1, n_samples, G)``.
+        theta_inter        : ``(T-1, G, G)`` GRN interaction tensor, or ``(T-1, n_samples, G, G)``.
+        ks                 : ``(n_modes, G)`` burst-rate amplitudes (sigmoid between the lowest and highest)
                              (already multiplied by ``scale_proteins``).
         d_learned_temporal : ``(T-1, G)`` learned protein degradation rates d1.
         k1_vec             : ``(G,)`` max burst rate × scale (= ``k1 * scale``).
@@ -510,17 +506,17 @@ def infer_ratio_d0_d1_unitary(
             theta_np = np.asarray(theta_inter,  dtype=np.float32)
 
             ks_cnt = _ks_sample(ks_np, s_int)
-            # Support 3-D bias (T-1, G, nets) and 4-D (T-1, n_samples, G, nets)
-            if bias_np.ndim == 3:
-                bias_cnt  = bias_np[cnt]                         # (G, n_nets)
-            elif bias_np.ndim == 4:
+            # Support 2-D bias (T-1, G) and 3-D (T-1, n_samples, G)
+            if bias_np.ndim == 2:
+                bias_cnt  = bias_np[cnt]                         # (G,)
+            elif bias_np.ndim == 3:
                 bias_cnt = bias_np[cnt, min(s_int, bias_np.shape[1] - 1)]
             else:
                 bias_cnt = bias_np
 
-            if theta_np.ndim == 4:
-                theta_cnt = theta_np[cnt]                        # (G, G, n_nets)
-            elif theta_np.ndim == 5:
+            if theta_np.ndim == 3:
+                theta_cnt = theta_np[cnt]                        # (G, G)
+            elif theta_np.ndim == 4:
                 theta_cnt = theta_np[cnt, min(s_int, theta_np.shape[1] - 1)]
             else:
                 theta_cnt = theta_np
@@ -529,7 +525,7 @@ def infer_ratio_d0_d1_unitary(
             k1_i        = (k1_vec[min(s_int, len(k1_vec) - 1)] if k1_vec.ndim == 2 else k1_vec) / float(scale)  # (G,) raw max burst rate
 
             # ── Build ODE and simulate ────────────────────────────────────────────
-            ode = GeneRegulatoryODE_softmax(
+            ode = GeneRegulatoryODE_sigmoid(
                 G, d_param_vec, ks_cnt, theta_cnt, bias_cnt,
                 n_stimuli=ns,
                 stim_vals=stim1,
@@ -665,7 +661,7 @@ def inference_degradation_prot(
     ``birth``: (N,) birth rate of the rows of X_prot (dilution of the proteins, rate of the start state of each
     interval: dP/dt = d (kon - P) - b P), or None (no dilution).
 
-    When ``bias`` is 3-D (n_samples, G, n_modes-1) and ``samples_data`` is provided,
+    When ``bias`` is 2-D (n_samples, G) and ``samples_data`` is provided,
     one ODE module is created per sample with its own bias while ``d_param`` and
     ``scale_param`` are shared, so a single optimizer refines the shared kinetics
     from all samples jointly.
@@ -699,7 +695,7 @@ def inference_degradation_prot(
     else:
         d_init = np.asarray(d, dtype=np.float32)
 
-    per_sample_mode = (bias.ndim == 3 and samples_data is not None)
+    per_sample_mode = (bias.ndim == 2 and samples_data is not None)
 
     if per_sample_mode:
         # ── Per-sample mode: one ODE per sample, shared d_param / scale_param ──
@@ -715,7 +711,7 @@ def inference_degradation_prot(
         else:
             stim_first = np.ones(ns, dtype=np.float32) * scale_proteins
         ode_funcs = [
-            GeneRegulatoryODE_softmax(
+            GeneRegulatoryODE_sigmoid(
                 G, d_init, _ks_sample(ks, s_idx), _theta_sample(theta_inter, s_idx), bias[s_idx],
                 n_stimuli=ns, stim_vals=stim_first, device=device,
                 lambda_scale=lambda_scale,
@@ -818,9 +814,9 @@ def inference_degradation_prot(
             pairs.append((float(t0), float(t1), X0_np[:n_pairs], X1_np[:n_pairs], stim0, stim1, lab0, g01, b01))
 
     stim_first = pairs[0][5] if pairs else np.ones(ns, dtype=np.float32) * scale_proteins
-    if np.ndim(ks) == 3 or np.ndim(theta_inter) == 4:
+    if np.ndim(ks) == 3 or np.ndim(theta_inter) == 3:
         raise ValueError('per-sample ks / interactions need a 3-D bias and samples_data')
-    ode_func: GeneRegulatoryODE_softmax = GeneRegulatoryODE_softmax(
+    ode_func: GeneRegulatoryODE_sigmoid = GeneRegulatoryODE_sigmoid(
         G, d_init, ks, theta_inter, bias,
         n_stimuli=ns, stim_vals=stim_first, device=device,
         lambda_scale=lambda_scale,
@@ -997,9 +993,9 @@ if __name__ == "__main__":
     X_prot = np.random.rand(N_cells, G).astype(np.float32)
 
     n_modes = 3
-    bias = np.random.randn(G, n_modes - 1).astype(np.float32) * 0.1
-    theta_inter = np.random.randn(G, G, n_modes - 1).astype(np.float32) * 0.1
-    ks = np.random.rand(n_modes, G).astype(np.float32)
+    bias = np.random.randn(G).astype(np.float32) * 0.1
+    theta_inter = np.random.randn(G, G).astype(np.float32) * 0.1
+    ks = np.sort(np.random.rand(n_modes, G).astype(np.float32), axis=0)
 
     d_init = np.ones(G, dtype=np.float32) * 0.5
 

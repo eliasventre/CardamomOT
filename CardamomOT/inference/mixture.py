@@ -107,6 +107,9 @@ def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=10
         # Newton step on every a_i > 0 at once (trigamma = zeta(2, .)):
         # gradient Σ_i [ψ(x_i+a) + log(b/s_i) - log(1+b/s_i) - ψ(a)]
         pos = a > 0
+        if not pos.any():  # no burst in any group (gene ~ unexpressed): nothing to fit, b as after an update
+            b = np.sum(w_b * a) / sx
+            break
         a_s = np.where(pos, a, 1.0)
         z = a_s[:, None] + V
         p0 = np.sum(Wm * psi(z), axis=1)

@@ -1,3 +1,6 @@
 {
+ "estimate_proliferation_rates": false,
+ "simulate_with_proliferation": false,
+ "select_genes": false,
  "train_rate": 0.1
 }

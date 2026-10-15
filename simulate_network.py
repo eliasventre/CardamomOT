@@ -18,7 +18,7 @@ Output files:
 """
 import sys; sys.path += ['../']
 import numpy as np
-from CardamomOT import NetworkModel as NetworkModel_beta
+from CardamomOT import NetworkModel as NetworkModel_beta, load_simul_parameters
 from CardamomOT.inputs import input_dir
 from CardamomOT.run_options import parse_step_options, settings, configure, configure_simulation
 from CardamomOT.config import n_inference_stimuli, simulation_schedule, schedule_reference_times
@@ -26,19 +26,26 @@ import anndata as ad
 import os
 import torch
 
-def attach_proliferation(model, p, tag='[simulate_network]'):
-    """Proliferation MLP (prolif_network.pt, one or two heads) and effects of the inference stimuli on the net
-    rate attached to model: branching simulation (and birth rate of the dilution) as in simulate_network."""
+def attach_proliferation(model, p, tag='[simulate_network]', branching=True):
+    """Proliferation MLP (prolif_network.pt, one or two heads) attached to model: birth rate of the dilution
+    (protein_dilution) and, with branching, branching simulation with the effects of the inference stimuli on the
+    net rate, as in simulate_network."""
     prolif_path = os.path.join(p, 'cardamomOT', 'prolif_network.pt')
     n_prot_path = os.path.join(p, 'cardamomOT', 'prolif_network_n_proteins.npy')
     if not (os.path.exists(prolif_path) and os.path.exists(n_prot_path)):
-        print(f"{tag} Warning: simulate_with_proliferation = True but prolif_network.pt not found; "
-              "run infer_network_simul.py with simulate_with_proliferation = True first")
+        if branching:
+            print(f"{tag} Warning: simulate_with_proliferation = True but prolif_network.pt not found; "
+                  "run infer_network_simul.py first")
+        else:
+            print(f"{tag} No prolif_network.pt: dilution at the birth rates of the trajectory slots")
         return False
     from CardamomOT.inference.proliferations import load_proliferation_mlp
     # One head (net rate) or two (birth, death); older networks keep identity input scaling
     model.prolif_network = load_proliferation_mlp(prolif_path, int(np.load(n_prot_path)[0]))
-    model.simulate_with_proliferation = True
+    model.simulate_with_proliferation = bool(branching)
+    if not branching:
+        print(f"{tag} Loaded proliferation network — birth rate of the dilution (no branching)")
+        return True
     stim_pkl = os.path.join(p, 'cardamomOT', 'stimulus_rates.pkl')
     if os.path.exists(stim_pkl):
         import pickle
@@ -62,25 +69,22 @@ def load_simulation_model(p, opts, adata, tag='[simulate_network]'):
     # Load inferred network parameters
     print(f"{tag} Loading inferred network parameters...")
     try:
-        model.d_t = np.load(os.path.join(p, 'cardamomOT', 'degradations_temporal.npy'))
-        model.basal = np.load(os.path.join(p, 'cardamomOT', 'basal_simul.npy'))
-        model.inter = np.load(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))
+        prm = load_simul_parameters(os.path.join(p, 'cardamomOT'))  # outputs of infer_network_simul
+        model.d_t, model.basal, model.inter = prm['d_t'], prm['basal'], prm['inter']
         # Validate n_stimuli against loaded inter (authoritative for simulation)
-        n_stimuli_inter = model.inter.shape[-2] - adata.shape[1]  # inter: ([n_samples,] G_tot, G_tot, n_networks)
+        n_stimuli_inter = model.inter.shape[-1] - adata.shape[1]  # inter: ([n_samples,] G_tot, G_tot)
         if n_stimuli_inter != model.n_stimuli:
             print(f"{tag} Warning: correcting n_stimuli from {model.n_stimuli} "
-                  f"to {n_stimuli_inter} based on loaded inter_simul.npy")
+                  f"to {n_stimuli_inter} based on the loaded network")
             model.n_stimuli = n_stimuli_inter
-        model.basal_t = np.load(os.path.join(p, 'cardamomOT', 'basal_t_simul.npy'))
-        model.inter_t = np.load(os.path.join(p, 'cardamomOT', 'inter_t_simul.npy'))
+        model.basal_t, model.inter_t = prm['basal_t'], prm['inter_t']
         model.a = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
-        model.prot = np.load(os.path.join(p, 'cardamomOT', 'data_prot_forsimul.npy'))
+        model.prot = prm['prot']
         model.rna = np.load(os.path.join(p, 'cardamomOT', 'data_rna.npy'))
         model.times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
         model.kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta.npy'))
-        model.proba_traj = np.load(os.path.join(p, 'cardamomOT', 'proba_traj.npy'))
-        model.ratios = np.load(os.path.join(p, 'cardamomOT', 'ratios.npy'))
-        model.n_networks = np.load(os.path.join(p, 'cardamomOT', 'n_networks.npy'))
+        model.ratios = prm['ratios']
+        model.load_state_rates(os.path.join(p, 'cardamomOT'))  # birth / death of the states (dilution)
         samples_path = os.path.join(p, 'cardamomOT', 'data_samples.npy')
         if os.path.exists(samples_path):
             model.samples_data = np.load(samples_path)
@@ -115,9 +119,9 @@ def load_simulation_model(p, opts, adata, tag='[simulate_network]'):
     times.sort()
     print(f"{tag} Will simulate {len(times)} timepoints: {times}")
 
-    # Load proliferation network if requested
-    if simulate_with_proliferation:
-        attach_proliferation(model, p, tag)
+    # Proliferation network: branching (simulate_with_proliferation) and birth rate of the dilution
+    if simulate_with_proliferation or model.protein_dilution:
+        attach_proliferation(model, p, tag, branching=simulate_with_proliferation)
 
     return model, times
 

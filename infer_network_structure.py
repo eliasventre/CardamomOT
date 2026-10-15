@@ -13,11 +13,11 @@ Usage:
 
 Required input files:
     - Data/data_<split>.h5ad: count matrix with degradation rates
-    - cardamom/modes.npy, proba.npy, mixture_parameters.npy: from infer_mixture.py
+    - cardamom/modes.npy, basins.npy, mixture_parameters.npy: from infer_mixture.py
 
 Output files:
     - cardamom/inter.npy: gene interaction matrix (G×G)
-    - cardamom/basal.npy: basal expression parameters (G×1)
+    - cardamom/basal.npy: basal expression parameters per sample (n_samples×G)
     - cardamom/alpha.npy: cellular scaling factors
     - cardamomOT/couplings.npz: final soft couplings of the trajectories between consecutive observed times
       (sparse: src / tgt = rows of data_<split>.h5ad, w = mass, sample, t_from, t_to; CardamomOT.tools.velocity)
@@ -88,12 +88,11 @@ def main(argv):
         model.modes = np.load(os.path.join(p, 'cardamomOT', 'modes.npy'))
         with open(os.path.join(p, 'cardamomOT', 'pi_init.pkl'), "rb") as f:
             model.pi_init = pickle.load(f)
-        model.proba = np.load(os.path.join(p, 'cardamomOT', 'proba.npy'))
+        model.basins = np.load(os.path.join(p, 'cardamomOT', 'basins.npy'))
         model.proba_init = np.load(os.path.join(p, 'cardamomOT', 'proba_init.npy'))
         model.a = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
-        model.n_networks = np.load(os.path.join(p, 'cardamomOT', 'n_networks.npy'))
 
-        print(f"[infer_network_structure] Loaded mixture parameters ({model.n_networks} networks)")
+        print(f"[infer_network_structure] Loaded mixture parameters ({model.a.shape[-2] - 1} modes max)")
     except FileNotFoundError as e:
         error_msg = (
             f"Error: Required mixture parameter files not found. "
@@ -104,7 +103,7 @@ def main(argv):
 
     G_tot = adata.shape[1] + model.n_stimuli
     ns = model.n_stimuli
-    model.ref_network = np.ones((G_tot, G_tot, model.n_networks))
+    model.ref_network = np.ones((G_tot, G_tot))
     # Possible targets of the stimuli (STIMk of the row all of perturbation_inference), applied in fit_network
     model.stimulus_targets = stimulus_target_mask(read_stimulus_targets(input_dir(p)),
                                                   list(adata.var_names), ns)
@@ -124,9 +123,8 @@ def main(argv):
             ref_mat = sub_df.to_numpy()  # signed: |v| > 1 forces the edge sign
             row_idxs = [ns + genes_only.index(g) for g in sub_df.index]
             col_idxs = [ns + genes_only.index(g) for g in sub_df.columns]
-            for n in range(model.n_networks):
-                for ii, ri in enumerate(row_idxs):
-                    model.ref_network[ri, col_idxs, n] = ref_mat[ii, :]
+            for ii, ri in enumerate(row_idxs):
+                model.ref_network[ri, col_idxs] = ref_mat[ii, :]
             # stimulus rows/cols are left at 1.0 and will be overridden by model.stimulus
             # inside fit_network (self.ref_network[:ns, :] = self.stimulus)
 
@@ -144,9 +142,8 @@ def main(argv):
             _ref_mat = _sub.to_numpy()  # signed: |v| > 1 forces the edge sign
             _row_idxs = [ns + genes_only.index(g) for g in _sub.index]
             _col_idxs = [ns + genes_only.index(g) for g in _sub.columns]
-            for _n in range(model.n_networks):
-                for _ii, _ri in enumerate(_row_idxs):
-                    model.ref_network[_ri, _col_idxs, _n] = _ref_mat[_ii, :]
+            for _ii, _ri in enumerate(_row_idxs):
+                model.ref_network[_ri, _col_idxs] = _ref_mat[_ii, :]
             print(f"[infer_network_structure] Loaded structural prior from {data_ref_path} "
                   f"({len(_common_ref)}/{len(genes_only)} genes matched).")
         else:
@@ -176,8 +173,7 @@ def main(argv):
                 # Gene-only matrix: embed into gene block
                 _block = np.zeros((G_tot, G_tot))
                 _block[ns:ns + _n_genes, ns:ns + _n_genes] = _vals
-            for _n in range(model.n_networks):
-                model.ref_network[:, :, _n] = _block
+            model.ref_network[:, :] = _block
 
     # Infer network
     model.d = np.ones((2, G_tot))
@@ -185,7 +181,7 @@ def main(argv):
 
     # ─── LOAD OPTIONAL INIT / REF ARRAYS ────────────────────────────────
     def _load_gene_vec(fname):
-        """Load a (G_tot,) or (G_tot, n_networks) basal vector from npy or csv."""
+        """Load a (G_tot,) or per-sample (n_samples, G_tot) basal vector from npy or csv (one column per sample)."""
         npy = os.path.join(p, 'Data', fname + '.npy')
         csv = os.path.join(p, 'Data', fname + '.csv')
         if os.path.exists(npy):
@@ -199,13 +195,13 @@ def main(argv):
             arr = np.zeros((G_tot, df.shape[1]))
             for row_g in common:
                 arr[genes_list.index(row_g), :] = df.loc[row_g].values
-            arr = arr[:, 0] if arr.shape[1] == 1 else arr
+            arr = arr[:, 0] if arr.shape[1] == 1 else arr.T
             print(f"[infer_network_structure] Loaded {fname} from {csv} shape={arr.shape}")
             return arr
         return None
 
     def _load_gene_mat(fname):
-        """Load a (G_tot, G_tot) or (G_tot, G_tot, n_networks) inter matrix from npy or csv.
+        """Load a (G_tot, G_tot) (or per-sample (n_samples, G_tot, G_tot)) inter matrix from npy or csv.
 
         If the CSV index contains gene names (case-insensitive), values are remapped to adata
         gene order. Otherwise the file is treated as positional: a warning is emitted and the
@@ -321,9 +317,7 @@ def main(argv):
                               if 'dataset_id' in adata.obs else np.array(['0']))
             n_samp = len(unique_samples)
             sample_to_idx = {str(s): i for i, s in enumerate(unique_samples)}
-            n_nw = model.n_networks
-
-            basal_ref_kov = np.zeros((n_samp, G_tot, n_nw))
+            basal_ref_kov = np.zeros((n_samp, G_tot))
             basal_ref_mask = np.zeros((n_samp, G_tot), dtype=bool)
 
             def _parse_genes(cell):
@@ -340,16 +334,16 @@ def main(argv):
                 for gene in _parse_genes(row.get('KO', '')):
                     if gene in genes_only:
                         gi = ns + genes_only.index(gene)
-                        basal_ref_kov[s_idx, gi, :] = -100.0
+                        basal_ref_kov[s_idx, gi] = -100.0
                         basal_ref_mask[s_idx, gi] = True
                 for gene in _parse_genes(row.get('OV', '')):
                     if gene in genes_only:
                         gi = ns + genes_only.index(gene)
-                        basal_ref_kov[s_idx, gi, :] = 100.0
+                        basal_ref_kov[s_idx, gi] = 100.0
                         basal_ref_mask[s_idx, gi] = True
 
             np.save(os.path.join(p, 'cardamomOT', 'basal_ref_mask'), basal_ref_mask)
-            basal_ref = basal_ref_kov   # 3D (n_samples, G_tot, n_networks)
+            basal_ref = basal_ref_kov   # (n_samples, G_tot)
             print(f"[infer_network_structure] Loaded per-sample KOV prior from {kov_path} "
                   f"({n_samp} samples, mask nnz={basal_ref_mask.sum()})")
         except Exception as e:
@@ -364,7 +358,7 @@ def main(argv):
               "default " + ('yes' if _m.get('default') is not None else 'no') + ", own matrix for " +
               (', '.join(k for k in _m if k != 'default') or 'no sample')))
 
-    model.fit_network(adata, intensity_prior=100, verb=1, stimulus_schedule=stim_sched,
+    model.fit_network(adata, verb=1, stimulus_schedule=stim_sched,
                       basal_init=basal_init, inter_init=inter_init,
                       basal_ref=basal_ref, inter_ref=inter_ref,
                       transition_rates=transition_rates)
@@ -387,16 +381,15 @@ def main(argv):
     np.save(os.path.join(cardamom_dir, 'data_rna'), model.rna)
     np.save(os.path.join(cardamom_dir, 'data_times'), model.times_data)
     np.save(os.path.join(cardamom_dir, 'data_samples'), model.samples_data)
-    np.save(os.path.join(cardamom_dir, 'proba_traj'), model.proba_traj)
     np.save(os.path.join(cardamom_dir, 'data_kon_theta'), model.kon_theta)
     np.save(os.path.join(cardamom_dir, 'data_kon_beta'), model.kon_beta)
     np.save(os.path.join(cardamom_dir, 'alpha'), model.alpha)
     # Final basin of each training cell for each gene (EMD and network): infer_test learns from them
-    np.save(os.path.join(cardamom_dir, 'basins_final'), np.argmax(model.proba, axis=-1).astype(np.int8))
+    np.save(os.path.join(cardamom_dir, 'basins_final'), model.basins.astype(np.int8))
     # Context of the last iteration (Sinkhorn counter, mode-to-mode OT weight, basin probability weight)
     ctx = model.final_context
     np.save(os.path.join(cardamom_dir, 'n_iter_inference'),
-            np.array([ctx['n_iter_reg'], ctx['weight_init'], ctx['weight_prob']], dtype=float))
+            np.array([ctx['n_iter_reg'], ctx['weight_init'], ctx['weight_prob'], ctx['reg_factor']], dtype=float))
     np.save(os.path.join(cardamom_dir, 'degradations'), model.d)
     if model.R_opt is not None:
         np.save(os.path.join(cardamom_dir, 'data_R_opt'), model.R_opt)

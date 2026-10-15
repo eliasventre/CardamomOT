@@ -6,7 +6,7 @@ KO/OV predictions) and write it in the project directory.
 
 Usage:
     python report_results.py -i <project_path> [--stimulus <float>] [--prior <float>] [-o <out.pdf>]
-(split, report_net_index, report_normalize, report_log1p, report_n_umap, cell_depth_for_representation,
+(split, report_normalize, report_log1p, report_n_umap, cell_depth_for_representation,
 embedding_method_visualization: model_parameters sheet)
 
 If --stimulus/--prior are given neither on the command line nor in the workbook, they are read from
@@ -56,7 +56,7 @@ def main(argv):
     p, out_path = opts.p, opts.output
     model = configure(NetworkModel(1), opts)
     split = model.split
-    net_index, norm, log = int(model.report_net_index), bool(model.report_normalize), bool(model.report_log1p)
+    norm, log = bool(model.report_normalize), bool(model.report_log1p)
     n_umap = int(model.report_n_umap) if model.report_n_umap and int(model.report_n_umap) > 0 else None
 
     # Tag of the run: given (option or workbook), else that of the latest check_sim_to_data output
@@ -87,7 +87,7 @@ def main(argv):
 
     try:
         out = generate_report(p, split, stimulus, prior, perturbations, out_path=out_path,
-                              net_index=net_index, normtransform=norm, logtransform=log, n_umap=n_umap,
+                              normtransform=norm, logtransform=log, n_umap=n_umap,
                               depth_embeddings=bool(model.cell_depth_for_representation),
                               embedding_method_visualization=str(model.embedding_method_visualization),
                               protein_dilution=bool(model.protein_dilution),

@@ -9,28 +9,28 @@ N = 10
 # Print information
 verb = 1
 # number of initial couplings
-n_repet=2
+n_repet=0
 
 # Inference for Network4
-# for r in range(0, N):
-#     fname = 'FN4/Data/data_{}.txt'.format(r + 1)
-#     data = np.loadtxt(fname, dtype=int, delimiter='\t')[1:,1:]
-#     time = np.loadtxt(fname, dtype=int, delimiter='\t')[0,1:]
-#     x = data.T
-#     x[:, 0] = time
-#     G = np.size(x, 1)
-#     model = NetworkModel(G - 1)
-#     model.recompute_degradations=0
-#     model.d = np.loadtxt('FN4/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
-#     model.fit(x, intensity_prior=0, verb=verb)
-#     score = model.inter
-#     for n in range(n_repet):
-#         model = NetworkModel(G - 1)
-#         model.recompute_degradations=0
-#         model.d = np.loadtxt('FN4/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
-#         model.fit(x, intensity_prior=0, verb=verb)
-#         score += model.inter
-#     np.save('FN4/random init/score_{}'.format(r+1), score)
+for r in range(0, N):
+    fname = 'FN4/Data/data_{}.txt'.format(r + 1)
+    data = np.loadtxt(fname, dtype=int, delimiter='\t')[1:,1:]
+    time = np.loadtxt(fname, dtype=int, delimiter='\t')[0,1:]
+    x = data.T
+    x[:, 0] = time
+    G = np.size(x, 1)
+    model = NetworkModel(G - 1)
+    model.d = np.loadtxt('FN4/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
+    model.intensity_prior = 0
+    model.fit(x, verb=verb)
+    score = model.inter
+    for n in range(n_repet):
+        model = NetworkModel(G - 1)
+        model.d = np.loadtxt('FN4/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
+        model.intensity_prior = 0
+        model.fit(x, verb=verb)
+        score += model.inter
+    np.save('FN4/random init/score_{}'.format(r+1), score)
 
 # Inference for Cycle
 for r in range(0, N):
@@ -41,15 +41,15 @@ for r in range(0, N):
     x[:, 0] = time
     G = np.size(x, 1)
     model = NetworkModel(G - 1)
-    model.recompute_degradations=0
     model.d = np.loadtxt('CN5/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
-    model.fit(x, intensity_prior=0, verb=verb)
+    model.intensity_prior = 0
+    model.fit(x, verb=verb)
     score = model.inter
     for n in range(n_repet):
         model = NetworkModel(G - 1)
-        model.recompute_degradations=0
         model.d = np.loadtxt('CN5/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
-        model.fit(x, intensity_prior=0, verb=verb)
+        model.intensity_prior = 0
+        model.fit(x, verb=verb)
         score += model.inter
     np.save('CN5/random init/score_{}'.format(r+1), score)
 
@@ -62,15 +62,15 @@ for r in range(0, N):
     x[:, 0] = time
     G = np.size(x, 1)
     model = NetworkModel(G - 1)
-    model.recompute_degradations=0
     model.d = np.loadtxt('BN8/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
-    model.fit(x, intensity_prior=0, verb=verb)
+    model.intensity_prior = 0
+    model.fit(x, verb=verb)
     score = model.inter
     for n in range(n_repet):
         model = NetworkModel(G - 1)
-        model.recompute_degradations=0
         model.d = np.loadtxt('BN8/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
-        model.fit(x, intensity_prior=0, verb=verb)
+        model.intensity_prior = 0
+        model.fit(x, verb=verb)
         score += model.inter
     np.save('BN8/random init/score_{}'.format(r+1), score)
 
@@ -84,43 +84,43 @@ for r in range(0, N):
     x[:, 0] = time
     G = np.size(x, 1)
     model = NetworkModel(G - 1)
-    model.recompute_degradations=0
     model.d = np.loadtxt('FN8/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
-    model.fit(x, intensity_prior=0, verb=verb)
+    model.intensity_prior = 0
+    model.fit(x, verb=verb)
     score = model.inter
     for n in range(n_repet):
         model = NetworkModel(G - 1)
-        model.recompute_degradations=0
         model.d = np.loadtxt('FN8/Data/Rates/degradation_rates.txt', dtype=float, delimiter='\t').T 
-        model.fit(x, intensity_prior=0, verb=verb)
+        model.intensity_prior = 0
+        model.fit(x, verb=verb)
         score += model.inter
     np.save('FN8/random init/score_{}'.format(r+1), score)
 
 # print("We are at trees")
-# # Inference for tree-like networks
-# for n in [5, 10, 20, 50, 100]:
-#     runtime = np.zeros(N)
-#     for r in range(N):
-#         fname = 'Trees{}/Data/data_{}.txt'.format(n,r+1)
-#         data = np.loadtxt(fname, dtype=int, delimiter='\t')[1:,1:]
-#         time = np.loadtxt(fname, dtype=int, delimiter='\t')[0,1:]
-#         x = data.T
-#         x[:,0] = time
-#         G = np.size(x, 1)
-#         model = NetworkModel(G - 1)
-#         model.recompute_degradations=0
-#         model.d = np.loadtxt('Trees{}/Data/Rates/degradation_rates.txt'.format(n), dtype=float, delimiter='\t').T 
-#         t0 = timer.time()
-#         model.fit(x, intensity_prior=0, verb=verb)
-#         t1 = timer.time()
-#         runtime[r] = t1 - t0
-#         score = model.inter_tmp
-#         for _ in range(n_repet):
-#             model = NetworkModel(G - 1)
-#             model.recompute_degradations=0
-#             model.d = np.loadtxt('Trees{}/Data/Rates/degradation_rates.txt'.format(n), dtype=float, delimiter='\t').T 
-#             model.fit(x, intensity_prior=0, verb=verb)
-#             score += model.inter_tmp
-#         np.save('Trees{}/random init/score_{}'.format(n,r+1), score)
-#     # Save running times
-#     np.savetxt('Trees{}/random init/runtime.txt'.format(n), runtime.T)
+# Inference for tree-like networks
+for n in [5, 10, 20]:
+    runtime = np.zeros(N)
+    for r in range(N):
+        fname = 'Trees{}/Data/data_{}.txt'.format(n,r+1)
+        data = np.loadtxt(fname, dtype=int, delimiter='\t')[1:,1:]
+        time = np.loadtxt(fname, dtype=int, delimiter='\t')[0,1:]
+        x = data.T
+        x[:,0] = time
+        G = np.size(x, 1)
+        model = NetworkModel(G - 1)
+        model.d = np.loadtxt('Trees{}/Data/Rates/degradation_rates.txt'.format(n), dtype=float, delimiter='\t').T 
+        t0 = timer.time()
+        model.intensity_prior = 0
+        model.fit(x, verb=verb)
+        t1 = timer.time()
+        runtime[r] = t1 - t0
+        score = model.inter_tmp
+        for _ in range(n_repet):
+            model = NetworkModel(G - 1)
+            model.d = np.loadtxt('Trees{}/Data/Rates/degradation_rates.txt'.format(n), dtype=float, delimiter='\t').T 
+            model.intensity_prior = 0
+            model.fit(x, verb=verb)
+            score += model.inter_tmp
+        np.save('Trees{}/random init/score_{}'.format(n,r+1), score)
+    # Save running times
+    np.savetxt('Trees{}/random init/runtime.txt'.format(n), runtime.T)

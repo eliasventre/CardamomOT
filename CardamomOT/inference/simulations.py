@@ -25,38 +25,200 @@ logger = get_logger(__name__)
 
 @njit(cache=True)
 def base_kon_vector(theta_basal, theta_inter, y_prot) -> np.ndarray:
+    """(1 - sigmoid(Z), sigmoid(Z)) per cell and gene, Z = basal + prot @ inter (basal (G,), inter (G, G))."""
     n_cells, G = y_prot.shape
-    Gm1, n_net = theta_basal.shape[0], theta_basal.shape[1]
-    Z = np.zeros((n_cells, Gm1, n_net))
-    result = np.empty((n_cells, Gm1, n_net + 1))
+    Gm1 = theta_basal.shape[0]
+    result = np.empty((n_cells, Gm1, 2))
     for i in range(n_cells):
         for j in range(Gm1):
-            z_max: float = -np.inf
-            for k in range(n_net):
-                Z[i, j, k] = theta_basal[j, k]
-                for g in range(G):
-                    Z[i, j, k] += y_prot[i, g] * theta_inter[g, j, k]
-                if Z[i, j, k] > z_max:
-                    z_max = Z[i, j, k]
-            denom = np.exp(-z_max)
-            result[i, j, 0] = np.exp(-z_max)
-            for k in range(n_net):
-                val = np.exp(Z[i, j, k] - z_max)
-                denom += val
-                result[i, j, k + 1] = val
-            result[i, j] /= denom
+            z = theta_basal[j]
+            for g in range(G):
+                z += y_prot[i, g] * theta_inter[g, j]
+            e = np.exp(-z)
+            denom = e + 1.0
+            result[i, j, 0] = e / denom
+            result[i, j, 1] = 1.0 / denom
 
     return result
 
 
 @njit(cache=True)
 def kon_ref(y_prot, kz, theta_inter, theta_basal):
+    # kon = k_low * (1 - sigmoid) + k_high * sigmoid (lowest and highest modes)
     result = base_kon_vector(theta_basal, theta_inter, y_prot)
     res = np.zeros(theta_basal.shape[0])
     for j in range(theta_basal.shape[0]):
-        for k in range(result.shape[-1]):
-            res[j] += kz[j, k] * result[-1, j, k]
+        k_high = kz[j, 0]
+        for k in range(1, kz.shape[1]):
+            if kz[j, k] > k_high:
+                k_high = kz[j, k]
+        res[j] += kz[j, 0] * result[-1, j, 0]
+        res[j] += k_high * result[-1, j, 1]
     return res
+
+
+@njit(cache=True)
+def kon_chrom(y_prot, kz, theta_inter, theta_basal, cbar):
+    # kon = k_low + (k_high - k_low) * cbar * sigmoid, written so that cbar = 1 gives kon_ref bit for bit
+    result = base_kon_vector(theta_basal, theta_inter, y_prot)
+    res = np.zeros(theta_basal.shape[0])
+    for j in range(theta_basal.shape[0]):
+        k_high = kz[j, 0]
+        for k in range(1, kz.shape[1]):
+            if kz[j, k] > k_high:
+                k_high = kz[j, k]
+        s1 = result[-1, j, 1]
+        res[j] += kz[j, 0] * (result[-1, j, 0] + (1.0 - cbar[j]) * s1)
+        res[j] += k_high * (cbar[j] * s1)
+    return res
+
+
+@njit(cache=True)
+def chrom_values(lvl, c_levels):
+    """Accessibility c (R,) = mean over alleles of the levels lvl (A, R) (indices into c_levels (R, Kmax))."""
+    A, R = lvl.shape
+    c = np.zeros(R)
+    for r in range(R):
+        for a in range(A):
+            c[r] += c_levels[r, lvl[a, r]]
+        c[r] /= A
+    return c
+
+
+@njit(cache=True)
+def chrom_gate(c, w, has_region):
+    """Gate cbar_g = sum_r w[g, r] c_r, 1 for genes without region (and stimuli)."""
+    G = w.shape[0]
+    cbar = np.ones(G)
+    for g in range(G):
+        if has_region[g]:
+            z = 0.0
+            for r in range(w.shape[1]):
+                z += w[g, r] * c[r]
+            cbar[g] = z
+    return cbar
+
+
+@njit(cache=True)
+def chrom_open_close(P, inter_c, basal_c, kbar_c, k_close_const):
+    """Opening / closing rates (R,): k_open = kbar sigmoid(Zc); k_close = kbar (1 - sigmoid(Zc)) (mirror,
+    k_close_const NaN) or k_close_const."""
+    R = basal_c.shape[0]
+    ko = np.empty(R)
+    kc = np.empty(R)
+    for r in range(R):
+        z = basal_c[r]
+        for g in range(P.shape[0]):
+            z += P[g] * inter_c[g, r]
+        e = np.exp(-z)
+        ko[r] = kbar_c[r] / (1.0 + e)
+        if np.isnan(k_close_const[r]):
+            kc[r] = kbar_c[r] * e / (1.0 + e)
+        else:
+            kc[r] = k_close_const[r]
+    return ko, kc
+
+
+@njit(cache=True)
+def chrom_jump_rates(lvl, c_levels, n_levels, ko, kc):
+    """Rates (2 A R,) of the jumps to adjacent levels, index 2 (a R + r) (+0 up, +1 down):
+    up k_open (1 - c_k) / (c_k+1 - c_k), down k_close c_k / (c_k - c_k-1), so that dE[c]/dt = k_open (1 - c) - k_close c."""
+    A, R = lvl.shape
+    rates = np.zeros(2 * A * R)
+    for a in range(A):
+        for r in range(R):
+            k = lvl[a, r]
+            i = 2 * (a * R + r)
+            if k < n_levels[r] - 1:
+                rates[i] = ko[r] * (1.0 - c_levels[r, k]) / (c_levels[r, k + 1] - c_levels[r, k])
+            if k > 0:
+                rates[i + 1] = kc[r] * c_levels[r, k] / (c_levels[r, k] - c_levels[r, k - 1])
+    return rates
+
+
+@njit(cache=True)
+def step_ode_chrom(d1, ks, inter, basal, dt, scale, P, ns, cfac, c, w, has_region, inter_c, basal_c,
+                   kbar_c, k_close_const):
+    """Exact step of (P, c) with rates frozen over dt; c follows dc/dt = k_open (1 - c) - k_close c."""
+    a = kon_chrom(P, ks, inter, basal, chrom_gate(c, w, has_region)) * cfac
+    Pnew = scale*a + (P[-1, :] - scale*a)*np.exp(-d1*dt)
+    for s in range(ns):
+        Pnew[s] = P[-1, s]
+    ko, kc = chrom_open_close(P[-1, :], inter_c, basal_c, kbar_c, k_close_const)
+    cnew = c.copy()
+    for r in range(c.shape[0]):
+        k = ko[r] + kc[r]
+        if k > 0:
+            ceq = ko[r] / k
+            cnew[r] = ceq + (c[r] - ceq) * np.exp(-k * dt)
+    return Pnew, cnew
+
+
+class ChromatinModel:
+    """
+    Accessibility of R regulatory regions and their regulation by the proteins.
+
+    w (G, R): weights of the regions of each gene (rows summing to 1, zero rows = gene without region, gate 1);
+    basal_c (R,), inter_c (G, R): Zc = basal_c + P @ inter_c (rows = regulators, stimuli included);
+    kbar_c (R,): chromatin speed; k_close_const (R,): constant closing rate, NaN = mirror (default);
+    c_levels: levels of each region, (K,) shared or (R, Kmax) NaN-padded, first 0 and last 1 (default [0, 1]);
+    diploid: two independent chains per region, c_r = mean of the alleles;
+    c0: initial level index (int, or (A, R)), 0 = closed. The current levels are kept in lvl (A, R).
+    """
+    def __init__(self, w, basal_c, inter_c, kbar_c, c_levels=None, k_close_const=None, diploid=False, c0=0):
+        self.w = np.ascontiguousarray(w, dtype=np.float64)
+        G, R = self.w.shape
+        self.R = R
+        self.basal_c = np.asarray(basal_c, dtype=np.float64).reshape(R)
+        self.inter_c = np.ascontiguousarray(inter_c, dtype=np.float64).reshape(G, R)
+        self.kbar_c = np.asarray(kbar_c, dtype=np.float64).reshape(R)
+        self.k_close_const = (np.full(R, np.nan) if k_close_const is None
+                              else np.asarray(k_close_const, dtype=np.float64).reshape(R))
+        self.has_region = np.abs(self.w).sum(axis=1) > 0
+        lev = np.array([0.0, 1.0]) if c_levels is None else np.asarray(c_levels, dtype=np.float64)
+        if lev.ndim == 1:
+            lev = np.tile(lev, (R, 1))
+        self.c_levels = np.ascontiguousarray(lev.reshape(R, -1) if R > 0 else np.zeros((0, 2)))
+        self.n_levels = np.sum(~np.isnan(self.c_levels), axis=1).astype(np.int64)
+        for r in range(R):
+            v = self.c_levels[r, :self.n_levels[r]]
+            if (self.n_levels[r] < 2 or np.any(np.isnan(self.c_levels[r, self.n_levels[r]:]))
+                    or v[0] != 0.0 or v[-1] != 1.0 or np.any(np.diff(v) <= 0)):
+                raise ValueError(f"c_levels of region {r} must increase from 0 to 1 (NaN padding at the end): {v}")
+        self.n_alleles = 2 if diploid else 1
+        self.lvl = np.zeros((self.n_alleles, R), dtype=np.int64)
+        self.lvl[:] = c0
+        self.lvl = np.minimum(self.lvl, self.n_levels[None, :] - 1)
+        self.thin_bound = self._thin_bound()
+
+    def _thin_bound(self):
+        """Upper bound of the total jump rate: per allele and region, max over levels of the up + down rates."""
+        tot = 0.0
+        for r in range(self.R):
+            v = self.c_levels[r, :self.n_levels[r]]
+            fu = np.zeros(len(v))
+            fd = np.zeros(len(v))
+            fu[:-1] = (1.0 - v[:-1]) / np.diff(v)
+            fd[1:] = v[1:] / np.diff(v)
+            kb = self.kbar_c[r]
+            if np.isnan(self.k_close_const[r]):
+                b = kb * np.max(np.maximum(fu, fd))  # k_open + k_close = kbar
+            else:
+                b = np.max(kb * fu + self.k_close_const[r] * fd)
+            tot += b
+        return self.n_alleles * tot
+
+    def values(self):
+        return chrom_values(self.lvl, self.c_levels)
+
+    def jump_rates(self, P):
+        ko, kc = chrom_open_close(P, self.inter_c, self.basal_c, self.kbar_c, self.k_close_const)
+        return chrom_jump_rates(self.lvl, self.c_levels, self.n_levels, ko, kc)
+
+    def apply_jump(self, j):
+        """Jump j of chrom_jump_rates: allele / region j // 2, up (j even) or down."""
+        a, r = divmod(j // 2, self.R)
+        self.lvl[a, r] += 1 if j % 2 == 0 else -1
 
 
 @njit(cache=True)
@@ -86,7 +248,7 @@ class ApproxODE:
     """
     ODE version of the network model
     """
-    def __init__(self, d, basal, inter) -> None:
+    def __init__(self, d, basal, inter, chrom=None) -> None:
         # Kinetic parameters
         G = basal.shape[0]
         # Network parameters
@@ -97,6 +259,13 @@ class ApproxODE:
         self.state: np.ndarray[Any, np.dtype[Any]] = np.array([(0) for i in range(G)], dtype=type)
         # Simulation parameter
         self.euler_step = 1e-2/np.max(d)
+        # Chromatin (ChromatinModel or None): mean accessibility c followed by the ODE
+        self.chrom = chrom if (chrom is not None and chrom.R > 0) else None
+        if self.chrom is not None:
+            self.c = self.chrom.values()
+            kmax = np.max(np.concatenate([self.chrom.kbar_c, np.nan_to_num(self.chrom.k_close_const)]))
+            if kmax > 0:
+                self.euler_step = min(self.euler_step, 1e-2/kmax)
 
 
     def simulation(self, d1, ks, timepoints, scale, ns=1, verb=False, cfac=None):
@@ -115,13 +284,23 @@ class ApproxODE:
         type: list[tuple[str, str]] = [('P', 'float64')]
         sim = []
         T, c = 0, 0
+        ch = self.chrom
+        c_rec = []
         # Core loop for simulation and recording
         for t in timepoints:
             while T < t:
-                self.state['P'] = step_ode(d1, ks, self.inter, self.basal, dt, scale, self.state['P'].reshape((1, -1)), ns, cfac)
+                if ch is None:
+                    self.state['P'] = step_ode(d1, ks, self.inter, self.basal, dt, scale, self.state['P'].reshape((1, -1)), ns, cfac)
+                else:
+                    self.state['P'], self.c = step_ode_chrom(
+                        d1, ks, self.inter, self.basal, dt, scale, self.state['P'].reshape((1, -1)), ns, cfac,
+                        self.c, ch.w, ch.has_region, ch.inter_c, ch.basal_c, ch.kbar_c, ch.k_close_const)
                 T += dt
                 c += 1
             sim += [np.array([(self.state['P'][i]) for i in range(1,G)], dtype=type)]
+            if ch is not None:
+                c_rec.append(self.c.copy())
+        self.c_rec = np.array(c_rec)
         # Display info about steps
         if verb:
             if c > 0:
@@ -135,7 +314,7 @@ class BurstyPDMP:
     """
     Bursty PDMP version of the network model (promoters not described)
     """
-    def __init__(self, ks, basal, inter, ns=1) -> None:
+    def __init__(self, ks, basal, inter, ns=1, chrom=None) -> None:
         # Kinetic parameters
         G = basal.shape[0]
         # Network parameters
@@ -146,6 +325,10 @@ class BurstyPDMP:
         self.state: np.ndarray[Any, np.dtype[Any]] = np.array([(0) for i in range(G)], dtype=type)
         # Thinning constant: sum of max burst rates over gene dims only (exclude stim dims 0..ns-1)
         self.thin_cst = np.sum(np.max(ks[ns:, :], axis=1))
+        # Chromatin (ChromatinModel or None): jumps of the region levels added to the thinning
+        self.chrom = chrom if (chrom is not None and chrom.R > 0) else None
+        if self.chrom is not None:
+            self.thin_cst = self.thin_cst + self.chrom.thin_bound
 
 
     def step(self, d1, ks, c, scale, ns=1):
@@ -162,6 +345,9 @@ class BurstyPDMP:
         P = flow(U, d1, self.state['P'], ns)
         self.state['P'] = P
 
+        if self.chrom is not None:
+            return U, self._jump_chrom(P, ks, c, scale, tau, ns)
+
         # 2. Compute the next jump
         v = kon_ref(P.reshape((1, -1)), ks, self.inter, self.basal)/tau # i = 1, ..., G-1 : burst of prot i
         for s in range(1, ns):
@@ -177,6 +363,29 @@ class BurstyPDMP:
         return U, jump
 
 
+    def _jump_chrom(self, P, ks, c, scale, tau, ns):
+        """Next jump with chromatin: bursts with the gated kon (i = 1..G-1), then the region jumps (i >= G);
+        same draws as without chromatin (one uniform, one exponential for a burst)."""
+        ch = self.chrom
+        G = P.shape[0]
+        cbar = chrom_gate(ch.values(), ch.w, ch.has_region)
+        v = kon_chrom(P.reshape((1, -1)), ks, self.inter, self.basal, cbar)/tau
+        for s in range(1, ns):
+            v[s] = 0.0
+        vc = ch.jump_rates(P)/tau
+        v[0] = 1.0 - (np.sum(v[1:]) + np.sum(vc))
+        w = np.concatenate((v, vc))
+        i = np.searchsorted(np.cumsum(w), np.random.random(), side='right')
+        if 0 < i < G:
+            r = (c/scale)[i]
+            self.state['P'][i] += np.random.exponential(1/r)
+            return True
+        if G <= i < w.shape[0] and w[i] > 0:
+            ch.apply_jump(i - G)
+            return True
+        return False
+
+
     def simulation(self, d1, ks, c, timepoints, scale, ns=1, verb=False):
         """
         Exact simulation of the network in the bursty PDMP case.
@@ -186,11 +395,17 @@ class BurstyPDMP:
         sim = [] # List of states to be recorded
         c0, c1 = 0, 0 # Jump counts (phantom and true)
         T = 0
+        ch = self.chrom
+        lvl_old, c_rec, lvl_rec = None, [], []
         # Core loop for simulation and recording
         Told, state_old = T, self.state.copy()
+        if ch is not None:
+            lvl_old = ch.lvl.copy()
         for t in timepoints:
             while T < t:
                 Told, state_old = T, self.state.copy()
+                if ch is not None:
+                    lvl_old = ch.lvl.copy()
                 U, jump = self.step(d1, ks, c, scale, ns)
                 T += U
                 if jump:
@@ -199,8 +414,15 @@ class BurstyPDMP:
                     c0 += 1
             P = flow(t - Told, d1, state_old['P'], ns)
             sim += [np.array([(P[i]) for i in range(1,G)], dtype=types)]
+            if ch is not None:
+                lvl_rec.append(lvl_old.copy())
+                c_rec.append(chrom_values(lvl_old, ch.c_levels))
         # Update the current state
         self.state['P'] = P
+        if ch is not None:
+            ch.lvl[:] = lvl_old  # chromatin state at the last recorded time
+            self.c_rec = np.array(c_rec)
+            self.c_alleles_rec = np.array([ch.c_levels[np.arange(ch.R)[None, :], l] for l in lvl_rec])
         # Display info about jumps
         if verb:
             ctot: int = c0 + c1
@@ -220,9 +442,11 @@ class Simulation:
     """
     Basic object to store simulations.
     """
-    def __init__(self, t, p) -> None:
+    def __init__(self, t, p, c=None, c_alleles=None) -> None:
         self.t: Any = t          # Time points
         self.p: Any = p          # Proteins
+        self.c: Any = c          # Region accessibility (n_t, R), with chromatin
+        self.c_alleles: Any = c_alleles  # Levels of each allele (n_t, A, R), PDMP with chromatin
 
 
 def simulate_next_prot_ode(d, a, basal, inter, t, scale, **kwargs) -> Simulation:
@@ -239,7 +463,8 @@ def simulate_next_prot_ode(d, a, basal, inter, t, scale, **kwargs) -> Simulation
         if np.any(t != np.sort(t)):
             msg = 'Time points must appear in increasing order'
             raise ValueError(msg)
-        network: ApproxODE = ApproxODE(d, basal, inter)
+        chrom = kwargs.get('chrom', None)  # ChromatinModel: (P, c) system
+        network: ApproxODE = ApproxODE(d, basal, inter, chrom=chrom)
         if p0 is not None:
             network.state['P'][ns:] = p0[ns:]  # gene dims only
         # Stimulus dims: schedule is authoritative; fall back to p0 if not provided
@@ -252,6 +477,8 @@ def simulate_next_prot_ode(d, a, basal, inter, t, scale, **kwargs) -> Simulation
             network.state['P'][0] = 1  # backward-compat: stim1 always active
         sim = network.simulation(d, a, t, scale, ns=ns, verb=verb, cfac=cfac)
         p = sim['P']
+        if network.chrom is not None:
+            return Simulation(t, p, c=network.c_rec)
         return Simulation(t, p)
 
 
@@ -268,7 +495,8 @@ def simulate_next_prot_pdmp(d, a, c, basal, inter, t, scale, **kwargs) -> Simula
         if np.any(t != np.sort(t)):
             msg = 'Time points must appear in increasing order'
             raise ValueError(msg)
-        network: BurstyPDMP = BurstyPDMP(a, basal, inter, ns=ns)
+        chrom = kwargs.get('chrom', None)  # ChromatinModel (state updated in place)
+        network: BurstyPDMP = BurstyPDMP(a, basal, inter, ns=ns, chrom=chrom)
         if p0 is not None:
             network.state['P'][ns:] = p0[ns:]  # gene dims only
         # Stimulus dims: schedule is authoritative; fall back to p0 if not provided
@@ -281,4 +509,6 @@ def simulate_next_prot_pdmp(d, a, c, basal, inter, t, scale, **kwargs) -> Simula
             network.state['P'][0] = 1  # backward-compat: stim1 always active
         sim = network.simulation(d, a, c, t, scale, ns=ns, verb=verb)
         p = sim['P']
+        if network.chrom is not None:
+            return Simulation(t, p, c=network.c_rec, c_alleles=network.c_alleles_rec)
         return Simulation(t, p)

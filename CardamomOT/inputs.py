@@ -42,7 +42,7 @@ PARAMETER_GROUPS = [
         'growth_reg_source', 'prolif_uses_stimulus', 'simulation_stochastic', 'simulate_full_with_harissa',
         'protein_dilution']),
     ('Report', ['classifier_method', 'embedding_method_visualization', 'cell_depth_for_representation',
-                'report_net_index', 'report_normalize', 'report_log1p', 'report_n_umap']),
+                'report_normalize', 'report_log1p', 'report_n_umap']),
     ('Reproducibility', ['seed']),
 ]
 

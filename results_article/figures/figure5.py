@@ -38,7 +38,7 @@ import sys
 sys.path += ['./../../']          # CardamomOT parent
 sys.path.append('./_scripts/')    # rf module
 
-from CardamomOT import NetworkModel as CardamomNetworkModel
+from CardamomOT import NetworkModel as CardamomNetworkModel, load_network_array
 from CardamomOT.inference.simulations import kon_ref, simulate_next_prot_ode
 from harissa import NetworkModel as HarissaNetworkModel
 import rf
@@ -512,8 +512,8 @@ def load_schiebinger():
     G               = rna.shape[1]
     model           = CardamomNetworkModel(G-1)
     model.d         = np.load(f'{base}/degradations.npy')
-    model.basal     = np.load(f'{base}/basal.npy')
-    model.inter     = np.load(f'{base}/inter.npy')
+    model.basal     = load_network_array(f'{base}/basal.npy')
+    model.inter     = load_network_array(f'{base}/inter.npy')
     model.prot      = np.load(f'{base}/data_prot.npy')
     adata_full      = ad.read_h5ad(f'{base}/adata_beta_stim{1.0}_prior{1.0}.h5ad')
     model.rna       = rna.copy()

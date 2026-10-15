@@ -7,6 +7,7 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import anndata as ad
 import scanpy as sc
+from ..model.base import load_network_array
 
 
 def analyse_reseau(matrix, gene_names=None, 
@@ -174,7 +175,7 @@ def reseau_top_regulateurs(matrix, gene_names=None,
     return G
 
 
-def plot_network(p, seuil=0.3, net_toplot='inter_simul', net_index=0, train="full", ns=1, sample_index=0):
+def plot_network(p, seuil=0.3, net_toplot='inter_simul', train="full", ns=1, sample_index=0):
     """Visualise the inferred GRN for a project directory.
 
     Loads ``net_toplot.npy`` and plots the top regulators using
@@ -187,9 +188,6 @@ def plot_network(p, seuil=0.3, net_toplot='inter_simul', net_index=0, train="ful
     seuil : float
         Edge-weight threshold passed as ``leaf_threshold`` to
         :func:`reseau_top_regulateurs` (fraction of max weight).
-    net_index : int
-        Index along the third axis of ``net_toplot.npy`` to visualise
-        (default 0).
     train : str
         Data split used to recover gene names (``"full"`` or ``"train"``).
     ns : int
@@ -199,15 +197,11 @@ def plot_network(p, seuil=0.3, net_toplot='inter_simul', net_index=0, train="ful
         Sample whose network is shown when ``net_toplot.npy`` is per sample (network conditions).
     """
     adata = sc.read_h5ad(f'{p}Data/data_{train}.h5ad')
-    grn_mat = np.load(f'{p}cardamomOT/{net_toplot}.npy')
-    if grn_mat.ndim == 4:   # (n_samples, G, G, n_networks): network of one sample's condition
+    grn_mat = load_network_array(f'{p}cardamomOT/{net_toplot}.npy')
+    if grn_mat.ndim == 3:   # (n_samples, G, G): network of one sample's condition
         grn_mat = grn_mat[sample_index]
-    grn_mat = grn_mat[ns:, ns:]
+    grn_slice = grn_mat[ns:, ns:]
     genes_init = list(adata.var_names)
-    if grn_mat.ndim < 3: 
-        grn_slice = grn_mat
-    else:
-        grn_slice = grn_mat[:, :, net_index]
 
     analyse_reseau(grn_slice, genes_init, top_regulateurs=1000)
     reseau_top_regulateurs(

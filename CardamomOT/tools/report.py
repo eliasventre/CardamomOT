@@ -29,6 +29,7 @@ from .velocity import knn_velocity_embedding as _knn_velocity_embedding
 from ..config import find_data_file, resolve_cell_type_obs
 from ..inputs import input_dir
 from ..inference.trajectory import kon_ref_vector
+from ..model.base import load_network_array, drop_network_axis
 from ..inference.proliferations import ProliferationMLP, growth_path_states, quadrature, interval_stimulus
 
 A4_LANDSCAPE = (11.69, 8.27)
@@ -565,7 +566,7 @@ def _cover_page(pdf, R, info, perturbations_status):
             ('Observed cells', f'{R.adata_data.n_obs}'),
             ('Timepoints', ', '.join(f'{t:g}' for t in np.sort(np.unique(R.times(R.adata_data))))),
             ('Cell types', ', '.join(R.categories) if R.has_ct else "— (no obs['cell_type'])"),
-            ('Network shown', f"inter_simul.npy, network #{info['net_index']} / {info['n_networks']}"),
+            ('Network shown', "inter_simul.npy"),
             ('Embeddings', f"{R.emb_name}; mRNA: log1p={R.log}, normalise={R.norm}, cell_depth_for_representation={R.depth_emb} "
                            + ("(observed / depth factor, model draws at the reference depth)" if R.depth_emb
                               else "(raw counts, model draws at the depth of the cells)"))]
@@ -1947,8 +1948,8 @@ class _Dynamics:
 
         self.d = load('degradations.npy')
         self.a = load('mixture_parameters.npy')
-        self.basal = load('basal_simul.npy')
-        self.inter = load('inter_simul.npy')
+        self.basal, self.inter = (None if x is None else drop_network_axis(x)
+                                  for x in (load('basal_simul.npy'), load('inter_simul.npy')))
 
         # Real cell behind each state, its prior rate and cell type
         self.real_idx = load('data_traj_real_idx.npy')
@@ -2052,8 +2053,8 @@ class _Dynamics:
             m = self.samples == s
             a = self.a[min(s, self.a.shape[0] - 1)] if self.a.ndim == 3 else self.a
             k1 = np.max(a[:-1], axis=0)
-            b = self.basal[min(s, self.basal.shape[0] - 1)] if self.basal.ndim == 3 else self.basal
-            i = self.inter[min(s, self.inter.shape[0] - 1)] if self.inter.ndim == 4 else self.inter
+            b = self.basal[min(s, self.basal.shape[0] - 1)] if self.basal.ndim == 2 else self.basal
+            i = self.inter[min(s, self.inter.shape[0] - 1)] if self.inter.ndim == 3 else self.inter
             out[m] = kon_ref_vector(self.prot_full[m].astype(float), (a[:-1] / k1).T, i, b)
             scale[m] = k1 / a[-1]
         return out[:, self.ns:], scale[:, self.ns:]
@@ -2633,7 +2634,7 @@ def _presentation_page(pdf, R, D, idx, E, V_traj, t, growth, labels=None, color_
 # Public API
 # ---------------------------------------------------------------------------
 
-def generate_report(p, split, stim, prior, perturbations=(), out_path=None, net_index=0,
+def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
                     normtransform=False, logtransform=True, n_umap=4000, top_regulators=20,
                     top_targets=10, seed=0, depth_embeddings=True, embedding_method_visualization='umap',
                     protein_dilution=True, classifier_method='random_forest'):
@@ -2653,8 +2654,6 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None, net_
         genes = perturbed gene names, highlighted in the GRN subgraphs).
     out_path : str, optional
         Output PDF path (default: ``<p>/CardamomOT_report_stim{stim}_prior{prior}.pdf``).
-    net_index : int
-        Network index along the last axis of ``inter_simul.npy``.
     normtransform, logtransform : bool
         Preprocessing applied before the embeddings.
     depth_embeddings : bool
@@ -2684,24 +2683,22 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None, net_
                     depth_embeddings, embedding_method_visualization, classifier_method)
     R.protein_dilution = bool(protein_dilution)
 
-    inter = np.load(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))
+    inter = load_network_array(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))
     # Network conditions: one network per condition (inter per sample, condition of each sample in network_conditions.json)
     cond_networks, cond_pen = {'': inter}, None
     cond_json = os.path.join(p, 'cardamomOT', 'network_conditions.json')
-    if inter.ndim == 4 and os.path.exists(cond_json):
+    if inter.ndim == 3 and os.path.exists(cond_json):
         import json
         info_c = json.load(open(cond_json))
         sc, cond_pen = np.asarray(info_c['sample_conditions']), info_c.get('network_condition_pen')
         cond_networks = {f' — condition {c}': inter[int(np.flatnonzero(sc == k)[0])]
                          for k, c in enumerate(info_c['conditions'])}
-    elif inter.ndim == 4:
+    elif inter.ndim == 3:
         cond_networks = {f' — sample {k}': inter[k] for k in range(inter.shape[0])}
-    cond_networks = {k: (v[:, :, net_index] if v.ndim == 3 else v) for k, v in cond_networks.items()}
-    n_networks = inter.shape[-1] if inter.ndim >= 3 else 1
     matrix = next(iter(cond_networks.values()))
     ns = matrix.shape[0] - len(R.genes)
     show_stim = stim >= 0.5
-    info = dict(n_stimuli=ns, net_index=net_index, n_networks=n_networks, show_stim=show_stim)
+    info = dict(n_stimuli=ns, show_stim=show_stim)
     status = [(l, d, A is not None) for l, d, A in R.perturbations]
 
     # Trajectory/growth data shared by sections 4 and 5, loaded once on first use

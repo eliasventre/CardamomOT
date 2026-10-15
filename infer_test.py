@@ -29,7 +29,7 @@ Usage:
 
 Required input files (from training pipeline):
     - Data/data_test.h5ad: test count matrix with temporal information
-    - cardamomOT/mixture_parameters.npy, n_networks.npy: mixture model parameters
+    - cardamomOT/mixture_parameters.npy: mixture model parameters
     - cardamomOT/pi_zinb.npy: zero-inflation parameters
     - cardamomOT/inter.npy, basal.npy: core inferred network (used for infer_test)
     - cardamomOT/basins_final.npy, proba_init.npy, alpha.npy, data_prot.npy, data_kon_beta.npy, data_times.npy,
@@ -43,7 +43,6 @@ Output files:
     - cardamomOT/data_rna_test.npy: RNA trajectories for test cells
     - cardamomOT/data_times_test.npy, data_samples_test.npy: trajectory metadata
     - cardamomOT/data_kon_beta_test.npy, data_kon_theta_test.npy: kon parameters
-    - cardamomOT/proba_traj_test.npy: trajectory mode probabilities
     - cardamomOT/data_prot_simul_test.npy, data_kon_simul_test.npy: simulations
     - cardamomOT/simulation_times_test.npy: simulation timepoints
     - cardamomOT/adata_*_test_stim*_prior*.h5ad: AnnData comparison objects
@@ -54,7 +53,7 @@ import pickle
 import numpy as np
 import anndata as ad
 import pandas as pd
-from CardamomOT import NetworkModel as NetworkModel_beta, find_data_file
+from CardamomOT import NetworkModel as NetworkModel_beta, find_data_file, load_network_array, load_simul_parameters
 from CardamomOT.inputs import input_dir, removed_samples
 from CardamomOT.inference.integration import nb_cell_parameters
 from CardamomOT.inference.depth import state_depth, simulation_depth
@@ -131,7 +130,6 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
 
     try:
         model.a = np.load(os.path.join(cardamom_dir, 'mixture_parameters.npy'))
-        model.n_networks = int(np.load(os.path.join(cardamom_dir, 'n_networks.npy')))
         model.d = np.load(os.path.join(cardamom_dir, 'degradations.npy'))
         pi_zinb = np.load(os.path.join(cardamom_dir, 'pi_zinb.npy'))
         model.pi_zinb = pi_zinb   # per-gene zero-inflation (used by fit_mixture_test as ZINB prior)
@@ -178,8 +176,8 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
     # are used for trajectory coupling on test cells.  The "simul" variants are
     # post-processed versions adapted for simulation and are loaded separately.
     try:
-        inter_core = np.load(os.path.join(cardamom_dir, 'inter.npy'))
-        basal_core = np.load(os.path.join(cardamom_dir, 'basal.npy'))
+        inter_core = load_network_array(os.path.join(cardamom_dir, 'inter.npy'))
+        basal_core = load_network_array(os.path.join(cardamom_dir, 'basal.npy'))
         print(f"[infer_test] Loaded core inferred network (inter.npy, basal.npy)")
     except FileNotFoundError:
         print(f"[infer_test] Warning: core network files (inter.npy / basal.npy) not found; "
@@ -189,12 +187,10 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
 
     # ─── LOAD POST-PROCESSING SIMULATION PARAMETERS ─────────────────────────
     try:
-        basal_simul = np.load(os.path.join(cardamom_dir, 'basal_simul.npy'))
-        inter_simul = np.load(os.path.join(cardamom_dir, 'inter_simul.npy'))
-        basal_t_simul = np.load(os.path.join(cardamom_dir, 'basal_t_simul.npy'))
-        inter_t_simul = np.load(os.path.join(cardamom_dir, 'inter_t_simul.npy'))
-        ratios = np.load(os.path.join(cardamom_dir, 'ratios.npy'))
-        d_t = np.load(os.path.join(cardamom_dir, 'degradations_temporal.npy'))
+        prm = load_simul_parameters(cardamom_dir)  # outputs of infer_network_simul
+        basal_simul, inter_simul = prm['basal'], prm['inter']
+        basal_t_simul, inter_t_simul = prm['basal_t'], prm['inter_t']
+        ratios, d_t = prm['ratios'], prm['d_t']
         print(f"[infer_test] Loaded post-processing simulation parameters")
     except FileNotFoundError as e:
         print(f"[infer_test] Error: Missing simulation parameter file: {e}")
@@ -202,10 +198,10 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
 
     # ─── SET CORE NETWORK FOR TRAJECTORY INFERENCE ──────────────────────────
     # infer_test uses the raw inferred network (inter/basal), not the simul ones;
-    # basal (n_samples, G_tot, n_networks): rows of the test samples
+    # basal (n_samples, G_tot): rows of the test samples
     def _inter_rows(arr, axis=0):
         # Per-sample interactions (network conditions: one more axis) take the test samples' rows too
-        return _sample_rows(arr, axis) if np.ndim(arr) == 4 + axis else arr
+        return _sample_rows(arr, axis) if np.ndim(arr) == 3 + axis else arr
 
     if inter_core is not None and basal_core is not None:
         model.basal = _sample_rows(basal_core)
@@ -214,9 +210,9 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
         model.basal = _sample_rows(basal_simul)
         model.inter = _inter_rows(inter_simul)
     basal_simul = _sample_rows(basal_simul)
-    basal_t_simul = _sample_rows(basal_t_simul, axis=1)  # (T-1, n_samples, G_tot, n_networks)
+    basal_t_simul = _sample_rows(basal_t_simul, axis=1)  # (T-1, n_samples, G_tot)
     inter_simul = _inter_rows(inter_simul)
-    inter_t_simul = _inter_rows(inter_t_simul, axis=1)   # (T-1, [n_samples,] G_tot, G_tot, n_networks)
+    inter_t_simul = _inter_rows(inter_t_simul, axis=1)   # (T-1, [n_samples,] G_tot, G_tot)
 
     # Context of the last training iteration (regularization, mode-to-mode OT weight, basin probability weight)
     it_path = os.path.join(cardamom_dir, 'n_iter_inference.npy')
@@ -225,7 +221,8 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
         it_saved = np.atleast_1d(np.load(it_path)).astype(float)
         n_reg = int(it_saved[0])
         context = {'n_iter_reg': n_reg, 'weight_init': it_saved[1] if len(it_saved) > 1 else 0.0,
-                   'weight_prob': it_saved[2] if len(it_saved) > 2 else max(.96**(n_reg - 1), .1)}
+                   'weight_prob': it_saved[2] if len(it_saved) > 2 else max(.96**(n_reg - 1), .1),
+                   'reg_factor': it_saved[3]}
     else:
         print("[infer_test] Warning: n_iter_inference.npy not found (older run): "
               f"context of iteration {model.min_n_loops}")
@@ -239,7 +236,7 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
 
     # Set ref_network (all ones = no structural prior for test)
     G_tot = adata.shape[1] + model.n_stimuli
-    model.ref_network = np.ones((G_tot, G_tot, model.n_networks))
+    model.ref_network = np.ones((G_tot, G_tot))
 
     # Build stimulus schedule
     times_unique = np.sort(np.unique(times_obs))
@@ -252,7 +249,6 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
         try:
             ns = model.n_stimuli
             G_tot_test = adata.shape[1] + ns
-            n_nw = model.n_networks
             stim_labels = ['Stimulus'] if ns == 1 else [f'Stimulus_{i}' for i in range(ns)]
             genes_only = [g.upper() for g in adata.var_names]
 
@@ -265,7 +261,7 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
             n_samp = len(unique_samples)
             sample_to_idx = {str(s): i for i, s in enumerate(unique_samples)}
 
-            basal_ref_test = np.zeros((n_samp, G_tot_test, n_nw))
+            basal_ref_test = np.zeros((n_samp, G_tot_test))
 
             def _parse_genes(cell):
                 if not cell or cell in ('0', 'nan', 'NAN'):
@@ -280,11 +276,11 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
                 for gene in _parse_genes(row.get('KO', '')):
                     if gene in genes_only:
                         gi = ns + genes_only.index(gene)
-                        basal_ref_test[s_idx, gi, :] = -100.0
+                        basal_ref_test[s_idx, gi] = -100.0
                 for gene in _parse_genes(row.get('OV', '')):
                     if gene in genes_only:
                         gi = ns + genes_only.index(gene)
-                        basal_ref_test[s_idx, gi, :] = 100.0
+                        basal_ref_test[s_idx, gi] = 100.0
             print(f"[infer_test] Loaded per-sample KOV prior from {kov_path}")
         except Exception as e:
             print(f"[infer_test] Warning: could not load KO_OV_inference.txt: {e}")
@@ -301,7 +297,7 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
 
     # ─── TRAJECTORY INFERENCE ON TEST SET ────────────────────────────────
     # Classifies cells into modes (fixed kz/c) then infers OT couplings with
-    # the core inferred network (compute_theta=False, update_modes=True).
+    # the core inferred network (compute_theta=False, basins updated).
     print(f"[infer_test] Running mixture classification and trajectory inference...")
     try:
         model.infer_test(adata, verb=1, stimulus_schedule=stim_sched,
@@ -346,7 +342,6 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
         np.save(os.path.join(cardamom_dir, 'data_samples_test'), model.samples_data)
         np.save(os.path.join(cardamom_dir, 'data_kon_beta_test'), model.kon_beta)
         np.save(os.path.join(cardamom_dir, 'data_kon_theta_test'), model.kon_theta)
-        np.save(os.path.join(cardamom_dir, 'proba_traj_test'), model.proba_traj)
         print(f"[infer_test] Saved test trajectory outputs")
     except Exception as e:
         print(f"[infer_test] Error saving trajectory outputs: {e}")
@@ -374,9 +369,9 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
 
     # ─── NETWORK SIMULATION ───────────────────────────────────────────────
     # Same simulation as for the training cells: proliferation MLP (branching, birth rate of the dilution)
-    if model.simulate_with_proliferation:
+    if model.simulate_with_proliferation or model.protein_dilution:
         from simulate_network import attach_proliferation
-        attach_proliferation(model, p, tag='[infer_test]')
+        attach_proliferation(model, p, tag='[infer_test]', branching=model.simulate_with_proliferation)
     print(f"[infer_test] Simulating network dynamics on test set...")
     try:
         model.simulate_network(sim_times, stimulus_schedule=stim_sched_simul)
@@ -509,7 +504,7 @@ def _restrict_slots(model, keep):
     T = len(np.unique(model.times_data))
     n = len(model.times_data)  # length before any restriction (times_data itself is restricted in the loop)
     for attr in ('prot', 'rna', 'kon_beta', 'kon_theta', 'traj_real_idx', 'R_opt', 'R_stim_offset', 'samples_data',
-                 'times_data'):
+                 'state_birth', 'state_death', 'state_birth_base', 'state_death_base', 'times_data'):
         arr = getattr(model, attr, None)
         if arr is not None and np.ndim(arr) >= 1 and len(arr) == n:
             arr = np.asarray(arr)

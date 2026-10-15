@@ -70,7 +70,7 @@ from .inference import (
 # ============================================================================
 # Core model classes
 # ============================================================================
-from .model import NetworkModel
+from .model import NetworkModel, load_network_array, load_simul_parameters
 
 # ============================================================================
 # Visualization and analysis tools
@@ -128,6 +128,8 @@ __all__ = [
     "extract_degradation_rates",
     # Model
     "NetworkModel",
+    "load_network_array",
+    "load_simul_parameters",
     # Visualization
     "plot_data_distrib",
     "plot_data_pmf_temporal",

@@ -140,7 +140,7 @@ def run_single_fit(cfg):
         model.d[0, ns:] = adata.var['d0'].values
 
     # ── Step 2b : prior reference network (optional CSV) ────────────────────
-    model.ref_network = np.ones((G_tot, G_tot, model.n_networks))
+    model.ref_network = np.ones((G_tot, G_tot))
     ref_csv = os.path.join(p, 'Data', 'ref_network.csv')
     if os.path.exists(ref_csv):
         try:
@@ -151,14 +151,13 @@ def run_single_fit(cfg):
             row_idxs   = [ns + genes_up.index(g) for g in row_genes if g in genes_up]
             col_idxs   = [ns + genes_up.index(g) for g in col_genes if g in genes_up]
             ref_mat    = ref_df.values
-            for n in range(model.n_networks):
-                for ii, ri in enumerate(row_idxs):
-                    model.ref_network[ri, col_idxs, n] = ref_mat[ii, :]
+            for ii, ri in enumerate(row_idxs):
+                model.ref_network[ri, col_idxs] = ref_mat[ii, :]
         except Exception as e:
             print(f"  Warning: ref_network.csv not loaded ({e})")
 
     # ── Step 3 : network ─────────────────────────────────────────────────────
-    model.fit_network(adata, intensity_prior=100, verb=True, stimulus_schedule=stim_sched)
+    model.fit_network(adata, verb=True, stimulus_schedule=stim_sched)
 
     # ── Step 4 : degradation refinement ─────────────────────────────────────
     model.refine_network_degradations(stimulus_schedule=stim_sched)

@@ -99,7 +99,7 @@ for r in range(0, N):
 
 print("We are at trees")
 # Inference for tree-like networks
-for n in [5, 10, 20, 50, 100]:
+for n in [5, 10, 20]:
     runtime = np.zeros(N)
     for r in range(N):
         fname = 'Trees{}/Data/data_{}.txt'.format(n,r+1)
@@ -109,7 +109,6 @@ for n in [5, 10, 20, 50, 100]:
         x[:,0] = time
         G = np.size(x, 1)
         model = NetworkModel(G - 1)
-        model.recompute_degradations=0
         model.d = np.loadtxt('Trees{}/Data/Rates/degradation_rates.txt'.format(n), dtype=float, delimiter='\t').T 
         t0 = timer.time()
         model.fit(x, verb=verb)
@@ -119,7 +118,6 @@ for n in [5, 10, 20, 50, 100]:
         score = model.inter_tmp
         for _ in range(n_repet):
             model = NetworkModel(G - 1)
-            model.recompute_degradations=0
             model.d = np.loadtxt('Trees{}/Data/Rates/degradation_rates.txt'.format(n), dtype=float, delimiter='\t').T 
             model.fit(x, verb=verb)
             score += model.inter_tmp

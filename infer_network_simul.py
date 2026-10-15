@@ -9,7 +9,7 @@ and parameter transformation for downstream simulation steps.
 
 Usage:
     python infer_network_simul.py -i <project_path> [--stimulus <float>] [--prior <float>]
-(simulate_with_proliferation: trains the proliferation MLP; model_parameters sheet)
+(simulate_with_proliferation or protein_dilution: trains the proliferation MLP; model_parameters sheet)
 
 Required input files:
     - Data/data_<split>.h5ad: count matrix with temporal information
@@ -24,10 +24,14 @@ Output files:
     - cardamom/basal_t_simul.npy, inter_t_simul.npy: temporal parameters
     - cardamom/ratios.npy: parameter ratios
     - cardamom/degradations_temporal.npy: temporal degradation rates
+    - cardamom/data_state_rates.npz: birth and death rates of the trajectory states, consistent with the net growth
+      R_opt of fit_network and closest to the prior ones (used for the dilution here and in the simulations, and as
+      targets of the birth / death heads of the proliferation MLP)
 """
 import sys; sys.path += ['../']
 import numpy as np
-from CardamomOT import NetworkModel as NetworkModel_beta, read_stimulus_targets, stimulus_target_mask, resolve_cell_type_obs
+from CardamomOT import (NetworkModel as NetworkModel_beta, read_stimulus_targets, stimulus_target_mask, resolve_cell_type_obs,
+                        load_network_array)
 from CardamomOT.inputs import input_dir
 from CardamomOT.inference import signed_floor
 from CardamomOT.run_options import parse_step_options, settings, configure
@@ -84,8 +88,8 @@ def main(argv):
     print("[infer_network_simul] Loading inferred network parameters...")
     try:
         model.d = np.load(os.path.join(p, 'cardamomOT', 'degradations.npy'))
-        model.basal = np.load(os.path.join(p, 'cardamomOT', 'basal.npy'))
-        model.inter = np.load(os.path.join(p, 'cardamomOT', 'inter.npy'))
+        model.basal = load_network_array(os.path.join(p, 'cardamomOT', 'basal.npy'))
+        model.inter = load_network_array(os.path.join(p, 'cardamomOT', 'inter.npy'))
         model.a = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
         model.modes = np.load(os.path.join(p, 'cardamomOT', 'modes.npy'))
         model.prot = np.load(os.path.join(p, 'cardamomOT', 'data_prot.npy'))
@@ -98,8 +102,6 @@ def main(argv):
         model.kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta.npy'))
         model.kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta.npy'))
         model.alpha = np.load(os.path.join(p, 'cardamomOT', 'alpha.npy'))
-        model.proba_traj = np.load(os.path.join(p, 'cardamomOT', 'proba_traj.npy'))
-        model.n_networks = np.load(os.path.join(p, 'cardamomOT', 'n_networks.npy'))
         ct_path = os.path.join(p, 'cardamomOT', 'data_cell_types.npy')
         if os.path.exists(ct_path):
             cell_types = np.load(ct_path)
@@ -123,10 +125,10 @@ def main(argv):
         sys.exit(1)
 
     # Load reference network if available
-    G_tot = model.inter.shape[-2]   # inter: ([n_samples,] G_tot, G_tot, n_networks)
+    G_tot = model.inter.shape[-1]   # inter: ([n_samples,] G_tot, G_tot)
     ns = model.n_stimuli
     genes_only = [g.upper() for g in adata.var_names]   # no stimulus prefix
-    model.ref_network = np.ones((G_tot, G_tot, model.n_networks))
+    model.ref_network = np.ones((G_tot, G_tot))
     ref_path = os.path.join(p, 'cardamomOT', 'ref_network.csv')
     if os.path.exists(ref_path):
         print(f"[infer_network_simul] Loading reference network from {ref_path}")
@@ -142,9 +144,8 @@ def main(argv):
                 ref_mat = sub_df.to_numpy()  # signed: |v| > 1 forces the edge sign
                 row_idxs = [ns + genes_only.index(g) for g in sub_df.index]
                 col_idxs = [ns + genes_only.index(g) for g in sub_df.columns]
-                for n in range(model.n_networks):
-                    for ii, ri in enumerate(row_idxs):
-                        model.ref_network[ri, col_idxs, n] = ref_mat[ii, :]
+                for ii, ri in enumerate(row_idxs):
+                    model.ref_network[ri, col_idxs] = ref_mat[ii, :]
                 print(f"[infer_network_simul] Incorporated reference network with {len(common_genes)} genes")
             else:
                 print("[infer_network_simul] Warning: no common genes found between CSV and data")
@@ -296,6 +297,7 @@ def main(argv):
         model.save_network_conditions(cardamom_dir, gene_names=stim_names + list(adata.var_names), suffix='_simul')
         np.save(os.path.join(cardamom_dir, 'ratios'), model.ratios)
         np.save(os.path.join(cardamom_dir, 'degradations_temporal.npy'), model.d_t)
+        model.save_state_rates(cardamom_dir)  # birth / death of the states (consistent with R_opt): dilution of the simulations
         if model.prolif_network is not None:
             torch.save(model.prolif_network.state_dict(),
                        os.path.join(cardamom_dir, 'prolif_network.pt'))

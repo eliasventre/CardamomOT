@@ -56,7 +56,7 @@ REMOVED_OPTIONS = {
     '--overwrite': 'overwrite_degradation_rates', '--no-senescence-gating': 'senescence_gating',
     '--integrate-samples': 'integrate_samples', '--no-integrate-samples': 'integrate_samples',
     '--ref-sample': 'ref_sample_integration',
-    '--soft-em-refinement': 'soft_em_refinement', '--net-index': 'report_net_index', '--norm': 'report_normalize',
+    '--soft-em-refinement': 'soft_em_refinement', '--norm': 'report_normalize',
     '--no-log': 'report_log1p', '--n-umap': 'report_n_umap',
 }
 

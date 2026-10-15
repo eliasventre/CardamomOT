@@ -171,9 +171,8 @@ def main(argv):
         print(f"[infer_mixture] Saving results to {out_dir}...")
 
     np.save(os.path.join(out_dir, 'modes'),              model.modes)
-    np.save(os.path.join(out_dir, 'proba'),              model.proba)
+    np.save(os.path.join(out_dir, 'basins'),             model.basins)
     np.save(os.path.join(out_dir, 'proba_init'),         model.proba_init)
-    np.save(os.path.join(out_dir, 'n_networks'),         model.n_networks)
     np.save(os.path.join(out_dir, 'weights'),            model.weights)
     np.save(os.path.join(out_dir, 'mixture_parameters'), model.a)
     np.save(os.path.join(out_dir, 'pi_zinb'),            model.pi_zinb)

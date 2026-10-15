@@ -27,7 +27,7 @@ KO_OV_Stim_simulate.txt format (see CardamomOT/tools/perturbations.py):
 import sys; sys.path += ['../']
 import re
 import numpy as np
-from CardamomOT import NetworkModel as NetworkModel_beta
+from CardamomOT import NetworkModel as NetworkModel_beta, load_simul_parameters
 from CardamomOT.inputs import input_dir
 from CardamomOT.run_options import parse_step_options, settings, configure, configure_simulation
 import anndata as ad
@@ -42,10 +42,10 @@ from CardamomOT.config import (n_inference_stimuli, simulation_schedule, simulat
 
 
 def _received(inter_t, ind):
-    """Sum of the last interactions received by gene ind: scalar, or (1, n_samples, 1) for per-sample networks."""
+    """Sum of the last interactions received by gene ind: scalar, or (1, n_samples) for per-sample networks."""
     last = np.asarray(inter_t)[-1]
-    if last.ndim == 4:   # (n_samples, G, G, n_networks)
-        return last[:, :, ind, :].sum(axis=(1, 2))[None, :, None]
+    if last.ndim == 3:   # (n_samples, G, G)
+        return last[:, :, ind].sum(axis=1)[None, :]
     return np.sum(last[:, ind])
 
 def main(argv):
@@ -112,22 +112,20 @@ def main(argv):
     # Load network model parameters
     print("[simulate_network_KOV] Loading inferred network parameters...")
     try:
-        model.d_t = np.load(os.path.join(p, 'cardamomOT', 'degradations_temporal.npy'))
-        model.inter_t = np.load(os.path.join(p, 'cardamomOT', 'inter_t_simul.npy'))
-        model.inter = np.load(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))
+        prm = load_simul_parameters(os.path.join(p, 'cardamomOT'))  # outputs of infer_network_simul
+        model.d_t, model.inter_t, model.inter = prm['d_t'], prm['inter_t'], prm['inter']
         # Validate n_stimuli against loaded inter (authoritative for simulation)
-        n_stimuli_inter = model.inter.shape[-2] - adata.shape[1]  # inter: ([n_samples,] G_tot, G_tot, n_networks)
+        n_stimuli_inter = model.inter.shape[-1] - adata.shape[1]  # inter: ([n_samples,] G_tot, G_tot)
         if n_stimuli_inter != model.n_stimuli:
             print(f"[simulate_network_KOV] Warning: correcting n_stimuli from {model.n_stimuli} "
-                  f"to {n_stimuli_inter} based on loaded inter_simul.npy")
+                  f"to {n_stimuli_inter} based on the loaded network")
             model.n_stimuli = n_stimuli_inter
         model.a = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
         model.times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
         model.kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta.npy'))
         model.rna = np.load(os.path.join(p, 'cardamomOT', 'data_rna.npy'))
-        model.proba_traj = np.load(os.path.join(p, 'cardamomOT', 'proba_traj.npy'))
-        model.ratios = np.load(os.path.join(p, 'cardamomOT', 'ratios.npy'))
-        model.n_networks = np.load(os.path.join(p, 'cardamomOT', 'n_networks.npy'))
+        model.ratios = prm['ratios']
+        model.load_state_rates(os.path.join(p, 'cardamomOT'))  # birth / death of the states (dilution)
         samples_path = os.path.join(p, 'cardamomOT', 'data_samples.npy')
         if os.path.exists(samples_path):
             model.samples_data = np.load(samples_path)
@@ -156,53 +154,52 @@ def main(argv):
     print(f"[simulate_network_KOV] Will simulate {len(times)} timepoints")
 
     # ─── COMPUTE CLEAN BASELINE (unperturbed by training KOVs) ───────────────
-    basal_simul_raw = np.load(os.path.join(p, 'cardamomOT', 'basal_simul.npy'))
-    basal_t_simul_raw = np.load(os.path.join(p, 'cardamomOT', 'basal_t_simul.npy'))
+    basal_simul_raw, basal_t_simul_raw = prm['basal'], prm['basal_t']
     EPS = 1e-16
 
-    if basal_simul_raw.ndim == 3:
+    if basal_simul_raw.ndim == 2:
         mask_path = os.path.join(p, 'cardamomOT', 'basal_ref_mask.npy')
-        n_samp, G_tot_b, _ = basal_simul_raw.shape
+        n_samp, G_tot_b = basal_simul_raw.shape
 
-        # ── Build per-sample clean basal (3-D) ────────────────────────────────
+        # ── Build per-sample clean basal (2-D) ────────────────────────────────
         # Start from the per-sample inferred basal and replace, for each gene
         # that was forced during training (basal_ref_mask), the perturbed
         # samples with the mean of the *free* (unforced) samples.
-        basal_clean_3d = basal_simul_raw.copy()   # (n_samp, G_tot, n_nw)
+        basal_clean_samples = basal_simul_raw.copy()   # (n_samp, G_tot)
         if os.path.exists(mask_path):
             basal_ref_mask = np.load(mask_path)   # (n_samples, G_tot)
             for g in range(G_tot_b):
                 perturbed = np.where(basal_ref_mask[:, g])[0]
                 free      = np.where(~basal_ref_mask[:, g])[0]
                 if len(perturbed) > 0:
-                    clean_g = (basal_simul_raw[free, g, :].mean(axis=0)
+                    clean_g = (basal_simul_raw[free, g].mean(axis=0)
                                if len(free) > 0
-                               else basal_simul_raw[:, g, :].mean(axis=0))
-                    basal_clean_3d[perturbed, g, :] = clean_g
+                               else basal_simul_raw[:, g].mean(axis=0))
+                    basal_clean_samples[perturbed, g] = clean_g
 
-        # 2-D average kept for ops that still need it (e.g. non-per-sample path)
-        basal_clean = basal_clean_3d.mean(axis=0)   # (G_tot, n_nw)
+        # Sample average kept for ops that still need it (e.g. non-per-sample path)
+        basal_clean = basal_clean_samples.mean(axis=0)   # (G_tot,)
 
         # ── Build temporal clean basal, preserving per-sample structure ────────
-        if basal_t_simul_raw.ndim == 4:
-            # (T-1, n_samp, G_tot, n_nw): normalise by *per-sample* static basal
+        if basal_t_simul_raw.ndim == 3:
+            # (T-1, n_samp, G_tot): normalise by *per-sample* static basal
             # so the temporal modulation is correct for each sample.
             temporal_factor = basal_t_simul_raw / (basal_simul_raw[np.newaxis] + EPS)
-            basal_t_clean = basal_clean_3d[np.newaxis] * temporal_factor  # (T-1, n_samp, G_tot, n_nw)
-            print(f"[simulate_network_KOV] basal_t_simul is 4-D (per-sample); "
+            basal_t_clean = basal_clean_samples[np.newaxis] * temporal_factor  # (T-1, n_samp, G_tot)
+            print(f"[simulate_network_KOV] basal_t_simul is 3-D (per-sample); "
                   f"keeping {n_samp} samples for per-sample routing")
         else:
-            # (T-1, G_tot, n_nw): normalise by sample-mean static basal
-            basal_mean_orig = basal_simul_raw.mean(axis=0)   # (G_tot, n_nw)
+            # (T-1, G_tot): normalise by sample-mean static basal
+            basal_mean_orig = basal_simul_raw.mean(axis=0)   # (G_tot,)
             temporal_factor = basal_t_simul_raw / (basal_mean_orig[np.newaxis] + EPS)
-            basal_t_clean = basal_clean[np.newaxis] * temporal_factor     # (T-1, G_tot, n_nw)
+            basal_t_clean = basal_clean[np.newaxis] * temporal_factor     # (T-1, G_tot)
 
         print(f"[simulate_network_KOV] Clean baseline from {n_samp}-sample basal "
               f"(basal_t shape: {basal_t_clean.shape})")
     else:
-        # 2-D basal (no per-sample structure)
+        # 1-D basal (no per-sample structure)
         basal_clean    = basal_simul_raw
-        basal_clean_3d = None
+        basal_clean_samples = None
         basal_t_clean  = basal_t_simul_raw
 
     N = np.sum(model.times_data == 0)
@@ -212,11 +209,15 @@ def main(argv):
 
     ns = model.n_stimuli
 
-    # Load proliferation network if requested
-    if simulate_with_proliferation:
+    # Proliferation network: branching (simulate_with_proliferation) and birth rate of the dilution
+    if simulate_with_proliferation or model.protein_dilution:
         prolif_path = os.path.join(p, 'cardamomOT', 'prolif_network.pt')
         n_prot_path = os.path.join(p, 'cardamomOT', 'prolif_network_n_proteins.npy')
-        if os.path.exists(prolif_path) and os.path.exists(n_prot_path):
+        if os.path.exists(prolif_path) and os.path.exists(n_prot_path) and not simulate_with_proliferation:
+            from CardamomOT.inference.proliferations import load_proliferation_mlp
+            model.prolif_network = load_proliferation_mlp(prolif_path, int(np.load(n_prot_path)[0]))
+            print("[simulate_network_KOV] Loaded proliferation network — birth rate of the dilution (no branching)")
+        elif os.path.exists(prolif_path) and os.path.exists(n_prot_path):
             from CardamomOT.inference.proliferations import load_proliferation_mlp
             # One head (net rate) or two (birth, death); older networks keep identity input scaling
             prolif_net = load_proliferation_mlp(prolif_path, int(np.load(n_prot_path)[0]))
@@ -229,8 +230,10 @@ def main(argv):
                 print("[simulate_network_KOV] Effects of the inference stimuli on the net rate (perturbation_inference) "
                       "applied with the simulated schedule")
             print("[simulate_network_KOV] Loaded proliferation network — branching simulation enabled")
-        else:
+        elif simulate_with_proliferation:
             print("[simulate_network_KOV] Warning: simulate_with_proliferation = True but prolif_network.pt not found (run infer_network_simul first)")
+        else:
+            print("[simulate_network_KOV] No prolif_network.pt: dilution at the birth rates of the trajectory slots")
 
     def sample_schedules(k, scenario):
         """{sample index: t -> value} of perturbation stimulus k for the samples with their own schedule."""
@@ -257,10 +260,10 @@ def main(argv):
         # Use the per-sample 3-D basal when available so that simulate_trajectories_unitary
         # can route each cell to its own sample's basal (same as simulate_network.py).
         try:
-            model_combo.basal = basal_clean_3d.copy() if basal_clean_3d is not None else basal_clean.copy()
+            model_combo.basal = basal_clean_samples.copy() if basal_clean_samples is not None else basal_clean.copy()
             model_combo.basal_t = basal_t_clean.copy()
             model_combo.production_factor = None   # reset per-gene creation rate scaling
-            model_combo.prot = np.load(os.path.join(p, 'cardamomOT', 'data_prot_forsimul.npy'))
+            model_combo.prot = prm['prot'].copy()
             model_combo.kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta.npy'))
         except FileNotFoundError as e:
             print(f"[simulate_network_KOV] Error resetting model: {e}")
@@ -276,7 +279,7 @@ def main(argv):
             if gene in adata.var_names:
                 ind = ns + adata.var_names.get_loc(gene)
                 if pct is None:
-                    if model_combo.basal_t.ndim == 4:
+                    if model_combo.basal_t.ndim == 3:
                         model_combo.basal_t[:, :, ind] = -100 - _received(model_combo.inter_t, ind)
                     else:
                         model_combo.basal_t[:, ind] = -100 - _received(model_combo.inter_t, ind)
@@ -298,7 +301,7 @@ def main(argv):
             if gene in adata.var_names:
                 ind = ns + adata.var_names.get_loc(gene)
                 if pct is None:
-                    if model_combo.basal_t.ndim == 4:
+                    if model_combo.basal_t.ndim == 3:
                         model_combo.basal_t[:, :, ind] = 100 + _received(model_combo.inter_t, ind)
                     else:
                         model_combo.basal_t[:, ind] = 100 + _received(model_combo.inter_t, ind)
