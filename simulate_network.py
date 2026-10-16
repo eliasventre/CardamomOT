@@ -9,7 +9,7 @@ Usage:
 Required input files:
     - Data/data_<split>.h5ad: count matrix with temporal information
     - cardamom/basal_simul.npy, inter_simul.npy: inferred parameters
-    - cardamom/mixture_parameters.npy, data_prot_unitary.npy: kinetic rates
+    - cardamom/mixture_parameters.npy, data_prot_forsimul.npy: kinetic rates and starting protein states
 
 Output files:
     - cardamom/data_prot_simul.npy: simulated protein abundance
@@ -85,6 +85,7 @@ def load_simulation_model(p, opts, adata, tag='[simulate_network]'):
         model.kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta.npy'))
         model.ratios = prm['ratios']
         model.load_state_rates(os.path.join(p, 'cardamomOT'))  # birth / death of the states (dilution)
+        model.load_chromatin(os.path.join(p, 'cardamomOT'))  # chromatin regions, if any
         samples_path = os.path.join(p, 'cardamomOT', 'data_samples.npy')
         if os.path.exists(samples_path):
             model.samples_data = np.load(samples_path)
@@ -170,9 +171,14 @@ def main(argv):
                 np.array([bool(model.simulate_with_proliferation and model.prolif_network is not None)]))
         if model.log_population is not None:
             np.save(os.path.join(cardamom_dir, 'data_log_population'), model.log_population)
-        if model.simulate_full_with_harissa and hasattr(model, 'mrna_simul') and model.mrna_simul is not None:
-            np.save(os.path.join(cardamom_dir, 'data_mrna_simul'), model.mrna_simul)
-            print(f"[simulate_network] Saved mRNA simulation to data_mrna_simul.npy")
+        # Explicit mRNA counts (simulation_mrnas_direct) and chromatin accessibility (model.chromatin)
+        for name, arr in [('data_mrna_simul', model.mrna_simul), ('data_chrom_simul', model.chrom_simul)]:
+            path = os.path.join(cardamom_dir, name + '.npy')
+            if arr is not None:
+                np.save(path, arr)
+                print(f"[simulate_network] Saved {name}.npy")
+            elif os.path.exists(path):
+                os.remove(path)  # output of an earlier run with other options
         print(f"[simulate_network] Successfully saved simulation results to {cardamom_dir}")
     except Exception as e:
         print(f"[simulate_network] Error saving simulation results: {e}")

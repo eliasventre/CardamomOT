@@ -39,7 +39,7 @@ PARAMETER_GROUPS = [
         'force_basins', 'temporal_basins', 'min_n_loops', 'max_iter', 'batch_size_traj', 'n_network_fits',
         'constrain_basal_uniform', 'network_condition_pen']),
     ('Proliferation and simulation', [
-        'growth_reg_source', 'prolif_uses_stimulus', 'simulation_stochastic', 'simulate_full_with_harissa',
+        'growth_reg_source', 'prolif_uses_stimulus', 'simulation_stochastic', 'simulation_mrnas_direct',
         'protein_dilution']),
     ('Report', ['classifier_method', 'embedding_method_visualization', 'cell_depth_for_representation',
                 'report_normalize', 'report_log1p', 'report_n_umap']),

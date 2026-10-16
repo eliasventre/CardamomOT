@@ -126,6 +126,7 @@ def main(argv):
         model.rna = np.load(os.path.join(p, 'cardamomOT', 'data_rna.npy'))
         model.ratios = prm['ratios']
         model.load_state_rates(os.path.join(p, 'cardamomOT'))  # birth / death of the states (dilution)
+        model.load_chromatin(os.path.join(p, 'cardamomOT'))  # chromatin regions, if any
         samples_path = os.path.join(p, 'cardamomOT', 'data_samples.npy')
         if os.path.exists(samples_path):
             model.samples_data = np.load(samples_path)
@@ -257,7 +258,7 @@ def main(argv):
               + ('' if scenario == 'default' else f" (schedule scenario {scenario})"))
 
         # Reset model to clean (unperturbed) baseline.
-        # Use the per-sample 3-D basal when available so that simulate_trajectories_unitary
+        # Use the per-sample 3-D basal when available so that simulate_trajectories
         # can route each cell to its own sample's basal (same as simulate_network.py).
         try:
             model_combo.basal = basal_clean_samples.copy() if basal_clean_samples is not None else basal_clean.copy()

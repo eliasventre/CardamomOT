@@ -8,6 +8,14 @@ Cell velocities from transport couplings, shared by run_classical_OT.py and the 
 - Gaussian-kernel regression of the velocities for the cells without any (not in the training set, or
   never reached by the transport), within their timepoint;
 - kNN-transition projection of velocities onto a 2-D embedding (scVelo style).
+
+The barycentric velocities follow the transport-map velocities of Waddington-OT (Schiebinger et al. 2019) and
+OTVelo (Zhao et al. 2024); the projection re-implements the velocity embedding of velocyto / scVelo.
+
+References:
+    La Manno G, et al. (2018). RNA velocity of single cells. Nature 560:494-498.
+    Bergen V, et al. (2020). Generalizing RNA velocity to transient cell states through dynamical modeling.
+    Nature Biotechnology 38:1408-1414.
 """
 import numpy as np
 import scipy.sparse

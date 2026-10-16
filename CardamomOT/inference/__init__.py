@@ -4,9 +4,9 @@ Inference of the network model.
 from .network import inference_network, inference_network_multi, active_regulators, PrevProt, signed_floor, sigmoid_amplitudes, sigmoid_target, gene_weights
 from .trajectory import filter_network, minimal_repetition_choice, inference_alpha, inference_alpha_1thread, find_next_prot, find_next_prot_dilution, my_otdistance, count_errors, kon_ref_vector
 from .mixture import NegativeBinomialMixtureEM, predict_resp
-from .simulations import simulate_next_prot_ode, simulate_next_prot_pdmp
+from .simulations import simulate_next_prot_ode, simulate_next_prot_pdmp, simulate_next_mrna_pdmp, ChromatinModel, kon_chrom, chrom_gate, chrom_values
 from .pretreatment import select_DEgenes, extract_degradation_rates
-from .degradations import compare_trajectories_umap, infer_ratio_d0_d1_unitary, inference_degradation_prot, fit_scale_theta
+from .degradations import compare_trajectories_umap, infer_ratio_d0_d1, inference_degradation_prot, fit_scale_theta
 from .proliferations import train_proliferation_mlp, quadrature, interval_stimulus
 from .seeding import seed_everything, seeded_call, task_seed
 from .sampling import stratified_order, stratified_choice, grouped_subsample, grouped_partition
@@ -15,10 +15,11 @@ from .sampling import stratified_order, stratified_choice, grouped_subsample, gr
 __all__ = ['inference_network', 'inference_network_multi', 'active_regulators', 'PrevProt', 'signed_floor', 'sigmoid_amplitudes', 'sigmoid_target', 'gene_weights', 'filter_network',
            'stratified_order', 'minimal_repetition_choice', 'inference_alpha', 'inference_alpha_1thread', 'find_next_prot', 'find_next_prot_dilution', 'my_otdistance', 'count_errors', 'kon_ref_vector',
            'NegativeBinomialMixtureEM', 'predict_resp',
-           'simulate_next_prot_ode', 'simulate_next_prot_pdmp',
+           'simulate_next_prot_ode', 'simulate_next_prot_pdmp', 'simulate_next_mrna_pdmp', 'ChromatinModel',
+           'kon_chrom', 'chrom_gate', 'chrom_values',
            'select_DEgenes', 'extract_degradation_rates',
            'inference_degradation_prot', 'compare_trajectories_umap',
-           'infer_ratio_d0_d1_unitary',
+           'infer_ratio_d0_d1',
            'train_proliferation_mlp', 'quadrature', 'interval_stimulus', 'fit_scale_theta',
            'seed_everything', 'seeded_call', 'task_seed',
            'stratified_choice', 'grouped_subsample', 'grouped_partition']

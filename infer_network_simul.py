@@ -18,8 +18,8 @@ Required input files:
     - cardamom/ref_network.csv: optional reference network (tab-separated)
 
 Output files:
-    - cardamom/data_prot_unitary.npy: adapted protein abundance
-    - cardamom/data_kon_unitary.npy: adapted bursting parameters
+    - cardamom/data_prot_forsimul.npy: protein trajectories used for the simulations
+    - cardamom/data_kon_forsimul.npy: kon of the trajectories with the simulation network
     - cardamom/basal_simul.npy, inter_simul.npy: simulation-ready parameters
     - cardamom/basal_t_simul.npy, inter_t_simul.npy: temporal parameters
     - cardamom/ratios.npy: parameter ratios

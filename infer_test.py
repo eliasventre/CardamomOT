@@ -233,6 +233,7 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
     # d_t and ratios are needed by estimate_trajectories inside infer_test
     model.ratios = ratios
     model.d_t = d_t
+    model.train_times = np.sort(np.unique(train['times_data']))  # intervals of d_t (transferred to the test times)
 
     # Set ref_network (all ones = no structural prior for test)
     G_tot = adata.shape[1] + model.n_stimuli
@@ -313,13 +314,14 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
     # ─── RESTORE SIMUL NETWORK FOR POST-PROCESSING ───────────────────────
     # Trajectory couplings were inferred with the core network; now load the
     # post-processed simul parameters so that estimate_trajectories and
-    # kon_theta are computed with the correct unitary-scale network.
+    # kon_theta are computed with the simulation network.
     model.basal = basal_simul
     model.inter = inter_simul
     model.basal_t = basal_t_simul
     model.inter_t = inter_t_simul
     model.ratios = ratios
     model.d_t = d_t
+    model.load_chromatin(cardamom_dir)  # chromatin regions of the simulations, if any
 
     # ─── RESTRICTED POST-PROCESSING: ESTIMATE TRAJECTORIES + KON_THETA ──
     # Runs only the estimate_trajectories step (updates protein paths along the

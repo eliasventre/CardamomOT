@@ -1,0 +1,12 @@
+{
+ "n_genes": 100,
+ "velocity_cosine": 0.883888266108139,
+ "fate_js": 0.06569863504760955,
+ "random_velocity_cosine": 0.7725133497646547,
+ "random_fate_js": 0.1392638860545327,
+ "network_method": "otvelo_granger",
+ "fate_r2": 0.8458047834664206,
+ "fate_r2_time": 0.09479920858910096,
+ "fate_r2_random": 0.7107919414363316,
+ "fate_r2_all_genes": 0.8926468336925841
+}

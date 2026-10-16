@@ -13,6 +13,7 @@ import multiprocessing as mp
 import numpy as np
 from scipy.optimize import minimize
 from scipy.optimize import check_grad
+from scipy.special import expit
 from numba import njit
 from functools import partial
 import logging
@@ -34,6 +35,7 @@ eps_CE = 1e-6
 EPS = 1e-16
 sc = 1e-3
 r_elasticnet = 0.5
+SCALE_BOUNDS_NET = (0.2, 5.0)  # interval scales of the logit (as the scale of theta of the degradation fits)
 max_inter = 100  # Capacity: bound on each interaction (logit units), independent of the number of genes
 
 
@@ -185,6 +187,45 @@ def _compute_sigma_per_sample(theta_inter, theta_basal_all, ref_network, yp, ys,
     return sigma
 
 
+A_PROBIT = np.pi / 8  # probit approximation E[sigmoid(z)] ~ sigmoid(z / sqrt(1 + A_PROBIT var(z))) (MacKay 1992, Neural Comput 4:720)
+
+
+INTERVAL_SCALE_PEN = 1e-2  # per cell of the fit: pull of the log interval scales towards 0 (theta carries the level)
+
+
+def _noisy_sigma(basal_s, theta_eff, Y, coef, sc=1.0):
+    """Sigmoid of the logit z = basal + Y theta, times the scale sc (per cell, interval scales) and averaged over the
+    protein noise (noise_coef, None = none): u c with u = sc z, c = 1 / sqrt(1 + A_PROBIT sc^2 v),
+    v = sum_j theta_j^2 coef_j Y_j (variance of protein j: coef_j Y_j). Returns (sigma, u, c)."""
+    u = sc * (basal_s + Y @ theta_eff)
+    if coef is None:
+        c = np.ones_like(u)
+    else:
+        v = (np.maximum(Y, 0.0) * coef) @ (theta_eff ** 2)
+        c = 1.0 / np.sqrt(1.0 + A_PROBIT * sc ** 2 * v)
+    return expit(u * c), u, c
+
+
+def _noisy_grad(tmp, Y, theta_eff, coef, u, c, sc=1.0):
+    """Gradients of _noisy_sigma, tmp = d loss / d (u c) per cell: d / d theta_eff (G,), d / d basal and
+    d / d log sc per cell (= tmp u c^3)."""
+    g_theta = Y.T @ (tmp * c * sc)
+    if coef is not None:
+        g_theta = g_theta - A_PROBIT * theta_eff * coef * (np.maximum(Y, 0.0).T @ (tmp * u * c ** 3 * sc ** 2))
+    return g_theta, float(np.sum(tmp * c * sc)), tmp * u * c ** 3
+
+
+def _sigma_noise(theta_basal, theta_eff, Y, ys, us, coef, sc=None):
+    """sigma per cell with the per-sample basal, the scale sc per cell (None = 1) and the protein noise."""
+    sigma = np.empty(Y.shape[0])
+    for s in us:
+        mask = (ys == s)
+        if np.any(mask):
+            sigma[mask] = _noisy_sigma(theta_basal[int(s)], theta_eff, Y[mask], coef,
+                                       1.0 if sc is None else sc[mask])[0]
+    return sigma
+
+
 def _sigma_loss(sigma, yt):
     """Cross-entropy of the sigmoid against its target yt (sigmoid_target of the target kon): symmetric ON / OFF."""
     return main_loss(sigma, yt, 1)
@@ -192,9 +233,11 @@ def _sigma_loss(sigma, yt):
 
 def objective(X, weights_samples, ys, yp, ypm, yt, G, g, n_samples,
               theta_ref, ref_network, l_pen, weight_prev, final,
-              constrain_basal_uniform=0.0, basal_free_mask=None):
+              constrain_basal_uniform=0.0, basal_free_mask=None, noise_coef=None, interval=None):
     """
     Loss function for a single gene — joint over all samples.
+    noise_coef : (G,) or None; kon averaged over the protein noise of variance noise_coef * prot (_noisy_sigma).
+    interval : (N_cells,) int or None; logit of each cell times exp(X[G + n_samples + interval]) (interval scales).
 
     X = theta, shape (G + n_samples,)
       0..G-1      : interaction weights
@@ -207,13 +250,18 @@ def objective(X, weights_samples, ys, yp, ypm, yt, G, g, n_samples,
         True for samples that are NOT pinned by basal_ref for this gene.
     """
     theta_inter = X[:G]           # (G,)
-    theta_basal = X[G:]           # (n_samples,)
+    theta_basal = X[G:G + n_samples]  # (n_samples,)
+    log_sc = X[G + n_samples:]    # interval scales (log)
+    sc = None if interval is None else np.exp(log_sc)[interval]
 
     Q = 0
     us = np.unique(ys.ravel())
     ns_unique: int = len(us)
 
-    sigma = _compute_sigma_per_sample(theta_inter, theta_basal, ref_network, yp, ys, us)
+    plain = noise_coef is None and interval is None
+    sig_fn = (lambda Y: _compute_sigma_per_sample(theta_inter, theta_basal, ref_network, Y, ys, us)) if plain \
+        else (lambda Y: _sigma_noise(theta_basal, theta_inter * ref_network, Y, ys, us, noise_coef, sc))
+    sigma = sig_fn(yp)
 
     for cnt, s in enumerate(us):
         weight_s = np.sum(weights_samples) / weights_samples[cnt]
@@ -221,7 +269,7 @@ def objective(X, weights_samples, ys, yp, ypm, yt, G, g, n_samples,
         Q += (1 - weight_prev) * _sigma_loss(sigma[mask], yt[mask]) * weight_s / ns_unique
 
     if weight_prev:
-        sigma_mod = _compute_sigma_per_sample(theta_inter, theta_basal, ref_network, ypm, ys, us)
+        sigma_mod = sig_fn(ypm)
         for cnt, s in enumerate(us):
             weight_s = np.sum(weights_samples) / weights_samples[cnt]
             mask = (ys == s)
@@ -243,6 +291,9 @@ def objective(X, weights_samples, ys, yp, ypm, yt, G, g, n_samples,
             mean_free  = theta_free.mean()
             Q += constrain_basal_uniform * np.sum((theta_free - mean_free) ** 2)
 
+    if interval is not None:
+        Q += INTERVAL_SCALE_PEN * len(yp) * np.sum(log_sc ** 2)
+
     return Q
 
 
@@ -253,16 +304,32 @@ def _sigma_grad_terms(sigma, yt):
 
 def grad_theta(X, weights_samples, ys, yp, ypm, yt, G, g, n_samples,
                theta_ref, ref_network, l_pen, weight_prev, final,
-               constrain_basal_uniform=0.0, basal_free_mask=None):
+               constrain_basal_uniform=0.0, basal_free_mask=None, noise_coef=None, interval=None):
     """Gradient of objective w.r.t. X = theta."""
     theta_inter = X[:G]
-    theta_basal = X[G:]
+    theta_basal = X[G:G + n_samples]
+    log_sc = X[G + n_samples:]
+    sc = None if interval is None else np.exp(log_sc)[interval]
     dq = np.zeros_like(X)
     us = np.unique(ys.ravel())
     ns_unique: int = len(us)
 
     passes = [(1 - weight_prev, yp)] + ([(weight_prev, ypm)] if weight_prev else [])
     for pass_w, Y in passes:
+        if noise_coef is not None or interval is not None:
+            theta_eff = theta_inter * ref_network
+            for cnt, s in enumerate(us):
+                s_idx = int(s)
+                weight_s = np.sum(weights_samples) / weights_samples[cnt]
+                mask = (ys == s)
+                sc_m = 1.0 if sc is None else sc[mask]
+                sig, u, c = _noisy_sigma(theta_basal[s_idx], theta_eff, Y[mask], noise_coef, sc_m)
+                res, rb, rl = _noisy_grad(_sigma_grad_terms(sig, yt[mask]), Y[mask], theta_eff, noise_coef, u, c, sc_m)
+                dq[:G] += pass_w * ref_network * res * weight_s / ns_unique
+                dq[G + s_idx] += pass_w * rb * weight_s / ns_unique
+                if interval is not None:
+                    np.add.at(dq, G + n_samples + interval[mask], pass_w * rl * weight_s / ns_unique)
+            continue
         sigma = _compute_sigma_per_sample(theta_inter, theta_basal, ref_network, Y, ys, us)
         for cnt, s in enumerate(us):
             s_idx = int(s)
@@ -288,6 +355,9 @@ def grad_theta(X, weights_samples, ys, yp, ypm, yt, G, g, n_samples,
             mean_free  = theta_free.mean()
             dq[G + free_idx] += 2.0 * constrain_basal_uniform * (theta_free - mean_free)
 
+    if interval is not None:
+        dq[G + n_samples:] += 2.0 * INTERVAL_SCALE_PEN * len(yp) * log_sc
+
     return dq
 
 
@@ -303,7 +373,8 @@ def _sigma_refinement(theta_basal, inter_with_diag, cond, Y, ys, us):
 
 
 def objective_refinement(X, correc_ref, inter, basal, weights_samples, ys, yp, ypm, yt,
-                          diag, G, g, n_samples, l_pen, weight_prev, final, cond=None):
+                          diag, G, g, n_samples, l_pen, weight_prev, final, cond=None, noise_coef=None,
+                          cell_scale=None):
     """
     Loss for the refinement step with per-sample basal.
 
@@ -324,7 +395,9 @@ def objective_refinement(X, correc_ref, inter, basal, weights_samples, ys, yp, y
 
     passes = [(1 - weight_prev, yp)] + ([(weight_prev, ypm)] if weight_prev else [])
     for pass_w, Y in passes:
-        sigma = _sigma_refinement(theta_basal, inter_with_diag, cond, Y, ys, us)
+        sigma = _sigma_refinement(theta_basal, inter_with_diag, cond, Y, ys, us) \
+            if noise_coef is None and cell_scale is None \
+            else _sigma_noise(theta_basal, inter_with_diag, Y, ys, us, noise_coef, cell_scale)
         for cnt, s in enumerate(us):
             weight_s = np.sum(weights_samples) / weights_samples[cnt]
             mask = (ys == s)
@@ -341,7 +414,7 @@ def objective_refinement(X, correc_ref, inter, basal, weights_samples, ys, yp, y
 
 
 def grad_correc(X, correc_ref, inter, basal, weights_samples, ys, yp, ypm, yt,
-                diag, G, g, n_samples, l_pen, weight_prev, final, cond=None):
+                diag, G, g, n_samples, l_pen, weight_prev, final, cond=None, noise_coef=None, cell_scale=None):
     """Gradient of objective_refinement w.r.t. correction factors X."""
     theta_inter = inter.copy() * X[:G]
     theta_basal = basal.copy() * X[G:]  # (n_samples,)
@@ -353,6 +426,18 @@ def grad_correc(X, correc_ref, inter, basal, weights_samples, ys, yp, ypm, yt,
 
     passes = [(1 - weight_prev, yp)] + ([(weight_prev, ypm)] if weight_prev else [])
     for pass_w, Y in passes:
+        if noise_coef is not None or cell_scale is not None:
+            for cnt, s in enumerate(us):
+                s_idx = int(s)
+                weight_s = np.sum(weights_samples) / weights_samples[cnt]
+                mask = (ys == s)
+                sc_m = 1.0 if cell_scale is None else cell_scale[mask]
+                sig, u, c = _noisy_sigma(theta_basal[s_idx], inter_with_diag, Y[mask], noise_coef, sc_m)
+                res, rb, _ = _noisy_grad(_sigma_grad_terms(sig, yt[mask]), Y[mask], inter_with_diag, noise_coef, u, c,
+                                         sc_m)
+                dq[:G] += pass_w * inter * res * weight_s / ns_unique
+                dq[G + s_idx] += pass_w * basal[s_idx] * rb * weight_s / ns_unique
+            continue
         sigma = _sigma_refinement(theta_basal, inter_with_diag, cond, Y, ys, us)
         for cnt, s in enumerate(us):
             s_idx = int(s)
@@ -376,7 +461,8 @@ def core_inference(y_samples, y_prot, y_prot_mod, y_target, theta_init, theta_re
                    ref_network, G, g, n_samples,
                    l_pen, weight_prev=.5, final=0,
                    constrain_basal_uniform=0.0, basal_free_mask=None,
-                   hard_forcing_ref=False, ref_constraint_pct=0.1, seuil_zero_min_ref=1e-2):
+                   hard_forcing_ref=False, ref_constraint_pct=0.1, seuil_zero_min_ref=1e-2, noise_coef=None,
+                   interval=None, n_intervals=0):
     """
     Joint L-BFGS-B optimisation of interactions + per-sample basals for one gene.
     Effective interactions theta * w (w = prior_weight) are bounded by max_inter, basals by
@@ -385,6 +471,8 @@ def core_inference(y_samples, y_prot, y_prot_mod, y_target, theta_init, theta_re
     theta_init shape: (G + n_samples,)
       0..G-1    : interaction weights
       G..G+ns-1 : per-sample basal values
+    With interval (per cell) and n_intervals > 0, n_intervals log scales of the logit are appended to theta
+    (bounded by SCALE_BOUNDS_NET, pulled towards 0).
     Returns theta_final of same shape.
     """
     weights_samples = [np.sum(y_samples == s) ** alpha for s in np.unique(y_samples)]
@@ -396,11 +484,16 @@ def core_inference(y_samples, y_prot, y_prot_mod, y_target, theta_init, theta_re
     bounds = _interaction_bounds(theta_ref_flat, ref_network_flat, G, final,
                                  hard_forcing_ref, ref_constraint_pct, seuil_zero_min_ref)
     bounds += [(-_basal_bound(G), _basal_bound(G))] * n_samples
+    use_int = interval is not None and n_intervals > 0
+    if use_int:
+        X_flat = np.concatenate([X_flat, np.zeros(n_intervals)])
+        bounds += [tuple(np.log(SCALE_BOUNDS_NET))] * n_intervals
 
     kw = dict(weights_samples=weights_samples, ys=y_samples, yp=y_prot, ypm=y_prot_mod, yt=y_target,
               G=G, g=g, n_samples=n_samples, theta_ref=theta_ref, ref_network=prior_weight(ref_network),
               l_pen=l_pen, weight_prev=weight_prev, final=final,
-              constrain_basal_uniform=constrain_basal_uniform, basal_free_mask=basal_free_mask)
+              constrain_basal_uniform=constrain_basal_uniform, basal_free_mask=basal_free_mask, noise_coef=noise_coef,
+              interval=np.asarray(interval, dtype=int) if use_int else None)
     loss_fn = partial(objective, **kw)
     grad_fn = partial(grad_theta, **kw)
 
@@ -465,10 +558,10 @@ def _interaction_bounds(theta_ref_flat, ref_network_flat, G, final,
     return bounds
 
 
-### NETWORK CONDITIONS: theta_c = theta_shared + delta_c (fused penalty on delta)
+### NETWORK CONDITIONS: theta_c = theta_shared + delta_c (fused penalty on delta - delta_ref)
 
 def _loss_grad_conditions(X, weights_samples, ys, yp, ypm, yt, G, n_samples,
-                          cond, omega, theta_ref, w, l_pen, l_fuse, weight_prev, final,
+                          cond, omega, theta_ref, delta_ref, w, l_pen, l_fuse, weight_prev, final,
                           constrain_basal_uniform=0.0, basal_free_mask=None):
     """
     Loss and gradient for one gene with one network per condition.
@@ -476,7 +569,8 @@ def _loss_grad_conditions(X, weights_samples, ys, yp, ypm, yt, G, n_samples,
     X = [shared (G,), delta (C, G), basal (n_samples,)] in theta units; the network of
     condition c is theta_c = shared + delta_c (effective = w * theta_c); sample s uses cond[s].
     Penalties: sparsity sum_c omega_c pen(theta_c - theta_ref_c) (omega_c = share of the samples,
-    so a common network costs as now) + l_fuse * L1(w * delta_c) (0 = independent networks).
+    so a common network costs as now) + l_fuse * L1(w * (delta_c - delta_ref_c)) (0 = independent
+    networks); delta_ref_c = theta_ref_c - mean_c theta_ref_c (0 without reference: common network).
     """
     C = len(omega)
     shared = X[:G]
@@ -517,11 +611,12 @@ def _loss_grad_conditions(X, weights_samples, ys, yp, ypm, yt, G, n_samples,
             g_theta[c] += omega[c] * (r_elasticnet * grad_l2_penalization(d, l_pen) * w
                                       + (1 - r_elasticnet) * grad_smoothed_l1_penalization(d, l_pen) * on)
 
-    # Fused penalty on the effective deviations from the shared network
+    # Fused penalty: effective deviations from the shared network pulled towards the reference ones
     g_delta = g_theta.copy()
     if l_fuse > 0:
-        Q += smoothed_l1_penalization(delta * w[None], l_fuse)
-        g_delta += grad_smoothed_l1_penalization(delta * w[None], l_fuse) * w[None]
+        dd = (delta - delta_ref) * w[None]
+        Q += smoothed_l1_penalization(dd, l_fuse)
+        g_delta += grad_smoothed_l1_penalization(dd, l_fuse) * w[None]
 
     if constrain_basal_uniform > 0.0 and basal_free_mask is not None:
         free_idx = np.where(basal_free_mask)[0]
@@ -550,8 +645,9 @@ def core_inference_conditions(y_samples, y_prot, y_prot_mod, y_target, theta_ini
     core_inference with one network per condition (cond[s] = condition of sample s).
 
     theta_init / theta_ref : (C * G + n_samples,), condition c in c*G..(c+1)*G-1
-    (theta units). The reference / sign bounds apply to the shared network; with
-    hard_forcing_ref the deviations are pinned to 0. Returns the effective (C * G + n_samples,).
+    (theta units). The reference / sign bounds apply to the shared network (mean of the references), the
+    fused penalty pulls the deviations towards those of the references (theta_ref_c - mean); with
+    hard_forcing_ref the deviations are pinned to the reference ones. Returns the effective (C * G + n_samples,).
     """
     C = int(np.max(cond)) + 1
     w = prior_weight(np.asarray(ref_network, dtype=float))
@@ -567,26 +663,29 @@ def core_inference_conditions(y_samples, y_prot, y_prot_mod, y_target, theta_ini
                              np.asarray(theta_init[C * G:], dtype=float)])
 
     ref_flat = ref_c.mean(axis=0)
+    delta_ref = ref_c - ref_flat[None]   # reference deviations from the mean reference
     ref_network_flat = np.ascontiguousarray(ref_network, dtype=float)
     bounds = _interaction_bounds(ref_flat, ref_network_flat, G, final,
                                  hard_forcing_ref, ref_constraint_pct, seuil_zero_min_ref)
+    pinned = [(v, v) for v in delta_ref.ravel()]
     if hard_forcing_ref and not final:
-        bounds += [(0.0, 0.0)] * (C * G)
+        bounds += pinned
     else:
-        bounds += [(-2 * max(-lo, hi), 2 * max(-lo, hi)) for _ in range(C) for lo, hi in bounds[:G]]
+        bounds += [(min(-2 * max(-lo, hi), dr), max(2 * max(-lo, hi), dr))
+                   for dr_c in delta_ref for (lo, hi), dr in zip(bounds[:G], dr_c)]
     bounds += [(-_basal_bound(G), _basal_bound(G))] * n_samples
 
     fn = partial(_loss_grad_conditions, weights_samples=weights_samples, ys=y_samples,
                  yp=y_prot, ypm=y_prot_mod, yt=y_target, G=G,
-                 n_samples=n_samples, cond=cond, omega=omega, theta_ref=ref_c, w=w,
+                 n_samples=n_samples, cond=cond, omega=omega, theta_ref=ref_c, delta_ref=delta_ref, w=w,
                  l_pen=l_pen, l_fuse=l_fuse, weight_prev=weight_prev, final=final,
                  constrain_basal_uniform=constrain_basal_uniform, basal_free_mask=basal_free_mask)
-    # Stage 1: common network (delta = 0), well conditioned; stage 2: deviations from it, started
-    # from the previous deviations or from none (the stiff fused term alone stalls L-BFGS-B)
+    # Stage 1: deviations pinned to the reference ones (0 without reference), well conditioned; stage 2:
+    # free deviations, started from stage 1 or the initial deviations (the stiff fused term alone stalls L-BFGS-B)
     d_sl = slice(G, (C + 1) * G)
     X_common = X_flat.copy()
-    X_common[d_sl] = 0.0
-    bounds_common = bounds[:G] + [(0.0, 0.0)] * (C * G) + bounds[(C + 1) * G:]
+    X_common[d_sl] = delta_ref.ravel()
+    bounds_common = bounds[:G] + pinned + bounds[(C + 1) * G:]
     res = minimize(fn, X_common, jac=True, method="L-BFGS-B", bounds=bounds_common, options=_lbfgs_options(G))
     if l_fuse < np.inf and not (hard_forcing_ref and not final):
         starts = [res.x, np.concatenate([res.x[:G], X_flat[d_sl], res.x[(C + 1) * G:]])]
@@ -610,7 +709,7 @@ def refine_inference(y_samples, y_prot, y_prot_mod, y_target, inter, basal, thet
                      G, g, n_samples,
                      l_pen, weight_prev=.5, correc_ref=0, final=0,
                      hard_forcing_ref=False, ref_constraint_pct=0.1, ref_network=None, seuil_zero_min_ref=1e-2,
-                     cond=None):
+                     cond=None, noise_coef=None, cell_scale=None):
     """
     Refinement step: optimise multiplicative correction factors over inter and per-sample basal.
     Corrections are bounded so that refined values stay within max_inter and _basal_bound(G);
@@ -674,7 +773,8 @@ def refine_inference(y_samples, y_prot, y_prot_mod, y_target, inter, basal, thet
     kw = dict(correc_ref=correc_ref, inter=inter, basal=basal,
               weights_samples=weights_samples, ys=y_samples, yp=y_prot, ypm=y_prot_mod, yt=y_target,
               diag=diag, G=G, g=g, n_samples=n_samples,
-              l_pen=l_pen, weight_prev=weight_prev, final=final, cond=cond)
+              l_pen=l_pen, weight_prev=weight_prev, final=final, cond=cond, noise_coef=noise_coef,
+              cell_scale=cell_scale)
     loss_fn = partial(objective_refinement, **kw)
     grad_fn = partial(grad_correc, **kw)
 
@@ -701,9 +801,13 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
                         weight_prev=.5, final=0,
                         constrain_basal_uniform=0.0, basal_free_mask=None,
                         hard_forcing_ref=False, ref_constraint_pct=0.1, seuil_zero_min_ref=1e-2,
-                        cond=None, condition_pen=1.0):
+                        cond=None, condition_pen=1.0, noise_coef=None, interval=None, n_intervals=0):
     """
     Joint inference (inter + per-sample basal) for a single gene g.
+    noise_coef : (G,) or None: kon averaged over a protein noise of variance noise_coef * prot (no network conditions).
+    interval, n_intervals : interval index of each cell and number of intervals; with n_intervals > 0 (no network
+                 conditions), the logit of g is scaled per interval (scales fitted with theta, kept in the refinement)
+                 and the scales (n_intervals,) are returned last.
 
     theta_init : (G + n_samples,), or (C * G + n_samples,) with one network per condition
                  (cond[s] = condition of sample s, see core_inference_conditions)
@@ -732,20 +836,23 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
     theta_init[:n_rows] = np.where(w_rows > 0, theta_init[:n_rows] / np.maximum(w_rows, EPS), 0.0)
     theta_ref[:n_rows] = np.where(w_rows > 0, theta_ref[:n_rows] / np.maximum(w_rows, EPS), 0.0)
 
-    l_pen = l_gen * np.size(y_prot, 0) / (scale * (1 + G**(1/2)))
+    l_pen = l_gen * np.size(y_prot, 0) / (scale * (1 + G**(3/4)))
 
     common = dict(weight_prev=weight_prev * (1 - final), final=final,
                   constrain_basal_uniform=constrain_basal_uniform, basal_free_mask=basal_free_mask,
                   hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
                   seuil_zero_min_ref=seuil_zero_min_ref)
+    use_int = interval is not None and n_intervals > 0 and cond is None
     if cond is None:
         theta = core_inference(y_samples, y_prot, y_prot_mod, y_target, theta_init, theta_ref, ref_network,
-                               G, g, n_samples, l_pen, **common)
+                               G, g, n_samples, l_pen, noise_coef=noise_coef, interval=interval if use_int else None,
+                               n_intervals=n_intervals if use_int else 0, **common)
     else:
         theta = core_inference_conditions(y_samples, y_prot, y_prot_mod, y_target, theta_init, theta_ref, ref_network,
                                           G, g, n_samples, cond, l_pen, condition_pen * l_pen, **common)
     inter_tmp = theta[:n_rows].reshape((G,) if cond is None else (C, G))
     basal_tmp = theta[n_rows:n_rows + n_samples].copy()
+    scales = np.exp(theta[n_rows + n_samples:]) if use_int else None
 
     # Refinement step (reference of the shared network for the conditions)
     ref_refine = theta_ref if cond is None else np.concatenate(
@@ -757,8 +864,12 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
         l_pen * max(1/max(1, np.log(1 + G)), refine_scale_effect(inter_tmp, y_prot, g)), weight_prev=weight_prev * (1 - final),  # adaptive lasso, weights 1 / |theta_tmp|, level in effect units
         correc_ref=final, final=final, hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
         ref_network=ref_network, seuil_zero_min_ref=seuil_zero_min_ref, cond=cond,
+        noise_coef=noise_coef if cond is None else None,
+        cell_scale=scales[np.asarray(interval, dtype=int)] if use_int else None,
     )
 
+    if use_int:
+        return basal, inter, basal_tmp, inter_tmp, scales
     return basal, inter, basal_tmp, inter_tmp
 
 
@@ -841,7 +952,8 @@ class PrevProt:
 
 
 def _infer_gene(g_tgt, G, active_src, y_samples, yp, ypm, y_kon_g, ti_g, tr_g,
-                ks_g, n_samples, l_gen, scale, rn, free_mask_g, gene_kw, cond=None):
+                ks_g, n_samples, l_gen, scale, rn, free_mask_g, gene_kw, cond=None, noise_coef=None,
+                interval=None):
     """
     Network inference for one target gene (worker task of inference_network).
     yp / ypm / rn are already restricted to the active regulators active_src
@@ -854,7 +966,7 @@ def _infer_gene(g_tgt, G, active_src, y_samples, yp, ypm, y_kon_g, ti_g, tr_g,
         # Dense path: no sub-selection
         return main_loop_inference(
             g_tgt, y_samples, yp, ypm, y_kon_g, ti_g, tr_g, ks_g, G, n_samples, l_gen, scale, rn,
-            basal_free_mask=free_mask_g, cond=cond, **gene_kw,
+            basal_free_mask=free_mask_g, cond=cond, noise_coef=noise_coef, interval=interval, **gene_kw,
         )
 
     # Sparse path: sub-select to K_g active regulators. K_g == 0: no interaction
@@ -868,10 +980,10 @@ def _infer_gene(g_tgt, G, active_src, y_samples, yp, ypm, y_kon_g, ti_g, tr_g,
     g_sub_matches = np.where(active_src == g_tgt)[0]
     g_sub = int(g_sub_matches[0]) if len(g_sub_matches) > 0 else K_g
 
-    basal_r, inter_sub_r, basal_tmp_r, inter_tmp_sub_r = main_loop_inference(
+    basal_r, inter_sub_r, basal_tmp_r, inter_tmp_sub_r, *extra = main_loop_inference(
         g_sub, y_samples, yp, ypm, y_kon_g, theta_init_sub, theta_ref_sub,
         ks_g, K_g, n_samples, l_gen, scale, rn,
-        basal_free_mask=free_mask_g, cond=cond, **gene_kw,
+        basal_free_mask=free_mask_g, cond=cond, noise_coef=noise_coef, interval=interval, **gene_kw,
     )
 
     # Expand interaction results back to full G-dimensional space
@@ -880,7 +992,7 @@ def _infer_gene(g_tgt, G, active_src, y_samples, yp, ypm, y_kon_g, ti_g, tr_g,
     inter_tmp_full = np.zeros(shape)
     inter_full[..., active_src]     = inter_sub_r
     inter_tmp_full[..., active_src] = inter_tmp_sub_r
-    return basal_r, inter_full, basal_tmp_r, inter_tmp_full
+    return (basal_r, inter_full, basal_tmp_r, inter_tmp_full, *extra)
 
 
 def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n_stimuli=1,
@@ -892,7 +1004,8 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
                       constrain_basal_uniform=0.0,
                       hard_forcing_ref=False, ref_constraint_pct=0.1,
                       seuil_zero_min_ref=1e-2,
-                      sample_conditions=None, condition_pen=1.0) -> list:
+                      sample_conditions=None, condition_pen=1.0, noise_coef=None,
+                      interval=None, n_intervals=0) -> list:
     """
     Joint network inference: interactions shared across samples, basal per sample.
     One independent fit per row subset in subsets (index arrays, None = all rows);
@@ -916,6 +1029,11 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
         condition_pen times the sparsity penalty (0: independent networks); inter is then
         returned per sample, (n_samples, G, G). inter_init / inter_ref may be
         (G, G) (common) or per sample.
+    noise_coef : (G,) or None; with it, kon is averaged over a protein noise of variance noise_coef * prot (probit
+        approximation, see _noisy_sigma): theta then gives the target kon in the presence of the simulated noise.
+    interval, n_intervals : (N_rows,) interval index of each row and number of intervals; with n_intervals > 0 (no
+        network conditions), each target has one scale of its logit per interval, fitted with theta, and each fit
+        gets a fifth element, the scales (n_intervals, G).
     """
     if ref_constraint_pct < 0:
         raise ValueError(f"ref_constraint_pct must be >= 0, got {ref_constraint_pct}")
@@ -1002,7 +1120,9 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
     gene_kw = dict(weight_prev=weight_prev, final=final,
                    constrain_basal_uniform=constrain_basal_uniform,
                    hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
-                   seuil_zero_min_ref=seuil_zero_min_ref, condition_pen=condition_pen)
+                   seuil_zero_min_ref=seuil_zero_min_ref, condition_pen=condition_pen,
+                   n_intervals=n_intervals if (interval is not None and cond is None) else 0)
+    use_int = gene_kw['n_intervals'] > 0
 
     def gene_args(rows, g_tgt):
         # Only the rows and regulators target g_tgt needs are sent to the worker (built lazily)
@@ -1014,7 +1134,9 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
                 y_kon[rows, g_tgt], theta_init_mat[:, g_tgt], theta_ref_mat[:, g_tgt],
                 ks[:, g_tgt] if ks.ndim == 3 else ks[g_tgt], n_samples, l_gen, scale,
                 ref_network[:, g_tgt] if dense else ref_network[active_src, g_tgt],
-                free_mask_2d[:, g_tgt], gene_kw, cond)
+                free_mask_2d[:, g_tgt], gene_kw, cond,
+                None if noise_coef is None else np.asarray(noise_coef, dtype=float)[slice(None) if dense else active_src],
+                np.asarray(interval, dtype=int)[rows] if use_int else None)
 
     genes = range(n_stimuli, G)
     tasks = [(k, g) for k in range(len(subsets)) for g in genes]
@@ -1030,12 +1152,16 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
     for k in range(len(subsets)):
         basal, basal_tmp = np.zeros((n_samples, G)), np.zeros((n_samples, G))
         inter, inter_tmp = np.zeros(shape), np.zeros(shape)
+        scales = np.ones((n_intervals, G)) if use_int else None
         for idx, g in enumerate(genes):
-            basal[:, g], inter[..., g], basal_tmp[:, g], inter_tmp[..., g] = results[k * len(genes) + idx]
+            res_g = results[k * len(genes) + idx]
+            basal[:, g], inter[..., g], basal_tmp[:, g], inter_tmp[..., g] = res_g[:4]
+            if use_int:
+                scales[:, g] = res_g[4]
         if cond is not None:
             # Per sample: each sample takes the network of its condition
             inter, inter_tmp = inter[cond], inter_tmp[cond]
-        fits.append((basal, inter, basal_tmp, inter_tmp))
+        fits.append((basal, inter, basal_tmp, inter_tmp) + ((scales,) if use_int else ()))
     return fits
 
 

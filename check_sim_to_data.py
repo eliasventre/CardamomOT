@@ -147,9 +147,9 @@ def main(argv):
         times_simulation = np.load(os.path.join(p, 'cardamomOT', 'simulation_times.npy'))
         rna_ref = np.load(os.path.join(p, 'cardamomOT', 'data_rna.npy'))
         mrna_simul_path = os.path.join(p, 'cardamomOT', 'data_mrna_simul.npy')
-        mrna_simul = np.load(mrna_simul_path) if os.path.exists(mrna_simul_path) and model.simulate_full_with_harissa else None
+        mrna_simul = np.load(mrna_simul_path) if os.path.exists(mrna_simul_path) and model.simulation_mrnas_direct else None
         if mrna_simul is not None:
-            print("[check_sim_to_data] Harissa mRNA simulation found — will use directly (no NB sampling)")
+            print("[check_sim_to_data] Explicit mRNA simulation found — used directly (no NB sampling)")
         print("[check_sim_to_data] Successfully loaded all parameters")
     except FileNotFoundError as e:
         print(f"[check_sim_to_data] Error: Missing parameter file: {e}")
@@ -202,11 +202,10 @@ def main(argv):
     if real_idx is not None and len(real_idx) == data_ref.shape[1] and np.all(real_idx >= 0):
         data_ref[1:, :] = data_rna_extracted[:, real_idx]
 
-    # Generate data_sim: either directly from Harissa mRNAs or via NB sampling
+    # Generate data_sim: either directly from the simulated mRNAs (simulation_mrnas_direct) or via NB sampling
     if mrna_simul is not None:
-        # Harissa mode: mRNAs are already simulated — use them directly
         data_sim[1:, :] = mrna_simul[:, ns:].T
-        print("[check_sim_to_data] data_sim built from Harissa mRNA simulation (no NB sampling)")
+        print("[check_sim_to_data] data_sim built from the explicit mRNA simulation (no NB sampling)")
     else:
         # Standard mode: sample counts from the NB burst model
         zero_mask = (np.random.uniform(0, 1, (data_sim[1:, :].shape)) < pz_sim.T)

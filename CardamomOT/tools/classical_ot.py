@@ -1,5 +1,8 @@
 """
 Classical optimal-transport analysis (Waddington-OT / moscot style), run before CardamomOT on every gene.
+Re-implements the transport-map computation of Waddington-OT (Schiebinger et al. 2019; github.com/broadinstitute/wot)
+with its default parameters, solved by the scaling algorithm of Chizat et al. 2018, as also used by moscot
+(Klein et al. 2025).
 
 Per sample and pair of consecutive timepoints: entropic unbalanced OT (Chizat et al. scaling algorithm) on
 the squared Euclidean distances of a PCA of log1p(counts / depth factor), divided by their median; source
@@ -10,6 +13,13 @@ epsilon = 0.05, lambda1 = 1, lambda2 = 50.
 From the couplings: cell-type transitions, genes differentially expressed in the ancestors of each cell
 type (its immediate ancestors against those of the other cells, weighted Welch t) next to the genes
 differentially expressed in the cell type itself; velocities drawn by the report (tools/velocity.py).
+
+References:
+    Schiebinger G, et al. (2019). Optimal-transport analysis of single-cell gene expression identifies
+    developmental trajectories in reprogramming. Cell 176(4):928-943. Code: github.com/broadinstitute/wot
+    Chizat L, Peyre G, Schmitzer B, Vialard F-X (2018). Scaling algorithms for unbalanced optimal transport
+    problems. Mathematics of Computation 87:2563-2609.
+    Klein D, Palla G, et al. (2025). Mapping cells through time and space with moscot. Nature 638:1065-1075.
 """
 import numpy as np
 import pandas as pd

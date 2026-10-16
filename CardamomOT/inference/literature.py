@@ -9,6 +9,12 @@ post-translational (OmniPath signalling) or transcriptional. Only feasibility is
 no length weight through unobserved intermediates, which make the effect look direct; paths
 through observed genes are down-weighted, see prior). Genes the literature does not cover (no
 TF -> gene edge for a target, absent for a regulator) get a neutral prior.
+
+References:
+    Turei D, et al. (2021). Integrated intra- and intercellular signaling knowledge for multicellular omics
+    analysis. Molecular Systems Biology 17:e9923 (OmniPath).
+    Muller-Dott S, et al. (2023). Expanding the coverage of regulons from high-confidence prior knowledge for
+    accurate estimation of transcription factor activities. Nucleic Acids Research 51:10934-10949 (CollecTRI).
 """
 import os
 from functools import lru_cache

@@ -13,7 +13,6 @@ _MOCK_MODULES = [
     "matplotlib", "matplotlib.pyplot", "matplotlib.patches", "matplotlib.cm",
     "umap",
     "networkx",
-    "harissa",
     "numexpr", "numexpr.utils",
 ]
 for _mod in _MOCK_MODULES:

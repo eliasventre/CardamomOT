@@ -5,7 +5,7 @@ This module provides PyTorch models and helper functions used by the
 CARDAMOM pipeline when learning gene-specific degradation parameters
 from protein dynamics.  It includes the
 :class:`GeneRegulatoryODE_sigmoid` neural ODE model and the
-:func:`infer_ratio_d0_d1_unitary` routine among other utilities.
+:func:`infer_ratio_d0_d1` routine among other utilities.
 """
 
 import numpy as np
@@ -128,6 +128,21 @@ def build_kon_fn(ks, theta_inter, bias, device="cpu"):
     return kon
 
 
+
+SCALE_BOUNDS = (0.2, 5.0)  # scale of theta per target gene: within [1/5, 5] (network neither erased nor blown up)
+
+
+def _fix_unit_scale(scale_param):
+    """Scale held at 1 (fix_scale): raw parameter at softplus^-1(1), no gradient."""
+    with torch.no_grad():
+        scale_param.fill_(float(np.log(np.expm1(1.0))))
+    scale_param.requires_grad_(False)
+
+
+def bounded_scale(scale_param):
+    """Scale of theta from its raw parameter: softplus clamped to SCALE_BOUNDS."""
+    return torch.nn.functional.softplus(scale_param).clamp(*SCALE_BOUNDS)
+
 class GeneRegulatoryODE_sigmoid(nn.Module):
     """
     ODE model for gene regulatory dynamics with sigmoid kon (between the lowest and the highest mode).
@@ -215,7 +230,7 @@ class GeneRegulatoryODE_sigmoid(nn.Module):
 
         # ----- compute scale -----
         # First ns elements (stimuli) are fixed at 1; ns: elements are learned
-        scale_raw = torch.nn.functional.softplus(self.scale_param)
+        scale_raw = bounded_scale(self.scale_param)
         scale = torch.cat([
             torch.ones(ns, device=X.device, dtype=scale_raw.dtype),
             scale_raw[ns:]
@@ -332,15 +347,15 @@ def fit_scale_theta(X_prot, kon_beta, bias, theta_inter, ks, ns, samples_data=No
                 total += np.mean(((sigma * ks_g).sum(axis=1) - target) ** 2)
             return total
 
-    res = minimize_scalar(_total_loss, bounds=(-5, 5), method='bounded')
+    res = minimize_scalar(_total_loss, bounds=tuple(np.log(SCALE_BOUNDS)), method='bounded')
     return float(np.exp(res.x))
 
 
 # ---------------------------
-# infer_ratio_d0_d1_unitary
+# infer_ratio_d0_d1
 # ---------------------------
 
-def infer_ratio_d0_d1_unitary(
+def infer_ratio_d0_d1(
     X_prot, times, bias, theta_inter, ks,
     d_learned_temporal, k1_vec,
     n_stimuli=1, stim_schedule=None,
@@ -352,10 +367,12 @@ def infer_ratio_d0_d1_unitary(
     verbose=True,
     scale=1.0,
     two_stage=False,
+    center=False,
     birth=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Estimate ε_i = d1_i/d0_i from ODE residuals (``birth``: (N,) birth rate of the rows, dilution in the
-    mean-field prediction; None: no dilution) (bursty-PDMP variance matching).
+    mean-field prediction; None: no dilution) (bursty-PDMP variance matching), for the protein PDMP or, with
+    ``two_stage``, the PDMP with explicit mRNA (simulation_mrnas_direct).
 
     **Theoretical background.**
 
@@ -392,6 +409,9 @@ def infer_ratio_d0_d1_unitary(
         h_{ic} = 2\\,dt\\cdot\\mathrm{scale}\\cdot
                  \\frac{d_{1,i}}{k_{1,i}}\\cdot k_{on,i}(P_c)
 
+    for short steps; over a step of any length, the variance accumulated with the relaxation d1 replaces
+    :math:`2\\,dt\\,d_{1,i}` by :math:`1 - e^{-2 d_{1,i} dt}` (used below).
+
     The regularised method-of-moments estimator is:
 
     .. math::
@@ -421,8 +441,9 @@ def infer_ratio_d0_d1_unitary(
         eps_min, eps_max   : Output clipping bounds for ε = d1/d0.
         verbose            : Log per-interval diagnostics.
         scale              : Protein scale (``self.scale_proteins``). Default 1.0.
-        two_stage          : True for the Harissa PDMP (explicit mRNA): the mRNA filters the protein
+        two_stage          : True for the PDMP with explicit mRNA (simulation_mrnas_direct): the mRNA filters the protein
                              noise by d0/(d0+d1), i.e. Var = ε/(1+ε)·h instead of ε·h.
+        center             : True: residuals centred per gene, interval and sample (mean shifts not counted as noise).
 
     Returns:
         eps_temporal : ``(T-1, G)`` per-interval ε = d1/d0 estimates.
@@ -458,7 +479,7 @@ def infer_ratio_d0_d1_unitary(
     # Bursty-PDMP model (Campbell's theorem for Exp bursts):
     #   Var(ΔX_i) = ε_i · h_{ic}
     # where  ε_i = d1_i/d0_i  and  kon_i(P_c) is the k1-normalised kon (kon_true/k1)
-    #        h_{ic} = 2 · dt · scale · d1_i/k1_i · kon_i(P_c)
+    #        h_{ic} = scale · (1 - exp(-2 d1_i dt)) / k1_i · kon_i(P_c)  (2 dt d1_i for short steps)
     # Regularised MoM: ε_i = (Σ res²_{ci} + λ·ε_prior) / (Σ h_{ic} + λ)
     num_t   = np.zeros((T - 1, G), dtype=np.float64)   # Σ residuals²
     denom_t = np.zeros((T - 1, G), dtype=np.float64)   # Σ h
@@ -553,12 +574,14 @@ def infer_ratio_d0_d1_unitary(
             kon_avg = 0.5 * (kon_0 + kon_1)   # (n_pairs, G)
 
             # ── Residuals and denominator ─────────────────────────────────────────
-            residuals = (X_pred - X1_np) ** 2   # (n_pairs, G)
+            diff = X_pred - X1_np
+            residuals = diff ** 2   # (n_pairs, G)
 
-            # h_{ic} = 2 · dt · scale · d1_i/k1_i · kon_i(P_c), kon_i(P_c) = kon_avg already = kon_true/k1_i
+            # h_{ic} = scale · (1 - exp(-2 d1_i dt)) / k1_i · kon_i(P_c), kon_i(P_c) = kon_avg already = kon_true/k1_i:
+            # variance accumulated over the step with the relaxation d1 (2 dt d1 for short steps)
             # Derived from Campbell's theorem: burst rate=k1·kon_norm·d0, burst size~Exp(k1·d0/(scale·d1))
             #   Var(ΔP_i) = burst_rate · E[B²] · dt = ε_i · 2·dt·scale·(d1_i/k1_i)·kon_i
-            h_mat = (2.0 * dts * float(scale)) * (d_param_vec / k1_i)[None, :] * kon_avg   # (n_pairs, G)
+            h_mat = float(scale) * (-np.expm1(-2.0 * d_param_vec * dts) / k1_i)[None, :] * kon_avg   # (n_pairs, G)
             h_mat[:, :ns] = 0.0   # stimuli don't get ε estimated
 
             # ── Outlier filtering: exclude top (1 - outlier_quantile) per gene ────
@@ -570,6 +593,7 @@ def infer_ratio_d0_d1_unitary(
                 valid_mask = res_sum <= q_thresh
 
             res_v   = residuals[valid_mask]   # (n_valid, G)
+            diff_v  = diff[valid_mask]
             h_v     = h_mat[valid_mask]       # (n_valid, G)
             kon_v   = kon_avg[valid_mask]     # (n_valid, G) — for min_kon filter
 
@@ -578,7 +602,11 @@ def infer_ratio_d0_d1_unitary(
                 cell_ok = kon_v[:, g] > min_kon
                 if cell_ok.sum() == 0:
                     continue
-                contrib_num   = float(res_v[cell_ok, g].sum())
+                if center:
+                    r = diff_v[cell_ok, g]
+                    contrib_num = float(((r - r.mean()) ** 2).sum())
+                else:
+                    contrib_num = float(res_v[cell_ok, g].sum())
                 contrib_denom = float(h_v[cell_ok, g].sum())
                 num_t[cnt:k_end, g]   += contrib_num    # every grid interval of the observed pair
                 denom_t[cnt:k_end, g] += contrib_denom
@@ -655,6 +683,7 @@ def inference_degradation_prot(
     lambda_deg=0.0,
     g_ratio=None,
     birth=None,
+    fix_scale=False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Estimate degradation rates and scaling factors from protein time-course data.
@@ -672,6 +701,7 @@ def inference_degradation_prot(
     are then cell-type proportional at the start time of each interval.
     ``g_ratio``: ``(N, G - ns)`` per-row ratio kon_beta_nonscaled / kon_beta (rows of X_prot) or None;
     interpolated per trajectory over each interval to multiply kon (mRNA-driven proteins).
+    ``fix_scale``: scale of theta held at 1 (only d is fitted); otherwise within SCALE_BOUNDS.
 
     Returns:
         ``d_learned``: Learned degradation rates, shape (G,).
@@ -723,6 +753,8 @@ def inference_degradation_prot(
             ode_funcs[s_idx].d_param     = ode_funcs[0].d_param
             ode_funcs[s_idx].scale_param = ode_funcs[0].scale_param
 
+        if fix_scale:
+            _fix_unit_scale(ode_funcs[0].scale_param)
         optimizer = torch.optim.Adam([ode_funcs[0].d_param, ode_funcs[0].scale_param], lr=lr)
         mse = nn.MSELoss(reduction="mean")
 
@@ -774,8 +806,8 @@ def inference_degradation_prot(
                 total_count += len(idxs)
 
             # Regularization: penalize deviation of scale[ns:] from 1 and d from d_init
-            if lambda_scale > 0:
-                scale_genes = torch.nn.functional.softplus(ode_funcs[0].scale_param[ns:])
+            if lambda_scale > 0 and not fix_scale:
+                scale_genes = bounded_scale(ode_funcs[0].scale_param[ns:])
                 (lambda_scale * torch.mean((scale_genes - 1.0) ** 2)).backward()
             if lambda_deg > 0:
                 d_init_t = torch.tensor(d_init, dtype=torch.float32)
@@ -786,14 +818,14 @@ def inference_degradation_prot(
             loss: float = total_loss / total_count if total_count > 0 else 0.0
             loss_ema = loss if epoch == 1 else 0.9 * loss_ema + 0.1 * loss
             if verbose and (epoch % print_every == 0 or epoch == 1 or epoch == n_epochs):
-                scale_now = torch.nn.functional.softplus(ode_funcs[0].scale_param[ns:]).detach().cpu().numpy()
+                scale_now = bounded_scale(ode_funcs[0].scale_param[ns:]).detach().cpu().numpy()
                 logger.info(f"[Epoch {epoch}/{n_epochs}] loss = {loss_ema:.6e}  max_scale[ns:] = {scale_now.max():.3e}")
                 if abs(loss_ema - old_loss) < 1e-4:
                     break
                 old_loss = loss_ema
 
         d_learned     = torch.nn.functional.softplus(ode_funcs[0].d_param).detach().cpu().numpy()
-        scale_learned = torch.nn.functional.softplus(ode_funcs[0].scale_param).detach().cpu().numpy()
+        scale_learned = bounded_scale(ode_funcs[0].scale_param).detach().cpu().numpy()
         return d_learned, scale_learned
 
     # ── Single-bias mode (original behaviour) ────────────────────────────
@@ -822,6 +854,8 @@ def inference_degradation_prot(
         lambda_scale=lambda_scale,
     ).to(device)
 
+    if fix_scale:
+        _fix_unit_scale(ode_func.scale_param)
     optimizer = torch.optim.Adam([ode_func.d_param, ode_func.scale_param], lr=lr)
     mse = nn.MSELoss(reduction="mean")
 
@@ -858,8 +892,8 @@ def inference_degradation_prot(
             total_count += len(idxs)
 
         # Regularization: penalize deviation of scale[ns:] from 1 and d from d_init
-        if lambda_scale > 0:
-            scale_genes = torch.nn.functional.softplus(ode_func.scale_param[ns:])
+        if lambda_scale > 0 and not fix_scale:
+            scale_genes = bounded_scale(ode_func.scale_param[ns:])
             (lambda_scale * torch.mean((scale_genes - 1.0) ** 2)).backward()
         if lambda_deg > 0:
             d_init_t = torch.tensor(d_init, dtype=torch.float32)
@@ -871,14 +905,14 @@ def inference_degradation_prot(
         loss_ema = loss if epoch == 1 else 0.9 * loss_ema + 0.1 * loss
 
         if verbose and (epoch % print_every == 0 or epoch == 1 or epoch == n_epochs):
-            scale_now = torch.nn.functional.softplus(ode_func.scale_param[ns:]).detach().cpu().numpy()
+            scale_now = bounded_scale(ode_func.scale_param[ns:]).detach().cpu().numpy()
             logger.info(f"[Epoch {epoch}/{n_epochs}] loss = {loss_ema:.6e}  max_scale[ns:] = {scale_now.max():.3e}")
             if abs(loss_ema - old_loss) < 1e-4:
                 break
             old_loss: float | Any = loss_ema
 
     d_learned = torch.nn.functional.softplus(ode_func.d_param).detach().cpu().numpy()
-    scale_learned = torch.nn.functional.softplus(ode_func.scale_param).detach().cpu().numpy()
+    scale_learned = bounded_scale(ode_func.scale_param).detach().cpu().numpy()
 
     return d_learned, scale_learned
 

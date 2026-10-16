@@ -88,8 +88,9 @@ def main(argv):
     src_path = complete_path if os.path.exists(complete_path) else data_path
     src = target if src_path == data_path else ad.read_h5ad(src_path)
     if src.n_vars < MIN_GENES_DEPTH:
-        print(f"{TAG} Warning: {src_path} has {src.n_vars} genes (< {MIN_GENES_DEPTH}) and there is no "
-              f"Data/data_complete.h5ad: the depth cannot be estimated from the transcriptome, no correction")
+        why = "" if src_path == complete_path else " and there is no Data/data_complete.h5ad"
+        print(f"{TAG} Warning: {src_path} has {src.n_vars} genes (< {MIN_GENES_DEPTH}){why}: "
+              f"the depth cannot be estimated from the transcriptome, no correction")
         json.dump(dict(estimated=False, applied=False, reason=f'{src.n_vars} genes < {MIN_GENES_DEPTH}',
                        predicted_doublets=doublet_check(target)),
                   open(os.path.join(out_dir, 'depth_diagnostic.json'), 'w'), indent=1)

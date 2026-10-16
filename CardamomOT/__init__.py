@@ -6,7 +6,8 @@ A gene regulatory network inference method adapted to time-course scRNA-seq data
 
 The algorithm consists of calibrating the parameters of a mechanistic model of gene
 expression. The calibrated model can then be simulated to reproduce the dataset used
-for inference. The simulation part is based on the Harissa package.
+for inference. The simulators (protein PDMP / ODE, PDMP with explicit mRNA, chromatin
+regions) are adapted from the Harissa package.
 
 Key Features
 ------------

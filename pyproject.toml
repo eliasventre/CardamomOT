@@ -37,7 +37,6 @@ dependencies = [
     "seaborn>=0.11",
     "networkx>=2.5",
     "tqdm>=4.0",
-    "harissa>=3.0.7",
     "torch>=1.9",
     "torchdiffeq>=0.2",
     "joblib>=1.0",
