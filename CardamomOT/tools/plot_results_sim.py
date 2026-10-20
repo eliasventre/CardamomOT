@@ -1,6 +1,7 @@
 """
 Plotting utilities for comparing data, mixture, trajectories, and simulations.
 """
+import os
 import numpy as np
 import anndata as ad
 import scanpy as sc
@@ -139,6 +140,16 @@ def _joint_umap(adatas, names, norm=True, log=True):
 # Public API
 # ---------------------------------------------------------------------------
 
+def _samples_traj(p):
+    """data_samples.npy of the run (sample index of each trajectory state), None if absent."""
+    path = os.path.join(p, 'cardamomOT', 'data_samples.npy')
+    return np.load(path).astype(int) if os.path.exists(path) else None
+
+
+def _suffix(label):
+    return f' — {label}' if label else ''
+
+
 def plot_results_rna_mixture(split, p, project_on_full=False, normtransform=False, logtransform=True):
     """Compare observed data to the NB mixture fit (UMAP by time and cell type).
 
@@ -166,9 +177,16 @@ def plot_results_rna_mixture(split, p, project_on_full=False, normtransform=Fals
         adata_full = adata_full_init.copy()
         adata_beta = adata_beta_init.copy()
 
-    adatas = [adata_full, adata_beta]
-    names = ["Exp Data", "NB Mixture"]
+    # One figure per network condition (its cells and genes), as in the report
+    from ..condition_genes import by_condition
+    for label, adatas in by_condition(adata_full_init, [adata_full, adata_beta]):
+        _plot_stages(adatas, ["Exp Data" + _suffix(label), "NB Mixture" + _suffix(label)], 0, project_on_full,
+                     normtransform, logtransform)
 
+
+def _plot_stages(adatas, names, reference_idx, project_on_full, normtransform, logtransform):
+    """Time and cell-type UMAPs of the stages adatas (joint embedding, or fitted on adatas[reference_idx])."""
+    adata_full = adatas[reference_idx]
     class_order = None
     if "cell_type" in adata_full.obs:
         class_order = adata_full.obs['cell_type'].astype(str).unique().tolist()
@@ -180,7 +198,7 @@ def plot_results_rna_mixture(split, p, project_on_full=False, normtransform=Fals
         A.obs["source"] = name
 
     if project_on_full:
-        _fit_umap(adatas, names, reference_idx=0, norm=normtransform, log=logtransform)
+        _fit_umap(adatas, names, reference_idx=reference_idx, norm=normtransform, log=logtransform)
     else:
         _joint_umap(adatas, names, norm=normtransform, log=logtransform)
 
@@ -218,26 +236,12 @@ def plot_results_rna_clean(p, stim=1.0, prior=1.0, project_on_full=False,
     adata_sim = ad.read_h5ad(p + f'cardamomOT/adata_sim_stim{s}_prior{q}.h5ad')
     adata_rna = ad.read_h5ad(p + f'cardamomOT/adata_rna_traj_stim{s}_prior{q}.h5ad')
 
-    adatas = [adata_rna, adata_beta, adata_theta, adata_sim]
-    names = ['Reference', "NB Mixture", "Network", "Sim"]
-
-    class_order = None
-    if "cell_type" in adata_beta.obs:
-        class_order = adata_beta.obs['cell_type'].astype(str).unique().tolist()
-        for A in adatas:
-            _enforce_cell_type_order(A, class_order)
-
-    for name, A in zip(names, adatas):
-        A.obs_names = [f"{name}_{i}" for i in range(A.n_obs)]
-        A.obs["source"] = name
-
-    if project_on_full:
-        _fit_umap(adatas, names, reference_idx=1, norm=normtransform, log=logtransform)
-    else:
-        _joint_umap(adatas, names, norm=normtransform, log=logtransform)
-
-    _plot_time_panel(adatas, names)
-    _plot_celltype_panel(adatas, names, class_order)
+    # One figure per network condition (its cells and genes), as in the report
+    from ..condition_genes import by_condition, project_data
+    for label, adatas in by_condition(project_data(p), [adata_rna, adata_beta, adata_theta, adata_sim],
+                                      _samples_traj(p)):
+        _plot_stages(adatas, [n + _suffix(label) for n in ('Reference', "NB Mixture", "Network", "Sim")], 1,
+                     project_on_full, normtransform, logtransform)
 
 
 def plot_results_prot(p, stim=1.0, prior=1.0, project_on_full=True):
@@ -257,9 +261,14 @@ def plot_results_prot(p, stim=1.0, prior=1.0, project_on_full=True):
     s, q = stim, prior
     adata_traj = ad.read_h5ad(p + f'cardamomOT/adata_prot_traj_stim{s}_prior{q}.h5ad')
     adata_simul = ad.read_h5ad(p + f'cardamomOT/adata_prot_simul_stim{s}_prior{q}.h5ad')
+    # One figure per network condition (its trajectories and proteins), as in the report
+    from ..condition_genes import by_condition, project_data
+    for label, adatas in by_condition(project_data(p), [adata_traj, adata_simul], _samples_traj(p)):
+        _plot_prot(adatas, ["Traj" + _suffix(label), "Sim" + _suffix(label)], project_on_full)
 
-    adatas = [adata_traj, adata_simul]
-    names = ["Traj", "Sim"]
+
+def _plot_prot(adatas, names, project_on_full):
+    adata_traj, adata_simul = adatas
 
     for name, adata in zip(names, adatas):
         adata.obs_names = [f"{name}_{i}" for i in range(adata.n_obs)]

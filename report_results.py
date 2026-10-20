@@ -91,7 +91,8 @@ def main(argv):
                               depth_embeddings=bool(model.cell_depth_for_representation),
                               embedding_method_visualization=str(model.embedding_method_visualization),
                               protein_dilution=bool(model.protein_dilution),
-                              classifier_method=str(model.classifier_method))
+                              classifier_method=str(model.classifier_method),
+                              select_genes=bool(model.select_genes))
     except FileNotFoundError as e:
         print(f"[report_results] Error: {e}")
         sys.exit(1)

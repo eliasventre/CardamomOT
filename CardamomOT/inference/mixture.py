@@ -27,6 +27,7 @@ import ot
 
 from CardamomOT.logging import get_logger
 from .sampling import stratified_choice
+from .depth_model import burst_frequency, set_depth_model
 
 # module-level logger
 logger = get_logger(__name__)
@@ -71,7 +72,8 @@ def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=10
                             s=None) -> tuple[Any, Any]:
     """
     Original version used for initialization with discrete timepoints.
-    s: per-cell depth factors (counts NB(a, b / s_i)); None = 1.
+    s: per-cell depth factors (counts NB(a s_i, b) with depth_model 'burst_frequency', NB(a, b / s_i) with 'mean');
+    None = 1.
     """
     t = np.sort(list(set(times)))
     m: int = t.size
@@ -101,6 +103,7 @@ def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=10
     sx: float = max(np.sum(x), EPS)
     gidx = np.searchsorted(t, times) if s is not None else None
     w_b = n if s is None else np.bincount(gidx, weights=s, minlength=m)
+    bf = s is not None and burst_frequency()
 
     k, c = 0, 0
     while (k == 0) or (k < max_iter and c > tol):
@@ -111,15 +114,22 @@ def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=10
             b = np.sum(w_b * a) / sx
             break
         a_s = np.where(pos, a, 1.0)
-        z = a_s[:, None] + V
-        p0 = np.sum(Wm * psi(z), axis=1)
-        p1 = np.sum(Wm * zeta(2, z), axis=1)
-        if s is None:
-            lb = n * (np.log(b) - np.log(1 + b))
-        else:  # Σ_i log(b / (b + s_i)) per group
-            lb = np.bincount(gidx, weights=np.log(b) - np.log(b + s), minlength=m)
-        d = p0 + lb - n * psi(a_s)
-        h = p1 - n * zeta(2, a_s)
+        if bf:
+            # Shape a s_i per cell: gradient Σ_i s_i [ψ(x_i + a s_i) - ψ(a s_i) + log(b / (1 + b))]
+            r = a_s[gidx] * s
+            d = (np.bincount(gidx, weights=s * (psi(x + r) - psi(r)), minlength=m)
+                 + w_b * (np.log(b) - np.log(1 + b)))
+            h = np.bincount(gidx, weights=s ** 2 * (zeta(2, x + r) - zeta(2, r)), minlength=m)
+        else:
+            z = a_s[:, None] + V
+            p0 = np.sum(Wm * psi(z), axis=1)
+            p1 = np.sum(Wm * zeta(2, z), axis=1)
+            if s is None:
+                lb = n * (np.log(b) - np.log(1 + b))
+            else:  # Σ_i log(b / (b + s_i)) per group
+                lb = np.bincount(gidx, weights=np.log(b) - np.log(b + s), minlength=m)
+            d = p0 + lb - n * psi(a_s)
+            h = p1 - n * zeta(2, a_s)
         ok = pos & (h != 0)
         da = np.where(ok, -d / np.where(ok, h, 1.0), 0.0)
         
@@ -251,6 +261,7 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
     # S_k = Σ_i r_ik s_i (= n_k without depth factors)
     sx: np.bool_ | float = max(np.sum(resp * x[:, None]), EPS)
     w_b = n if s is None else resp.T @ np.asarray(s, dtype=float)
+    bf = s is not None and burst_frequency()
     
     # Newton-Raphson with damping
     iteration, conv_metric = 0, 0
@@ -259,7 +270,11 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
         da = np.zeros(K)
         
         for k in range(K):
-            if a[k] > seuil * 0.1:  # avoid divisions by zero
+            if a[k] > seuil * 0.1 and bf:  # shape a s_i per cell (depth_model 'burst_frequency')
+                r = a[k] * s
+                gradient = np.sum(resp[:, k] * s * (psi(x + r) - psi(r) + np.log(b) - np.log(1 + b)))
+                hessian = np.sum(resp[:, k] * s ** 2 * (polygamma(1, x + r) - polygamma(1, r)))
+            elif a[k] > seuil * 0.1:  # avoid divisions by zero
                 # z = a[k] + x for all observations
                 z = a[k] + x  # (N,)
                 
@@ -273,7 +288,7 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
                 else:  # Σ_i r_ik log(b / (b + s_i))
                     gradient = np.sum(resp[:, k] * (np.log(b) - np.log(b + s))) - n[k] * psi(a[k]) + p0
                 hessian = p1 - n[k] * polygamma(1, a[k])
-                
+            if a[k] > seuil * 0.1:
                 # Newton step avec damping
                 if abs(hessian) != 0:
                     da[k] = -damping * gradient / hessian
@@ -313,7 +328,8 @@ def nb_logpmf_vectorized(x, ks, c, s=None):
     """
     Vectorized log-PMF of a Negative Binomial.
 
-    Model: X_i | z=k ∼ NB(ks_k, c)
+    Model: X_i | z=k ∼ NB(ks_k, c); depth factors s: NB(ks_k s_i, c) (depth_model 'burst_frequency') or
+    NB(ks_k, c / s_i) ('mean').
 
     Parameters
     ----------
@@ -334,7 +350,9 @@ def nb_logpmf_vectorized(x, ks, c, s=None):
 
     ln_c: np.ndarray[Any, np.dtype[Any]]   = np.log(c + EPS)               # scalar
     ln_1pc: np.ndarray[Any, np.dtype[Any]] = np.log(1.0 + c + EPS)         # scalar
-    if s is not None:  # NB(k, c / s_i): rate c / s_i per cell
+    if s is not None and burst_frequency():  # NB(k s_i, c): shape k s_i per cell
+        K = K * np.asarray(s, dtype=float).reshape(-1, 1)
+    elif s is not None:  # NB(k, c / s_i): rate c / s_i per cell
         s = np.asarray(s, dtype=float).reshape(-1, 1)
         ln_c, ln_1pc = np.log(c / s + EPS), np.log(1.0 + c / s + EPS)
 
@@ -541,7 +559,7 @@ def _compute_nu_with_temporal_constraint(resp_i, data_t, ks, c, n_components, me
 
 
 def neg_log_likelihood_logits(logits, data, r, p):
-    # p: scalar, or per-cell (depth factors: p_i = c / (c + s_i))
+    # r[k], p: scalars, or per cell (depth factors: shapes r_k s_i, or p_i = c / (c + s_i))
     """
     logits : array (K,)
     data   : array (n,)
@@ -635,9 +653,13 @@ def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_component
     
     Solves a constrained quadratic optimization problem.
     """
-    # Depth factors: mean at the reference depth, p_i = c / (c + s_i) per cell
+    # Depth factors: mean at the reference depth; NB per cell, shapes ks s_i ('burst_frequency') or p_i = c / (c + s_i)
     mean_t = np.mean(data_t) if s is None else np.mean(data_t) / np.mean(s)  # ratio of means, as the M-step
-    p_cells = c / (1 + c) if s is None else c / (c + np.asarray(s, dtype=float))
+    r_cells = ks
+    if s is not None and burst_frequency():
+        r_cells, p_cells = np.asarray(ks, dtype=float)[:, None] * np.asarray(s, dtype=float)[None, :], c / (1 + c)
+    else:
+        p_cells = c / (1 + c) if s is None else c / (c + np.asarray(s, dtype=float))
 
     # Size everything from the actual components, not a possibly stale n_components.
     n_components = len(means_components)
@@ -646,7 +668,7 @@ def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_component
 
     # Adjust the level of regularization
     nu_star = compute_nu_star(data=data_t,
-                            r_components=ks,
+                            r_components=r_cells,
                             p_components=p_cells,
                             nu_init=nu_init
                             )
@@ -880,9 +902,10 @@ def compute_aic_for_params(x, ks, c, pi, pi_zero, zi_mode, s=None) -> tuple[Any,
 # ---------------------------
 
 class NegativeBinomialMixtureEM:
-    def __init__(self, min_components=1, max_components=3, zi=None, refilter=0.0, hard_em=1, mean_forcing_em=1.0,
+    def __init__(self, min_components=1, max_components=3, zi=None, hard_em=1, mean_forcing_em=1.0,
                  tol=1e-5, max_iter_em=200, verbose=False, preserve_mean_values=0,
-                 compare_init_aic=True, damping=1.0, use_scBoolSeq=False, soft_em_refinement=False) -> None:
+                 compare_init_aic=True, damping=1.0, use_scBoolSeq=False, soft_em_refinement=False,
+                 depth_model=None, min_separation=0.0, min_mode_weight=0.0, min_mode_ratio=1.0) -> None:
         """
         NB/ZINB mixture with optimal analytical M-step.
 
@@ -900,6 +923,11 @@ class NegativeBinomialMixtureEM:
         soft_em_refinement : bool
             If True, (ks, c) are refined by soft EM with the
             basin masses kept fixed, which removes the bias of hard assignments on c.
+        depth_model : 'burst_frequency', 'mean' or None (current setting): how depth factors enter the NB
+            (depth_model.py), set in the process that runs fit (parallel workers included).
+        min_separation, min_mode_weight, min_mode_ratio : a fit with K >= 2 modes is kept only if its modes are
+            separated (_modes_separated: nb_separation of consecutive modes, weight of each mode, highest / lowest
+            mean); the best BIC among the separated fits is kept, a single mode when none is.
         """
         assert min_components >= 1 and max_components >= min_components
         self.min_components: int = min_components
@@ -908,7 +936,9 @@ class NegativeBinomialMixtureEM:
         self.preserve_mean_values: int = preserve_mean_values
         self.hard_em: int = hard_em
         self.mean_forcing_em: float = mean_forcing_em
-        self.refilter: float = refilter
+        self.min_separation: float = min_separation
+        self.min_mode_weight: float = min_mode_weight
+        self.min_mode_ratio: float = min_mode_ratio
         self.tol: float = tol
         self.max_iter_em: int = max_iter_em
         self.verbose: bool = verbose
@@ -916,6 +946,7 @@ class NegativeBinomialMixtureEM:
         self.damping: float = damping
         self.use_scBoolSeq: bool = use_scBoolSeq
         self.soft_em_refinement: bool = soft_em_refinement
+        self.depth_model = depth_model
         self.best_model = None
 
 
@@ -1003,47 +1034,19 @@ class NegativeBinomialMixtureEM:
 
 
 
-    def _refilter_merge(self, ks, c, pi, pi_zero):
-        modified = False
-        order: np.ndarray[Any, np.dtype[np.signedinteger[Any]]] = np.argsort(ks)
-        ks = ks[order].astype(float).copy()
-        pi = pi[order].astype(float).copy()
-        
-        if pi_zero is not None and self.zi == 'component':
-            pi_zero: np.ndarray[Any, np.dtype[Any]] = np.asarray(pi_zero)[order].astype(float).copy()
-        elif pi_zero is not None:
-            pi_zero = float(pi_zero)
-        else:
-            pi_zero = 0
-
-        K = ks.size
-        i = 0
-        while i < K - 1:
-            if abs(ks[i+1] - ks[i]) < self.refilter * c:
-                modified = True
-                weight_i = pi[i]
-                weight_ip1 = pi[i+1]
-                total_weight = weight_i + weight_ip1
-                
-                new_k = (ks[i] * weight_i + ks[i+1] * weight_ip1) / total_weight
-                new_pi = total_weight
-                
-                if self.zi == 'component' and isinstance(pi_zero, np.ndarray):
-                    new_pi_zero = (pi_zero[i] * weight_i + pi_zero[i+1] * weight_ip1) / total_weight
-                    pi_zero: np.ndarray[Any, np.dtype[Any]] = np.delete(pi_zero, i+1)
-                    pi_zero[i] = new_pi_zero
-                
-                ks = np.delete(ks, i+1)
-                ks[i] = new_k
-                pi = np.delete(pi, i+1)
-                pi[i] = new_pi
-                
-                K -= 1
-            else:
-                i += 1
-        
-        pi = pi / (pi.sum() + EPS)
-        return ks, c, pi, pi_zero, modified
+    def _modes_separated(self, ks, c, weights):
+        """
+        True if the K >= 2 modes (ks, common rate c, weights = mean posteriors) are distinct: every pair of
+        consecutive modes separated by at least min_separation (nb_separation: gap of the means over their
+        pooled standard deviation), every mode of weight >= min_mode_weight, highest / lowest mean >= min_mode_ratio.
+        """
+        order = np.argsort(ks)
+        k, w = np.asarray(ks, dtype=float)[order], np.asarray(weights, dtype=float)[order]
+        if k.size < 2:
+            return True
+        sep = min(nb_separation(k[i], k[i + 1], c) for i in range(k.size - 1))
+        return bool(sep >= self.min_separation and w.min() >= self.min_mode_weight
+                    and k[-1] >= self.min_mode_ratio * max(k[0], EPS))
 
 
     def _count_params(self, K):
@@ -1188,9 +1191,10 @@ class NegativeBinomialMixtureEM:
                with the learned parameters.
         strata : (N,) cell types or None
                If given, the sub-sample is cell-type proportional within each timepoint.
-        s      : (N,) per-cell depth factors or None: counts modelled as NB(k, c / s_i), the
-               parameters ks, c being those of a cell at the reference depth (s = 1).
+        s      : (N,) per-cell depth factors or None: counts modelled as NB(k s_i, c) or NB(k, c / s_i)
+               (depth_model), the parameters ks, c being those of a cell at the reference depth (s = 1).
         """
+        set_depth_model(self.depth_model)
         # ── Keep full-data references for the final resp computation ────────
         x_all: np.ndarray[Any, np.dtype[Any]] = np.asarray(x).astype(int)
         N_all: int = x_all.size
@@ -1231,7 +1235,9 @@ class NegativeBinomialMixtureEM:
         best_aic: float = np.inf
         best_model = None
 
-        for K_try in range(self.min_components, self.max_components + 1):
+        # Candidate numbers of modes; one mode is added when none of them gives separated modes
+        K_list = list(range(self.min_components, self.max_components + 1))
+        for K_try in K_list:
             if self.verbose:
                 logger.info("=== Trying K_init = %s ===", K_try)
             ks_init, c_init, pi_init, pi_zero_init = self._init_for_K(
@@ -1274,15 +1280,6 @@ class NegativeBinomialMixtureEM:
                         mean_forcing=self.mean_forcing_em, s=s
                     )
 
-            if (self.refilter > 0.0) and (ks_init.size > 1):
-                ks_merged, c_merged, pi_merged, pi_zero_merged, modified = \
-                    self._refilter_merge(ks_init, c_init, pi_init, pi_zero_init)
-                if modified and ks_merged.size < ks_init.size and ks_merged.size >= 1:
-                    if self.verbose:
-                        logger.info("Merged -> %d, re-fitting", ks_merged.size)
-                    ks_init, c_init, pi_init, pi_zero_init = \
-                        ks_merged, c_merged, pi_merged, pi_zero_merged
-
             # ── AIC de l'initialisation ───────────────────────────────────
             if self.compare_init_aic:
                 aic_init, loglik_init = compute_aic_for_params(
@@ -1313,16 +1310,6 @@ class NegativeBinomialMixtureEM:
                 if self.verbose:
                     logger.info("EM iter %d: K=%d, loglik=%.3f", iter_count, ks_fit.size, loglik_fit)
 
-                if (self.refilter > 0.0) and (ks_fit.size > 1):
-                    ks_merged, c_merged, pi_merged, pi_zero_merged, modified = \
-                        self._refilter_merge(ks_fit, c_fit, pi_fit, pi_zero_fit)
-                    if modified and ks_merged.size < ks_fit.size and ks_merged.size >= 1:
-                        if self.verbose:
-                            logger.info("Merged -> %d", ks_merged.size)
-                        ks_final, c_final, pi_final, pi_zero_final = \
-                            ks_merged, c_merged, pi_merged, pi_zero_merged
-                        continue
-
                 ks_final, c_final, pi_final, pi_zero_final, resp_final, loglik_final = (
                     ks_fit, c_fit, pi_fit, pi_zero_fit, resp_fit, loglik_fit
                 )
@@ -1335,7 +1322,7 @@ class NegativeBinomialMixtureEM:
             # ── Comparer init vs EM ───────────────────────────────────────
             if self.compare_init_aic and self.max_iter_em:
                 keep_init: np.bool_ | bool = (loglik_init >= loglik_final) or (
-                    not self.refilter and vect_t is not None and
+                    vect_t is not None and
                     np.std(ks_init / c_init) > 2 * np.std(ks_final / c_final)
                 )
                 if keep_init:
@@ -1359,6 +1346,14 @@ class NegativeBinomialMixtureEM:
 
             if self.verbose:
                 logger.info("Final: K=%d, loglik=%.3f, AIC=%.3f", K_final, loglik_final, aic_final)
+
+            # Modes not separated enough: fit not eligible (one mode tried if no candidate is)
+            if K_final >= 2 and not self._modes_separated(ks_final, c_final, np.asarray(resp_final).mean(axis=0)):
+                if self.verbose:
+                    logger.info("K=%d: modes not separated, fit discarded", K_final)
+                if K_try == K_list[-1] and best_model is None and 1 not in K_list:
+                    K_list.append(1)
+                continue
 
             if aic_final < best_aic:
                 # Recompute resp and basins on ALL cells (not just the mini-batch)

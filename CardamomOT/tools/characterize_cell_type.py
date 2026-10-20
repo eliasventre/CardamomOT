@@ -27,11 +27,13 @@ class SampleClassifiers:
     much (cell line, batch) for a single classifier, even after integration. A sample without classifier of its own
     (held out of the inference, observed at a single type...) is classified by the one indicated in `assign`
     ({sample: sample whose classifier is used}, e.g. the reference_sample of perturbation_inference), else by the one
-    with the closest name.
+    with the closest name. cols ({sample: column indices}, optional): genes each classifier reads (the genes of the
+    sample's condition with select_genes_per_condition).
     """
 
-    def __init__(self, clfs, sizes=None, assign=None):
+    def __init__(self, clfs, sizes=None, assign=None, cols=None):
         self.clfs = dict(clfs)
+        self.cols = dict(cols or {})
         self.assign = {str(k): str(v) for k, v in (assign or {}).items()}
         sizes = sizes or {k: 1 for k in self.clfs}
         self.default = max(self.clfs, key=lambda k: sizes.get(k, 0))   # largest sample: when the sample is unknown
@@ -54,16 +56,21 @@ class SampleClassifiers:
         """Cell types of the cells of adata (matrix X, default adata.X), each with the classifier of its sample (use:
         classifier of this sample for all)."""
         X = adata.X if X is None else X
+
+        def run(key, rows):
+            Xr = X[rows] if rows is not None else X
+            return self.clfs[key].predict(Xr[:, self.cols[key]] if key in self.cols else Xr)
+
         if use is not None:
-            return self.clfs[self.sample_for(use)].predict(X)
+            return run(self.sample_for(use), None)
         if sample_key not in adata.obs:
             print(f"[cell types] Warning: no obs['{sample_key}']: the classifier of the largest sample ({self.default}) is used")
-            return self.clfs[self.default].predict(X)
+            return run(self.default, None)
         samples = adata.obs[sample_key].astype(str).values
         out = np.empty(len(samples), dtype=object)
         for s_ in np.unique(samples):
             m = samples == s_
-            out[m] = self.clfs[self.sample_for(s_)].predict(X[np.flatnonzero(m)])
+            out[m] = run(self.sample_for(s_), np.flatnonzero(m))
         return out
 
 
@@ -77,25 +84,16 @@ def _log1p(X):
     return np.log1p(np.maximum(X, 0.0))
 
 
-def representation(adata, cell_depth=False, kind=None):
+def representation(adata, cell_depth=False):
     """
-    Counts used to learn and assign the cell types (cell_depth_for_representation): with cell_depth, real cells
-    divided by obs['depth_factor'] and model draws at the reference depth (layer 'reference_depth'), else the counts
-    as they are. kind: 'observed' (real cells, e.g. data or reference trajectories) or 'model' (NB draws); None =
-    'model' if the AnnData has a 'reference_depth' layer or uns['model_draws'], else 'observed'.
+    Counts used to learn and assign the cell types (cell_depth_for_representation): with cell_depth, counts divided by
+    obs['depth_factor'] (depth of the real cell, or of the cell a model draw mimics: data and draws then undergo the
+    same transformation, hence the same noise), else the counts as they are. Without obs['depth_factor'] (draws of a
+    run without depth factors, at the reference depth) the counts are returned unchanged.
     """
     X = adata.X.toarray() if hasattr(adata.X, 'toarray') else np.asarray(adata.X)
     X = X.astype(float)
-    if not cell_depth:
-        return X
-    if kind is None:
-        kind = 'model' if ('reference_depth' in adata.layers or adata.uns.get('model_draws', False)) else 'observed'
-    if kind == 'model':
-        if 'reference_depth' in adata.layers:
-            L = adata.layers['reference_depth']
-            return np.asarray(L.toarray() if hasattr(L, 'toarray') else L, dtype=float)
-        return X  # drawn without depth factor (run without use_depth_factor)
-    if 'depth_factor' in adata.obs:
+    if cell_depth and 'depth_factor' in adata.obs:
         return X / adata.obs['depth_factor'].to_numpy(dtype=float)[:, None]
     return X
 
@@ -149,14 +147,14 @@ def train_classifier(adata, label_key='cell_type', sample_key=SAMPLE_KEY, min_ce
     """
     Classifier (method: 'random_forest' or 'logistic', see make_classifier; None = classifier_method of base.py, use
     classifier_options(project) for the value of a project) of obs[label_key] on the observed cells of
-    adata, divided by their depth factor if cell_depth (representation; predict_cell_types then uses the model draws
-    at the reference depth). With several samples (obs[sample_key]), one per sample (SampleClassifiers); a sample with
+    adata, divided by their depth factor if cell_depth (representation; predict_cell_types then divides the model draws
+    by the depth factor of the cells they mimic). With several samples (obs[sample_key]), one per sample (SampleClassifiers); a sample with
     fewer than min_cells cells or a single cell type has none and takes that of its `assign` or of the closest name.
     """
     if method is None:
         from ..model.base import NetworkModel
         method = NetworkModel(1).classifier_method
-    X_all = representation(adata, cell_depth, 'observed')
+    X_all = representation(adata, cell_depth)
 
     def fit(X, y, tag=''):
         clf = make_classifier(method, seed, n_estimators).fit(X, y)
@@ -171,30 +169,35 @@ def train_classifier(adata, label_key='cell_type', sample_key=SAMPLE_KEY, min_ce
         clf.cell_depth = bool(cell_depth)
         return clf
     samples = adata.obs[sample_key].astype(str).values
-    clfs, sizes = {}, {}
+    # Genes of each sample's condition (select_genes_per_condition): each classifier reads only them
+    from ..condition_genes import row_mask
+    gm = row_mask(adata, samples)
+    clfs, sizes, cols = {}, {}, {}
     for s_ in np.unique(samples):
         idx = np.flatnonzero(samples == s_)
         if len(idx) < min_cells or len(np.unique(y_all[idx])) < 2:
             print(f"[cell types] Warning: sample {s_} has {len(idx)} cells and {len(np.unique(y_all[idx]))} cell type(s): "
                   f"no classifier of its own")
             continue
-        clfs[s_] = fit(X_all[idx], y_all[idx], s_)
+        if gm is not None:
+            cols[s_] = np.flatnonzero(gm[idx[0]])
+        clfs[s_] = fit(X_all[idx][:, cols[s_]] if s_ in cols else X_all[idx], y_all[idx], s_)
         sizes[s_] = len(idx)
     if not clfs:
         clf = fit(X_all, y_all)
         clf.cell_depth = bool(cell_depth)
         return clf
     print(f"[cell types] One {METHODS.get(str(method).lower(), method)} classifier per sample: {sorted(clfs)}")
-    clf = SampleClassifiers(clfs, sizes, assign)
+    clf = SampleClassifiers(clfs, sizes, assign, cols)
     clf.cell_depth = bool(cell_depth)
     return clf
 
 
 # 2. Prédiction sur un nouvel AnnData
-def predict_cell_types(adata_new, clf, label_key='cell_type', sample_key=SAMPLE_KEY, use=None, kind=None):
-    """Cell types of adata_new (obs[label_key]), in the representation of the classifier (kind: 'observed' or 'model',
-    see representation); with per-sample classifiers each cell takes that of its sample (use: of this sample)."""
-    X = representation(adata_new, getattr(clf, 'cell_depth', False), kind)
+def predict_cell_types(adata_new, clf, label_key='cell_type', sample_key=SAMPLE_KEY, use=None):
+    """Cell types of adata_new (obs[label_key]), in the representation of the classifier (see representation); with
+    per-sample classifiers each cell takes that of its sample (use: of this sample)."""
+    X = representation(adata_new, getattr(clf, 'cell_depth', False))
     preds = clf.predict(adata_new, sample_key=sample_key, use=use, X=X) if isinstance(clf, SampleClassifiers) \
         else clf.predict(X)
 
@@ -258,10 +261,10 @@ def check_cell_types_full(clf, p, stim=1.0, prior=1.0, label_key='cell_type'):
     adata_theta_train = ad.read_h5ad(p + f'cardamomOT/adata_theta_stim{s}_prior{q}.h5ad')
 
     # Reference trajectories = real cells; the others = model draws (representation of the classifier)
-    adata_train = predict_cell_types(adata_train, clf, label_key=label_key, kind='observed')
-    adata_beta = predict_cell_types(adata_beta, clf, label_key=label_key, kind='model')
-    adata_sim_train = predict_cell_types(adata_sim_train, clf, label_key=label_key, kind='model')
-    adata_theta_train = predict_cell_types(adata_theta_train, clf, label_key=label_key, kind='model')
+    adata_train = predict_cell_types(adata_train, clf, label_key=label_key)
+    adata_beta = predict_cell_types(adata_beta, clf, label_key=label_key)
+    adata_sim_train = predict_cell_types(adata_sim_train, clf, label_key=label_key)
+    adata_theta_train = predict_cell_types(adata_theta_train, clf, label_key=label_key)
 
     adata_train.write(p + f'cardamomOT/adata_rna_traj_stim{s}_prior{q}.h5ad')
     adata_beta.write(p + f'cardamomOT/adata_beta_stim{s}_prior{q}.h5ad')
@@ -308,7 +311,7 @@ def check_cell_types_mixture(clf, p, adata_full, stim=1.0, prior=1.0, label_key=
         else:
             print(f"[cell types] Warning: adata_beta has no obs['{SAMPLE_KEY}'] and does not match adata_full: "
                   "rerun check_mixture_to_data.py")
-    adata_train = predict_cell_types(adata_train, clf, label_key=label_key, kind='model')
+    adata_train = predict_cell_types(adata_train, clf, label_key=label_key)
     adata_train.write(p + 'cardamomOT/adata_beta.h5ad')
 
     plot_cell_type_proportions(
@@ -367,20 +370,24 @@ def identity_diagnostic(adata, draws, modes=None, label_key='cell_type', sample_
     if pooled:
         units.append(np.concatenate(pooled))
     preds = {(c, v): np.empty(len(y), dtype=object) for c in _identity_classifiers() for v in versions}
+    from ..condition_genes import row_mask
+    gm = row_mask(adata, smp)  # genes of each cell's condition (select_genes_per_condition)
     for idx in units:
+        cols = slice(None) if gm is None else np.flatnonzero(gm[idx].all(axis=0))  # genes of the unit's samples
+        Xu, Du = X[:, cols], D[:, cols]
         for tr, te in KFold(min(n_folds, len(idx)), shuffle=True, random_state=seed).split(idx):
             tr, te = idx[tr], idx[te]
-            ver = {'data (cross-validated)': X[te], 'model draws': D[te]}
+            ver = {'data (cross-validated)': Xu[te], 'model draws': Du[te]}
             if modes is not None:
                 keys = np.char.add(np.char.add(smp[te, None].astype('U'), times[te, None].astype('U')),
-                                   np.asarray(modes)[te].astype('U'))
-                ver['data permuted within modes'] = _permute_within(X[te], keys, rng)
+                                   np.asarray(modes)[te][:, cols].astype('U'))
+                ver['data permuted within modes'] = _permute_within(Xu[te], keys, rng)
             for c, make in _identity_classifiers(seed).items():
                 if len(np.unique(y[tr])) < 2:
                     for v in versions:
                         preds[(c, v)][te] = y[tr][0]
                     continue
-                clf = make().fit(X[tr], y[tr])
+                clf = make().fit(Xu[tr], y[tr])
                 for v in versions:
                     preds[(c, v)][te] = clf.predict(ver[v])
     rows = []

@@ -130,10 +130,21 @@ def override_function(override, times, k):
     return lambda t: float(col[min(max(int(np.searchsorted(tt, float(t) + 1e-9, side='right')) - 1, 0), len(col) - 1)])
 
 
-def test_schedule(project, n_stimuli):
+def step_rows(values, times_ref, times):
+    """Rows of values (one per sorted times_ref, the last repeated) at the times: each takes the row of the last
+    reference time <= it (the first before it), as the simulation schedules."""
+    values = np.atleast_2d(np.asarray(values, dtype=float))
+    ref = np.sort(np.asarray(times_ref, dtype=float))
+    idx = np.searchsorted(ref, np.asarray(times, dtype=float) + 1e-9, side='right') - 1
+    return values[np.clip(idx, 0, min(len(ref), len(values)) - 1)]
+
+
+def test_schedule(project, n_stimuli, times=None, inference_times=None):
     """
-    (default matrix or None, per-sample overrides) of the held-out cells (infer_test): stimulus_test_schedule,
-    else the inference schedule; without a default test schedule, the samples keep their inference overrides.
+    (default matrix or None, per-sample overrides) of the held-out cells (infer_test): stimulus_test_schedule (rows
+    on the sorted test times), else the inference schedule; without a default test schedule, the samples keep their
+    inference overrides. With times (test) and inference_times, the inference schedule (default rows, overrides
+    without time) is carried from the inference times to the test ones as a step function.
     """
     from .config import find_stimulus_schedule
     from .inputs import input_dir
@@ -148,4 +159,11 @@ def test_schedule(project, n_stimuli):
         else:
             return default, over
     inf = find_stimulus_schedule(d)
-    return (np.loadtxt(inf, ndmin=2) if inf is not None else None), {**load_overrides(project, 'inference', n_stimuli), **over}
+    default = np.loadtxt(inf, ndmin=2) if inf is not None else None
+    inf_over = load_overrides(project, 'inference', n_stimuli)
+    if times is not None and inference_times is not None:
+        if default is not None:
+            default = step_rows(default, inference_times, np.sort(np.unique(times)))
+        inf_over = {s: (np.sort(np.asarray(inference_times, dtype=float)) if t is None else t, v)
+                    for s, (t, v) in inf_over.items()}
+    return default, {**inf_over, **over}

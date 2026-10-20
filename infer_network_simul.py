@@ -18,8 +18,6 @@ Required input files:
     - cardamom/ref_network.csv: optional reference network (tab-separated)
 
 Output files:
-    - cardamom/data_prot_forsimul.npy: protein trajectories used for the simulations
-    - cardamom/data_kon_forsimul.npy: kon of the trajectories with the simulation network
     - cardamom/basal_simul.npy, inter_simul.npy: simulation-ready parameters
     - cardamom/basal_t_simul.npy, inter_t_simul.npy: temporal parameters
     - cardamom/ratios.npy: parameter ratios
@@ -97,6 +95,7 @@ def main(argv):
         model.times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
         model.samples_data = np.load(os.path.join(p, 'cardamomOT', 'data_samples.npy'))
         model.load_network_conditions(os.path.join(p, 'cardamomOT'))  # one network per condition, if any
+        model.set_gene_mask(adata)  # genes of each sample's condition (select_genes_per_condition), if any
         valid_path = os.path.join(p, 'cardamomOT', 'data_traj_valid.npy')
         model.traj_valid = np.load(valid_path) if os.path.exists(valid_path) else None
         model.kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta.npy'))
@@ -287,8 +286,6 @@ def main(argv):
     # Save adapted parameters
     cardamom_dir = os.path.join(p, 'cardamomOT')
     try:
-        np.save(os.path.join(cardamom_dir, 'data_prot_forsimul'), model.prot)
-        np.save(os.path.join(cardamom_dir, 'data_kon_forsimul'), model.kon_theta)
         np.save(os.path.join(cardamom_dir, 'basal_simul'), model.basal)
         np.save(os.path.join(cardamom_dir, 'inter_simul'), model.inter)
         np.save(os.path.join(cardamom_dir, 'basal_t_simul'), model.basal_t)
@@ -298,11 +295,20 @@ def main(argv):
         np.save(os.path.join(cardamom_dir, 'ratios'), model.ratios)
         np.save(os.path.join(cardamom_dir, 'degradations_temporal.npy'), model.d_t)
         model.save_state_rates(cardamom_dir)  # birth / death of the states (consistent with R_opt): dilution of the simulations
+        # Proliferation model of an earlier run (single or per condition) removed before saving the new one
+        import glob
+        for f in glob.glob(os.path.join(cardamom_dir, 'prolif_network*.pt')) + [
+                os.path.join(cardamom_dir, n) for n in ('prolif_network_n_proteins.npy', 'prolif_network_conditions.json')]:
+            if os.path.exists(f):
+                os.remove(f)
         if model.prolif_network is not None:
-            torch.save(model.prolif_network.state_dict(),
-                       os.path.join(cardamom_dir, 'prolif_network.pt'))
-            np.save(os.path.join(cardamom_dir, 'prolif_network_n_proteins'),
-                    np.array([model.prolif_network.net[0].in_features]))
+            from CardamomOT.inference.proliferations import ConditionProliferation
+            if isinstance(model.prolif_network, ConditionProliferation):
+                model.prolif_network.save(cardamom_dir)  # one MLP per condition (ProliferationMLP_per_condition)
+            else:
+                torch.save(model.prolif_network.state_dict(), os.path.join(cardamom_dir, 'prolif_network.pt'))
+                np.save(os.path.join(cardamom_dir, 'prolif_network_n_proteins'),
+                        np.array([model.prolif_network.net[0].in_features]))
             diag = getattr(model.prolif_network, 'diagnostics', None)
             if diag is not None:
                 import json

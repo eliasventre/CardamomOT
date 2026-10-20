@@ -53,6 +53,7 @@ import pickle
 import numpy as np
 import anndata as ad
 import pandas as pd
+from CardamomOT.inference.depth_model import nb_numpy_params
 from CardamomOT import NetworkModel as NetworkModel_beta, find_data_file, load_network_array, load_simul_parameters
 from CardamomOT.inputs import input_dir, removed_samples
 from CardamomOT.inference.integration import nb_cell_parameters
@@ -117,7 +118,9 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
     # ─── STIMULUS SCHEDULES ──────────────────────────────────────────────
     # Held-out cells: stimulus_test_schedule (per sample), else the inference schedule; also for the simulation
     n_stimuli = n_inference_stimuli(input_dir(p))
-    stim_sched, test_overrides = test_schedule(p, n_stimuli)
+    # Without a test schedule, the inference one is carried from the inference times to the test ones
+    inference_times = np.unique(np.load(os.path.join(cardamom_dir, 'data_times.npy')))
+    stim_sched, test_overrides = test_schedule(p, n_stimuli, times=times_obs, inference_times=inference_times)
     test_overrides = {s: v for s, v in test_overrides.items() if s not in removed}  # validation pass
     stim_sched_simul = stim_sched
 
@@ -213,6 +216,11 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
     basal_t_simul = _sample_rows(basal_t_simul, axis=1)  # (T-1, n_samples, G_tot)
     inter_simul = _inter_rows(inter_simul)
     inter_t_simul = _inter_rows(inter_t_simul, axis=1)   # (T-1, [n_samples,] G_tot, G_tot)
+    # Kinetics per network condition (stored per sample): rows of the test samples too
+    if np.ndim(d_t) == 4:
+        d_t = _sample_rows(d_t, axis=2)                   # (T-1, 2, n_samples, G_tot)
+    if np.ndim(ratios) == 3:
+        ratios = _sample_rows(ratios, axis=1)             # (T-1, n_samples, G_tot)
 
     # Context of the last training iteration (regularization, mode-to-mode OT weight, basin probability weight)
     it_path = os.path.join(cardamom_dir, 'n_iter_inference.npy')
@@ -358,16 +366,10 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
     real_idx_test = np.asarray(model.traj_real_idx).copy()  # test cell behind each trajectory state
 
     # ─── SIMULATION TIMES ────────────────────────────────────────────────
-    times_file = os.path.join(input_dir(p), 'times_simulation.txt')
-    if os.path.exists(times_file):
-        with open(times_file, "r") as f:
-            sim_times = [float(line.strip()) for line in f if line.strip()]
-        if sim_times[0] != 0:
-            sim_times = [0.0] + sim_times
-        print(f"[infer_test] Loaded simulation times from file: {sim_times}")
-    else:
-        sim_times = sorted(np.unique(model.times_data).tolist())
-        print(f"[infer_test] Using inferred timepoints for simulation: {sim_times}")
+    # Simulated at the test timepoints (compared with the test cells); the rates of the training intervals are
+    # transferred to them as for times_simulation (train_times)
+    sim_times = sorted(np.unique(model.times_data).tolist())
+    print(f"[infer_test] Simulation at the test timepoints: {sim_times} (training: {model.train_times.tolist()})")
 
     # ─── NETWORK SIMULATION ───────────────────────────────────────────────
     # Same simulation as for the training cells: proliferation MLP (branching, birth rate of the dilution)
@@ -409,9 +411,9 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
         def _nb_sample(kon, times_vec, sample_idx=None, depth=None):
             n_cells = kon.shape[0]
             k1c, cc, pzc = nb_cell_parameters(model.a, pi_zinb, sample_idx)
-            n_param = ((k1c + 1e-6) * kon)[:, ns:].T  # (G, N)
-            sd = 1.0 if depth is None else depth[:, None]  # NB(k, c / s): p = c / (c + s)
-            p_param = (cc / (cc + sd))[:, ns:].T
+            sd = 1.0 if depth is None else depth[:, None]  # depth_model: NB(k s, c) or NB(k, c / s)
+            n_param, p_param = nb_numpy_params((k1c + 1e-6) * kon, cc, sd, model.depth_model)
+            n_param, p_param = n_param[:, ns:].T, np.broadcast_to(p_param, n_param.shape)[:, ns:].T  # (G, N)
             n_param = np.maximum(n_param, 1e-6)
             p_param = np.clip(p_param, 1e-6, 1 - 1e-6)
             zero_mask = np.random.uniform(0, 1, (G, n_cells)) < pzc.T
@@ -433,12 +435,8 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
         data_beta = _nb_sample(vect_kon_beta, times_data_test, s_test[:len(vect_kon_beta)] if s_test is not None else None, d_tr)
         data_netw_theta = _nb_sample(vect_kon_theta, times_data_test, s_test[:len(vect_kon_theta)] if s_test is not None else None, d_tr)
         data_sim = _nb_sample(vect_kon_sim, times_simulation_test, s_sim, d_sim)
-        # Same draws at the reference depth (s = 1), shown by the report with cell_depth_for_representation
-        ref_depth = {}
-        if depth_cells is not None:
-            ref_depth = dict(beta=_nb_sample(vect_kon_beta, times_data_test, s_test[:len(vect_kon_beta)] if s_test is not None else None)[1:],
-                             theta=_nb_sample(vect_kon_theta, times_data_test, s_test[:len(vect_kon_theta)] if s_test is not None else None)[1:],
-                             sim=_nb_sample(vect_kon_sim, times_simulation_test, s_sim)[1:])
+        # Depth each draw was taken at: the report divides data and draws by it (cell_depth_for_representation)
+        depth_of = {k: np.ravel(v) for k, v in (('beta', d_tr), ('theta', d_tr), ('sim', d_sim)) if v is not None}
 
         # RNA trajectory data
         data_rna_traj = np.zeros((G + 1, rna_test.shape[0]))
@@ -450,23 +448,28 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
         stim = model.stimulus
         prior = model.prior_network_pen
 
-        def _make_adata(matrix_2d, obs_times, suffix):
-            """matrix_2d: (G, N) — rows=genes, cols=cells."""
+        def _make_adata(matrix_2d, obs_times, suffix, rows_s=None):
+            """matrix_2d: (G, N) — rows=genes, cols=cells; rows_s: test sample index of each row."""
             a = ad.AnnData(X=matrix_2d.T)
             a.var = adata.var.copy()
             a.obs['time'] = obs_times
-            if suffix in ref_depth:
-                a.layers['reference_depth'] = ref_depth[suffix].T
+            if rows_s is not None and len(rows_s) == a.n_obs:
+                a.obs['dataset_id'] = np.asarray(test_ids).astype(str)[np.minimum(np.asarray(rows_s, dtype=int),
+                                                                                   len(test_ids) - 1)]
+                from CardamomOT.condition_genes import mask_stage
+                mask_stage(a, adata, model_draws=suffix != 'rna_traj')  # genes outside each sample's condition: 0
+            if suffix in depth_of:
+                a.obs['depth_factor'] = depth_of[suffix]
             if suffix == 'rna_traj' and d_tr is not None:
                 a.obs['depth_factor'] = np.ravel(d_tr)  # depth of the real test cell behind each state
             a.write(os.path.join(cardamom_dir,
                                  f'adata_{suffix}_test_stim{stim}_prior{prior}.h5ad'))
             print(f"[infer_test] Saved adata_{suffix}_test_stim{stim}_prior{prior}.h5ad")
 
-        _make_adata(data_beta[1:], times_data_test, 'beta')
-        _make_adata(data_netw_theta[1:], times_data_test, 'theta')
-        _make_adata(data_sim[1:], times_simulation_test, 'sim')
-        _make_adata(data_rna_traj[1:], times_data_test, 'rna_traj')
+        _make_adata(data_beta[1:], times_data_test, 'beta', s_test)
+        _make_adata(data_netw_theta[1:], times_data_test, 'theta', s_test)
+        _make_adata(data_sim[1:], times_simulation_test, 'sim', s_sim)
+        _make_adata(data_rna_traj[1:], times_data_test, 'rna_traj', s_test)
         _make_adata(prot_traj_test[:, ns:].T, times_data_test, 'prot_traj')
         _make_adata(model.prot[:, ns:].T, times_simulation_test, 'prot_simul')
 
@@ -574,17 +577,19 @@ def validation_pass(p, opts, adata_rem, removed, refs, cardamom_dir):
         if m.use_depth_factor and 'depth_factor' in cells.obs:
             depth = np.random.choice(cells.obs['depth_factor'].to_numpy(dtype=float), n_sim)
         sd_ = 1.0 if depth is None else depth[:, None]
-        n_param = np.maximum(((k1c + 1e-6) * kon)[:, ns:], 1e-6)
-        p_param = np.clip((cc / (cc + sd_))[:, ns:], 1e-6, 1 - 1e-6)
+        n_param, p_param = nb_numpy_params((k1c + 1e-6) * kon, cc, sd_, m.depth_model)
+        n_param = np.maximum(n_param[:, ns:], 1e-6)
+        p_param = np.clip(np.broadcast_to(p_param, (n_sim, p_param.shape[-1]))[:, ns:], 1e-6, 1 - 1e-6)
         x = np.random.negative_binomial(n_param, p_param)
         x = np.where(np.random.uniform(0, 1, x.shape) < pzc, 0, x)  # pzc (1 or N, genes)
         a = ad.AnnData(X=x.astype(float))
-        if depth is not None:  # same draw at the reference depth (s = 1)
-            x_ref = np.random.negative_binomial(n_param, np.clip((cc / (cc + 1.0))[:, ns:], 1e-6, 1 - 1e-6))
-            a.layers['reference_depth'] = np.where(np.random.uniform(0, 1, x_ref.shape) < pzc, 0, x_ref).astype(float)
+        if depth is not None:  # depth of the draw (representation of the report)
+            a.obs['depth_factor'] = depth
         a.var = train.var.copy()
         a.obs['time'] = m.times_simul
         a.obs['dataset_id'] = r
+        from CardamomOT.condition_genes import mask_stage
+        mask_stage(a, adata_rem)  # genes outside the condition of r (select_genes_per_condition): 0
         a.uns['reference_sample'] = ref
         a.uns['observed_times'] = t_obs
         if m.log_population is not None:

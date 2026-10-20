@@ -2,28 +2,28 @@ classifier,version,cell_type,share,recall,n_cells
 ,observed,Extraembryonic_Endoderm,0.21555555555555556,,194
 random forest,data (cross-validated),Extraembryonic_Endoderm,0.22777777777777777,0.8814432989690721,194
 random forest,data permuted within modes,Extraembryonic_Endoderm,0.2511111111111111,0.8092783505154639,194
-random forest,model draws,Extraembryonic_Endoderm,0.16444444444444445,0.6134020618556701,194
+random forest,model draws,Extraembryonic_Endoderm,0.15777777777777777,0.5773195876288659,194
 logistic regression,data (cross-validated),Extraembryonic_Endoderm,0.21222222222222223,0.9020618556701031,194
 logistic regression,data permuted within modes,Extraembryonic_Endoderm,0.24,0.8247422680412371,194
-logistic regression,model draws,Extraembryonic_Endoderm,0.20777777777777778,0.711340206185567,194
+logistic regression,model draws,Extraembryonic_Endoderm,0.19777777777777777,0.6804123711340206,194
 ,observed,Neuroectoderm,0.19444444444444445,,175
 random forest,data (cross-validated),Neuroectoderm,0.17222222222222222,0.72,175
 random forest,data permuted within modes,Neuroectoderm,0.1622222222222222,0.6228571428571429,175
-random forest,model draws,Neuroectoderm,0.16333333333333333,0.5485714285714286,175
+random forest,model draws,Neuroectoderm,0.15888888888888889,0.5714285714285714,175
 logistic regression,data (cross-validated),Neuroectoderm,0.20555555555555555,0.8685714285714285,175
 logistic regression,data permuted within modes,Neuroectoderm,0.19,0.7028571428571428,175
-logistic regression,model draws,Neuroectoderm,0.16333333333333333,0.5428571428571428,175
+logistic regression,model draws,Neuroectoderm,0.15888888888888889,0.5657142857142857,175
 ,observed,Pluripotency,0.39,,351
 random forest,data (cross-validated),Pluripotency,0.4722222222222222,0.9430199430199431,351
 random forest,data permuted within modes,Pluripotency,0.45222222222222225,0.8660968660968661,351
-random forest,model draws,Pluripotency,0.5622222222222222,0.8917378917378918,351
+random forest,model draws,Pluripotency,0.5555555555555556,0.9230769230769231,351
 logistic regression,data (cross-validated),Pluripotency,0.37222222222222223,0.8774928774928775,351
 logistic regression,data permuted within modes,Pluripotency,0.3566666666666667,0.7663817663817664,351
-logistic regression,model draws,Pluripotency,0.45111111111111113,0.8290598290598291,351
+logistic regression,model draws,Pluripotency,0.46,0.7863247863247863,351
 ,observed,Post-implantation_Epiblast,0.2,,180
 random forest,data (cross-validated),Post-implantation_Epiblast,0.12777777777777777,0.49444444444444446,180
 random forest,data permuted within modes,Post-implantation_Epiblast,0.13444444444444445,0.45555555555555555,180
-random forest,model draws,Post-implantation_Epiblast,0.11,0.3055555555555556,180
+random forest,model draws,Post-implantation_Epiblast,0.12777777777777777,0.4,180
 logistic regression,data (cross-validated),Post-implantation_Epiblast,0.21,0.8,180
 logistic regression,data permuted within modes,Post-implantation_Epiblast,0.21333333333333335,0.6888888888888889,180
-logistic regression,model draws,Post-implantation_Epiblast,0.17777777777777778,0.5277777777777778,180
+logistic regression,model draws,Post-implantation_Epiblast,0.18333333333333332,0.4666666666666667,180

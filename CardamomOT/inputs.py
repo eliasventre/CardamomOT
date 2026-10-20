@@ -25,21 +25,24 @@ PARAMETER_GROUPS = [
         'simulate_perturbations', 'run_test', 'run_classical_OT', 'split', 'train_rate', 'species',
         'senescence_gating', 'overwrite_degradation_rates', 'classical_ot_max_cells']),
     ('Gene selection', [
-        'num_max_genes', 'n_query_genes', 'n_entropy_genes', 'network_method', 'sample_network_combination',
+        'num_max_genes', 'n_query_genes', 'n_entropy_genes', 'network_method', 'select_genes_per_condition',
+        'sample_network_combination',
         'k_in_steiner', 'closure_min',
         'min_entropy_change', 'min_nb_separation']),
     ('Literature prior network', [
         'prior_network_pen', 'max_free_params', 'literature_selection', 'literature_depth', 'literature_resources']),
     ('Stimulus', ['stimulus']),
     ('Per-cell sequencing depth', [
-        'use_depth_factor', 'compute_depth_factor', 'allow_depth_correction', 'depth_method', 'depth_by_cell_type']),
+        'use_depth_factor', 'compute_depth_factor', 'allow_depth_correction', 'depth_method', 'depth_by_cell_type',
+        'depth_model']),
     ('NB mixture and samples', [
         'mean_forcing_em', 'batch_size_mixture', 'soft_em_refinement', 'integrate_samples', 'ref_sample_integration']),
     ('Network inference', [
         'force_basins', 'temporal_basins', 'min_n_loops', 'max_iter', 'batch_size_traj', 'n_network_fits',
-        'constrain_basal_uniform', 'network_condition_pen']),
+        'constrain_basal_uniform', 'network_condition_pen', 'degradation_rates_per_condition', 'exact_flow_matching']),
     ('Proliferation and simulation', [
-        'growth_reg_source', 'prolif_uses_stimulus', 'simulation_stochastic', 'simulation_mrnas_direct',
+        'growth_reg_source', 'prolif_uses_stimulus', 'ProliferationMLP_per_condition', 'simulation_stochastic',
+        'simulation_mrnas_direct',
         'protein_dilution']),
     ('Report', ['classifier_method', 'embedding_method_visualization', 'cell_depth_for_representation',
                 'report_normalize', 'report_log1p', 'report_n_umap']),
@@ -130,7 +133,9 @@ SHEETS = {
         '(add STIM2, STIM3... for several perturbation stimuli; their effects add up).'),
     'times': (
         [('times_inference', 'Inference restricted to the timepoints <= the largest value of this column'),
-         ('times_simulation', 'Timepoints of the simulations (0 added if absent)')],
+         ('times_simulation', 'Timepoints of the simulations (0 added if absent)'),
+         ('times_test', 'Timepoints of the test cells (split = train; 0 added if absent): times beyond the inference '
+                        'ones are held out for the test only; empty = the inference timepoints')],
         'Timepoints, one per row.'),
     'proliferation_rates': (
         [('cell_type', 'Cell type (as in obs cell_type_proliferation, else cell_type_transition, else cell_type)'),
@@ -246,7 +251,7 @@ def upgrade_workbook(path, out=None):
     """
     Brings an existing workbook to the current layout without touching the values of the kept sheets: the headers
     sample_id of proliferation_rates and population_sizes, birth_rate_per_hour / death_rate_per_hour of
-    proliferation_rates, and the removal of the former sheet doubling_times. Saved in place (out=None) or as `out`.
+    proliferation_rates, times_test of times (former times_to_inference / times_to_simulate renamed), and the removal of the former sheet doubling_times. Saved in place (out=None) or as `out`.
     Returns what was changed.
     """
     from openpyxl import load_workbook
@@ -254,9 +259,17 @@ def upgrade_workbook(path, out=None):
     from openpyxl.styles import Font, PatternFill, Alignment
     wb = load_workbook(path)
     added = []
+    # Former headers of the times sheet, renamed (values kept)
+    if 'times' in wb.sheetnames:
+        for cell in wb['times'][1]:
+            new = {'times_to_inference': 'times_inference', 'times_to_simulate': 'times_simulation'}.get(cell.value)
+            if new is not None:
+                added.append(f'column {cell.value} of times renamed {new}')
+                cell.value = new
+                cell.comment = Comment(dict(SHEETS['times'][0])[new], 'CardamomOT', width=320, height=90)
     for sheet, column, pos in (('proliferation_rates', 'sample_id', 3), ('population_sizes', 'sample_id', 3),
                                ('proliferation_rates', 'birth_rate_per_hour', 4),
-                               ('proliferation_rates', 'death_rate_per_hour', 5)):
+                               ('proliferation_rates', 'death_rate_per_hour', 5), ('times', 'times_test', 3)):
         ws = wb[sheet] if sheet in wb.sheetnames else None
         if ws is not None and column not in [c.value for c in ws[1]]:
             doc = dict(SHEETS[sheet][0])[column]
@@ -599,7 +612,7 @@ def export(wb, out_dir):
     old = [c for c in ('times_to_inference', 'times_to_simulate') if c in tm.columns and tm[c].notna().any()]
     if old:
         print(f"[CardamomOT] Warning: sheet times: columns {old} ignored (now times_inference, times_simulation)")
-    for col in ('times_inference', 'times_simulation'):
+    for col in ('times_inference', 'times_simulation', 'times_test'):
         vals = _values(tm, col)
         if vals:
             write(f'{col}.txt', '\n'.join(f'{float(v):g}' for v in vals) + '\n')
@@ -758,6 +771,14 @@ def depth_factor_used(project):
     m = NetworkModel(1)
     m.apply_project_parameters(project, verb=False)
     return bool(m.use_depth_factor)
+
+
+def depth_model_used(project):
+    """depth_model of the project (model_parameters sheet, else the default of NetworkModel)."""
+    from .model.base import NetworkModel
+    m = NetworkModel(1)
+    m.apply_project_parameters(project, verb=False)
+    return str(m.depth_model)
 
 
 def input_dir(project):

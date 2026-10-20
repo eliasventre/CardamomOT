@@ -92,12 +92,13 @@ def nb_init_separation(X, times, cell_types=None, n_cells=1024, seuil=0.01, seed
     """
     Separation of the extreme modes found by the initialization of the NB mixture (group_init,
     as in infer_mixture: one mode per time, and per cell type, with a common rate; the most
-    diverse labelling kept), per gene (column of X), on at most n_cells cells per timepoint.
+    diverse labelling kept), per gene (column of X), on at most n_cells cells per timepoint (None = all).
     A gene whose initialization gives no distinct basins is unlikely to get them from the CEM.
     depth: per-cell depth factors (NB(k, c / s_i)) or None.
     """
     rng = np.random.default_rng(seed)
-    sub = np.concatenate([rng.choice(np.flatnonzero(times == t), min(n_cells, int(np.sum(times == t))), replace=False)
+    sub = np.concatenate([rng.choice(np.flatnonzero(times == t), int(np.sum(times == t)) if n_cells is None
+                                     else min(n_cells, int(np.sum(times == t))), replace=False)
                           for t in np.unique(times)])
     Xs = np.rint(X[sub]).astype(int)
     groups = [times[sub], None if cell_types is None else np.asarray(cell_types)[sub]]

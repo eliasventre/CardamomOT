@@ -27,6 +27,7 @@ from CardamomOT.run_options import parse_step_options, settings, configure
 import anndata as ad
 from CardamomOT import NetworkModel, plot_data_umap_altogether, plot_data_distrib
 from CardamomOT.inference.integration import nb_cell_parameters
+from CardamomOT.inference.depth_model import nb_numpy_params
 from CardamomOT.inference.depth import state_depth, simulation_depth
 import scipy.sparse
 import os
@@ -141,7 +142,8 @@ def main(argv):
         samples_traj = np.load(samples_path).astype(int) if os.path.exists(samples_path) else None
         
         vect_kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta.npy')) + 1e-6
-        vect_kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_forsimul.npy')) + 1e-6
+        # Network sample: kon of the network of fit_network on its trajectories
+        vect_kon_theta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_theta.npy')) + 1e-6
         vect_kon_sim = np.load(os.path.join(p, 'cardamomOT', 'data_kon_simul.npy')) + 1e-6
         times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
         times_simulation = np.load(os.path.join(p, 'cardamomOT', 'simulation_times.npy'))
@@ -187,7 +189,7 @@ def main(argv):
     k1_sim, c_sim, pz_sim = nb_cell_parameters(mixture_parameters, pi_zinb, _sim_sample_idx(samples_traj, times_simulation))
     k1_tr, k1_sim = k1_tr + 1e-6, k1_sim + 1e-6
     # Depth factors (estimate_cell_depth.py): each state / simulated cell drawn at the depth of the
-    # real cell it mimics, NB(k, c / s): p = c / (c + s)
+    # real cell it mimics (depth_model: NB(k s, c) or NB(k, c / s))
     depth_cells = (adata.obs['depth_factor'].values.astype(float)
                    if (model.use_depth_factor and 'depth_factor' in adata.obs) else None)
     idx_path = os.path.join(p, 'cardamomOT', 'data_traj_real_idx.npy')
@@ -211,32 +213,34 @@ def main(argv):
         zero_mask = (np.random.uniform(0, 1, (data_sim[1:, :].shape)) < pz_sim.T)
         zero_ratio_sim = np.sum(zero_mask == 1)/np.size(data_sim[1:, :])
         print(f"[check_sim_to_data] Simulation zero-inflation ratio: {zero_ratio_sim:.4f}")
-        data_sim[1:, :] = np.random.negative_binomial((k1_sim*vect_kon_sim)[:, ns:].T, (c_sim / (c_sim + s_sim))[:, ns:].T)
+        n_nb, p_nb = nb_numpy_params(k1_sim * vect_kon_sim, c_sim, s_sim, model.depth_model)
+        data_sim[1:, :] = np.random.negative_binomial(n_nb[:, ns:].T, p_nb[:, ns:].T)
         data_sim[1:, :] = np.where(zero_mask, 0, data_sim[1:, :])
 
     zero_mask = (np.random.uniform(0, 1, (data_beta[1:, :].shape)) < pz_tr.T)
     zero_ratio_beta = np.sum(zero_mask == 1)/np.size(data_beta[1:, :])
     print(f"[check_sim_to_data] Beta (mixture) zero-inflation ratio: {zero_ratio_beta:.4f}")
-    data_beta[1:, :] = np.random.negative_binomial((k1_tr*vect_kon_beta)[:, ns:].T, (c_tr / (c_tr + s_tr))[:, ns:].T)
+    n_nb, p_nb = nb_numpy_params(k1_tr * vect_kon_beta, c_tr, s_tr, model.depth_model)
+    data_beta[1:, :] = np.random.negative_binomial(n_nb[:, ns:].T, p_nb[:, ns:].T)
     data_beta[1:, :] = np.where(zero_mask, 0, data_beta[1:, :])
 
     zero_mask = (np.random.uniform(0, 1, (data_netw_theta[1:, :].shape)) < pz_tr.T)
     zero_ratio_theta = np.sum(zero_mask == 1)/np.size(data_netw_theta[1:, :])
     print(f"[check_sim_to_data] Theta (network) zero-inflation ratio: {zero_ratio_theta:.4f}")
-    data_netw_theta[1:, :] = np.random.negative_binomial((k1_tr*vect_kon_theta)[:, ns:].T, (c_tr / (c_tr + s_tr))[:, ns:].T)
+    n_nb, p_nb = nb_numpy_params(k1_tr * vect_kon_theta, c_tr, s_tr, model.depth_model)
+    data_netw_theta[1:, :] = np.random.negative_binomial(n_nb[:, ns:].T, p_nb[:, ns:].T)
     data_netw_theta[1:, :] = np.where(zero_mask, 0, data_netw_theta[1:, :])
 
-    # Same draws at the reference depth (s = 1): layer 'reference_depth', shown by the report with
-    # cell_depth_for_representation (the observed data then divided by their depth factor)
-    ref_depth = {}
+    # Depth each model draw was taken at (obs['depth_factor']): the report divides data and draws by it
+    # (cell_depth_for_representation), the explicit mRNA simulation being at the reference depth
+    depth_of = {}
     if depth_cells is not None:
-        def _draw_ref(k1, kon, c, pz):
-            x = np.random.negative_binomial((k1 * kon)[:, ns:].T, (c / (c + 1.0))[:, ns:].T)
-            return np.where(np.random.uniform(0, 1, x.shape) < pz.T, 0, x).T
-        ref_depth['beta'] = _draw_ref(k1_tr, vect_kon_beta, c_tr, pz_tr)
-        ref_depth['theta'] = _draw_ref(k1_tr, vect_kon_theta, c_tr, pz_tr)
-        if mrna_simul is None:
-            ref_depth['sim'] = _draw_ref(k1_sim, vect_kon_sim, c_sim, pz_sim)
+        if np.ndim(s_tr):
+            depth_of.update(beta=np.ravel(s_tr), theta=np.ravel(s_tr))
+        if mrna_simul is not None:
+            depth_of['sim'] = np.ones(data_sim.shape[1])
+        elif np.ndim(s_sim):
+            depth_of['sim'] = np.ravel(s_sim)
 
     cardamom_dir = os.path.join(p, 'cardamomOT')
 
@@ -270,8 +274,13 @@ def main(argv):
         A.obs['time'] = times_data
         _with_samples(A, samples_traj)
         A.obs['observed'] = traj_valid  # False: virtual state (time not observed for its sample)
-        if name in ref_depth:
-            A.layers['reference_depth'] = ref_depth[name]
+        if name in depth_of:
+            A.obs['depth_factor'] = depth_of[name]
+        from CardamomOT.condition_genes import mask_stage
+        mask_stage(A, adata, model_draws=name != 'rna_traj')  # genes outside each sample's condition: 0 (draws)
+        if name == 'beta':
+            # kon of each state (its mode per gene): mode-shuffle ceiling of the gene-pair correlations (report)
+            A.layers['kon'] = np.asarray(vect_kon_beta[:, ns:], dtype=np.float32)
         if name == 'rna_traj' and 'depth_factor' in adata.obs and real_idx is not None:
             # Depth of the real cell behind each state (counts of the real cells), even if the run did not use it
             A.obs['depth_factor'] = state_depth(adata.obs['depth_factor'].values.astype(float), real_idx)
@@ -297,8 +306,10 @@ def main(argv):
         adata_sim.var = adata.var.copy()
         adata_sim.obs['time'] = times_simulation
         _with_samples(adata_sim, _sim_sample_idx(samples_traj, times_simulation))
-        if 'sim' in ref_depth:
-            adata_sim.layers['reference_depth'] = ref_depth['sim']
+        if 'sim' in depth_of:
+            adata_sim.obs['depth_factor'] = depth_of['sim']
+        from CardamomOT.condition_genes import mask_stage
+        mask_stage(adata_sim, adata)
         adata_sim.uns['proliferation'] = sim_prolif
         pop_path = os.path.join(cardamom_dir, 'data_log_population.npy')
         if sim_prolif and os.path.exists(pop_path):
@@ -308,7 +319,7 @@ def main(argv):
         # Trajectory RNA (without proliferation), and growth-weighted if the simulation has proliferation
         _write_states(data_ref[1:, :].T, 'rna_traj')
 
-        data_prot_traj = np.load(os.path.join(cardamom_dir, 'data_prot_forsimul.npy'))
+        data_prot_traj = np.load(os.path.join(cardamom_dir, 'data_prot.npy'))  # trajectories of fit_network
         _write_states(data_prot_traj[:, ns:], 'prot_traj')
 
         data_prot_simul = np.load(os.path.join(cardamom_dir, 'data_prot_simul.npy'))

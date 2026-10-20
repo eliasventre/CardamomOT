@@ -92,30 +92,37 @@ def log_view(A, depth=True):
     return X
 
 
-def data_embedding(p, n_hvg=2000, n_pcs=50, n_neighbors=15, seed=0, depth=True, method='umap'):
+def data_embedding(p, n_hvg=2000, n_pcs=50, n_neighbors=15, seed=0, depth=True, method='umap', genes=None):
     """
     Embedding of every cell of Data/data.h5ad: log1p(counts / depth factor if depth and computed, else counts),
     n_hvg highly variable genes (seurat), PCA, then UMAP (kNN graph), the first 2 principal components, or
     PHATE (on the PCA). Cached in cardamomOT/embedding_data.npz (cell names, embedding 'emb', PCA, HVG with
     their mean and PCA loadings), reused while the cells, depth and method are the same.
+    genes: restrict to these genes (e.g. those of the gene selection), cached in embedding_data_genes.npz and
+    reused while they are the same.
     Returns (dict of arrays, obs of the cells).
     """
     from ..config import ensure_raw_counts, harmonize_obs
     method = str(method).lower()
     data_path = os.path.join(p, 'Data', 'data.h5ad')
-    cache = os.path.join(p, 'cardamomOT', 'embedding_data.npz')
+    cache = os.path.join(p, 'cardamomOT', 'embedding_data.npz' if genes is None else 'embedding_data_genes.npz')
     obs = ad.read_h5ad(data_path, backed='r').obs.copy()
     use_depth = bool(depth and 'depth_factor' in obs)
+    genes = None if genes is None else np.asarray(list(genes), dtype=str)
     if os.path.exists(cache):
         E = dict(np.load(cache, allow_pickle=True))
+        same_genes = genes is None or ('genes' in E and np.array_equal(E['genes'].astype(str), genes))
         if (len(E['obs_names']) == len(obs) and (E['obs_names'] == obs.index.values.astype(str)).all()
-                and bool(E['depth']) == use_depth and str(E['method']) == method):
+                and bool(E['depth']) == use_depth and str(E['method']) == method and same_genes):
             tmp = ad.AnnData(obs=obs)
             harmonize_obs(tmp)
             return E, tmp.obs
     A = ensure_raw_counts(ad.read_h5ad(data_path), data_path)
     harmonize_obs(A)
-    print(f"[embedding] {embedding_name(method)} of the {A.n_obs} cells of Data/data.h5ad (cached in {cache})")
+    if genes is not None:
+        A = A[:, A.var_names.isin(genes)].copy()
+    print(f"[embedding] {embedding_name(method)} of the {A.n_obs} cells of Data/data.h5ad"
+          + ("" if genes is None else f" on {A.n_vars} genes") + f" (cached in {cache})")
     A.X = log_view(A, use_depth)
     batch = 'dataset_id' if 'dataset_id' in A.obs and A.obs['dataset_id'].nunique() > 1 else None
     sc.pp.highly_variable_genes(A, n_top_genes=min(n_hvg, A.n_vars), flavor='seurat', batch_key=batch)
@@ -132,6 +139,8 @@ def data_embedding(p, n_hvg=2000, n_pcs=50, n_neighbors=15, seed=0, depth=True, 
     E = dict(obs_names=A.obs_names.values.astype(str), emb=np.asarray(emb), pca=A.obsm['X_pca'],
              hvg=A.var_names.values.astype(str), hvg_mean=np.asarray(A.X.mean(axis=0)).ravel(),
              pcs=A.varm['PCs'], depth=use_depth, method=method)
+    if genes is not None:
+        E['genes'] = genes
     os.makedirs(os.path.dirname(cache), exist_ok=True)
     np.savez_compressed(cache, **E)
     old = os.path.join(p, 'cardamomOT', 'umap_data.npz')  # cache of an earlier version

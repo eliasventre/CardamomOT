@@ -15,12 +15,13 @@ only ever read Data/data.h5ad, never Data/data_complete.h5ad.
 
 If `Data/data.h5ad` was already prepared with a pre-filtered gene set, the
 literature marker genes may be missing from it. In that case, place the
-unfiltered dataset alongside it as `Data/data_complete.h5ad`: it is used ONLY
-to score the proliferation/death/senescence signatures (and is never
-modified or written back), and the resulting per-cell rates are mapped onto
-the matching cells of `Data/data.h5ad` by cell name (every cell in
-Data/data.h5ad is assumed to also be present in Data/data_complete.h5ad; the
-converse need not hold). If `Data/data_complete.h5ad` is absent,
+unfiltered dataset alongside it as `Data/data_complete.h5ad`: only its counts
+are used, to score the proliferation/death/senescence signatures (it is never
+modified or written back), on the cells of `Data/data.h5ad` (matched by cell
+name; every cell in Data/data.h5ad must be present in Data/data_complete.h5ad,
+the converse need not hold) and with their annotations of Data/data.h5ad
+(time, dataset_id, cell types), so that the anchoring is done on the analysed
+cells; the resulting per-cell rates are written to Data/data.h5ad. If `Data/data_complete.h5ad` is absent,
 `Data/data.h5ad` is used directly for both scoring and output if it has at
 least MIN_GENES_SCORING (10,000) genes. With fewer, the signatures are not
 scored (warning): the reference rates of the proliferation_rates sheet,
@@ -363,8 +364,17 @@ def main(argv):
     try:
         if using_complete:
             adata_score = ensure_raw_counts(ad.read_h5ad(complete_path), complete_path)
-            print(f"[get_proliferation_rates] Found {complete_path}; scoring gene signatures on it "
-                  f"({adata_score.shape[0]} cells, {adata_score.shape[1]} genes) instead of Data/data.h5ad")
+            missing = adata_target.obs_names.difference(adata_score.obs_names)
+            if len(missing) > 0:
+                print(f"[get_proliferation_rates] Error: {len(missing)} cell(s) in Data/data.h5ad "
+                      f"were not found in Data/data_complete.h5ad (first missing: {list(missing[:5])})")
+                sys.exit(1)
+            # Counts of data_complete.h5ad on the cells of Data/data.h5ad, with their annotations (time, sample,
+            # cell types): the anchoring is done on the analysed cells
+            adata_score = adata_score[adata_target.obs_names].copy()
+            adata_score.obs = adata_target.obs.copy()
+            print(f"[get_proliferation_rates] Found {complete_path}; scoring gene signatures on its counts "
+                  f"({adata_score.shape[0]} cells of Data/data.h5ad, {adata_score.shape[1]} genes)")
         else:
             adata_score = ensure_raw_counts(adata_target, data_path)
     except ValueError as e:

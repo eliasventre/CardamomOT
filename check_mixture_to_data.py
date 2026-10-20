@@ -123,29 +123,27 @@ def main(argv):
     print(f"[check_mixture_to_data] Applied zero-inflation with ratio: {zero_ratio:.4f}")
 
     # Sample from negative binomial distribution (exclude stimulus columns ns:)
-    # Depth factors: each cell drawn at its own depth, NB(k, c / s)
+    # Depth factors: each cell drawn at its own depth (depth_model: NB(k s, c) or NB(k, c / s))
+    from CardamomOT.inputs import depth_model_used
+    from CardamomOT.inference.depth_model import nb_numpy_params
     s = (adata.obs['depth_factor'].values.astype(float)[:, None]
          if (depth_factor_used(p) and 'depth_factor' in adata.obs) else 1.0)
-    data_beta[1:, :] = np.random.negative_binomial(((k1c + 1e-6)*vect_kon_beta)[:, ns:].T, (cc / (cc + s))[:, ns:].T)
+    n_nb, p_nb = nb_numpy_params((k1c + 1e-6) * vect_kon_beta, cc, s, depth_model_used(p))
+    data_beta[1:, :] = np.random.negative_binomial(n_nb[:, ns:].T, p_nb[:, ns:].T)
     data_beta[1:, :] = np.where(zero_mask, 0, data_beta[1:, :])
-    # Same draw at the reference depth (s = 1): representation with cell_depth_for_representation
-    ref_depth = None
-    if np.ndim(s):
-        ref_depth = np.random.negative_binomial(((k1c + 1e-6)*vect_kon_beta)[:, ns:], (cc / (cc + 1.0))[:, ns:])
-        ref_depth = np.where(zero_mask.T, 0, ref_depth).astype(float)
 
     # Save synthetic data 
     adata_beta = ad.AnnData(X=data_beta[1:, :].T)
     adata_beta.var = adata.var.copy()
     adata_beta.obs_names = adata.obs_names.astype(str)
-    adata_beta.uns['model_draws'] = True
-    if ref_depth is not None:
-        adata_beta.layers['reference_depth'] = ref_depth
     adata_beta.obs['time'] = times_data
-    # Sample and depth of each cell (the cell-type classifiers are per sample)
-    for key in ('dataset_id', 'depth_factor'):
-        if key in adata.obs:
-            adata_beta.obs[key] = adata.obs[key].values
+    # Sample of each cell (the cell-type classifiers are per sample), and the depth it was drawn at (representation)
+    if 'dataset_id' in adata.obs:
+        adata_beta.obs['dataset_id'] = adata.obs['dataset_id'].values
+    if np.ndim(s):
+        adata_beta.obs['depth_factor'] = np.ravel(s)
+    from CardamomOT.condition_genes import mask_stage
+    mask_stage(adata_beta, adata)  # genes outside each sample's condition (select_genes_per_condition): 0
     adata_beta.write(os.path.join(p, 'cardamomOT', 'adata_beta.h5ad'))
     print(f"[check_mixture_to_data] Saved synthetic data to {os.path.join(p, 'cardamomOT', 'adata_beta.h5ad')}")
 
@@ -162,8 +160,8 @@ def main(argv):
         from CardamomOT.tools.characterize_cell_type import representation
         rep = bool(settings(opts).cell_depth_for_representation)
         real = adata.copy()
-        real.X = representation(adata, rep, 'observed')
-        idt = identity_diagnostic(real, representation(adata_beta, rep, 'model'), modes, seed=0)
+        real.X = representation(adata, rep)
+        idt = identity_diagnostic(real, representation(adata_beta, rep), modes, seed=0)
         idt.to_csv(os.path.join(p, 'cardamomOT', 'identity_mixture.csv'), index=False)
         rec = idt[idt.version != 'observed'].groupby(['classifier', 'version'])['recall'].mean()
         print("[check_mixture_to_data] Cell-type identity (mean recall over the types): "

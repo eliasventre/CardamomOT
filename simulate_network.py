@@ -9,7 +9,7 @@ Usage:
 Required input files:
     - Data/data_<split>.h5ad: count matrix with temporal information
     - cardamom/basal_simul.npy, inter_simul.npy: inferred parameters
-    - cardamom/mixture_parameters.npy, data_prot_forsimul.npy: kinetic rates and starting protein states
+    - cardamom/mixture_parameters.npy, data_prot.npy: kinetic rates and starting protein states (fit_network)
 
 Output files:
     - cardamom/data_prot_simul.npy: simulated protein abundance
@@ -30,18 +30,17 @@ def attach_proliferation(model, p, tag='[simulate_network]', branching=True):
     """Proliferation MLP (prolif_network.pt, one or two heads) attached to model: birth rate of the dilution
     (protein_dilution) and, with branching, branching simulation with the effects of the inference stimuli on the
     net rate, as in simulate_network."""
-    prolif_path = os.path.join(p, 'cardamomOT', 'prolif_network.pt')
-    n_prot_path = os.path.join(p, 'cardamomOT', 'prolif_network_n_proteins.npy')
-    if not (os.path.exists(prolif_path) and os.path.exists(n_prot_path)):
+    from CardamomOT.inference.proliferations import load_proliferation
+    # One MLP (one or two heads), or one per network condition (ProliferationMLP_per_condition)
+    prolif = load_proliferation(os.path.join(p, 'cardamomOT'))
+    if prolif is None:
         if branching:
             print(f"{tag} Warning: simulate_with_proliferation = True but prolif_network.pt not found; "
                   "run infer_network_simul.py first")
         else:
             print(f"{tag} No prolif_network.pt: dilution at the birth rates of the trajectory slots")
         return False
-    from CardamomOT.inference.proliferations import load_proliferation_mlp
-    # One head (net rate) or two (birth, death); older networks keep identity input scaling
-    model.prolif_network = load_proliferation_mlp(prolif_path, int(np.load(n_prot_path)[0]))
+    model.prolif_network = prolif
     model.simulate_with_proliferation = bool(branching)
     if not branching:
         print(f"{tag} Loaded proliferation network — birth rate of the dilution (no branching)")
@@ -90,6 +89,7 @@ def load_simulation_model(p, opts, adata, tag='[simulate_network]'):
         if os.path.exists(samples_path):
             model.samples_data = np.load(samples_path)
             print(f"{tag} Loaded per-cell sample IDs")
+        model.set_gene_mask(adata)  # genes of each sample's condition (select_genes_per_condition), if any
         print(f"{tag} Successfully loaded all network parameters")
     except FileNotFoundError as e:
         print(f"{tag} Error: Missing parameter file: {e}")

@@ -114,7 +114,7 @@ All 7 files in `CardamomOT/inference/` translated to English-only:
 - network.py ✅
 - base.py ✅
 - mixture.py ✅
-- degradations.py ✅
+- sde.py ✅
 - pretreatment.py ✅
 - trajectory.py ✅
 - simulations.py ✅
@@ -182,7 +182,7 @@ cardamom run /path/to/project --default
 - ✅ CardamomOT/inference/network.py
 - ✅ CardamomOT/inference/base.py
 - ✅ CardamomOT/inference/mixture.py
-- ✅ CardamomOT/inference/degradations.py
+- ✅ CardamomOT/inference/sde.py
 - ✅ CardamomOT/inference/pretreatment.py
 - ✅ CardamomOT/inference/trajectory.py
 - ✅ CardamomOT/inference/simulations.py

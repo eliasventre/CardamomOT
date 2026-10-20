@@ -217,7 +217,7 @@ All source files in `CardamomOT/inference/` have been thoroughly documented and 
   - EM algorithm implementation
   - Parameter estimation
 
-- **[degradations.py](CardamomOT/inference/degradations.py)** - Degradation rate inference
+- **[sde.py](CardamomOT/inference/sde.py)** - Free-running fit of the simulation kinetics (and network)
   - PyTorch ODE models
   - Epsilon parameter fitting
   - Stability analysis
@@ -262,7 +262,7 @@ CardamomOT/
 │   │   ├── network.py
 │   │   ├── base.py
 │   │   ├── mixture.py
-│   │   ├── degradations.py
+│   │   ├── sde.py
 │   │   ├── pretreatment.py
 │   │   ├── trajectory.py
 │   │   └── simulations.py

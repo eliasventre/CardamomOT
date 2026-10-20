@@ -71,12 +71,6 @@ def pipeline_steps(cfg, project=None) -> List[str]:
     return steps
 
 
-def _has_layer(path, layer='reference_depth') -> bool:
-    import h5py
-    with h5py.File(path, 'r') as f:
-        return 'layers' in f and layer in f['layers']
-
-
 def report_steps(cfg, project) -> List[str]:
     """
     Steps to rebuild the final report with the current visualisation parameters (embedding_method_visualization,

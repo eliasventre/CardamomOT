@@ -1,0 +1,566 @@
+%======================================================================
+% CardamomOT-multiome: project note
+%======================================================================
+\documentclass[a4paper, 11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage[margin=1in]{geometry}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator{\diag}{diag}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\kon}{k_{\mathrm{on}}^{\theta}}
+\newcommand{\koni}{k_{\mathrm{on},i}^{\theta}}
+\newcommand{\kop}{k^{\mathrm{open}}}
+\newcommand{\kcl}{k^{\mathrm{close}}}
+\newcommand{\thc}{\theta^{\mathrm{c}}}
+\newcommand{\bc}{\beta^{\mathrm{c}}}
+\newcommand{\cbar}{\bar c}
+\newcommand{\Lv}{\mathcal{L}}
+\newcommand{\Rg}{\mathcal{R}}
+\newcommand{\tofill}[1]{\par\smallskip\noindent\emph{[To be completed: #1]}\par\smallskip}
+
+\theoremstyle{plain}
+\newtheorem{prop}{Proposition}
+\newtheorem{conj}{Assumption}
+\theoremstyle{remark}
+\newtheorem{rem}{Remark}
+
+\title{CardamomOT-multiome\\[0.3em] \large Mechanistic gene regulatory network inference from joint\\ single-cell RNA and chromatin accessibility time series}
+\author{Project note}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+%======================================================================
+\section*{Project note}
+%======================================================================
+
+\paragraph{Objective.} The article will extend CardamomOT~\cite{mauge2026cardamomot} to single-cell multiome data, in which the transcriptome and the chromatin accessibility of the same cell are measured. The accessibility of regulatory regions becomes a hidden variable of the mechanistic model: it gates the regulated part of the burst frequency of its genes, and it is itself regulated by the proteins through a second network. The method infers both networks, the hidden protein and chromatin trajectories, and the kinetic rates of the chromatin, and returns a generative model of the joint RNA and accessibility dynamics.
+
+\paragraph{The thread.} From RNA alone, a gene whose regulatory region is closed is indistinguishable from a repressed gene: in both cases it stays in its low burst-frequency mode. A mechanistic network fitted on RNA then explains closed chromatin by repression, and slow chromatin memory by self-activation. The first simulations confirm it (Section~\ref{sec:confounding}). The chromatin measurement removes this confusion: \emph{the cells whose region is closed carry no information on the transcriptional regulation of the gene, and must not be counted as repressed}. This observation, which requires neither new trajectories nor new kinetic parameters, is the first and most robust gain of the method. Trajectories that also follow the chromatin, and a chromatin network fitted along them, are the second step.
+
+\paragraph{What already exists in the code.} The CardamomOT package implements the negative binomial mixture, the mechanistic bridge cost, the network regression with refinement of basin labels, the recalibration of kinetic rates and generative simulations. For this project, the simulators have been extended (\texttt{CardamomOT/inference/simulations.py}): every simulator (protein ODE, protein PDMP, PDMP with explicit mRNA, adapted from Harissa) carries chromatin regions as Markov chains on discrete accessibility levels, with the model of Section~\ref{sec:model}, and \texttt{simulate\_network} reads them from \texttt{cardamomOT/chromatin\_simul.npz}. Two toy networks, FN4-chrom and TG-chrom, are simulated with explicit mRNA, and exported as \texttt{.h5mu} files with RNA counts, ATAC fragments, peak--gene links and the ground truth (Section~\ref{sec:data}). Standard CardamomOT has been run on their RNA (Section~\ref{sec:confounding}). Nothing of the inference of Sections~\ref{sec:mixture} and~\ref{sec:network} exists yet.
+
+\paragraph{Preprocessing and existing tools.} The model of Section~\ref{sec:model} starts from processed multiome data: peaks, their links to genes and, when available, the transcription factors that can bind them. These inputs are produced by the classical ATAC pipelines (Signac, ArchR, JASPAR motifs, chromVAR) and by the multiome GRN methods SCENIC+, Dictys and eventually CellOracle, whose preprocessing steps can be reused as such: region--gene links define the gates, and TF--region links (motif enrichment, TF footprinting) give a soft prior on the transcriptional network, a TF binding a region linked to a gene being a candidate regulator of that gene. Study of these tools is therefore directly part of the method, and Section~\ref{sec:preproc} lists what each step provides. These methods infer static networks, or networks along a pseudotime; they are mainly sources of inputs and priors here, not direct competitors, since, to our knowledge, no method yet infers a mechanistic network of transcription and chromatin from multiome time series. However, it would be worth it comparing their outpputs (without temporal information) to our results.
+
+\paragraph{Next steps.}
+\begin{enumerate}[nosep]
+\item Preprocessing of a first multiome dataset with the tools above (Section~\ref{sec:preproc}): peaks, region--gene and TF--region links in the \texttt{.h5mu} format of Section~\ref{sec:data}.
+\item Reader of \texttt{.h5mu} files and multiome mixture (Section~\ref{sec:mixture}), first with one binary region per gene.
+\item Gated network regression (Section~\ref{sec:gated}), first with the true accessibility, then with its posterior: on FN4-chrom and TG-chrom, it should remove the spurious self-activations.
+\item Chromatin term of the transport cost and chromatin network along trajectories (Sections~\ref{sec:bridge}--\ref{sec:chromnet}).
+\item Larger benchmarks and choice of a real multiome time series (Section~\ref{sec:validation}).
+\end{enumerate}
+
+\paragraph{Notation.} Table~\ref{tab:notation}. Cells are indexed by $n$, since $c$ denotes accessibility.
+
+\begin{table}[!t]
+\centering
+\small
+\begin{tabular}{p{4.3cm}p{10.5cm}}
+\toprule
+Symbol & Meaning \\
+\midrule
+$i, j$; $G$ & genes (index $0$, or $0..n_s-1$, for the stimuli); number of genes \\
+$n$, $N$; $t_1 < \dots < t_T$ & cell, number of cells; timepoints \\
+$M_i$, $P_i$ & mRNA and protein of gene $i$ ($P_i \in [0,1]$ after normalisation) \\
+$k_{0,i}$, $k_{1,i}$; $k_{\mathrm{off},i}/s_{0,i}$ & minimal and maximal burst frequencies; inverse mean burst size \\
+$d_{0,i}$, $d_{1,i}$ & mRNA and protein degradation rates \\
+$\theta$, $\beta$ & transcriptional network and basal activities, as in CardamomOT \\
+$r$, $R$; $\Rg(i)$ & regulatory region, number of regions; regions linked to gene $i$ \\
+$\Lv_r = \{\ell_{r,0} = 0 < \dots < \ell_{r,K_r} = 1\}$ & accessibility levels of region $r$ \\
+$A_r$, $c_r^{(a)}$, $c_r$ & number of copies (alleles) of region $r$, level of copy $a$, mean level $c_r = \frac{1}{A_r}\sum_a c_r^{(a)}$ \\
+$w_{ir}$, $\cbar_i = \sum_r w_{ir}c_r$ & weight of region $r$ for gene $i$ ($\sum_{r\in\Rg(i)} w_{ir} = 1$); gate of gene $i$ ($\cbar_i = 1$ if $\Rg(i) = \emptyset$) \\
+$\thc_{rj}$, $\bc_r$, $Z^{\mathrm{c}}_r$ & chromatin network (effect of $j$ on region $r$), basal accessibility, $Z^{\mathrm{c}}_r = \bc_r + \sum_j \thc_{rj}P_j$ \\
+$\bar k_r$, $\kappa_r$ & chromatin speed; constant closing rate (closing mode \emph{constant}) \\
+$\kop_r$, $\kcl_r$ & opening and closing rates of region $r$ \\
+$u_i \in \{0,1\}$ & regulatory basin of gene $i$ (sigmoid of~\eqref{eq:kon_chrom} saturated low or high) \\
+$z_i$ & RNA basin (burst-frequency mode) of gene $i$, as in CardamomOT \\
+$y_{nr}$; $q_n$, $\varepsilon_r$ & ATAC fragments of region $r$ in cell $n$; capture of cell $n$; background of region $r$ \\
+$\pi^{\mathrm{c}}_{n,r}(\ell)$ & posterior probability that region $r$ is at level $\ell$ in cell $n$ \\
+$T^r_{\ell\ell'}$ & transition probability of the chromatin of region $r$ over an interval, given the protein path \\
+$\alpha$ & switching fraction of a bridge, as in CardamomOT \\
+\bottomrule
+\end{tabular}
+\caption{Main notation.}
+\label{tab:notation}
+\end{table}
+
+\clearpage
+
+\begin{abstract}
+Chromatin accessibility gates transcription: a transcription factor can only activate a gene whose regulatory regions are open, and the opening and closing of these regions are themselves controlled by transcription factors, on time scales that can exceed the lifetime of proteins. Single-cell multiome assays now measure the transcriptome and the accessibility of the same cell along time courses, but gene regulatory network (GRN) inference methods use accessibility as a static prior on possible interactions rather than as a dynamical variable. We extend CardamomOT, a mechanistic optimal-transport framework that infers a GRN and hidden protein trajectories from scRNA-seq time series, to multiome data. The accessibility of each region is a Markov chain on discrete levels, whose opening and closing rates depend on the proteins through a chromatin network, and which multiplies the regulated part of the burst frequency of its genes. We show that RNA alone confounds closed chromatin with repression, and chromatin memory with self-activation, and that a gated regression, in which cells with closed chromatin carry no information on transcriptional regulation, removes this confusion. Trajectories are then reconstructed with a transport cost that includes the likelihood of chromatin transitions along the protein path, and the chromatin network and its kinetic rates are fitted along these trajectories, which yields a generative model of joint RNA and accessibility dynamics.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{Introduction}\label{sec:intro}
+%======================================================================
+
+Gene expression is controlled at two levels. Transcription factors (TFs) bind regulatory regions and change the frequency of transcriptional bursts, and the accessibility of these regions, set by nucleosome positioning and chromatin remodelling, determines whether TFs can bind at all. Changes of accessibility often precede changes of expression during differentiation, as shown by SHARE-seq and the notion of chromatin potential~\cite{ma2020shareseq}, and the closing of regions can maintain a silenced state after its cause has disappeared. Single-cell multiome assays, which measure RNA and chromatin accessibility (scATAC-seq) in the same cell, give access to both levels~\cite{ma2020shareseq}.
+
+GRN inference from such data mostly uses accessibility as a prior: a TF can regulate a gene if its motif lies in an accessible region linked to the gene, and the network is then fitted on expression, as in SCENIC+~\cite{bravo2023scenicplus}, CellOracle~\cite{kamimoto2023celloracle}, FigR~\cite{kartha2022figr} or Pando~\cite{fleck2023pando}; Dictys~\cite{wang2023dictys} uses TF footprints and follows the network along a pseudotime. In these methods, accessibility enters as a constraint on the possible interactions, the network is not a dynamical model calibrated on time, and the regulation of accessibility itself is not modelled. Their preprocessing (peaks, region--gene links, TF binding evidence), however, provides exactly the inputs that a mechanistic model needs (Section~\ref{sec:preproc}). MultiVelo~\cite{li2023multivelo} introduced a kinetic model in which the accessibility $c$ of a gene opens and closes, $dc/dt = k_c\,\alpha_c - \alpha_c\,c$ with $k_c$ switching between $0$ and $1$, and drives transcription, but it fits each gene separately, without network.
+
+CardamomOT~\cite{mauge2026cardamomot} calibrates a mechanistic model of bursty gene expression driven by a GRN on scRNA-seq time series, by alternating between the reconstruction of hidden protein trajectories with mechanistic optimal transport (OT) and the regression of the network, and returns a generative model. Here we add chromatin to this model: each regulatory region is a Markov chain on accessibility levels, whose rates depend on the proteins through a chromatin network, and which gates the regulated part of the burst frequency of its genes. The form of the opening and closing rates includes the MultiVelo model as a special case (closing mode \emph{mirror}, Section~\ref{sec:chromdyn}). To our knowledge, this is the first method that calibrates a mechanistic, generative model of transcription and chromatin, with a network for each, on multiome time series.
+
+Three questions structure the project. (i) What does RNA alone get wrong when chromatin regulates expression? (ii) Can accessibility be inferred per cell from sparse scATAC data, jointly with the burst-frequency modes, and how should it enter the network regression? (iii) Can the chromatin network and its kinetic rates be identified from time series, and with which likelihood? Section~\ref{sec:model} defines the model, Section~\ref{sec:confounding} shows the confusion of RNA-only inference on two toy networks, Sections~\ref{sec:mixture} and~\ref{sec:network} adapt the two inference steps of CardamomOT, and Section~\ref{sec:validation} gives the validation plan.
+
+%======================================================================
+\section{Background: CardamomOT}\label{sec:background}
+%======================================================================
+
+\paragraph{Model.} The promoter of each gene $i$ switches between an inactive and an active state; in the bursty regime, mRNA is produced in bursts of exponential size, of mean $s_{0,i}/k_{\mathrm{off},i}$, at frequency $\koni(P)$, and the proteins are translated from the mRNA~\cite{peccoud1995markovian, herbachinferring2017}:
+\begin{equation}\label{eq:pdmp}
+M_i \xrightarrow{\ \koni(P)\ } M_i + \mathcal{E}\Bigl(\frac{k_{\mathrm{off},i}}{s_{0,i}}\Bigr), \qquad
+\frac{dM_i}{dt} = -d_{0,i}M_i, \qquad \frac{dP_i}{dt} = s_{1,i}M_i - d_{1,i}P_i,
+\end{equation}
+with
+\begin{equation}\label{eq:kon}
+\koni(P) = k_{0,i} + (k_{1,i} - k_{0,i})\,\sigma\Bigl(\beta_i + \sum_j \theta_{ij}P_j\Bigr).
+\end{equation}
+When bursts and mRNA are fast compared with proteins, $M_i \mid P \sim \mathrm{NB}(\koni(P)/d_{0,i},\, k_{\mathrm{off},i}/s_{0,i})$, and, with $s_1$ chosen so that $P \in [0,1]$, the proteins follow $dP/dt = d_1 \odot (\kon(P)/k_1 - P)$. When $\koni$ takes a few values $\mathbf{k}_{z,i}$ (basins), the RNA of a population is a mixture of negative binomial distributions.
+
+\paragraph{Inference.} CardamomOT fits the negative binomial mixture gene by gene, which gives $k_0/d_0$, $k_1/d_0$ and $k_{\mathrm{off}}/s_0$ and the posterior probabilities of the basins of each cell, and then alternates between three steps. (1) Cells of consecutive timepoints are coupled by entropic OT with a mechanistic bridge cost: the proteins of a source cell are propagated by the deterministic limit, with the forcing of the source basins up to a switching fraction $\alpha$ and of the target basins afterwards, and the cost is the cross-entropy between the burst frequencies predicted by the network at the end of the interval and the basins of the target. (2) The network is fitted by regression of the basins on the reconstructed proteins through~\eqref{eq:kon}, with a sparsity penalty and an optional prior network. (3) The basin labels are refined by a constrained assignment that balances the mixture likelihood and the consistency with the network. After convergence, the kinetic rates $d_1$ and $d_0$, anchored on the literature, are recalibrated along the trajectories, so that the calibrated model is generative.
+
+\paragraph{Why it works.} The mixture identifies the burst parameters up to the time scale $d_0$, the degradation rates of the literature fix this time scale, and the network is identified from the protein trajectories. The extension must keep this structure: what can be identified before the loop (here, the accessibility of each cell), what is identified by the loop (the networks and the trajectories), and what is recalibrated afterwards (the kinetic rates of the chromatin).
+
+%======================================================================
+\section{A model of chromatin-gated bursting}\label{sec:model}
+%======================================================================
+
+\subsection{Regions, accessibility levels and gates}
+
+The genome contains $R$ regulatory regions (peaks). Region $r$ has $A_r$ copies (alleles), and each copy $a$ has an accessibility $c_r^{(a)}$ in a finite set of levels $\Lv_r = \{\ell_{r,0} = 0 < \ell_{r,1} < \dots < \ell_{r,K_r} = 1\}$; the accessibility of the region is the mean over copies, $c_r = \frac{1}{A_r}\sum_a c_r^{(a)}$. The default is binary ($\Lv_r = \{0, 1\}$, closed or open) with copies that move together; intermediate levels describe partial nucleosome occupancy, or a region made of several sub-peaks, and independent copies describe allele-specific accessibility.
+
+Gene $i$ is linked to a set of regions $\Rg(i)$, which may be empty and may overlap between genes, with weights $w_{ir} \geq 0$, $\sum_{r\in\Rg(i)} w_{ir} = 1$. Its \emph{gate} is
+\begin{equation}\label{eq:gate}
+\cbar_i = \sum_{r\in\Rg(i)} w_{ir}\,c_r \in [0,1], \qquad \cbar_i = 1 \text{ if } \Rg(i) = \emptyset .
+\end{equation}
+The stimuli have no region. The linear gate~\eqref{eq:gate} assumes that the regions of a gene contribute additively to its regulated activity (enhancers acting independently); a multiplicative gate $\prod_r c_r^{w_{ir}}$ (all regions required) or a maximum (one region sufficient) are possible alternatives, and the choice could be tested on data (Section~\ref{sec:open}).
+
+\subsection{Burst frequency}
+
+Accessibility multiplies the regulated part of the burst frequency:
+\begin{equation}\label{eq:kon_chrom}
+\koni(P, c) = k_{0,i} + (k_{1,i} - k_{0,i})\,\cbar_i\,\sigma\Bigl(\beta_i + \sum_j \theta_{ij}P_j\Bigr).
+\end{equation}
+For $\cbar_i = 1$, \eqref{eq:kon_chrom} is the burst frequency~\eqref{eq:kon} of CardamomOT; for $\cbar_i = 0$, the gene bursts at its minimal frequency $k_{0,i}$ whatever its regulators. Accessibility is thus necessary for activation, and TF binding sufficient. The basal frequency $k_{0,i}$ is not gated: it describes transcription that does not depend on the regulators of the network. A finer model would gate each regulator by the accessibility of its own binding sites, $\sigma(\beta_i + \sum_j \theta_{ij}\,\cbar_{ij}P_j)$, which requires motif information (Section~\ref{sec:open}).
+
+\subsection{Chromatin dynamics}\label{sec:chromdyn}
+
+The chromatin network is defined as the transcriptional one: its rows are the regions, its columns the regulators (stimuli included), and
+\begin{equation}\label{eq:zc}
+Z^{\mathrm{c}}_r(P) = \bc_r + \sum_j \thc_{rj}P_j .
+\end{equation}
+A positive $\thc_{rj}$ describes a pioneer or opening factor, a negative one a factor that recruits closing complexes. Region $r$ opens at rate $\kop_r(P) = \bar k_r\,\sigma(Z^{\mathrm{c}}_r(P))$ and closes at rate
+\begin{equation}\label{eq:closing}
+\kcl_r(P) = \bar k_r\,\bigl(1 - \sigma(Z^{\mathrm{c}}_r(P))\bigr) \quad\text{(mirror)}, \qquad\text{or}\qquad \kcl_r = \kappa_r \quad\text{(constant)}.
+\end{equation}
+In the mirror mode, $\kop_r + \kcl_r = \bar k_r$ does not depend on the proteins: $1/\bar k_r$ is the response time of the region, and $\sigma(Z^{\mathrm{c}}_r)$ its accessibility at equilibrium; this is the form of MultiVelo~\cite{li2023multivelo}, with a continuous instead of a binary switch. In the constant mode, regulation only acts on opening, and a closed region reopens slowly when $\bar k_r$ is small, which gives memory.
+
+Each copy of a region is a birth--death chain on its levels: from level $\ell_k$, it jumps up to $\ell_{k+1}$ at rate
+\begin{equation}\label{eq:jumps}
+a_k = \kop_r\,\frac{1 - \ell_k}{\ell_{k+1} - \ell_k}, \qquad\text{and down to } \ell_{k-1} \text{ at rate}\qquad b_k = \kcl_r\,\frac{\ell_k}{\ell_k - \ell_{k-1}} .
+\end{equation}
+In the binary case, these rates are simply $\kop_r$ and $\kcl_r$. The normalisation makes the mean accessibility independent of the number of levels.
+
+\begin{prop}\label{prop:mean}
+Given a protein path $s \mapsto P(s)$, the mean accessibility $p_r(t) = \E[c_r(t)]$ of a region with levels from $0$ to $1$ and jumps~\eqref{eq:jumps} satisfies
+\begin{equation}\label{eq:mean}
+\frac{dp_r}{dt} = \kop_r(P(t))\,(1 - p_r) - \kcl_r(P(t))\,p_r ,
+\end{equation}
+whatever the levels and the number of copies. In the binary case, $p_r$ is the probability of being open and~\eqref{eq:mean} gives the transition probabilities of the chain exactly: $T^r_{01}$ and $T^r_{11}$ over $[t, t']$ are the solutions of~\eqref{eq:mean} at $t'$ from $p_r(t) = 0$ and $p_r(t) = 1$.
+\end{prop}
+
+The drift of the chain at level $\ell_k$ is $a_k(\ell_{k+1} - \ell_k) - b_k(\ell_k - \ell_{k-1}) = \kop_r(1-\ell_k) - \kcl_r\ell_k$, which is affine in $\ell_k$; the endpoints $0$ and $1$ ensure that no jump leaves the levels. For several levels, the transition matrix solves the matrix equation $\partial_{t'}T^r = T^r Q_r(P(t'))$, with $Q_r$ the generator~\eqref{eq:jumps} (Appendix~\ref{app:proofs}).
+
+\begin{prop}\label{prop:filter}
+In the mirror mode, the solution of~\eqref{eq:mean} is
+\begin{equation}\label{eq:filter}
+p_r(t) = p_r(t_0)\,e^{-\bar k_r(t - t_0)} + \bar k_r\int_{t_0}^{t} e^{-\bar k_r(t - s)}\,\sigma\bigl(Z^{\mathrm{c}}_r(P(s))\bigr)\,ds :
+\end{equation}
+the accessibility is a low-pass filter, of time constant $1/\bar k_r$, of the regulatory input $\sigma(Z^{\mathrm{c}}_r(P))$.
+\end{prop}
+
+Proposition~\ref{prop:filter} separates the two parameters of a region: the chromatin network $(\bc_r, \thc_r)$ sets which proteins open or close the region, and $\bar k_r$ the lag between them and the accessibility. A region with $\bar k_r \gg d_{1}$ follows its input, $p_r \approx \sigma(Z^{\mathrm{c}}_r(P))$; a region with $\bar k_r \lesssim d_1$ remembers inputs that the proteins have already forgotten. In the constant mode, the time constant $1/(\bar k_r\sigma(Z^{\mathrm{c}}_r) + \kappa_r)$ depends on the proteins, and the equilibrium $\bar k_r\sigma/(\bar k_r\sigma + \kappa_r)$ is no longer a sigmoid of $Z^{\mathrm{c}}_r$.
+
+\subsection{The multiome PDMP and its regimes}
+
+The state of a cell is $(M, P, c)$: the mRNA and proteins follow~\eqref{eq:pdmp} with the burst frequency~\eqref{eq:kon_chrom}, and the accessibility jumps with the rates~\eqref{eq:jumps}. The whole system is a PDMP, simulated exactly by thinning: a single bound on the total rate of bursts and chromatin jumps gives the candidate times, and each candidate is accepted as a burst of gene $i$, a jump up or down of a copy of region $r$, or rejected, with probabilities proportional to the current rates. This is the simulator of the package (Appendix~\ref{app:simulator}).
+
+Three time scales matter: mRNA ($1/d_0$), proteins ($1/d_1$) and chromatin ($1/\bar k_r$, $1/\kappa_r$). If the chromatin is much faster than the proteins, it can be averaged out, and the burst frequency becomes $k_0 + (k_1 - k_0)\,\E[\cbar_i \mid P]\,\sigma(\cdot)$, a deterministic function of $P$: chromatin then only reshapes the regulation function, and RNA alone can in principle identify the product. If the chromatin is as slow as or slower than the proteins, $c$ is a slow discrete variable, like the basins of CardamomOT, and the state space of a cell is the product of basins and accessibility states. This is the regime of interest: the chromatin carries information that the proteins do not.
+
+\subsection{Observation model}\label{sec:obs}
+
+\paragraph{RNA.} In the limit model, $M_i \mid (P, c) \sim \mathrm{NB}\bigl(\koni(P,c)/d_{0,i},\, k_{\mathrm{off},i}/s_{0,i}\bigr)$; with explicit mRNA, the counts are Poisson draws of the continuous mRNA level, whose marginal at fixed burst frequency is the same negative binomial. In the extreme regime where $\sigma \in \{0, 1\}$ and $c \in \{0, 1\}$, $\koni \in \{k_{0,i}, k_{1,i}\}$: \emph{binary chromatin creates no new RNA mode}, it creates a second cause of the low mode. Fractional gates (several regions, or intermediate levels) create intermediate modes $k_{0,i} + (k_{1,i} - k_{0,i})\cbar_i$.
+
+\paragraph{ATAC.} Each copy of a region yields a fragment with a probability that depends on its accessibility and on the capture of the cell:
+\begin{equation}\label{eq:atac}
+y_{nr} = \sum_{a=1}^{A_r} B_{nra}, \qquad B_{nra} \sim \mathrm{Bernoulli}\bigl(c_r^{(a)}\,q_n + (1 - c_r^{(a)})\,\varepsilon_r\bigr),
+\end{equation}
+with $q_n \in (0,1)$ the capture of cell $n$ (sequencing depth, transposition efficiency) and $\varepsilon_r \geq 0$ the background of region $r$ (fragments of closed chromatin, or of neighbouring open regions). For a region made of several peaks merged, a Poisson model $y_{nr} \sim \mathcal{P}(s_n(\lambda_r c_r + \varepsilon_r))$ with a depth factor $s_n$ is a natural alternative. scATAC data are very sparse: with $q_n \approx 0.3$ and two copies, an open region gives no fragment in about half of the cells, so that the accessibility of a single region in a single cell is poorly determined by its own fragments (Section~\ref{sec:mixture}).
+
+\subsection{What RNA alone gets wrong}\label{sec:confounding}
+
+\begin{prop}\label{prop:confounding}
+In the extreme binary regime, the RNA of gene $i$ is in its high mode if and only if $\cbar_i = 1$ and $u_i = 1$, where $u_i$ is the saturated value of the sigmoid in~\eqref{eq:kon_chrom}. A cell in the low mode has $u_i = 0$, or $\cbar_i = 0$, or both, and its RNA does not distinguish these cases.
+\end{prop}
+
+CardamomOT regresses the basins on the proteins through~\eqref{eq:kon}, i.e.\ it treats every cell in the low mode as $u_i = 0$. When the closing of a region is driven by a protein $P_j$, the low mode of gene $i$ covaries with $P_j$, and the regression explains it by $\theta_{ij} < 0$: \emph{closed chromatin is read as repression}. When the region closes slowly, the gene stays low, or high, for longer than its regulators justify, and the regression explains this persistence by a positive self-loop: \emph{chromatin memory is read as self-activation}. And when a direct activator of gene $i$ is active while the region is closed, the cells where the activator is high but the gene is low make the activation look weaker than it is.
+
+We simulated two toy networks with the multiome PDMP with explicit mRNA (gene $0$ is the stimulus, one binary region per gene, $1000$ cells at the ten timepoints of FN4, $d_0 = 0.2\,\mathrm{h}^{-1}$, $d_1 = 0.04\,\mathrm{h}^{-1}$). In FN4-chrom, the stimulus activates genes~1 and~2 directly, $1 \to 3 \to 4$ and $3 \to 3$ are direct, gene~1 slowly opens the region of gene~2 ($\bar k_2 = 1/25\,\mathrm{h}^{-1}$, constant closing $\kappa_2 = 1/20\,\mathrm{h}^{-1}$) and gene~4 closes the region of gene~1 ($\bar k_1 = 0.5\,\mathrm{h}^{-1}$, mirror); the regions of genes~3 and~4 stay open. In TG-chrom, the stimulus activates both genes, and each gene closes the region of the other ($\bar k = 0.2\,\mathrm{h}^{-1}$, mirror), which makes a toggle switch through chromatin only. Standard CardamomOT on the RNA of one run gives Table~\ref{tab:standard}.
+
+\begin{table}[!ht]
+\centering
+\small
+\begin{tabular}{llcc}
+\toprule
+Network & Edge & Truth & Inferred $\theta$ (RNA only) \\
+\midrule
+FN4-chrom & stim\,$\to$\,1, $1\to 3$, $3\to 4$ & $+$ direct & $+5.3$, $+5.9$, $+12.2$ \\
+ & stim\,$\to$\,2 & $+$ direct & $0$ (missed) \\
+ & $1\to 2$ & $+$ chromatin & $+2.1$ (as direct) \\
+ & $4\to 1$ & $-$ chromatin & $-8.2$ (as direct) \\
+ & $2\to 2$ & none & $+5.4$ (spurious) \\
+\midrule
+TG-chrom & stim\,$\to$\,1, stim\,$\to$\,2 & $+$ direct & $+2.3$, $+2.5$ \\
+ & $1\to 2$, $2\to 1$ & $-$ chromatin & $-2.4$, $-1.4$ (as direct) \\
+ & $1\to 1$, $2\to 2$ & none & $+3.4$, $+3.6$ (spurious) \\
+\bottomrule
+\end{tabular}
+\caption{Standard CardamomOT on the RNA of FN4-chrom and TG-chrom (run~1). The union topology is well recovered (AUPR $0.91$ for FN4-chrom, without self-loops), but every chromatin edge is read as a direct one, and the chromatin memory as self-activation. In an earlier version of FN4-chrom with a slower mirror region for gene~2, the closing of the region of gene~1 by gene~4 was even attributed to gene~3 ($\theta_{13} = -6.1$), and $1 \to 2$ was not found.}
+\label{tab:standard}
+\end{table}
+
+The missed stim\,$\to$\,2 is not an error of the method: the stimulus is constant after $t_1$, so that its effect is confounded with the basal activity of gene~2, from RNA alone and also among the cells whose region is open, which are all stimulated. A variant of FN4 in which the direct activator of gene~2 varies, so that RNA alone yields a wrong topology and not only a wrong mechanism, is still to be designed. The other errors of Table~\ref{tab:standard} are those that the chromatin measurement should correct.
+
+%======================================================================
+\section{Upstream preprocessing}\label{sec:preproc}
+%======================================================================
+
+As for CardamomOT, which takes count matrices and does not preprocess them, the multiome method takes processed data and reuses the established pipelines; the choices below are made once per dataset, before the mixture, and are stored in the \texttt{.h5mu} file (Section~\ref{sec:data}).
+
+\paragraph{Cells and quality control.} Joint quality control of the two modalities (fragments in peaks, TSS enrichment, nucleosome signal, RNA counts, doublets) and the fragment count matrix, with Signac~\cite{stuart2021signac} or ArchR~\cite{granja2021archr}. The two steps below are not standard for time series, and are the part of the preprocessing to develop specifically for the method; they are Claire's main area.
+
+\paragraph{Peak calling along time.} Peaks are usually called on pseudo-bulks of annotated cell types. For a time series, this biases the regions towards the annotated states: the cell types are themselves inferred, the transitional cells lie between them, and a region that opens transiently along a transition can be missed in every pseudo-bulk. Peaks should rather be called on pseudo-bulks that follow the dynamics, with a sliding window of cells along time: consecutive timepoints, and, within a timepoint, neighbourhoods of cells in a joint embedding of the two modalities rather than annotation labels. The union of the peaks of all windows, merged, gives the candidate regions, of which only those linked to the selected genes are kept. The width of the windows trades the sensitivity to transient regions against the depth of each pseudo-bulk.
+\tofill{choice of the windows (over timepoints, over a kNN graph within each timepoint), peak caller and merging rule}
+
+\paragraph{Capture of each cell.} The capture $q_n$ of~\eqref{eq:atac} must be estimated without making the timepoints uniform. A global normalisation (fragments in peaks of the cell over the median of all cells) absorbs the true changes of accessibility between timepoints into the capture, and erases part of the dynamics that the model must explain. CardamomOT faces the same problem for the RNA depth factor $s_n$ (\texttt{estimate\_cell\_depth}, method \texttt{poissonian}, reference \texttt{sample\_pairwise}): within each group (sample, timepoint), a size factor relative to the group is computed on the ``Poisson'' genes, those whose normalised variance matches the extrinsic noise of the group, and each group then receives a scale fitted from the pairwise log ratios of the means between groups, on the genes that are Poisson in both, which corrects the depth differences between libraries without aligning the mean expression of the timepoints. The capture of the ATAC can follow the same scheme: regions of constant accessibility play the role of the Poisson genes (constitutive promoters, insulator sites, regions whose accessibility is stable within the group), the factor of each cell is relative to its group, and the scale between groups is fitted on the regions that are stable in both; the depth factor $s_n$ is then mapped to the capture by $q_n = 1 - e^{-\kappa s_n}$, as in the simulations. The fragment counts being nearly binary per region, the selection of the reference regions and the estimation of the extrinsic noise must be adapted. In multiome data, the RNA and ATAC factors of a nucleus are correlated but not equal, and their joint estimation is a possible refinement. The fraction of fragments outside peaks gives a prior on the background $\varepsilon_r$.
+
+\paragraph{Regions and region--gene links.} The regions $\Rg(i)$ of each gene and their weights $w_{ir}$ come from peak--gene links: distance to the promoter, correlation between accessibility and expression (Signac, ArchR), co-accessibility (Cicero~\cite{pliner2018cicero}), or the region-to-gene links of SCENIC+~\cite{bravo2023scenicplus}. Only the regions linked to the selected genes are kept. Peaks can be merged into regions (several peaks of an enhancer, topics of co-accessible regions as in SCENIC+), which reduces the sparsity of single regions (Section~\ref{sec:open}); the Poisson version of~\eqref{eq:atac} then applies.
+
+\paragraph{TF--region links.} The binding evidence of each regulator in each region comes from motif scanning (JASPAR motifs, with Signac or chromVAR~\cite{schep2017chromvar}), motif enrichment in sets of co-accessible regions (the cistromes of SCENIC+), base networks from motifs in linked peaks (CellOracle~\cite{kamimoto2023celloracle}) or TF footprints (Dictys~\cite{wang2023dictys}). Most TFs bind regions that are already open: a binding site of regulator $j$ in a region $r \in \Rg(i)$ is evidence for the \emph{transcriptional} edge $j \to i$, conditioned on the accessibility of $r$, which is the logic of the TF--region--gene triplets of SCENIC+ and the structure of the gate~\eqref{eq:kon_chrom}. It also indicates which regions gate which edge, the information needed by a regulator-specific gate $\sigma(\beta_i + \sum_j \theta_{ij}\cbar_{ij}P_j)$, with $\cbar_{ij}$ the accessibility of the regions of $i$ that contain a site of $j$ (Section~\ref{sec:open}). The binding evidence says little about the chromatin network: only pioneer factors open chromatin by binding it, closing goes through remodellers and repressive complexes that are often recruited indirectly, and signals outside the network also change accessibility; at most, known pioneer factors with a site in a region get a soft prior on $\thc_{rj}$.
+
+In both cases the evidence is a \emph{soft} prior, never a mask, as the prior network of CardamomOT (soft weights $|\theta^0_{ij}| \leq 1$ that lower the penalty of supported edges, forced signs for $|\theta^0_{ij}| > 1$): CardamomOT infers an effective network, which includes indirect regulations through intermediates that are not selected or not measured, and these edges have no binding site by definition. Restricting the networks to the edges with binding evidence would remove them.
+
+\paragraph{What is not reused.} Gene activity scores and TF activity scores (chromVAR deviations) summarise accessibility per gene or per motif, and lose the per-region states that the model needs; they can serve for the gene selection (genes with dynamic accessibility, Section~\ref{sec:open}) and for visual checks, not as inputs of the inference.
+
+%======================================================================
+\section{The multiome mixture (\texttt{infer\_mixture})}\label{sec:mixture}
+%======================================================================
+
+The mixture step of CardamomOT identifies, before any trajectory, the burst parameters and the basins of each cell. Its multiome version must in addition identify the accessibility of each region in each cell, as a posterior distribution, since scATAC data are too sparse to give it with certainty.
+
+\subsection{Joint latent states of a gene}
+
+Consider first a gene $i$ with binary regions. Its latent state in a cell is $(u_i, c_{\Rg(i)})$: the regulatory basin and the accessibility of its regions. The RNA mode follows from it, $\mathbf{k}_i(u, c) = k_{0,i} + (k_{1,i} - k_{0,i})\,u\,\cbar_i(c)$, and the observations are independent given the latent state:
+\begin{equation}\label{eq:joint}
+p(x_{ni}, y_{n\Rg(i)} \mid u, c) = \mathrm{NB}\Bigl(x_{ni};\, \frac{\mathbf{k}_i(u,c)}{d_{0,i}}\,s_n,\, \frac{k_{\mathrm{off},i}}{s_{0,i}}\Bigr) \prod_{r\in\Rg(i)} p(y_{nr} \mid c_r, q_n, \varepsilon_r),
+\end{equation}
+with the depth factor $s_n$ of CardamomOT and the ATAC likelihood~\eqref{eq:atac}. The prior on $(u, c)$ depends on the timepoint (and, as in CardamomOT, on the cell type for the initialisation), $\pi_t(u, c)$. The joint mixture~\eqref{eq:joint} is fitted by EM, gene by gene, with $k_{0,i}/d_{0,i}$, $k_{1,i}/d_{0,i}$ and $k_{\mathrm{off},i}/s_{0,i}$ shared across time, $\varepsilon_r$ shared across cells, and $\pi_t$ per timepoint. Its outputs are the burst parameters, unchanged in nature, the ATAC parameters, and for each cell the posterior $\pi^{\mathrm{c}}_{n,r}$ of the accessibility of each region and the posterior of the RNA mode.
+
+Two features make the joint fit better than separate fits of RNA and ATAC. First, RNA informs chromatin: a cell in the high mode has an open gate, whatever its fragments, which is the only reliable information on accessibility in the many cells without fragment. Second, chromatin informs RNA: a cell with a closed region cannot be in the high mode, which sharpens the posterior of the modes. With one region per gene, the four states $(u, c)$ give only two RNA modes: $(1,1)$ in the high mode, $(0,0)$, $(1,0)$ and $(0,1)$ in the low mode.
+
+\begin{rem}\label{rem:ident}
+The states $(0,0)$ and $(1,0)$ have the same likelihood: the regulatory basin of a cell with closed chromatin is not identifiable from its own data. This is not a problem, because it is not needed: Section~\ref{sec:gated} shows that such cells must carry no weight in the transcriptional regression. Only the posterior of the accessibility, and the posterior of $u$ given an open gate, are used downstream.
+\end{rem}
+
+\subsection{Regions shared between genes, several levels and copies}
+
+A region linked to several genes couples their mixtures; in a first version, its posterior is computed from its fragments and from the RNA of the genes it gates, by iterating gene-wise updates (a mean-field approximation). Several levels and independent copies only change the ATAC likelihood: for levels $\ell$ of the copies, $p(y \mid c^{(1)}, \dots, c^{(A)})$ is the convolution of the Bernoulli laws~\eqref{eq:atac}, and the gate depends on the mean level. With fractional gates, intermediate RNA modes appear at the levels $k_0 + (k_1 - k_0)\cbar$, which the mixture of CardamomOT already handles as intermediate modes.
+
+\subsection{Capture, background and initialisation}
+
+The capture $q_n$ is a cell-level nuisance parameter, as the RNA depth factor $s_n$; it is estimated from the total number of fragments in peaks of the cell, $\E[\sum_r y_{nr}] = \sum_r A_r\bigl(\E[c_r]\,q_n + (1 - \E[c_r])\varepsilon_r\bigr)$, iterated with the posteriors. Its initial value is the time-preserving estimate of Section~\ref{sec:preproc}, which the mixture refines within each (sample, timepoint) group only. The background $\varepsilon_r$ is identified from the cells in which the region is closed with high confidence, i.e.\ in which the RNA of the gene is low and the mean accessibility of the timepoint is low; a prior from the fraction of fragments outside peaks stabilises it. The prior $\pi_t(c_r)$ is initialised by the pseudo-bulk accessibility of the timepoint, and $\pi_t(u)$ as in CardamomOT, from the modes per timepoint.
+
+\subsection{Region--gene weights}
+
+The weights $w_{ir}$ are given by the peak--gene links, uniform over the regions of a gene by default. They can also be estimated in the mixture, as the weights that best explain the RNA modes by the gates on the simplex, with a sparsity penalty; this is the multiome counterpart of choosing the regulatory regions of a gene from the data, and is left for a second version.
+
+%======================================================================
+\section{Network inference (\texttt{infer\_network\_structure})}\label{sec:network}
+%======================================================================
+
+The loop of CardamomOT is kept, with three changes: the transcriptional regression is gated by the accessibility (Section~\ref{sec:gated}), the transport cost includes the accessibility (Section~\ref{sec:bridge}), and the chromatin network is fitted along the trajectories (Section~\ref{sec:chromnet}).
+
+\subsection{Gated transcriptional regression}\label{sec:gated}
+
+In the extreme regime, the probability that gene $i$ is in its high mode is $\cbar_i\,\sigma_i^\theta(P)$, with $\sigma_i^\theta(P) = \sigma(\beta_i + \sum_j\theta_{ij}P_j)$. With $h_{ni}$ the posterior probability of the high mode of gene $i$ in cell $n$ and $\cbar_{ni}$ its gate, the regression of CardamomOT becomes
+\begin{equation}\label{eq:gated}
+\theta^\ast = \argmin_{\theta, \beta}\ \sum_{n,i} -\Bigl[h_{ni}\log\bigl(\cbar_{ni}\,\sigma_i^\theta(P_n)\bigr) + (1 - h_{ni})\log\bigl(1 - \cbar_{ni}\,\sigma_i^\theta(P_n)\bigr)\Bigr] + \lambda\|\theta - \theta^0\|_1 ,
+\end{equation}
+with the gate replaced by its posterior expectation, or the loss averaged over the posterior of the accessibility. For intermediate modes, $h_{ni}$ is replaced by the position of the mode between $k_{0,i}$ and $k_{1,i}$, as in CardamomOT.
+
+\begin{prop}\label{prop:gated}
+In~\eqref{eq:gated}, a cell with $\cbar_{ni} = 0$ (and therefore $h_{ni} = 0$) has a loss independent of $\theta$. The gradient of~\eqref{eq:gated} is that of an EM algorithm on the complete data $(u, c)$ in which the prior of $u_i$ is $\sigma_i^\theta(P)$: for a cell with closed chromatin, the posterior of $u_i$ is its prior, and its cross-entropy has zero gradient at the current $\theta$.
+\end{prop}
+
+The proof is a direct computation (Appendix~\ref{app:proofs}). Proposition~\ref{prop:gated} is the core of the method: the standard regression gives these cells the target $u_i = 0$, which creates the spurious repressions and self-activations of Table~\ref{tab:standard}; the gated regression removes them from the regression of gene $i$, and from it only. It requires no change in the trajectories, and can be tested first with the true accessibility of the simulations, then with its posterior. It also restores the weight of direct activations by regulators that vary while the region is closed; an activation by a stimulus that is constant after $t_1$ remains confounded with the basal activity among the open cells, as stim\,$\to$\,2 in FN4-chrom.
+
+The same gate enters the protein dynamics: in the deterministic limit, $dP_i/dt = d_{1,i}(\koni(P, c)/k_{1,i} - P_i)$ with the gated burst frequency~\eqref{eq:kon_chrom}, so that the protein of a gene with closed chromatin relaxes towards $k_{0,i}/k_{1,i}$. The protein reconstruction of CardamomOT, which uses the basins of the cells as forcing, is unchanged by construction, since the RNA basins already include the effect of the gate.
+
+\subsection{Mechanistic bridge with chromatin}\label{sec:bridge}
+
+The transport cost of CardamomOT between a source cell $n$ at $t_j$ and a target cell $n'$ at $t_{j+1}$ is the cross-entropy between the burst frequencies predicted at the end of the bridge and the basins of the target. Two terms change.
+
+\paragraph{Gated RNA term.} The predicted burst frequencies are gated by the accessibility of the target, so that the RNA term becomes the gated cross-entropy~\eqref{eq:gated} of the target, evaluated on the bridge proteins $P_{n,n'}(t_{j+1})$.
+
+\paragraph{Chromatin term.} The accessibility of the target must be reachable from that of the source given the protein path of the bridge. For each region, the transition probabilities $T^r_{\ell\ell'}(P_{n,n'})$ over $[t_j, t_{j+1}]$ follow from Proposition~\ref{prop:mean}, in closed form in the binary case, and the chromatin cost is the negative log-likelihood of the fragments of the target given the source,
+\begin{equation}\label{eq:chromcost}
+C^{\mathrm{c}}_{n,n'} = -\sum_{r} \log \sum_{\ell,\ell'} \pi^{\mathrm{c}}_{n,r}(\ell)\,T^r_{\ell\ell'}(P_{n,n'})\,p\bigl(y_{n',r} \mid \ell'\bigr) ,
+\end{equation}
+with $\ell$, $\ell'$ the levels of region $r$ at $t_j$ and $t_{j+1}$, the posterior of the source $n$ and the likelihood~\eqref{eq:atac} of the fragments of the target $n'$, as in~\eqref{eq:chromfit}. The target enters through its fragments only: its posterior also contains its RNA, which the RNA term of the cost already scores. The total cost is $C_{n,n'} = C^{\mathrm{RNA}}_{n,n'} + \omega_{\mathrm c}\,C^{\mathrm{c}}_{n,n'}$, with a weight $\omega_{\mathrm c}$ that balances the two modalities. Before the chromatin network is known, $\thc = 0$, $\bc_r$ is set by the mean accessibility and $\bar k_r$ by a prior: the chromatin term then only favours the persistence of accessibility over short intervals, which is already informative when chromatin is slow. Along the bridge, the gate of each gene switches with its basin, at the switching fraction $\alpha$; a smoother choice is the conditional mean accessibility given both ends.
+
+\paragraph{Transition probabilities along the path.} The bridge gives the proteins at nodes $t_j = s_0 < s_1 < \dots < s_Q = t_{j+1}$, $s_q = t_j + qh$, $h = \Delta t/Q$ (the source state, interior nodes and the end state, as for the exact flow matching). Write $\kop_{r,q} = \kop_r(P(s_q))$, $\kcl_{r,q} = \kcl_r(P(s_q))$ and $\lambda_{r,q} = \kop_{r,q} + \kcl_{r,q}$. In the binary case, Proposition~\ref{prop:mean} gives the open probability $p_r$ at $t_{j+1}$ from its value at $t_j$, affine in it:
+\begin{equation}\label{eq:affine}
+p_r(t_{j+1}) = D_r\,p_r(t_j) + A_r, \qquad
+D_r = e^{-\int_{t_j}^{t_{j+1}} \lambda_r(s)\,ds}, \qquad
+A_r = \int_{t_j}^{t_{j+1}} \kop_r(s)\,e^{-\int_s^{t_{j+1}} \lambda_r(u)\,du}\,ds ,
+\end{equation}
+so that the transition probabilities are
+\begin{equation}\label{eq:T_binary}
+T^r_{01} = A_r, \qquad T^r_{11} = D_r + A_r, \qquad T^r_{00} = 1 - A_r, \qquad T^r_{10} = 1 - D_r - A_r .
+\end{equation}
+In the mirror mode, $\lambda_r = \bar k_r$ does not depend on the proteins, $D_r = e^{-\bar k_r\Delta t}$ and $A_r = \bar k_r\int_{t_j}^{t_{j+1}} e^{-\bar k_r(t_{j+1}-s)}\sigma(Z^{\mathrm{c}}_r(P(s)))\,ds$; with $\sigma(Z^{\mathrm{c}}_r)$ linear in time between the nodes, $A_r = \sum_{q=0}^{Q}\omega_q(\bar k_r)\,\sigma(Z^{\mathrm{c}}_r(P(s_q)))$, where the weights $\omega_q$ are the integrals of the kernel $\bar k_r e^{-\bar k_r(t_{j+1}-s)}$ against the hat functions of the nodes (the weights of the mRNA memory with $\bar k_r$ in place of $d_0$, without the term of the past before $t_j$). In the constant mode, $\lambda_r$ varies with the proteins; with the rates frozen on each sub-interval at the mean of its two nodes, $\bar\lambda_{r,q} = \frac12(\lambda_{r,q-1} + \lambda_{r,q})$ and $\bar k^{\mathrm{open}}_{r,q} = \frac12(\kop_{r,q-1} + \kop_{r,q})$, each sub-interval is solved exactly, $p_r(s_q) = e^{-\bar\lambda_{r,q}h}\,p_r(s_{q-1}) + \frac{\bar k^{\mathrm{open}}_{r,q}}{\bar\lambda_{r,q}}\bigl(1 - e^{-\bar\lambda_{r,q}h}\bigr)$, and composing the $Q$ affine maps gives
+\begin{equation}\label{eq:affine_nodes}
+D_r = \prod_{q=1}^{Q} e^{-\bar\lambda_{r,q}h}, \qquad
+A_r = \sum_{q=1}^{Q} \frac{\bar k^{\mathrm{open}}_{r,q}}{\bar\lambda_{r,q}}\bigl(1 - e^{-\bar\lambda_{r,q}h}\bigr)\prod_{q'=q+1}^{Q} e^{-\bar\lambda_{r,q'}h} .
+\end{equation}
+This scheme also applies to the mirror mode, and is exact when the rates are constant. With several levels, the same freezing gives $T^r = \prod_{q=1}^{Q}\exp\bigl(h\,\bar Q_{r,q}\bigr)$, with $\bar Q_{r,q}$ the generator~\eqref{eq:jumps} of one copy at the mean rates of the sub-interval, a product of small matrix exponentials; independent copies have independent transitions. All these expressions are differentiable in $(\bc_r, \thc_r, \bar k_r, \kappa_r)$, and they are the transitions used both in the cost~\eqref{eq:chromcost} and in the chromatin fit~\eqref{eq:chromfit}.
+
+\paragraph{First iterations.} As in CardamomOT, the first couplings, computed before the network can time the switches, include a direct term on the observations, whose weight decreases quickly along the iterations so that the mechanistic structure takes over. In CardamomOT, this term is the squared distance between the mRNA of the source and of the target in burst-frequency units (counts times $s_1$, i.e.\ $k_z/k_1$ at the mean of mode $z$; log1p counts are an equivalent choice), brought to the median of the network term, with a weight $(1/k)^{1 - 1/k}$ at iteration $k$, set to zero after a few iterations. In the multiome version, the $L^1$ distance between the expected accessibilities of the source and of the target, $\sum_r |\E[c_{n,r}] - \E[c_{n',r}]|$ under their posteriors, is added to it, brought to the same median, so that RNA and chromatin have the same weight, with the same decreasing weight. At the first iteration, this term dominates the cost, and the couplings are close to those of a classical OT on the two modalities; then the mechanistic terms~\eqref{eq:chromcost} and the gated RNA term take over.
+
+In the language of Appendix~B of~\cite{mauge2026cardamomot}, the coupling is the Schrödinger bridge of a reference process on the product of basins and accessibility states, whose chromatin transitions are induced by the protein path and the chromatin network; the chromatin term is exact in this reference process, whereas the RNA term keeps the approximation of CardamomOT.
+
+\subsection{Chromatin network and kinetic rates along trajectories}\label{sec:chromnet}
+
+Given the reconstructed trajectories, the chromatin parameters $(\bc, \thc, \bar k, \kappa)$ are fitted by maximising the likelihood of the fragments along the trajectories, with teacher forcing as in the recalibration of $d_1$. Let $m$ index the reconstructed trajectories, $n^m_j$ be the cell visited by trajectory $m$ at $t_j$, and $P^m(s)$, $s \in [t_j, t_{j+1}]$, its protein path along the bridge from $n^m_j$ to $n^m_{j+1}$. For each trajectory, interval and region, the accessibility of the source cell, given by its posterior, is propagated forward along the protein path by Proposition~\ref{prop:mean}, and the fragments of the target cell are scored under the propagated distribution:
+\begin{equation}\label{eq:chromfit}
+\begin{split}
+\mathcal{J}(\bc, \thc, \bar k, \kappa) = {} & -\sum_{m,j,r} \log \sum_{a, b \in \Lv_r} \underbrace{\pi^{\mathrm{c}}_{n^m_j, r}(a)}_{\text{source, } t_j}\, \underbrace{T^r_{ab}\bigl(P^m|_{[t_j,t_{j+1}]}\bigr)}_{a \to b \text{ along the path}} \\
+& \qquad\qquad \times \underbrace{p\bigl(y_{n^m_{j+1}, r} \mid b\bigr)}_{\text{fragments of the target, } t_{j+1}} \\
+& + \lambda_{\mathrm c}\|\thc - \thc_0\|_1 + \lambda_{k}\|\log\bar k - \log\bar k^{\mathrm{prior}}\|^2 ,
+\end{split}
+\end{equation}
+where $a$ and $b$ are the levels of the region at $t_j$ and $t_{j+1}$, and $T^r_{ab}$ depends on the chromatin parameters of region $r$ and on the protein path. The target enters through the likelihood of its fragments~\eqref{eq:atac}, not through its posterior, which would count the prior of its timepoint twice. Using the posterior of the source rather than the accessibility propagated from $t_1$ along the whole trajectory (a forward algorithm) is the teacher forcing: errors of the couplings or of the parameters do not accumulate over the intervals.
+In the binary case, $T^r$ is given by the linear equation~\eqref{eq:mean}, integrated along the protein path with the same solver as the proteins, so that $\mathcal{J}$ is differentiable in all parameters and is minimised with Adam. Unlike the protein recalibration, no stochastic differential equation is needed: the chromatin is a jump process observed (noisily) at both ends of each interval, and its transition probabilities, hence its likelihood, are available exactly. The closing mode (mirror or constant) of each region is chosen by comparing the two fitted likelihoods, with a penalty for the extra parameter $\kappa_r$.
+
+\paragraph{Computation.} Given the trajectories,~\eqref{eq:chromfit} separates into one problem per region, with $G + 3$ parameters $(\bc_r, \thc_r, \bar k_r, \kappa_r)$, as the transcriptional regression separates into one problem per gene, and the regions are fitted in parallel. The protein paths are needed at a few nodes of each interval only, the same as those of the exact flow matching of the network regression (states of the bridge at $t_j$ and at interior nodes, \texttt{PathProt} in the package). In the mirror mode, Proposition~\ref{prop:filter} gives the open probability at $t_{j+1}$ in closed form, $p_r(t_{j+1}) = p_r(t_j)e^{-\bar k_r\Delta t} + \sum_q \omega_q(\bar k_r)\,\sigma(Z^{\mathrm{c}}_r(P_q))$, with the weights $\omega_q$ of the exponential kernel at the nodes, those of the mRNA memory with $\bar k_r$ in place of $d_0$. In the constant mode, the total rate $\bar k_r\sigma(Z^{\mathrm{c}}_r) + \kappa_r$ varies along the path, and~\eqref{eq:mean} is solved exactly on each sub-interval with rates frozen between nodes. In both cases $\mathcal{J}$ and its gradient cost about as much as the transcriptional regression, so that~\eqref{eq:chromfit} can be used at every iteration of the loop.
+
+\paragraph{Schedule in the loop.} The chromatin parameters are fitted by~\eqref{eq:chromfit} from the first iteration, warm-started from the previous one. At the first iteration only, $(\bc, \thc)$ are started from a logistic regression of the accessibility posteriors on the proteins of the same cells, which is the quasi-static limit of Proposition~\ref{prop:filter} ($p_r \approx \sigma(Z^{\mathrm{c}}_r(P))$ when $\bar k_r \gg d_1$); this regression is biased for slow regions, towards the regulators whose protein peaks late, and is not used afterwards. Since the early trajectories are poor, $\bar k$ and $\kappa$ are updated only every two or three iterations, as the degradation rates in the loop of CardamomOT, with a prior weight $\lambda_k$ on $\log\bar k$ that decreases along the iterations, so that the lag of a region is not adjusted to absorb the errors of early couplings.
+
+\paragraph{Identifiability.} Within an interval, $\thc$ and $\bar k$ trade off: a region that opens late can be driven strongly by a protein that rises late, or slowly by one that rises early. Several intervals with different protein paths, and the dynamics of closing, separate them; this trade-off is the reason for the less frequent updates of $\bar k$ and for its prior, not for ignoring the dynamics. In the constant mode, $\bar k$ and $\kappa$ are separately identified only if the region is observed both while opening and while closing.
+
+\subsection{Label refinement and algorithm}
+
+The basin refinement of CardamomOT is extended to the joint states $(z, c)$: the assignment balances the multiome mixture likelihood~\eqref{eq:joint} and the consistency with both networks, the transcriptional one through the gated burst frequency, the chromatin one through the transition probabilities from the ancestor of the cell.
+
+\begin{algorithm}[H]
+\caption{CardamomOT-multiome (sketch)}\label{alg:multiome}
+\begin{algorithmic}[1]
+\Require RNA counts and ATAC fragments at $t_1, \dots, t_T$, peak--gene links $w$, $d_0$, $d_1$ from the literature, prior $\bar k^{\mathrm{prior}}$, optional prior networks $\theta^0$, $\thc_0$
+\State Multiome mixture~\eqref{eq:joint}: burst parameters, $q_n$, $\varepsilon_r$, posteriors of the modes and of the accessibility $\pi^{\mathrm{c}}_{n,r}$
+\State Initial chromatin network: $\thc = 0$, $\bc_r$ from the mean accessibility, $\bar k = \bar k^{\mathrm{prior}}$
+\For{$k = 0, 1, \dots$ until convergence}
+  \State Couplings by entropic OT with the cost $C^{\mathrm{RNA}} + \omega_{\mathrm c}C^{\mathrm{c}}$~\eqref{eq:chromcost}, plus the direct mRNA and accessibility term of the first iterations (decreasing weight); sample protein and accessibility trajectories
+  \State $\theta \gets$ gated regression~\eqref{eq:gated} on the reconstructed proteins
+  \State $(\bc, \thc) \gets$~\eqref{eq:chromfit}, one problem per region, warm-started (logistic quasi-static start at $k = 0$); every $m$ iterations, $(\bar k, \kappa)$ updated with them, prior $\lambda_k$ decreasing
+  \State Refine the joint labels $(z, c)$
+\EndFor
+\State Fit $(\bc, \thc, \bar k, \kappa)$ by~\eqref{eq:chromfit}, choose the closing modes; recalibrate $d_1$, $d_0$ as in CardamomOT
+\State \Return $\theta$, $\beta$, $\thc$, $\bc$, $\bar k$, $\kappa$, trajectories, and the calibrated multiome simulator
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Generative model}
+
+The calibrated model is simulated by the multiome PDMP, with explicit mRNA or in the protein limit, with chromatin regions as Markov chains, as already implemented. The simulations generate RNA counts, accessibility levels and, through~\eqref{eq:atac}, ATAC fragments, so that the model is checked on both modalities, and in silico perturbations can target genes (knock-out, over-expression) or regions (forced opening or closing, as with CRISPR activation or interference of enhancers).
+
+%======================================================================
+\section{Validation plan}\label{sec:validation}
+%======================================================================
+
+\paragraph{Toy networks.} FN4-chrom and TG-chrom (Section~\ref{sec:confounding}), ten runs each, then larger networks built from the benchmarks of CardamomOT (CN5, BN8, FN8) by moving some of their edges to the chromatin, with one or several regions per gene, mirror and constant closing, and slow and fast chromatin.
+
+\paragraph{Metrics.} AUPR of the inferred networks against the direct, chromatin and union topologies; accuracy of the mechanism (direct or chromatin) and of the sign of each true edge; number of spurious self-loops; error on $\bar k$ and $\kappa$; accuracy of the accessibility posteriors against the true accessibility; and, for the generative model, the distance between simulated and observed RNA and ATAC distributions per timepoint.
+
+\paragraph{Ablations.} (a) Standard CardamomOT on RNA; (b) gated regression with the true accessibility; (c) gated regression with the accessibility posteriors of the multiome mixture; (d) with the chromatin term of the transport cost; (e) full method with the chromatin network. The difference between (b) and (c) measures the cost of scATAC sparsity, and robustness is tested by lowering the capture $q$, adding background $\varepsilon$, and simulating independent alleles while inferring with copies that move together (misspecification).
+
+\paragraph{Reference points.} The main reference is standard CardamomOT on the RNA of the same cells, which isolates the contribution of the chromatin. SCENIC+, CellOracle and Dictys do not use the timepoints and do not return a dynamical model, so they are not compared as competitors: they provide inputs and priors (Section~\ref{sec:preproc}), and, on real data, their static networks are a qualitative check of the inferred topology. For the chromatin kinetics of each gene, MultiVelo~\cite{li2023multivelo} gives a reference on a latent time.
+
+\paragraph{Real data.} A multiome time course with at least four timepoints, slow chromatin changes and known regulators.
+\tofill{choice of datasets (e.g.\ differentiation time courses with 10x Multiome or SHARE-seq~\cite{ma2020shareseq}); validation by perturbation data (CRISPR of TFs or enhancers) if available}
+
+%======================================================================
+\section{Implementation and data interface}\label{sec:data}
+%======================================================================
+
+\paragraph{Input.} A \texttt{.h5mu} file (MuData) with \texttt{mod['rna']} (counts, cells $\times$ genes, optional \texttt{var['d0']}, \texttt{var['d1']}), \texttt{mod['atac']} (fragments, sparse integer matrix, cells $\times$ peaks, with \texttt{var} columns \texttt{chrom}, \texttt{start}, \texttt{end}, \texttt{peak\_type}), shared \texttt{obs} with \texttt{time} (and \texttt{dataset\_id}, cell types, as in CardamomOT), \texttt{uns['peak\_gene\_links']}, a table (\texttt{peak}, \texttt{gene}, \texttt{w}) giving $\Rg(i)$ and $w$, and optionally \texttt{uns['tf\_region\_links']}, a table (\texttt{tf}, \texttt{peak}, \texttt{weight}, optional \texttt{sign}) from the TF--region evidence of Section~\ref{sec:preproc}, used as a soft prior on $\theta$ through the region--gene links (and, for pioneer factors, on $\thc$). The simulated files of the toy networks also contain the ground truth (\texttt{obsm['true\_P']}, \texttt{obsm['true\_M']}, \texttt{obsm['true\_c']}, \texttt{uns['truth']}) and the parameters of the ATAC noise (\texttt{uns['atac\_model']}). A \texttt{.h5ad} with the RNA only is also written, for standard CardamomOT.
+
+\paragraph{Code to write.} Converters from the outputs of the preprocessing tools (Signac or ArchR objects, SCENIC+ region-to-gene links and cistromes, motif or footprint tables) to the \texttt{.h5mu} format; reader of \texttt{.h5mu} and selection of the peaks linked to the selected genes; multiome mixture (new EM, \texttt{infer\_mixture}); gated loss in the network regression and in the transport cost; chromatin term of the cost (transition probabilities along the bridge, closed form in the binary case); chromatin network fit~\eqref{eq:chromfit} (torch, one problem per region, on the path nodes of the exact flow matching); writing of \texttt{chromatin\_simul.npz}, already read by the simulations; report pages for accessibility.
+
+%======================================================================
+\section{Open questions}\label{sec:open}
+%======================================================================
+
+\begin{enumerate}[nosep]
+\item \emph{Sparsity of scATAC.} Is the per-cell posterior of a single region informative enough, or must regions be aggregated (several peaks per gene, gene activity scores)? The RNA of the gated genes and the transport, which pools ancestors and descendants, both add information; the ablation (b)--(c) quantifies the loss.
+\item \emph{Form of the gate.} Linear, multiplicative or maximum over the regions of a gene; gene-level or regulator-specific gating, in which the TF--region links of Section~\ref{sec:preproc} say which regions gate which edge $j \to i$ (a per-edge gate, not a constraint on the existence of the edge).
+\item \emph{Time scales.} When the chromatin is fast, its effect is absorbed in the regulation function and the chromatin network is weakly identifiable; the validation should map the identifiable regime in $\bar k/d_1$.
+\item \emph{Chromatin regulated by non-network factors.} Regions can change because of factors outside the selected genes (cell cycle, remodelers); a time-dependent basal $\bc_r(t)$, as the temporal basal of CardamomOT, can absorb them.
+\item \emph{Gene selection.} Genes whose accessibility changes but whose RNA does not are missed by the selection of CardamomOT; the selection should also score dynamic accessibility.
+\item \emph{Weight of the modalities} in the transport cost, $\omega_{\mathrm c}$, and its annealing.
+\end{enumerate}
+
+%======================================================================
+\section{Timeline and target journal}\label{sec:timeline}
+%======================================================================
+
+The target journal depends on the results. If the gated regression and the chromatin network clearly improve on standard CardamomOT, with correct mechanisms and kinetic rates on simulations, and if a real multiome time course gives predictions supported by perturbation data, the target is \emph{Nature Methods}. If the gain is clear on simulations but the real-data application remains a proof of concept, the target is \emph{BMC Bioinformatics}.
+
+\begin{description}[style=nextline, leftmargin=2cm]
+\item[Phase 1] Multiome mixture with binary regions and gated regression; test on FN4-chrom and TG-chrom with the true and the inferred accessibility.
+\item[Phase 2] Chromatin term of the transport cost and chromatin network fit; larger toy networks, several regions, closing modes; ablations.
+\item[Phase 3] Choice and preprocessing of a real multiome time course (Section~\ref{sec:preproc}); application and checks.
+\item[Decision] On the target journal, from the results of phases 2 and 3.
+\item[Phase 4] Writing and preprint.
+\end{description}
+
+%======================================================================
+\section{Figure plan}\label{sec:figures}
+%======================================================================
+
+\begin{description}[style=nextline, leftmargin=2cm]
+\item[Figure 1] Model: regions, gates, chromatin network; accessibility as a low-pass filter (Proposition~\ref{prop:filter}); confusion of RNA-only inference (Table~\ref{tab:standard}).
+\item[Figure 2] Multiome mixture: posteriors of accessibility against the truth as a function of the capture; information brought by the RNA.
+\item[Figure 3] Gated regression and full method on the toy networks: AUPR on the three topologies, mechanisms, spurious self-loops, ablations.
+\item[Figure 4] Chromatin kinetics: recovery of $\bar k$, $\kappa$ and closing modes; identifiable regime in $\bar k/d_1$.
+\item[Figures 5--6] Real data: networks, accessibility trajectories, simulated RNA and ATAC, perturbations.
+\end{description}
+
+%======================================================================
+\section{Reuse of existing tools}\label{sec:reuse}
+%======================================================================
+
+The method is built on top of the established multiome preprocessing, not in place of it: Signac or ArchR for quality control and fragment counts, with peaks called along time and a capture estimated without making the timepoints uniform (Section~\ref{sec:preproc}); Cicero, Signac, ArchR or SCENIC+ for region--gene links; JASPAR motifs, the cistromes of SCENIC+, the base networks of CellOracle or the footprints of Dictys for TF--region links. Their outputs become the inputs of Section~\ref{sec:preproc} (regions, gates, and a soft prior on the transcriptional network, which keeps the indirect regulations), so that the work on these tools, started by Claire, feeds the first real application directly. What the method adds is the use of time: a mechanistic and generative model of transcription and chromatin, with a network for each, calibrated on time series, which, to our knowledge, does not exist yet.
+
+%======================================================================
+\appendix
+\section{Proofs}\label{app:proofs}
+%======================================================================
+
+\paragraph{Proposition~\ref{prop:mean}.} Given the protein path, the levels of one copy form a time-inhomogeneous birth--death chain with generator $Q_r(t)$, and $\frac{d}{dt}\E[f(c)] = \E[(Q_r f)(c)]$. For $f(\ell) = \ell$, $(Q_r f)(\ell_k) = a_k(\ell_{k+1} - \ell_k) - b_k(\ell_k - \ell_{k-1}) = \kop_r(1 - \ell_k) - \kcl_r\ell_k$, with $b_0 = 0$ and $a_{K_r} = 0$ consistent with this formula since $\ell_0 = 0$ and $\ell_{K_r} = 1$. Taking expectations gives~\eqref{eq:mean} for one copy, and the mean over copies is linear. In the binary case, the law of $c_r(t')$ given $c_r(t)$ is a Bernoulli of parameter $p_r(t')$, where $p_r$ solves~\eqref{eq:mean} from $c_r(t)$; this gives $T^r_{01}$ and $T^r_{11}$, and $T^r_{\ell 0} = 1 - T^r_{\ell 1}$. For several levels, the Kolmogorov forward equation $\partial_{t'}T^r(t,t') = T^r(t,t')\,Q_r(t')$ holds, with $T^r(t,t) = I$.
+
+\paragraph{Proposition~\ref{prop:filter}.} In the mirror mode, $\kop_r + \kcl_r = \bar k_r$, so that~\eqref{eq:mean} reads $\dot p_r = \bar k_r\sigma(Z^{\mathrm{c}}_r(P(t))) - \bar k_r p_r$, a linear equation with constant coefficient, whose solution is~\eqref{eq:filter}.
+
+\paragraph{Proposition~\ref{prop:gated}.} With $g = \cbar_{ni}$ and $s = \sigma_i^\theta(P_n)$, the loss of a cell is $-h\log(gs) - (1-h)\log(1-gs)$. For $g = 0$, the high mode is impossible, so $h = 0$ and the loss is $-\log 1 = 0$ for every $\theta$. For the EM form, the complete-data log-likelihood of the regulatory basin is $u\log s + (1-u)\log(1-s)$, whose expectation under the posterior $\hat u = \E[u \mid x, y]$ is a cross-entropy with target $\hat u$ and gradient $(s - \hat u)\,\partial_\theta(\beta_i + \sum_j\theta_{ij}P_{nj})$. For $g = 0$, the data do not depend on $u$, so that $\hat u = s$ at the current $\theta$, and the gradient vanishes. For $g = 1$, $\hat u = h$ and both forms coincide with the cross-entropy of CardamomOT.
+
+%======================================================================
+\section{Simulator}\label{app:simulator}
+%======================================================================
+
+The simulator of the package (\texttt{BurstyPDMPmRNA}, \texttt{BurstyPDMP}, \texttt{ApproxODE} with \texttt{ChromatinModel}) uses thinning~\cite{lewis1979thinning}. With explicit mRNA, the bound on the burst frequencies is adaptive, as in Harissa: the proteins are bounded along the flow from the current state, and the burst frequencies at this bound with the positive interactions only, and a gate equal to one, bound the true frequencies. The chromatin jumps add a constant bound: for each copy of each region, the maximum over levels of the sum of the up and down rates~\eqref{eq:jumps}, with $\sigma$ replaced by one, i.e.\ $\bar k_r$ times a level factor in the mirror mode, and $\max(\bar k_r, \kappa_r)$ in the binary constant mode. At each candidate time, the flow is applied, all rates are recomputed with the current proteins and levels, and a single uniform draw selects a burst, a jump up or down of a copy, or a rejection; a chromatin jump changes the level by one step without further draw, so that without regions the sequence of random draws is unchanged. With the protein ODE, the proteins follow the ODE between candidate chromatin jumps, which are drawn at the rate of the chromatin bound. The tests check the non-regression without regions, the stationary accessibility $\kop/(\kop + \kcl)$ for frozen proteins, the mean dynamics~\eqref{eq:mean} for binary, multi-level and diploid regions, and the agreement of the explicit-mRNA simulator with Harissa.
+
+%======================================================================
+\begin{thebibliography}{99}
+%======================================================================
+
+\bibitem{mauge2026cardamomot}
+Y.~Maugé, E.~Ventre.
+\newblock CardamomOT: a mechanistic optimal transport-based framework for gene regulatory network inference, trajectory reconstruction and generative modeling.
+\newblock \emph{bioRxiv}, 2026. doi:10.64898/2026.03.31.715390. Accepted in \emph{PLoS Computational Biology}.
+
+\bibitem{peccoud1995markovian}
+J.~Peccoud, B.~Ycart.
+\newblock Markovian modeling of gene-product synthesis.
+\newblock \emph{Theoretical Population Biology}, 48(2):222--234, 1995.
+
+\bibitem{herbachinferring2017}
+U.~Herbach, A.~Bonnaffoux, T.~Espinasse, O.~Gandrillon.
+\newblock Inferring gene regulatory networks from single-cell data: a mechanistic approach.
+\newblock \emph{BMC Systems Biology}, 11:105, 2017.
+
+\bibitem{ma2020shareseq}
+S.~Ma, B.~Zhang, L.~M.~LaFave, et al.
+\newblock Chromatin potential identified by shared single-cell profiling of RNA and chromatin.
+\newblock \emph{Cell}, 183(4):1103--1116, 2020.
+
+\bibitem{li2023multivelo}
+C.~Li, M.~C.~Virgilio, K.~L.~Collins, J.~D.~Welch.
+\newblock Multi-omic single-cell velocity models epigenome--transcriptome interactions and improves cell fate prediction.
+\newblock \emph{Nature Biotechnology}, 41:387--398, 2023.
+
+\bibitem{bravo2023scenicplus}
+C.~Bravo González-Blas, S.~De Winter, G.~Hulselmans, et al.
+\newblock SCENIC+: single-cell multiomic inference of enhancers and gene regulatory networks.
+\newblock \emph{Nature Methods}, 20:1355--1367, 2023.
+
+\bibitem{kamimoto2023celloracle}
+K.~Kamimoto, B.~Stringa, C.~M.~Hoffmann, K.~Jindal, L.~Solnica-Krezel, S.~A.~Morris.
+\newblock Dissecting cell identity via network inference and in silico gene perturbation.
+\newblock \emph{Nature}, 614:742--751, 2023.
+
+\bibitem{kartha2022figr}
+V.~K.~Kartha, F.~M.~Duarte, Y.~Hu, et al.
+\newblock Functional inference of gene regulation using single-cell multi-omics.
+\newblock \emph{Cell Genomics}, 2(9):100166, 2022.
+
+\bibitem{fleck2023pando}
+J.~S.~Fleck, S.~M.~J.~Jansen, D.~Wollny, et al.
+\newblock Inferring and perturbing cell fate regulomes in human brain organoids.
+\newblock \emph{Nature}, 621:365--372, 2023.
+
+\bibitem{wang2023dictys}
+L.~Wang, N.~Trasanidis, T.~Wu, et al.
+\newblock Dictys: dynamic gene regulatory network dissects developmental continuum with single-cell multiomics.
+\newblock \emph{Nature Methods}, 20:1368--1378, 2023.
+
+\bibitem{schep2017chromvar}
+A.~N.~Schep, B.~Wu, J.~D.~Buenrostro, W.~J.~Greenleaf.
+\newblock chromVAR: inferring transcription-factor-associated accessibility from single-cell epigenomic data.
+\newblock \emph{Nature Methods}, 14:975--978, 2017.
+
+\bibitem{granja2021archr}
+J.~M.~Granja, M.~R.~Corces, S.~E.~Pierce, et al.
+\newblock ArchR is a scalable software package for integrative single-cell chromatin accessibility analysis.
+\newblock \emph{Nature Genetics}, 53:403--411, 2021.
+
+\bibitem{stuart2021signac}
+T.~Stuart, A.~Srivastava, S.~Madad, C.~A.~Lareau, R.~Satija.
+\newblock Single-cell chromatin state analysis with Signac.
+\newblock \emph{Nature Methods}, 18:1333--1341, 2021.
+
+\bibitem{pliner2018cicero}
+H.~A.~Pliner, J.~S.~Packer, J.~L.~McFaline-Figueroa, et al.
+\newblock Cicero predicts cis-regulatory DNA interactions from single-cell chromatin accessibility data.
+\newblock \emph{Molecular Cell}, 71(5):858--871, 2018.
+
+\bibitem{lewis1979thinning}
+P.~A.~W.~Lewis, G.~S.~Shedler.
+\newblock Simulation of nonhomogeneous Poisson processes by thinning.
+\newblock \emph{Naval Research Logistics Quarterly}, 26(3):403--413, 1979.
+
+\end{thebibliography}
+
+\end{document}

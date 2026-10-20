@@ -197,8 +197,13 @@ def _celltype_legend(fig, color_map, y=0.01):
 _EMBEDDING = {'name': 'UMAP'}  # name of the embedding method of the report, used in the titles
 
 
+_PAGE_SUFFIX = ['']  # label of the network condition of the section being drawn (condition views)
+
+
 def _page_title(fig, title, subtitle=None):
     title = title.replace('UMAP', _EMBEDDING['name'])
+    if _PAGE_SUFFIX[0] and _PAGE_SUFFIX[0] not in title:
+        title += _PAGE_SUFFIX[0]
     subtitle = subtitle.replace('UMAP', _EMBEDDING['name']) if subtitle else subtitle
     # Long titles shrink to fit the page width; subtitles wrap on at most 2 lines
     size = 14 if len(title) <= 90 else max(9.0, 14 * 90 / len(title))
@@ -357,7 +362,7 @@ class _ReportData:
         self.p, self.split, self.stim, self.prior = p, split, stim, prior
         self.norm, self.log = norm, log
         self.depth_emb, self.emb_method, self.emb_name = bool(depth_emb), str(emb_method).lower(), embedding_name(emb_method)
-        self.no_ref_depth = []  # stages drawn at the cells' depth without a reference-depth version
+        self.no_ref_depth = []  # stages drawn at the cells' depth without their obs['depth_factor']
         self.rng = np.random.default_rng(seed)
         self.n_umap = n_umap
         tag = f'stim{stim}_prior{prior}'
@@ -368,6 +373,10 @@ class _ReportData:
         from ..inputs import depth_factor_used
         self.use_depth = depth_factor_used(p)
         self.genes = list(self.adata_data.var_names)
+        # Genes of each network condition (select_genes_per_condition); None: one gene space
+        from ..condition_genes import condition_gene_sets
+        self.condition_genes = condition_gene_sets(self.adata_data)
+        self.parent, self.samples, self.condition = None, None, None
         # Data = observed cells; Reference = RNA of the trajectories (one state per ancestor: without
         # proliferation), growth-weighted below if the simulation used the proliferation MLP
         self.stages = {
@@ -428,6 +437,19 @@ class _ReportData:
                 _attach_samples(A, samples_traj, names)
         for _, _, A in self.perturbations:
             _attach_samples(A, samples_traj, names)
+        for A in self.prot.values():
+            _attach_samples(A, samples_traj, names)
+
+        # Network conditions: samples of each condition (network_conditions.json, samples in sorted order)
+        self.conditions = {}
+        cond_json = os.path.join(cdir, 'network_conditions.json')
+        if os.path.exists(cond_json) and names:
+            import json
+            info_c = json.load(open(cond_json))
+            sc, cn = np.asarray(info_c['sample_conditions'], dtype=int), list(info_c['conditions'])
+            smp = [str(x) for x in info_c.get('samples', names)]
+            if len(cn) > 1 and len(sc) == len(smp):
+                self.conditions = {str(c): [smp[k] for k in np.flatnonzero(sc == i)] for i, c in enumerate(cn)}
 
         # Cell types: one classifier per sample (classifier_method) trained on its observed cells, applied in memory
         # (h5ad files untouched); a sample held out of the inference uses the classifier of its reference sample
@@ -486,27 +508,22 @@ class _ReportData:
                             predict_cell_types(A, self.clf, label_key=LABEL_KEY)
 
         if self.no_ref_depth:
-            print(f"[report] Warning: no reference-depth version of {sorted(set(self.no_ref_depth))} (drawn at the depth "
-                  "of the cells): rerun check_sim_to_data / check_KOV_to_sim / infer_test for cell_depth_for_representation")
+            print(f"[report] Warning: no obs['depth_factor'] for {sorted(set(self.no_ref_depth))} (shown as drawn): rerun "
+                  "check_sim_to_data / check_KOV_to_sim / infer_test for cell_depth_for_representation")
         self._fit_umap()
 
     def view(self, A, kind, name=''):
         """
-        mRNA of A as shown in the report, in place. With cell_depth_for_representation: observed cells and reference
-        trajectories (real cells) divided by their depth factor, model draws taken at the reference depth (layer
-        'reference_depth', written when the run used depth factors); otherwise the counts as drawn (model draws at
-        the depth of the cells they mimic, compatible with the raw data).
+        mRNA of A as shown in the report, in place. With cell_depth_for_representation: counts / obs['depth_factor'],
+        the same transformation for the observed cells, the reference trajectories (depth of their real cell) and the
+        model draws (taken at the depth of the cell they mimic, hence the same noise as the data); draws without
+        depth factor (run without use_depth_factor) are shown as drawn. Otherwise the counts as drawn.
         """
         if A is None or not self.depth_emb:
             return A
-        if kind == 'model':
-            if 'reference_depth' in A.layers:
-                A.X = np.asarray(_dense(A.layers['reference_depth']), dtype=float)
-            elif self.use_depth:
-                self.no_ref_depth.append(name)
-        elif 'depth_factor' in A.obs:
+        if 'depth_factor' in A.obs:
             A.X = _dense(A.X).astype(float) / A.obs['depth_factor'].to_numpy(dtype=float)[:, None]
-        elif kind == 'reference' and 'depth_factor' in self.adata_data.obs:
+        elif (kind == 'model' and self.use_depth) or (kind == 'reference' and 'depth_factor' in self.adata_data.obs):
             self.no_ref_depth.append(name)
         return A
 
@@ -546,6 +563,80 @@ class _ReportData:
             self.pert_sub[label] = self._subsample(A)
             self.pert_umap[label] = self.reducer.transform(_preprocess(A.X[self.pert_sub[label]], self.norm, self.log))
 
+    def view_of(self, samples=None):
+        """
+        Stages, subsamples and embeddings of the cells of samples (one network condition; None = every cell, the
+        embeddings of _fit_umap): mRNA embedding learned once on the observed cells of the samples, every stage of
+        these samples projected onto it, protein embedding learned once on their trajectories. Cached; None when a
+        stage has no cell of the samples.
+        """
+        if samples is None:
+            return dict(stages=self.stages, sub=self.sub, umap=self.umap, prot=self.prot,
+                        prot_red=self.prot_reducer, prot_sub=getattr(self, 'prot_sub', None))
+        key = tuple(samples)
+        cache = self.__dict__.setdefault('_views', {})
+        if key not in cache:
+            stages = {k: _restrict(A, samples) for k, A in self.stages.items()}
+            if any(A is None or A.n_obs == 0 for A in stages.values()):
+                cache[key] = None
+                return None
+            sub = {k: self._subsample(A) for k, A in stages.items()}
+            red = Embedder(self.emb_method, seed=42).fit(_preprocess(stages['Data'].X[sub['Data']], self.norm, self.log))
+            umap = {k: (red.embedding_ if k == 'Data' else
+                        red.transform(_preprocess(A.X[sub[k]], self.norm, self.log))) for k, A in stages.items()}
+            prot = {k: _restrict(self.prot.get(k), samples) for k in ('Trajectories', 'Simulation')}
+            Pt, prot_red, prot_sub = prot['Trajectories'], None, None
+            if Pt is not None and Pt.n_obs and prot['Simulation'] is not None and prot['Simulation'].n_obs:
+                prot_sub = self._subsample(Pt)
+                prot_red = Embedder(self.emb_method, seed=42).fit(_dense(Pt.X[prot_sub]).astype(float))
+            cache[key] = dict(stages=stages, sub=sub, umap=umap, prot=prot, prot_red=prot_red, prot_sub=prot_sub)
+        return cache[key]
+
+    def condition_view(self, c, samples):
+        """
+        Report data restricted to the samples of network condition c and to its genes: every stage, protein,
+        perturbation, test and validation AnnData of these samples (columns: the genes of the condition with
+        select_genes_per_condition), with their own embeddings (learned on the observed cells of the condition).
+        Cached; the pages called on it are those of a run on this condition alone.
+        """
+        cache = self.__dict__.setdefault('_condition_views', {})
+        if c in cache:
+            return cache[c]
+        import copy
+        Rc = copy.copy(self)
+        Rc.parent, Rc.samples, Rc.condition = self, [str(x) for x in samples], str(c)
+        genes = self.genes if self.condition_genes is None else self.condition_genes.get(str(c), self.genes)
+        Rc.gene_cols = np.flatnonzero(np.isin(self.genes, genes))
+        Rc.genes = [self.genes[i] for i in Rc.gene_cols]
+        cols = Rc.gene_cols
+
+        def restrict(A):
+            A = _restrict(A, Rc.samples)
+            return None if A is None else A[:, cols].copy()
+
+        Rc.cell_mask = self.adata_data.obs['dataset_id'].astype(str).isin(Rc.samples).to_numpy() \
+            if 'dataset_id' in self.adata_data.obs else np.ones(self.adata_data.n_obs, bool)
+        Rc.adata_data = restrict(self.adata_data)
+        Rc.stages = {k: restrict(A) for k, A in self.stages.items()}
+        Rc.prot = {k: restrict(A) for k, A in self.prot.items()}
+        Rc.perturbations = [(l, d, restrict(A)) for l, d, A in self.perturbations]
+        Rc.test = None
+        if self.test:
+            test = {k: restrict(A) for k, A in self.test.items()}
+            Rc.test = test if all(A is not None and A.n_obs for A in test.values()) else None
+        Rc.validation = {}
+        for r, (obs_r, sim, ref) in self.validation.items():
+            cond_r = (str(obs_r.obs['network_condition'].iloc[0]) if 'network_condition' in obs_r.obs and obs_r.n_obs
+                      else None)
+            if cond_r == str(c) or (cond_r is None and ref in Rc.samples):
+                Rc.validation[r] = (obs_r[:, cols].copy(), sim[:, cols].copy(), ref)
+        Rc.conditions = {}
+        Rc.__dict__.pop('_views', None)
+        Rc._teaser = None
+        Rc._fit_umap()
+        cache[c] = Rc
+        return Rc
+
     def times(self, A, idx=None):
         t = pd.to_numeric(A.obs['time']).values
         return t if idx is None else t[idx]
@@ -568,7 +659,7 @@ def _cover_page(pdf, R, info, perturbations_status):
             ('Cell types', ', '.join(R.categories) if R.has_ct else "— (no obs['cell_type'])"),
             ('Network shown', "inter_simul.npy"),
             ('Embeddings', f"{R.emb_name}; mRNA: log1p={R.log}, normalise={R.norm}, cell_depth_for_representation={R.depth_emb} "
-                           + ("(observed / depth factor, model draws at the reference depth)" if R.depth_emb
+                           + ("(counts / depth factor, model draws taken at the depth of the cells they mimic)" if R.depth_emb
                               else "(raw counts, model draws at the depth of the cells)"))]
     y = 0.73
     fig.text(0.06, y + 0.02, 'Run', fontsize=13, fontweight='bold')
@@ -599,9 +690,10 @@ def _cover_page(pdf, R, info, perturbations_status):
 
     fig.text(0.06, 0.25, 'Contents', fontsize=13, fontweight='bold')
     fig.text(0.07, 0.04,
-             'Data — UMAP of all the cells of Data/data.h5ad (time, samples); teaser: classical OT vs CardamomOT displacement fields (all times, then per interval), '
+             'Data — UMAP of all the cells of Data/data.h5ad (time, samples), also on the genes of the model with select_genes; teaser: classical OT vs CardamomOT displacement fields (all times, then per interval), '
              'then cell-type transitions and fate genes of each; list of the genes of the model\n'
-             '1. Generative model — UMAPs of data, trajectories, NB mixture, network modes and simulation; cell-type proportions; gene-pair correlations; proteins\n'
+             '1. Generative model — UMAPs of data, trajectories, NB mixture, network modes and simulation; cell-type proportions; gene-pair correlations; proteins'
+             + (' (per network condition, embeddings learned on its cells)' if R.conditions else '') + '\n'
              '2. Gene regulatory network — regulatory power (violin plots), top-20 regulators' + (' + stimulus' if info['show_stim'] else '')
              + ' and top-20 regulated genes (mutual top-10 edges)\n'
              '3. In-silico perturbations — overview across KO/OV, then one page per perturbation\n'
@@ -614,8 +706,9 @@ def _cover_page(pdf, R, info, perturbations_status):
     pdf.savefig(fig); plt.close(fig)
 
 
-def _data_umap_page(pdf, R, seed=0):
-    E, obs = data_embedding(R.p, seed=seed, depth=R.depth_emb, method=R.emb_method)
+def _data_umap_page(pdf, R, seed=0, genes=None):
+    """UMAP of every cell of Data/data.h5ad, on the whole transcriptome or restricted to genes (gene selection)."""
+    E, obs = data_embedding(R.p, seed=seed, depth=R.depth_emb, method=R.emb_method, genes=genes)
     coords = E['emb']
     times = pd.to_numeric(obs['time']).values if 'time' in obs else np.zeros(len(obs))
     samples = obs['dataset_id'].astype(str).values if 'dataset_id' in obs else None
@@ -625,11 +718,13 @@ def _data_umap_page(pdf, R, seed=0):
     order = np.random.default_rng(seed).permutation(len(coords))  # no category drawn on top of the others
     size = float(np.clip(30000 / len(coords), 0.3, 6))
     fig = plt.figure(figsize=A4_LANDSCAPE)
-    _page_title(fig, 'Data — UMAP of all the cells',
+    _page_title(fig, 'Data — UMAP of all the cells' + ('' if genes is None else ', genes of the gene selection'),
                 f"Data/data.h5ad, {len(coords)} cells: log1p(counts" + (" / depth factor)" if E['depth'] else ")")
-                + f", {len(E['hvg'])} highly variable genes, PCA ({E['pca'].shape[1]} components), "
+                + (f", {len(E['hvg'])} highly variable genes" if genes is None
+                   else f", the {len(E['hvg'])} genes of the model (select_genes)")
+                + f", PCA ({E['pca'].shape[1]} components), "
                 + {'umap': 'kNN graph, UMAP', 'pca': 'first 2 components', 'phate': 'PHATE'}[R.emb_method]
-                + ". Stored in cardamomOT/embedding_data.npz.")
+                + ". Stored in cardamomOT/" + ('embedding_data.npz.' if genes is None else 'embedding_data_genes.npz.'))
     gs = gridspec.GridSpec(1, len(panels), figure=fig, left=0.03, right=0.95, top=0.86, bottom=0.2, wspace=0.08)
     for j, kind in enumerate(panels):
         ax = fig.add_subplot(gs[0, j])
@@ -664,6 +759,8 @@ def _gene_list_page(pdf, R):
     path = os.path.join(R.p, 'cardamomOT', 'gene_selection_report.csv')
     if os.path.exists(path):
         rep = pd.read_csv(path)
+        if 'condition' in rep and R.condition is not None:  # selection per condition: rows of this condition
+            rep = rep[rep['condition'].astype(str) == R.condition]
         if set(rep['gene'].astype(str)) == set(genes):
             roles = dict(zip(rep['gene'].astype(str), rep['role'].astype(str)))
             if 'connected' in rep:
@@ -841,20 +938,28 @@ def _classical_ot_pages(pdf, R, seed=0):
     cats = sorted(np.unique(labels))
     cmap = R.color_map if R.color_map and set(cats) <= set(R.color_map) else _cell_type_colors(cats)
     tr, fg = pd.read_csv(tr_path), pd.read_csv(fg_path)
+    in_cond = np.ones(len(obs), bool)
+    if R.samples is not None:  # condition view: flows pooled over its samples, its cells
+        from .classical_ot import pooled_transitions
+        sub = tr[tr['sample'].astype(str).isin(R.samples)]
+        tr = pd.concat([sub, pooled_transitions(sub).assign(sample='all')], ignore_index=True)
+        in_cond = obs['dataset_id'].astype(str).isin(R.samples).to_numpy() if 'dataset_id' in obs else in_cond
     tr['cell_type_from'], tr['cell_type_to'] = tr['cell_type_from'].astype(str), tr['cell_type_to'].astype(str)
     fg['cell_type'] = fg['cell_type'].astype(str)
     vel = np.load(os.path.join(cdir, 'velocity.npz'), allow_pickle=True)
     fit = (pd.Series(vel['transported'], index=vel['obs_names'].astype(str)).reindex(E['obs_names'])
            .fillna(False).to_numpy(dtype=bool) if 'transported' in vel.files else np.ones(len(obs), bool))
     # Same cells as CardamomOT (data_<split>)? Otherwise the classical OT is from an earlier train/test split
-    same = set(E['obs_names'][fit]) == set(R.adata_data.obs_names.astype(str))
+    same = set(E['obs_names'][fit]) == set((R.parent or R).adata_data.obs_names.astype(str))
+    fit = fit & in_cond
     warn = '' if same else (' WARNING: not the cells of data_<split> (classical OT from an earlier split: rerun '
                             'run_classical_OT.py).')
     if not same:
         print("[report] Warning: the classical OT was run on other cells than data_<split>: rerun run_classical_OT.py")
     _transition_page(pdf, 'Classical OT — cell-type transitions and fate genes',
                      'Waddington-OT couplings (every gene, train cells, per sample, growth from the net rate), pooled over '
-                     'the samples. Sankey: node = share of the cell type; links leave ∝ fate and arrive ∝ ancestor '
+                     + ('the samples' if R.samples is None else f'the samples of condition {R.condition} (fate genes of '
+                        'every sample)') + '. Sankey: node = share of the cell type; links leave ∝ fate and arrive ∝ ancestor '
                      'probabilities. Table: weighted Welch t, genes of both top 10 in red (classical_OT/fate_genes.csv).' + warn,
                      tr[tr['sample'].astype(str) == 'all'], _shares(labels, times, fit), fg, cats, cmap)
 
@@ -869,26 +974,34 @@ def _cardamom_transition_page(pdf, R):
     cp = os.path.join(cdir, 'couplings.npz')
     if not os.path.exists(cp):
         raise FileNotFoundError('cardamomOT/couplings.npz not found: rerun infer_network_structure.py')
-    A = R.adata_data
+    A = (R.parent or R).adata_data  # rows of the couplings: every cell of data_<split>
     blocks = dense_blocks(coupling_blocks(cp, A.n_obs))
+    in_cond = np.ones(A.n_obs, bool)
+    if R.samples is not None:  # condition view: its samples' blocks and cells, its genes
+        names = sorted(A.obs['dataset_id'].astype(str).unique()) if 'dataset_id' in A.obs else ['0']
+        keep = {names.index(x) for x in R.samples if x in names}  # blocks are indexed by sorted dataset_id
+        blocks = [b for b in blocks if int(b['sample']) in keep]
+        in_cond = R.cell_mask
     labels = A.obs[LABEL_KEY].astype(str).values
     times = pd.to_numeric(A.obs['time']).values
     tr = transitions(blocks, labels)
     tr = pd.concat([tr, pooled_transitions(tr)], ignore_index=True)
     # Fate genes on the model genes: log1p(counts / depth factor with use_depth_factor), as in the inference
-    X = _dense(A.X).astype(float)
+    cols = getattr(R, 'gene_cols', None)
+    X = _dense(A.X).astype(float) if cols is None else _dense(A.X[:, cols]).astype(float)
     if R.use_depth and 'depth_factor' in A.obs:
         X = X / A.obs['depth_factor'].to_numpy(dtype=float)[:, None]
-    fg = fate_genes(np.log1p(X), np.asarray(R.genes), blocks, labels, np.ones(A.n_obs, bool))
-    tr.to_csv(os.path.join(cdir, 'teaser_transitions.csv'), index=False)
-    fg.to_csv(os.path.join(cdir, 'teaser_fate_genes.csv'), index=False)
+    fg = fate_genes(np.log1p(X), np.asarray(R.genes), blocks, labels, in_cond)
+    suffix = '' if R.condition is None else f'_{R.condition}'
+    tr.to_csv(os.path.join(cdir, f'teaser_transitions{suffix}.csv'), index=False)
+    fg.to_csv(os.path.join(cdir, f'teaser_fate_genes{suffix}.csv'), index=False)
     cats = sorted(np.unique(labels))
     cmap = R.color_map if R.color_map and set(cats) <= set(R.color_map) else _cell_type_colors(cats)
     _transition_page(pdf, 'Teaser — CardamomOT: cell-type transitions and fate genes',
                      'Final soft couplings of the CardamomOT trajectories (model genes, data_<split> cells), pooled over the '
                      'samples. Sankey: node = share of the cell type; links leave ∝ fate and arrive ∝ ancestor '
                      'probabilities. Table: weighted Welch t, genes of both top 10 in red (cardamomOT/teaser_fate_genes.csv).',
-                     tr[tr['sample'].astype(str) == 'all'], _shares(labels, times, np.ones(A.n_obs, bool)), fg, cats, cmap)
+                     tr[tr['sample'].astype(str) == 'all'], _shares(labels, times, in_cond), fg, cats, cmap)
 
 
 def classical_velocity(p, E):
@@ -957,8 +1070,17 @@ def cardamom_velocity(p, split, E, use_depth, k=30):
 
 
 def _teaser_fields(R, seed=0):
-    """Data embedding and coupling displacements of classical OT (if run) and CardamomOT, computed once."""
+    """Data embedding and coupling displacements of classical OT (if run) and CardamomOT, computed once; for a
+    condition view, those of the whole run restricted to the cells of its samples (embedding of every cell)."""
     if getattr(R, '_teaser', None) is not None:
+        return R._teaser
+    if getattr(R, 'parent', None) is not None:
+        F = _teaser_fields(R.parent, seed)
+        m = F['obs']['dataset_id'].astype(str).isin(R.samples).to_numpy() if 'dataset_id' in F['obs'] \
+            else np.ones(len(F['obs']), bool)
+        E = dict(F['E'], emb=F['E']['emb'][m], pca=F['E']['pca'][m], obs_names=F['E']['obs_names'][m])
+        R._teaser = dict(F, E=E, obs=F['obs'][m], labels=None if F['labels'] is None else F['labels'][m],
+                         times=F['times'][m], fields=[(n, V[m], o[m]) for n, V, o in F['fields']])
         return R._teaser
     E, obs = data_embedding(R.p, seed=seed, depth=R.depth_emb, method=R.emb_method)
     labels = obs[LABEL_KEY].astype(str).values if LABEL_KEY in obs else None
@@ -973,7 +1095,7 @@ def _teaser_fields(R, seed=0):
     # Intervals of the CardamomOT couplings (t_from -> t_to)
     cp = np.load(os.path.join(R.p, 'cardamomOT', 'couplings.npz'))
     intervals = sorted({(float(a), float(b)) for a, b in zip(cp['t_from'], cp['t_to'])})
-    R._teaser = dict(E=E, labels=labels, cmap=cmap, times=times, fields=fields, intervals=intervals)
+    R._teaser = dict(E=E, obs=obs, labels=labels, cmap=cmap, times=times, fields=fields, intervals=intervals)
     return R._teaser
 
 
@@ -1061,31 +1183,50 @@ def _teaser_time_pages(pdf, R, seed=0, per_page=6):
         pdf.savefig(fig); plt.close(fig)
 
 
-def _model_pages(pdf, R):
-    names = list(R.stages)
-    t_all = np.concatenate([R.times(R.stages[k], R.sub[k]) for k in names])
+def _restrict(A, samples):
+    """Cells of A from the samples (obs['dataset_id']); A itself without samples, None if it has no sample column."""
+    if samples is None:
+        return A
+    if A is None or 'dataset_id' not in A.obs:
+        return None
+    return A[A.obs['dataset_id'].astype(str).isin(samples).to_numpy()]
+
+
+def _model_umap_page(pdf, R, samples=None, label=''):
+    """UMAPs of the stages of the cells of samples (None = all), on the embedding learned on their observed cells."""
+    V = R.view_of(samples)
+    if V is None:
+        _error_page(pdf, f'1. Generative model — trajectories and simulation{label}',
+                    f'no cell of the samples {samples} in a stage (no obs["dataset_id"] or empty)')
+        return
+    stages, sub, umap = V['stages'], V['sub'], V['umap']
+    names = list(stages)
+    t_all = np.concatenate([R.times(stages[k], sub[k]) for k in names])
     vmin, vmax = float(t_all.min()), float(t_all.max())
 
-    # Page: UMAPs by time and cell type
     fig = plt.figure(figsize=A4_LANDSCAPE)
-    _page_title(fig, '1. Generative model — trajectories and simulation',
-                'UMAP learned on the observed data; the trajectories (Reference: one state per ancestor, i.e. '
+    _page_title(fig, f'1. Generative model — trajectories and simulation{label}',
+                ('' if samples is None else f"Samples {', '.join(samples)}. ")
+                + f'{R.emb_name} learned on the observed data' + ('' if samples is None else ' of these samples')
+                + '; the trajectories (Reference: one state per ancestor, i.e. '
                 + ('growth-weighted by exp ∫R_opt, as the simulation has proliferation)' if R.growth_ref
                    else 'without proliferation, as the simulation)')
                 + ', the NB mixture and network-driven modes along them and the full simulation are projected onto it.')
-    smp_data = _sample_labels(R.stages['Data'], R.sub['Data'])
+    smp_data = _sample_labels(stages['Data'], sub['Data'])
+    if smp_data is not None and len(np.unique(smp_data)) < 2:
+        smp_data = None  # a single sample: no sample panel
     gs = gridspec.GridSpec(2 + (smp_data is not None), len(names), figure=fig, left=0.03, right=0.96, top=0.89,
                            bottom=0.12, hspace=0.12, wspace=0.05)
     sca = None
     if smp_data is not None:  # samples of the observed data
-        _umap_sample(fig.add_subplot(gs[2, 0]), R.umap['Data'], smp_data, 'Data — samples')
+        _umap_sample(fig.add_subplot(gs[2, 0]), umap['Data'], smp_data, 'Data — samples')
     for j, k in enumerate(names):
-        A = R.stages[k]
-        sca = _umap_time(fig.add_subplot(gs[0, j]), R.umap[k], R.times(A, R.sub[k]), vmin, vmax,
+        A = stages[k]
+        sca = _umap_time(fig.add_subplot(gs[0, j]), umap[k], R.times(A, sub[k]), vmin, vmax,
                          'Data (observed)' if k == 'Data' else k)
         ax = fig.add_subplot(gs[1, j])
         if R.has_ct:
-            _umap_celltype(ax, R.umap[k], R.labels(A, R.sub[k]), R.color_map, '')
+            _umap_celltype(ax, umap[k], R.labels(A, sub[k]), R.color_map, '')
         else:
             ax.axis('off')
     cax = fig.add_axes([0.965, 0.55, 0.008, 0.3])
@@ -1093,23 +1234,52 @@ def _model_pages(pdf, R):
     _celltype_legend(fig, R.color_map, y=0.03)
     pdf.savefig(fig); plt.close(fig)
 
-    # Page: cell-type proportions, gene-pair correlations, proteins
+
+def _mode_shuffle(ref_stage, beta_stage, X, rng):
+    """X (reference states) with each gene shuffled among the states of the same sample, time and mode (kon of the
+    aligned NB-mixture states, layer 'kon' of check_sim_to_data); None if unavailable or not aligned."""
+    if 'kon' not in beta_stage.layers or beta_stage.n_obs != ref_stage.n_obs or X.shape[0] != ref_stage.n_obs:
+        return None
+    kon = _dense(beta_stage.layers['kon']).astype(float)
+    smp = (ref_stage.obs['dataset_id'].astype(str).values if 'dataset_id' in ref_stage.obs
+           else np.zeros(ref_stage.n_obs, dtype=str))
+    base = np.unique(np.char.add(np.char.add(smp.astype(str), '|'),
+                                 pd.to_numeric(ref_stage.obs['time']).values.astype(str)), return_inverse=True)[1]
+    out = np.empty_like(X)
+    for g in range(X.shape[1]):
+        lev = np.unique(np.round(kon[:, g], 6), return_inverse=True)[1]
+        key = base * (lev.max() + 1) + lev
+        pos = np.argsort(key, kind='stable')
+        out[pos, g] = X[np.lexsort((rng.random(len(key)), key)), g]
+    return out
+
+
+def _model_checks_page(pdf, R, samples=None, label=''):
+    """Cell-type proportions, gene-pair correlations and proteins of the cells of samples (None = all)."""
+    V = R.view_of(samples)
+    if V is None:
+        _error_page(pdf, f'1. Generative model — quantitative checks{label}',
+                    f'no cell of the samples {samples} in a stage (no obs["dataset_id"] or empty)')
+        return
+    stages = V['stages']
+    names = list(stages)
     fig = plt.figure(figsize=A4_LANDSCAPE)
-    _page_title(fig, '1. Generative model — quantitative checks',
-                'Reference = RNA of the trajectories equivalent to the simulation '
+    _page_title(fig, f'1. Generative model — quantitative checks{label}',
+                ('' if samples is None else f"Samples {', '.join(samples)}. ")
+                + 'Reference = RNA of the trajectories equivalent to the simulation '
                 + ('(growth-weighted: simulation with proliferation).' if R.growth_ref else '(without proliferation).'))
     gs = gridspec.GridSpec(2, 3, figure=fig, left=0.06, right=0.97, top=0.88, bottom=0.12, hspace=0.45, wspace=0.3)
     if R.has_ct:
-        prop = pd.DataFrame({k: _proportions(R.stages[k], R.categories) for k in names}).T
+        prop = pd.DataFrame({k: _proportions(stages[k], R.categories) for k in names}).T
         ax = fig.add_subplot(gs[0, 0]); _stacked_bars(ax, prop, R.color_map, 'Cell-type proportions'); _panel_label(ax, 'A', -0.2)
         ax = fig.add_subplot(gs[0, 1:])
-        _proportions_over_time(ax, _proportions_by_time(R.stages['Reference'], R.categories),
-                               _proportions_by_time(R.stages['Simulation'], R.categories), R.color_map,
+        _proportions_over_time(ax, _proportions_by_time(stages['Reference'], R.categories),
+                               _proportions_by_time(stages['Simulation'], R.categories), R.color_map,
                                'Cell-type proportions over time', 'Reference', 'Simulation')
         _panel_label(ax, 'B', -0.08)
 
     # Gene-pair correlations, reference vs NB mixture / simulation
-    ref = _dense(R.stages['Reference'].X).astype(float)
+    ref = _dense(stages['Reference'].X).astype(float)
     iu = np.triu_indices(ref.shape[1], k=1)
 
     def _pair_corr(X):
@@ -1118,8 +1288,16 @@ def _model_pages(pdf, R):
         return np.corrcoef(X.T)[iu]
 
     c_ref = _pair_corr(ref)
+    # Ceiling of a model with these modes and genes independent given them: reference shuffled per gene within
+    # (sample, time, mode of the state)
+    shuffled = _mode_shuffle(stages['Reference'], stages['NB mixture'], ref, R.rng)
+    ceiling = None
+    if shuffled is not None:
+        c_sh = _pair_corr(shuffled)
+        ok = np.isfinite(c_ref) & np.isfinite(c_sh)
+        ceiling = np.corrcoef(c_ref[ok], c_sh[ok])[0, 1]
     for j, (k, lab) in enumerate([('NB mixture', 'C'), ('Simulation', 'D')]):
-        c_k = _pair_corr(R.stages[k].X)
+        c_k = _pair_corr(stages[k].X)
         ok = np.isfinite(c_ref) & np.isfinite(c_k)
         r = np.corrcoef(c_ref[ok], c_k[ok])[0, 1]
         ax = fig.add_subplot(gs[1, j])
@@ -1128,16 +1306,16 @@ def _model_pages(pdf, R):
         ax.plot(lim, lim, 'r--', lw=0.8, alpha=0.6)
         ax.set_xlabel('Reference gene-pair correlation', fontsize=8)
         ax.set_ylabel(f'{k} gene-pair correlation', fontsize=8)
-        ax.set_title(f'Gene-pair correlations vs {k}\n(R = {r:.2f})', fontsize=9)
+        ax.set_title(f'Gene-pair correlations vs {k}\n(R = {r:.2f}'
+                     + ('' if ceiling is None else f'; mode-shuffle ceiling {ceiling:.2f}') + ')', fontsize=9)
         ax.tick_params(labelsize=7)
         _panel_label(ax, lab, -0.2)
 
-    # Proteins: embedding learned on the trajectories, simulation projected
-    if all(v is not None for v in R.prot.values()):
+    # Proteins: embedding learned once on the trajectories of these cells, simulation projected
+    Pt, Ps, red = V['prot'].get('Trajectories'), V['prot'].get('Simulation'), V['prot_red']
+    if red is not None and Pt is not None and Ps is not None:
         sub_gs = gs[1, 2].subgridspec(1, 2, wspace=0.05)
-        Pt, Ps = R.prot['Trajectories'], R.prot['Simulation']
-        it, is_ = R.prot_sub, R._subsample(Ps)
-        red = R.prot_reducer  # learned once on the protein trajectories
+        it, is_ = V['prot_sub'], R._subsample(Ps)
         emb_s = red.transform(_dense(Ps.X[is_]).astype(float))
         tt, ts = R.times(Pt, it), R.times(Ps, is_)
         lo, hi = min(tt.min(), ts.min()), max(tt.max(), ts.max())
@@ -1538,7 +1716,7 @@ def _integration_page(pdf, R, rep, sample_key='dataset_id'):
               fontsize=6.5, frameon=False)
     ax.set_title('Mode means per sample (all modes)', fontsize=9)
 
-    if 'counts_raw' in A.layers and sample_key in A.obs:
+    if 'counts_raw' in A.layers and sample_key in A.obs and R.condition_genes is None:  # common gene space only
         idx = _time_subsample(pd.to_numeric(A.obs['time']).values, R.n_umap, R.rng)
         lab = A.obs[sample_key].astype(str).values[idx]
         s_i = (A.obs['depth_factor'].to_numpy(dtype=float)[idx, None]
@@ -1926,12 +2104,10 @@ class _Dynamics:
         cdir = os.path.join(R.p, 'cardamomOT')
         load = lambda name: np.load(os.path.join(cdir, name)) if os.path.exists(os.path.join(cdir, name)) else None
         rna = load('data_rna.npy')
-        prot = load('data_prot_forsimul.npy')
-        if prot is None:
-            prot = load('data_prot.npy')
+        prot = load('data_prot.npy')  # trajectories of fit_network (the only saved ones)
         self.times = load('data_times.npy')
         if rna is None or prot is None or self.times is None:
-            raise FileNotFoundError('trajectory files (data_rna / data_prot[_forsimul] / data_times) not found')
+            raise FileNotFoundError('trajectory files (data_rna / data_prot / data_times) not found')
         self.ns = rna.shape[1] - len(R.genes)
         self.prot_full = prot
         self.P = prot[:, self.ns:]
@@ -1964,14 +2140,13 @@ class _Dynamics:
         self.R_opt = load('data_R_opt.npy')
         if self.R_opt is not None and len(self.R_opt) != len(self.times):
             self.R_opt = None
-        self.mlp = None
-        pt, npt = os.path.join(cdir, 'prolif_network.pt'), load('prolif_network_n_proteins.npy')
-        if os.path.exists(pt) and npt is not None:
-            from ..inference.proliferations import load_proliferation_mlp
-            self.mlp = load_proliferation_mlp(pt, int(np.ravel(npt)[0]))
+        # Proliferation MLP: one, or one per network condition (ConditionProliferation, rows routed by sample)
+        from ..inference.proliferations import load_proliferation, ConditionProliferation
+        self.mlp = load_proliferation(cdir)
+        self.per_condition_mlp = isinstance(self.mlp, ConditionProliferation)
         # Stimuli of the interval starting at each state (as in training and simulation)
         self.stim_state = interval_stimulus(prot, self.times, self.ns) if self.ns > 0 else np.zeros((len(self.times), 0))
-        self.R_mlp = self.mlp.predict(self.P, self.stim_state) if self.mlp is not None else None
+        self.R_mlp = self.mlp.predict(self.P, self.stim_state, samples=self.samples) if self.mlp is not None else None
         # Part of the inference stimuli (perturbation_inference, RATEk): not in the MLP, added back with the
         # inference schedule (rate of each state over the interval it starts, as for R_opt)
         self.R_stim = None
@@ -2012,10 +2187,11 @@ class _Dynamics:
             d_cells = np.maximum(b_cells - net, 0.0)
         self.birth_prior, self.death_prior = self._per_state(b_cells), self._per_state(d_cells)
         self.birth_mlp = self.death_mlp = None
-        if self.mlp is not None and int(getattr(self.mlp, 'two_heads', 0)):
+        nets = self.mlp.nets if self.per_condition_mlp else [self.mlp]
+        if self.mlp is not None and any(n is not None and int(getattr(n, 'two_heads', 0)) for n in nets):
             from .estimate_proliferation import split_net_change
-            self.birth_mlp = self.mlp.predict_birth(self.P, self.stim_state)
-            self.death_mlp = self.mlp.predict_death(self.P, self.stim_state)
+            self.birth_mlp = self.mlp.predict_birth(self.P, self.stim_state, samples=self.samples)
+            self.death_mlp = self.mlp.predict_death(self.P, self.stim_state, samples=self.samples)
             if self.R_stim is not None:  # inference stimuli given apart: their part shared as in the simulations
                 self.birth_mlp, self.death_mlp = split_net_change(self.birth_mlp, self.death_mlp, np.nan_to_num(self.R_stim))
         sim_prolif = bool(R.stages['Simulation'].uns.get('proliferation', False))
@@ -2025,6 +2201,45 @@ class _Dynamics:
         self.birth_sim_label = ('MLP birth (prior regressed on the state)' if (sim_prolif and self.birth_mlp is not None)
                                 else "prior birth (obs['proliferation_birth_rate'])")
         self.d_t = load('degradations_temporal.npy')
+        self.gene_cols = None  # all genes (for_condition: those of the condition)
+
+    def for_condition(self, Rc):
+        """Dynamics of the trajectories of the samples of the condition view Rc (its slots, its genes, its MLP), real
+        cells indexed in Rc.adata_data."""
+        import copy
+        D = copy.copy(self)
+        names = sorted(Rc.parent.adata_data.obs['dataset_id'].astype(str).unique()) \
+            if 'dataset_id' in Rc.parent.adata_data.obs else ['0']
+        s_idx = [names.index(x) for x in Rc.samples if x in names]
+        T, N = len(self.tu), self.N
+        slots = np.flatnonzero(np.isin(self.samples.reshape(T, N)[0], s_idx))
+        rows = (np.arange(T)[:, None] * N + slots[None, :]).ravel()
+        D.N = len(slots)
+        take = lambda v: None if v is None else np.asarray(v)[rows]
+        for attr in ('times', 'samples', 'prot_full', 'P', 'M', 'rna_ref', 'prior', 'ct', 'R_opt', 'R_mlp', 'R_stim',
+                     'R_learned', 'L_growth', 'birth_prior', 'death_prior', 'birth_mlp', 'death_mlp', 'birth_sim',
+                     'stim_state'):
+            setattr(D, attr, take(getattr(self, attr)))
+        cols = np.asarray(Rc.gene_cols)
+        D.gene_cols = cols
+        D.P, D.M, D.rna_ref = D.P[:, cols], D.M[:, cols], D.rna_ref[:, cols]
+        full = np.concatenate([np.arange(self.ns), self.ns + cols])
+        D.d = None if self.d is None else self.d[..., full]
+        if self.d_t is not None:
+            dt = self.d_t[:, :, s_idx[0]] if self.d_t.ndim == 4 else self.d_t  # kinetics of the condition
+            D.d_t = dt[..., full]
+        # Real cells re-indexed in Rc.adata_data (-1: other condition)
+        pos = np.full(len(Rc.cell_mask), -1)
+        pos[Rc.cell_mask] = np.arange(int(Rc.cell_mask.sum()))
+        D.real_idx = None if self.real_idx is None else np.where(self.real_idx[rows] >= 0,
+                                                                 pos[np.maximum(self.real_idx[rows], 0)], -1)
+        D.prior_cells = None if self.prior_cells is None else self.prior_cells[Rc.cell_mask]
+        if self.per_condition_mlp:  # the condition's own MLP, on its genes (as D.P), and its diagnostics
+            c = int(self.mlp.sample_cond[s_idx[0]])
+            D.mlp, D.per_condition_mlp = self.mlp.nets[c], False
+            name = str(self.mlp.names[c]) if self.mlp.names else str(c)
+            D.mlp_diag = self.mlp_diag.get(name) if isinstance(self.mlp_diag, dict) else None
+        return D
 
     def _per_state(self, per_cell, fill=np.nan):
         if per_cell is None or self.real_idx is None:
@@ -2057,7 +2272,10 @@ class _Dynamics:
             i = self.inter[min(s, self.inter.shape[0] - 1)] if self.inter.ndim == 3 else self.inter
             out[m] = kon_ref_vector(self.prot_full[m].astype(float), (a[:-1] / k1).T, i, b)
             scale[m] = k1 / a[-1]
-        return out[:, self.ns:], scale[:, self.ns:]
+        out, scale = out[:, self.ns:], scale[:, self.ns:]
+        if self.gene_cols is not None:  # genes of the condition (for_condition)
+            out, scale = out[:, self.gene_cols], scale[:, self.gene_cols]
+        return out, scale
 
     def trajectory_velocity(self, X, rate=True):
         """(x_{t+1} − x_t)/Δt along each trajectory slot, the displacement x_{t+1} − x_t if not rate; NaN at the
@@ -2242,6 +2460,8 @@ def _proliferation_pages(pdf, R, D):
         curves.append(('growth OT pass', '#E67E22', '-', np.nanmean(np.exp(ro * dt[:, None]), axis=1)))
     if D.mlp is not None:
         states, _ = growth_path_states(D.prot_full, D.times, ns=D.ns, n_nodes=5)
+        if D.gene_cols is not None:  # genes of the condition (inputs of its MLP)
+            states = states[..., D.gene_cols]
         _, w = quadrature(5)
         S = D.prot_full[:T * N, :D.ns].reshape(T, N, D.ns)[1:, None]       # stimuli of each interval
         integ = (D.mlp.predict(states, S) * w[None, :, None]).sum(axis=1) * dt[:, None]
@@ -2402,7 +2622,9 @@ def _dilution_page(pdf, R, D):
     ns = D.ns
     var = R.adata_data.var
     d1_lit = var['d1'].to_numpy(dtype=float) if 'd1' in var else D.d[1, ns:]
-    d1_fit = np.nanmean(D.d_t[:, 1, ns:], axis=0) if D.d_t is not None else D.d[1, ns:]
+    # Temporal d1 (mean over the samples with kinetics per network condition)
+    d1_tm = None if D.d_t is None else (D.d_t[:, 1] if D.d_t.ndim == 3 else np.nanmean(D.d_t[:, 1], axis=1))
+    d1_fit = np.nanmean(d1_tm[:, ns:], axis=0) if d1_tm is not None else D.d[1, ns:]
     b_states = np.nan_to_num(D.birth_sim)
     b_mean = float(np.mean(b_states))
     hl_lit, hl_eff = np.log(2) / d1_lit, np.log(2) / (d1_fit + b_mean)
@@ -2433,7 +2655,7 @@ def _dilution_page(pdf, R, D):
     dts = np.diff(D.tu)
     T, N = len(D.tu), D.N
     b_int = b_states.reshape(T, N)[:-1].mean(axis=1)
-    d1_int = D.d_t[:, 1, ns:] if D.d_t is not None and len(D.d_t) == len(dts) else np.tile(d1_fit, (len(dts), 1))
+    d1_int = d1_tm[:, ns:] if d1_tm is not None and len(d1_tm) == len(dts) else np.tile(d1_fit, (len(dts), 1))
     f_lit = [np.median(1 - np.exp(-d1_lit * dt)) for dt in dts]
     f_dil = [np.median(1 - np.exp(-(d1_int[k] + b_int[k]) * dt)) for k, dt in enumerate(dts)]
     x = np.arange(len(dts))
@@ -2637,7 +2859,7 @@ def _presentation_page(pdf, R, D, idx, E, V_traj, t, growth, labels=None, color_
 def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
                     normtransform=False, logtransform=True, n_umap=4000, top_regulators=20,
                     top_targets=10, seed=0, depth_embeddings=True, embedding_method_visualization='umap',
-                    protein_dilution=True, classifier_method='random_forest'):
+                    protein_dilution=True, classifier_method='random_forest', select_genes=False):
     """Write the final multi-page PDF report of a CardamomOT run.
 
     Parameters
@@ -2657,12 +2879,14 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
     normtransform, logtransform : bool
         Preprocessing applied before the embeddings.
     depth_embeddings : bool
-        cell_depth_for_representation: mRNA shown at the reference depth (observed / depth factor, model draws
-        without the depth of the cells); False: raw counts and model draws at the depth of the cells.
+        cell_depth_for_representation: mRNA shown as counts / depth factor, for the observed cells and for the model
+        draws (taken at the depth of the cells they mimic); False: raw counts and model draws at the depth of the cells.
     embedding_method_visualization : str
         'umap', 'pca' or 'phate' (every 2-D embedding of the report).
     classifier_method : str
         Cell types of the model outputs: 'random_forest' or 'logistic' (per-sample classifiers on the data).
+    select_genes : bool
+        Genes of the model chosen by the gene selection: the UMAP of all the cells is also drawn on these genes.
     n_umap : int or None
         Max cells per dataset used in UMAPs (stratified by time); None = all.
     top_regulators, top_targets : int
@@ -2711,49 +2935,74 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
     with PdfPages(out_path) as pdf:
         _cover_page(pdf, R, info, status)
         rep_path = os.path.join(p, 'cardamomOT', 'integration_report.csv')
-        sections = [('Data — UMAP of all the cells', lambda: _data_umap_page(pdf, R, seed)),
-                    ('Teaser — displacement fields', lambda: _teaser_page(pdf, R, seed)),
-                    ('Teaser — displacement fields over time', lambda: _teaser_time_pages(pdf, R, seed)),
-                    ('Classical OT — cell-type transitions', lambda: _classical_ot_pages(pdf, R, seed)),
-                    ('Teaser — CardamomOT cell-type transitions', lambda: _cardamom_transition_page(pdf, R)),
-                    ('Genes of the model', lambda: _gene_list_page(pdf, R))]
+        # Network conditions: every section below that depends on the cells of a condition is drawn condition by
+        # condition, on its own view (its samples, its genes with select_genes_per_condition, its embeddings)
+        conds = R.conditions
+        view = lambda c: R.condition_view(c, conds[c])
+        per_condition = lambda title, fn: [(f'{title} — condition {c}', (lambda c=c: fn(view(c))), c) for c in conds] \
+            if conds else [(title, lambda: fn(R), None)]
+        sections = [('Data — UMAP of all the cells', lambda: _data_umap_page(pdf, R, seed), None)]
+        if select_genes and R.condition_genes is None:  # one gene space: the cells of every condition on it
+            sections.append(('Data — UMAP of all the cells, genes of the gene selection',
+                             lambda: _data_umap_page(pdf, R, seed, genes=R.genes), None))
+        sections += per_condition('Teaser — displacement fields', lambda V: _teaser_page(pdf, V, seed))
+        sections += per_condition('Teaser — displacement fields over time', lambda V: _teaser_time_pages(pdf, V, seed))
+        sections += per_condition('Classical OT — cell-type transitions', lambda V: _classical_ot_pages(pdf, V, seed))
+        sections += per_condition('Teaser — CardamomOT cell-type transitions', lambda V: _cardamom_transition_page(pdf, V))
+        if R.condition_genes is None:
+            sections.append(('Genes of the model', lambda: _gene_list_page(pdf, R), None))
+        else:
+            sections += per_condition('Genes of the model', lambda V: _gene_list_page(pdf, V))
         depth_json = os.path.join(p, 'cardamomOT', 'depth_diagnostic.json')
         if os.path.exists(depth_json):
             import json
             depth_csv = os.path.join(p, 'cardamomOT', 'depth_diagnostic.csv')
             sections.append(('0. Per-cell sequencing depth', lambda: _depth_page(
-                pdf, R, json.load(open(depth_json)), pd.read_csv(depth_csv) if os.path.exists(depth_csv) else None)))
-        sections.append(('1. Generative model', lambda: _model_pages(pdf, R)))
+                pdf, R, json.load(open(depth_json)), pd.read_csv(depth_csv) if os.path.exists(depth_csv) else None), None))
+        # Generative model: embeddings learned on the cells of each condition, UMAPs, proportions and reproduction
+        sections += per_condition('1. Generative model', lambda V: _model_umap_page(pdf, V))
+        sections += per_condition('1. Generative model — quantitative checks', lambda V: _model_checks_page(pdf, V))
         idt_path = os.path.join(p, 'cardamomOT', 'identity_mixture.csv')
         if os.path.exists(idt_path):
-            sections.append(('1. Cell-type identity in the mixture', lambda: _identity_page(pdf, R, pd.read_csv(idt_path))))
+            sections.append(('1. Cell-type identity in the mixture',
+                             lambda: _identity_page(pdf, R, pd.read_csv(idt_path)), None))
         if os.path.exists(rep_path):
-            sections.append(('1. Sample integration', lambda: _integration_page(pdf, R, pd.read_csv(rep_path))))
+            sections.append(('1. Sample integration', lambda: _integration_page(pdf, R, pd.read_csv(rep_path)), None))
         for label, mat in cond_networks.items():
             sections.append((f'2. Gene regulatory network{label}', lambda label=label, mat=mat: _grn_pages(
-                pdf, R, mat, ns, show_stim, top_regulators, top_targets, label=label)))
+                pdf, R, mat, ns, show_stim, top_regulators, top_targets, label=label), None))
         if len(cond_networks) > 1:
             sections.append(('2. Similarity between network conditions',
-                             lambda: _network_similarity_page(pdf, R, cond_networks, ns, show_stim)))
+                             lambda: _network_similarity_page(pdf, R, cond_networks, ns, show_stim), None))
         diff_csv = os.path.join(p, 'cardamomOT', 'network_differences_simul.csv')
         if len(cond_networks) > 1 and os.path.exists(diff_csv):
             sections.append(('2. Differences between network conditions',
-                             lambda: _condition_differences_page(pdf, R, pd.read_csv(diff_csv), cond_pen)))
-        sections += [('3. In-silico perturbations', lambda: _perturbation_pages(pdf, R)),
-                     ('4. Proliferation', lambda: _proliferation_pages(pdf, R, dyn())),
-                     ('4. Protein dilution', lambda: _dilution_page(pdf, R, dyn())),
-                     ('5. Learned dynamics — velocity fields', lambda: _velocity_pages(pdf, R, dyn()))]
+                             lambda: _condition_differences_page(pdf, R, pd.read_csv(diff_csv), cond_pen), None))
+        # Perturbations, proliferation, dilution, velocity fields, test and validation: per condition
+        dyn_of = lambda V: dyn() if V.parent is None else dyn().for_condition(V)
+        sections += per_condition('3. In-silico perturbations', lambda V: _perturbation_pages(pdf, V))
+        sections += per_condition('4. Proliferation', lambda V: _proliferation_pages(pdf, V, dyn_of(V)))
+        sections += per_condition('4. Protein dilution', lambda V: _dilution_page(pdf, V, dyn_of(V)))
+        sections += per_condition('5. Learned dynamics — velocity fields', lambda V: _velocity_pages(pdf, V, dyn_of(V)))
         if R.test:
-            sections.append(('6. Held-out test cells', lambda: _test_pages(pdf, R)))
-        for r in R.validation:
-            sections.append((f'6. Validation of sample {r}', lambda r=r: _validation_page(pdf, R, r)))
-        for title, fn in sections:
+            sections += per_condition('6. Held-out test cells', lambda V: _test_pages(pdf, V) if V.test else None)
+        if conds:
+            for c in conds:
+                for r in view(c).validation:
+                    sections.append((f'6. Validation of sample {r} — condition {c}',
+                                     lambda r=r, c=c: _validation_page(pdf, view(c), r), c))
+        else:
+            for r in R.validation:
+                sections.append((f'6. Validation of sample {r}', lambda r=r: _validation_page(pdf, R, r), None))
+        for title, fn, c in sections:
+            _PAGE_SUFFIX[0] = '' if c is None else f' — condition {c}'
             try:
                 fn()
             except Exception as e:  # keep the rest of the report if one section fails
                 plt.close('all')
                 print(f"[report] Warning: section '{title}' failed: {e!r}")
                 _error_page(pdf, title, repr(e))
+        _PAGE_SUFFIX[0] = ''
         d = pdf.infodict()
         d['Title'] = f'CardamomOT report — {os.path.basename(os.path.normpath(p))}'
         d['Author'] = 'CardamomOT'

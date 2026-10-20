@@ -290,7 +290,7 @@ def simulate_n(model_base, adata_ref, ns, sim_times, n_sims,
         m = copy.deepcopy(model_base)
         # Ré-initialiser les conditions initiales
         if cardamom_dir is not None:
-            fwd_prot = os.path.join(cardamom_dir, 'data_prot_forsimul.npy')
+            fwd_prot = os.path.join(cardamom_dir, 'data_prot.npy')
             fwd_kon  = os.path.join(cardamom_dir, 'data_kon_theta.npy')
             if os.path.exists(fwd_prot):
                 m.prot      = np.load(fwd_prot)

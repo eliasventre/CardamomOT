@@ -30,7 +30,9 @@ Optional:
 Output files (selected genes only):
     - Data/data_full.h5ad: every cell of the samples used for the inference
     - Data/data_train.h5ad, data_test.h5ad: cells with obs['split'] = 'train' / 'test' (data_train with split = 'train';
-      data_test whenever there are test cells: split = 'train' or samples with remove_from_inference)
+      data_test whenever there are test cells: split = 'train' or samples with remove_from_inference); with
+      select_genes_per_condition, the union of the per-condition selections and uns['condition_genes']
+      ({network_condition: genes}, also cardamomOT/condition_genes.json)
     - cardamomOT/gene_selection_report.csv: role of each selected gene (query, entropy, Steiner, regulator), its
       Steiner parent, and its regulators (is_regulated_by) and targets (regulates) inside the selection: edges of
       the global network with probability >= selection_edge_prob, feasible in the literature (path of at most
@@ -150,6 +152,7 @@ def main(argv):
 
     genes_list_init = sorted(adata.var_names.values)
     genes_list_final = genes_list_init
+    condition_sets = None  # {condition: genes} with select_genes_per_condition
 
     if change:
         model = configure(NetworkModel_beta(adata.shape[1], n_stimuli=n_inference_stimuli(input_dir(p))), opts)
@@ -171,13 +174,19 @@ def main(argv):
                       or os.path.join(input_dir(p), 'stimulus_schedule_inference.txt'))
         stim = np.loadtxt(sched_path) if os.path.exists(sched_path) else None
         model._stim_schedule = model._build_stimulus_schedule(tu, stim)
-        stim = np.array([model._stim_schedule[t] for t in tu])
         # Per-sample schedules (sample_id rows of stimulus_inference_schedule): one schedule per sample
         from CardamomOT.schedules import sample_names
         names_s = sample_names(ad_fit)
         model.set_sample_names(names_s)
-        if model._stim_schedule.has_overrides():
-            stim = {None: stim, **{s: np.array([model._stim_schedule.at(t, s) for t in tu]) for s in names_s}}
+
+        def stim_at(times_sel):
+            """Stimulus rows at the sorted times of the cells used (default, and per sample with overrides)."""
+            st = np.array([model._stim_schedule[t] for t in times_sel])
+            if model._stim_schedule.has_overrides():
+                st = {None: st, **{s: np.array([model._stim_schedule.at(t, s) for t in times_sel]) for s in names_s}}
+            return st
+
+        stim = stim_at(tu)
 
         # Fate drivers of the classical OT (module representatives, round robin over the fates)
         drivers = []
@@ -189,36 +198,71 @@ def main(argv):
         elif model.n_driver_genes:
             print("[select_genes] No cardamomOT/classical_OT/fate_drivers.csv (run_classical_OT): no fate drivers")
 
-        # Combination of the per-sample networks: 'any' for independent condition networks
-        combo = str(model.sample_network_combination).lower()
-        if combo == 'auto':
-            n_cond = ad_fit.obs['network_condition'].nunique() if 'network_condition' in ad_fit.obs else 1
-            combo = 'any' if (n_cond >= 2 and float(model.network_condition_pen) == 0) else 'consensus'
-        if combo not in ('any', 'consensus'):
-            raise ValueError(f"sample_network_combination '{combo}': use 'auto', 'consensus' or 'any'")
-        selected, df_report, net, prior = select_genes(
-            ad_fit, queries, model.num_max_genes, n_query=model.n_query_genes, n_entropy=model.n_entropy_genes,
-            stim=stim, cell_type_key=resolve_cell_type_obs(ad_fit, 'selection'),
-            n_hvg=model.n_hvg_selection, n_top_entropy=model.n_top_entropy, n_cells_entropy=model.n_cells_entropy,
-            network_method=model.network_method, network_params=model.network_method_params,
-            project_path=p, k_in=model.k_in_steiner, k_stim=model.k_stim_steiner,
-            min_edge_prob=model.min_edge_prob, edge_prior=model.edge_prior, null_network=model.null_network,
-            closure_min=model.closure_min, literature=use_literature,
-            literature_depth=model.literature_depth, literature_weight=model.literature_weight,
-            literature_resources=model.literature_resources, max_free_params=max_free,
-            min_entropy_change=model.min_entropy_change, min_nb_separation=model.min_nb_separation,
-            n_cells_mixture=model.batch_size_mixture, seuil_mixture=model.seuil, n_cells_network=model.batch_size_mixture,
-            forced_genes=perturbed_genes(p, list(adata.var_names)), stimulus_targets=read_stimulus_targets(input_dir(p)),
-            drivers=drivers, n_driver=int(model.n_driver_genes), entropy_preselection=bool(model.entropy_preselection),
-            use_depth_factor=model.use_depth_factor, report_edge_prob=model.selection_edge_prob,
-            sample_combination=combo, seed=model.seed)
+        from CardamomOT.inference.depth_model import set_depth_model
+        set_depth_model(model.depth_model)  # NB of the depth factors in the separation of the modes
+
+        def run(ad_sel, combo):
+            """select_genes on the cells ad_sel (sample_combination combo)."""
+            return select_genes(
+                ad_sel, queries, model.num_max_genes, n_query=model.n_query_genes, n_entropy=model.n_entropy_genes,
+                stim=stim_at(np.sort(np.unique(ad_sel.obs['time'].values))), cell_type_key=resolve_cell_type_obs(ad_sel, 'selection'),
+                n_hvg=model.n_hvg_selection, n_top_entropy=model.n_top_entropy, n_cells_entropy=model.n_cells_entropy,
+                network_method=model.network_method, network_params=model.network_method_params,
+                project_path=p, k_in=model.k_in_steiner, k_stim=model.k_stim_steiner,
+                min_edge_prob=model.min_edge_prob, edge_prior=model.edge_prior, null_network=model.null_network,
+                closure_min=model.closure_min, literature=use_literature,
+                literature_depth=model.literature_depth, literature_weight=model.literature_weight,
+                literature_resources=model.literature_resources, max_free_params=max_free,
+                min_entropy_change=model.min_entropy_change, min_nb_separation=model.min_nb_separation,
+                n_cells_mixture=model.batch_size_mixture, seuil_mixture=model.seuil,
+                n_cells_network=model.batch_size_mixture or 1000,  # cost of the network: capped without batch_size_mixture
+                forced_genes=perturbed_genes(p, list(adata.var_names)), stimulus_targets=read_stimulus_targets(input_dir(p)),
+                drivers=drivers, n_driver=int(model.n_driver_genes), entropy_preselection=bool(model.entropy_preselection),
+                use_depth_factor=model.use_depth_factor, report_edge_prob=model.selection_edge_prob,
+                sample_combination=combo, seed=model.seed)
 
         out_dir = os.path.join(p, 'cardamomOT')
         os.makedirs(out_dir, exist_ok=True)
+        combo_set = str(model.sample_network_combination).lower()
+        if combo_set not in ('auto', 'any', 'consensus'):
+            raise ValueError(f"sample_network_combination '{combo_set}': use 'auto', 'consensus' or 'any'")
+        conds = (np.sort(ad_fit.obs['network_condition'].astype(str).unique())
+                 if 'network_condition' in ad_fit.obs else np.array([]))
+        if model.select_genes_per_condition and len(conds) >= 2:
+            # One selection per network condition, as if CardamomOT were run on each one (consensus of its samples)
+            condition_sets, reports = {}, []
+            nc = ad_fit.obs['network_condition'].astype(str).values
+            for c in conds:
+                print(f"[select_genes] Condition {c}: selection on its {int(np.sum(nc == c))} cells")
+                sel_c, rep_c, net_c, _ = run(ad_fit[nc == c].copy(), 'consensus' if combo_set == 'auto' else combo_set)
+                condition_sets[str(c)] = sorted(sel_c)
+                reports.append(rep_c.assign(condition=str(c)))
+                if net_c is not None:
+                    np.savez_compressed(os.path.join(out_dir, f'global_network_{c}.npz'), **net_c)
+            selected = sorted(set().union(*condition_sets.values()))
+            df_report, net, prior = pd.concat(reports, ignore_index=True), None, None
+            if use_literature and build_prior:
+                # Prior of the union (intermediates outside it unobserved), masked per condition at use
+                from CardamomOT.inference.literature import literature_graph
+                from CardamomOT.inference.halflife_db import detect_species
+                species = str(model.species).lower()
+                species = detect_species(selected)[0] if species == 'auto' else species
+                prior = literature_graph(species, str(model.literature_resources).lower()).prior(
+                    selected, int(model.literature_depth))
+            print(f"[select_genes] Genes per condition: " + '; '.join(f"{c}: {len(v)}" for c, v in condition_sets.items())
+                  + f"; union {len(selected)}, shared by every condition "
+                  f"{len(set.intersection(*[set(v) for v in condition_sets.values()]))}")
+        else:
+            # Combination of the per-sample networks: 'any' for independent condition networks
+            combo = combo_set
+            if combo == 'auto':
+                combo = 'any' if (len(conds) >= 2 and float(model.network_condition_pen) == 0) else 'consensus'
+            selected, df_report, net, prior = run(ad_fit, combo)
+
         df_report.to_csv(os.path.join(out_dir, 'gene_selection_report.csv'), index=False)
         if net is not None:
             np.savez_compressed(os.path.join(out_dir, 'global_network.npz'), **net)
-        print(f"[select_genes] Saved gene_selection_report.csv and global_network.npz to {out_dir}")
+        print(f"[select_genes] Saved gene_selection_report.csv and the selection network(s) to {out_dir}")
         genes_list_final = [g for g in genes_list_init if g in set(selected)]
         ref_path = os.path.join(out_dir, 'ref_network.csv')
         if prior is not None and build_prior:
@@ -288,11 +332,20 @@ def main(argv):
                     os.remove(path)  # test cells of an earlier split
                 continue
             sub = adata[mask, genes_list_final].copy()
+            sub.uns.pop('condition_genes', None)
+            if condition_sets is not None:
+                sub.uns['condition_genes'] = condition_sets  # genes of each network condition (union in var)
             sub.write(path)
             print(f"[select_genes] Saved {path}: {sub.n_obs} cells, {sub.n_vars} genes")
     except Exception as e:
         print(f"[select_genes] Error saving the datasets: {e}")
         sys.exit(1)
+    sets_path = os.path.join(p, 'cardamomOT', 'condition_genes.json')
+    if condition_sets is not None:
+        from CardamomOT.condition_genes import save_sets
+        save_sets(sets_path, condition_sets)
+    elif os.path.exists(sets_path) and change:
+        os.remove(sets_path)  # per-condition sets of an earlier selection
     print("[select_genes] Gene selection completed successfully")
 
 

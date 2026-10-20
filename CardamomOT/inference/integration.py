@@ -14,11 +14,13 @@ i.e. scipy nbinom(n=k, p=c/(1+c)), mean k/c.
 import numpy as np
 from scipy.stats import nbinom
 
+from .depth_model import nb_numpy_params
+
 
 def zinb_cdf(x, k, c, pi0, s=1.0):
-    """CDF of the zero-inflated NB at integer x (-1 → 0); s: per-cell depth factors (rate c / s)."""
+    """CDF of the zero-inflated NB at integer x (-1 → 0); s: per-cell depth factors (depth_model)."""
     x = np.asarray(x, dtype=float)
-    F = pi0 + (1 - pi0) * nbinom.cdf(x, k, c / (s + c))
+    F = pi0 + (1 - pi0) * nbinom.cdf(x, *nb_numpy_params(k, c, s))
     return np.where(x < 0, 0.0, F)
 
 
@@ -26,7 +28,7 @@ def zinb_ppf(u, k, c, pi0, s=1.0):
     """Quantile function of the zero-inflated NB (s: per-cell depth factors)."""
     u = np.asarray(u, dtype=float)
     v = np.clip((u - pi0) / max(1 - pi0, 1e-12), 0.0, 1 - 1e-12)
-    return np.where(u <= pi0, 0.0, nbinom.ppf(v, k, c / (s + c)))
+    return np.where(u <= pi0, 0.0, nbinom.ppf(v, *nb_numpy_params(k, c, s)))
 
 
 def quantile_match(x, src, dst, rng, s=1.0):

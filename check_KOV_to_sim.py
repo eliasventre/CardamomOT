@@ -28,6 +28,7 @@ import anndata as ad
 from CardamomOT import NetworkModel
 from CardamomOT.inputs import input_dir
 from CardamomOT.inference.integration import nb_cell_parameters
+from CardamomOT.inference.depth_model import nb_numpy_params
 from CardamomOT.inference.depth import simulation_depth
 import scipy.sparse
 import os
@@ -142,7 +143,7 @@ def main(argv):
     ns = mixture_parameters.shape[-1] - G
     # NB parameters of each simulated cell: its sample's mixture if per-sample (identical otherwise)
     k1_sim, c_sim, pz_sim = nb_cell_parameters(mixture_parameters, pi_zinb, _sim_sample_idx(samples_traj, times_simulation))
-    # Depth factors: each simulated cell drawn at the depth of the real cell it mimics (p = c / (c + s))
+    # Depth factors: each simulated cell drawn at the depth of the real cell it mimics (depth_model)
     depth_cells = (adata.obs['depth_factor'].values.astype(float)
                    if (depth_factor_used(p) and 'depth_factor' in adata.obs) else None)
     idx_path = os.path.join(p, 'cardamomOT', 'data_traj_real_idx.npy')
@@ -187,10 +188,8 @@ def main(argv):
         zero_mask = (np.random.uniform(0, 1, data_sim[1:, :].shape) < pz_sim.T)
         print(f'[check_KOV_to_sim] New zeros ratio for {label}: {np.sum(zero_mask == 1)/np.size(data_sim[1:, :]):.3f}')
 
-        data_sim[1:, :] = np.random.negative_binomial(
-            (k1_sim * vect_kon_sim)[:, ns:].T,
-            (c_sim / (c_sim + s_sim))[:, ns:].T
-        )
+        n_nb, p_nb = nb_numpy_params(k1_sim * vect_kon_sim, c_sim, s_sim, model.depth_model)
+        data_sim[1:, :] = np.random.negative_binomial(n_nb[:, ns:].T, p_nb[:, ns:].T)
         data_sim[1:, :] = np.where(zero_mask, 0, data_sim[1:, :])
 
         # Create AnnData object for simulated RNA
@@ -200,10 +199,12 @@ def main(argv):
             # sample of each simulated cell (the classifier of cell_type is per sample)
             _names = np.asarray(sorted(adata.obs['dataset_id'].astype(str).unique()))
             adata_sim.obs['dataset_id'] = _names[np.minimum(_idx.astype(int), len(_names) - 1)]
-        if depth_cells is not None:
-            # Same draw at the reference depth (s = 1), shown by the report with cell_depth_for_representation
-            x = np.random.negative_binomial((k1_sim * vect_kon_sim)[:, ns:], (c_sim / (c_sim + 1.0))[:, ns:])
-            adata_sim.layers['reference_depth'] = np.where(np.random.uniform(0, 1, x.shape) < pz_sim, 0, x)
+        if np.ndim(s_sim):
+            # Depth of the draw: the report divides data and draws by it (cell_depth_for_representation)
+            adata_sim.obs['depth_factor'] = np.ravel(s_sim)
+        from CardamomOT.condition_genes import mask_stage
+        adata_sim.var = adata.var.copy()
+        mask_stage(adata_sim, adata)  # genes outside each sample's condition (select_genes_per_condition): 0
         adata_sim.var = adata.var.copy()
         adata_sim.obs["combo_label"] = label
         adata_sim.obs['time'] = times_simulation

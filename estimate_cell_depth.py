@@ -106,7 +106,11 @@ def main(argv):
         print(f"{TAG} Error: {len(missing)} cells of Data/data.h5ad absent from {src_path} (first: {list(missing[:5])})")
         sys.exit(1)
     if src is not target:
-        src = src[target.obs_names]
+        # Counts of data_complete.h5ad, cell annotations (time, sample, cell type) of Data/data.h5ad
+        src = src[target.obs_names].copy()
+        meta = ad.AnnData(obs=target.obs.copy())
+        harmonize_obs(meta)
+        src.obs = meta.obs
 
     times = src.obs['time'].values.astype(float) if 'time' in src.obs else np.zeros(src.n_obs)
     samples = src.obs['dataset_id'].values if 'dataset_id' in src.obs else None
@@ -122,7 +126,7 @@ def main(argv):
           f"{len(np.unique(groups_est))} (sample, time{', ' + ct_key if (ct_key and model.depth_by_cell_type) else ''}) "
           f"groups; diagnostic within {len(np.unique(groups))} groups (sample, time{', ' + ct_key if ct_key else ''})")
     doublet = src.obs['doublet_score'].values if 'doublet_score' in src.obs else None
-    per_group, glob = diagnose_depth(src.X, lib, groups, times, cts, s, doublet, n_cells=model.batch_size_mixture,
+    per_group, glob = diagnose_depth(src.X, lib, groups, times, cts, s, doublet, n_cells=model.batch_size_mixture or 1024,
                                      seuil=model.seuil, seed=model.seed)
     applied = bool(glob['recommended'] and allow)
     glob.update(estimated=True, method=method, allow_depth_correction=allow, applied=applied, source=src_path,

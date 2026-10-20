@@ -56,8 +56,9 @@ class ProliferationMLP(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.r_mean + self.r_scale * self.net((x - self.x_mean) / self.x_std).squeeze(-1)
 
-    def predict(self, prot: np.ndarray, stim=None) -> np.ndarray:
-        """prot: (..., n_proteins), stim: (..., n_stim) or broadcastable (ignored if n_stim = 0) → R (...)."""
+    def predict(self, prot: np.ndarray, stim=None, samples=None) -> np.ndarray:
+        """prot: (..., n_proteins), stim: (..., n_stim) or broadcastable (ignored if n_stim = 0) → R (...); samples
+        (sample index of the rows) only used by ConditionProliferation."""
         prot = np.asarray(prot, dtype=np.float32)
         k = int(self.n_stim)
         if k > 0:
@@ -75,7 +76,7 @@ class ProliferationMLP(nn.Module):
             prot = np.concatenate([np.broadcast_to(stim, prot.shape[:-1] + (k,)), prot], axis=-1)
         return torch.as_tensor(prot, dtype=torch.float32)
 
-    def predict_rates(self, prot: np.ndarray, stim=None):
+    def predict_rates(self, prot: np.ndarray, stim=None, samples=None):
         """(birth, death) of the states: regressed prior rates (two heads), else (max(R, 0), max(−R, 0))."""
         self.eval()
         with torch.no_grad():
@@ -85,13 +86,86 @@ class ProliferationMLP(nn.Module):
             R = self.forward(x).numpy()
         return np.maximum(R, 0.0), np.maximum(-R, 0.0)
 
-    def predict_birth(self, prot: np.ndarray, stim=None) -> np.ndarray:
+    def predict_birth(self, prot: np.ndarray, stim=None, samples=None) -> np.ndarray:
         """Birth rate b of the states (dilution)."""
         return self.predict_rates(prot, stim)[0]
 
-    def predict_death(self, prot: np.ndarray, stim=None) -> np.ndarray:
+    def predict_death(self, prot: np.ndarray, stim=None, samples=None) -> np.ndarray:
         """Death rate δ of the states."""
         return self.predict_rates(prot, stim)[1]
+
+
+class ConditionProliferation:
+    """
+    One ProliferationMLP per network condition (ProliferationMLP_per_condition): the rows (first axis of prot) are
+    routed by the condition of their sample (samples, required), each MLP reading the proteins of its condition's
+    genes (cols[c], indices among the proteins without stimuli). Same predict interface as ProliferationMLP.
+    """
+
+    def __init__(self, nets, cols, sample_cond, names=None):
+        self.nets, self.cols = list(nets), [np.asarray(c, dtype=int) for c in cols]
+        self.sample_cond, self.names = np.asarray(sample_cond, dtype=int), names
+        self.diagnostics = {str(names[c] if names else c): getattr(n, 'diagnostics', None)
+                            for c, n in enumerate(self.nets) if n is not None}
+
+    def _route(self, fn, prot, stim, samples, n_out=1):
+        if samples is None:
+            raise ValueError("ConditionProliferation: the sample of each row is needed (samples)")
+        prot = np.asarray(prot, dtype=np.float32)
+        cond = self.sample_cond[np.minimum(np.asarray(samples, dtype=int), len(self.sample_cond) - 1)]
+        outs = [np.zeros(prot.shape[:-1]) for _ in range(n_out)]
+        st = None if stim is None else np.asarray(stim, dtype=np.float32)
+        if st is not None:
+            st = np.broadcast_to(st, prot.shape[:-1] + st.shape[-1:])
+        for c, net in enumerate(self.nets):
+            rows = cond == c
+            if net is None or not rows.any():
+                continue
+            res = fn(net, prot[rows][..., self.cols[c]], None if st is None else st[rows])
+            for o, r in zip(outs, res if n_out > 1 else (res,)):
+                o[rows] = r
+        return outs[0] if n_out == 1 else tuple(outs)
+
+    def predict(self, prot, stim=None, samples=None):
+        return self._route(lambda n, p, s: n.predict(p, s), prot, stim, samples)
+
+    def predict_rates(self, prot, stim=None, samples=None):
+        return self._route(lambda n, p, s: n.predict_rates(p, s), prot, stim, samples, n_out=2)
+
+    def predict_birth(self, prot, stim=None, samples=None):
+        return self.predict_rates(prot, stim, samples)[0]
+
+    def predict_death(self, prot, stim=None, samples=None):
+        return self.predict_rates(prot, stim, samples)[1]
+
+    def save(self, cardamom_dir):
+        """prolif_network_<c>.pt per condition and prolif_network_conditions.json (genes, sample conditions)."""
+        import json
+        import os
+        for c, net in enumerate(self.nets):
+            if net is not None:
+                torch.save(net.state_dict(), os.path.join(cardamom_dir, f'prolif_network_{c}.pt'))
+        with open(os.path.join(cardamom_dir, 'prolif_network_conditions.json'), 'w') as fh:
+            json.dump({'names': self.names, 'cols': [c.tolist() for c in self.cols],
+                       'sample_cond': self.sample_cond.tolist(),
+                       'n_inputs': [None if n is None else int(n.net[0].in_features) for n in self.nets]}, fh)
+
+
+def load_proliferation(cardamom_dir):
+    """Proliferation model saved by infer_network_simul: ConditionProliferation (prolif_network_conditions.json) or a
+    single ProliferationMLP (prolif_network.pt); None if absent."""
+    import json
+    import os
+    js = os.path.join(cardamom_dir, 'prolif_network_conditions.json')
+    if os.path.exists(js):
+        info = json.load(open(js))
+        nets = [None if n is None else load_proliferation_mlp(os.path.join(cardamom_dir, f'prolif_network_{c}.pt'), n)
+                for c, n in enumerate(info['n_inputs'])]
+        return ConditionProliferation(nets, info['cols'], info['sample_cond'], info.get('names'))
+    pt, npt = os.path.join(cardamom_dir, 'prolif_network.pt'), os.path.join(cardamom_dir, 'prolif_network_n_proteins.npy')
+    if os.path.exists(pt) and os.path.exists(npt):
+        return load_proliferation_mlp(pt, int(np.load(npt)[0]))
+    return None
 
 
 def load_proliferation_mlp(path, n_inputs):

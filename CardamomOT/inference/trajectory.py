@@ -50,10 +50,15 @@ def base_kon_vector(theta_basal, theta_inter, y_prot) -> np.ndarray:
             z = theta_basal[j]
             for g in range(G):
                 z += y_prot[i, g] * theta_inter[g, j]
-            e = np.exp(-z)
+            # Stable sigmoid: exp of a negative argument only (no inf / inf for |z| > 709)
+            e = np.exp(-abs(z))
             denom = e + 1.0
-            result[i, j, 0] = e / denom
-            result[i, j, 1] = 1.0 / denom
+            if z >= 0:
+                result[i, j, 0] = e / denom
+                result[i, j, 1] = 1.0 / denom
+            else:
+                result[i, j, 0] = 1.0 / denom
+                result[i, j, 1] = e / denom
 
     return result
 
@@ -305,7 +310,8 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
                             n_iter=1, intensity_prior=1,
                             n_stimuli=1, stim_vals=np.ones(1), scale_proteins=1, weight_fixed=-1.0,
                             b_init=np.zeros(0), b_end=np.zeros(0), alpha_tol=0.6,
-                            d0=np.zeros(0), rna_to_x=1.0, beta=np.zeros(0), z=np.zeros((0, 0))) -> np.ndarray:
+                            d0=np.zeros(0), rna_to_x=1.0, beta=np.zeros(0), z=np.zeros((0, 0)),
+                            g_active=np.zeros(0)) -> np.ndarray:
     """
     OT cost between n1 trajectory ends and n2 real cells: w A + (1 - w) [(1 - 1/G) B + (1/G) P], with
     A = |Δ mRNA s1|² (mRNA in kon units, as the modes and proteins: k_z / k1 at the mean of mode z, up to the
@@ -321,9 +327,12 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
     d0 (G,) given: end proteins from the mRNA bridges (prot_bridge_end), mode_init / mode_end being then the kon levels
     of the modes and the mRNA rna * s1 * rna_to_x in the same units; empty: find_next_prot on shrunk modes. Bridge
     proteins sampled with the noise z (n1, G) of each source, shared by its targets, and burst sizes beta (G,)
-    (empty: the bridge means).
+    (empty: the bridge means). g_active (G,): 1 for the genes of the sample's condition, 0 for the others (left out of
+    the mRNA and protein terms; the network term already ignores them through w_genes); empty = every gene.
     """
     n1, G = vect_rna_init.shape
+    gmask = g_active if g_active.shape[0] == G else np.ones(G)
+    G_eff = max(np.sum(gmask), 1.0)
     bridge = d0.shape[0] == G
     sampled = z.shape[0] == n1
     n2 = vect_rna_end.shape[0]
@@ -387,8 +396,8 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
         # --- Terms of the cost; network term = cross-entropy on the sigmoid of the genes, weighted by w_genes ---
         sigma = base_kon_vector(basal, inter, prot_full_i)
         for j in range(0, n2):
-            diff_prot = (prot_end_i[j] - prot_init_i) / scale_proteins
-            diff_rna = kon_rna_end[j] - kon_rna_init_i
+            diff_prot = gmask * (prot_end_i[j] - prot_init_i) / scale_proteins
+            diff_rna = gmask * (kon_rna_end[j] - kon_rna_init_i)
             cost_rna[i, j] = np.sum(diff_rna * diff_rna)
             cost_net[i, j] = np.sum(w_genes * cross_entropy(sigma[j, ns:, 1], tau_end[j]))
             cost_prot[i, j] = np.sum(diff_prot * diff_prot)
@@ -399,7 +408,7 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
     cost_net *= median_ref /_median_scale(cost_net)
     cost_prot *= median_ref /_median_scale(cost_prot)
     dist = (cost_rna * weight_init + (1 - weight_init) *
-            ((1.0 - 1.0 / G) * cost_net + (1.0 / G) * cost_prot))
+            ((1.0 - 1.0 / G_eff) * cost_net + (1.0 / G_eff) * cost_prot))
     return np.minimum(dist, 100.0)
 
 

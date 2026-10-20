@@ -131,6 +131,7 @@ def main(argv):
         if os.path.exists(samples_path):
             model.samples_data = np.load(samples_path)
             print("[simulate_network_KOV] Loaded per-cell sample IDs")
+        model.set_gene_mask(adata)  # genes of each sample's condition (select_genes_per_condition), if any
         print("[simulate_network_KOV] Successfully loaded all parameters")
     except FileNotFoundError as e:
         print(f"[simulate_network_KOV] Error: Missing parameter file: {e}")
@@ -212,16 +213,13 @@ def main(argv):
 
     # Proliferation network: branching (simulate_with_proliferation) and birth rate of the dilution
     if simulate_with_proliferation or model.protein_dilution:
-        prolif_path = os.path.join(p, 'cardamomOT', 'prolif_network.pt')
-        n_prot_path = os.path.join(p, 'cardamomOT', 'prolif_network_n_proteins.npy')
-        if os.path.exists(prolif_path) and os.path.exists(n_prot_path) and not simulate_with_proliferation:
-            from CardamomOT.inference.proliferations import load_proliferation_mlp
-            model.prolif_network = load_proliferation_mlp(prolif_path, int(np.load(n_prot_path)[0]))
+        from CardamomOT.inference.proliferations import load_proliferation
+        # One MLP (one or two heads), or one per network condition (ProliferationMLP_per_condition)
+        prolif_net = load_proliferation(os.path.join(p, 'cardamomOT'))
+        if prolif_net is not None and not simulate_with_proliferation:
+            model.prolif_network = prolif_net
             print("[simulate_network_KOV] Loaded proliferation network — birth rate of the dilution (no branching)")
-        elif os.path.exists(prolif_path) and os.path.exists(n_prot_path):
-            from CardamomOT.inference.proliferations import load_proliferation_mlp
-            # One head (net rate) or two (birth, death); older networks keep identity input scaling
-            prolif_net = load_proliferation_mlp(prolif_path, int(np.load(n_prot_path)[0]))
+        elif prolif_net is not None:
             model.prolif_network = prolif_net
             model.simulate_with_proliferation = True
             stim_pkl = os.path.join(p, 'cardamomOT', 'stimulus_rates.pkl')
@@ -293,6 +291,16 @@ def main(argv):
                     print(f"[simulate_network_KOV]   KO {pct:.0f}%: {gene} (index {ind}), creation ×{factor:.3g}")
             else:
                 print(f"[simulate_network_KOV]   Warning: Gene '{gene}' not found in data")
+
+        # Genes perturbed but outside some conditions (select_genes_per_condition): frozen there, so no effect
+        if model.gene_mask is not None:
+            for gene, _ in list(kos) + list(ovs):
+                if gene in adata.var_names:
+                    off = ~model.gene_mask[:, ns + adata.var_names.get_loc(gene)]
+                    if off.any():
+                        print(f"[simulate_network_KOV]   Note: {gene} is not selected in samples "
+                              f"{[str(x) for x in np.sort(adata.obs['dataset_id'].astype(str).unique())[off]]}: "
+                              "perturbation without effect there")
 
         # Apply overexpressions
         # - No percentage: activate via basal_t (complete OV, existing behaviour)

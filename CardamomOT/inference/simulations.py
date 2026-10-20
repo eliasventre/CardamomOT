@@ -52,10 +52,15 @@ def base_kon_vector(theta_basal, theta_inter, y_prot) -> np.ndarray:
             z = theta_basal[j]
             for g in range(G):
                 z += y_prot[i, g] * theta_inter[g, j]
-            e = np.exp(-z)
+            # Stable sigmoid: exp of a negative argument only (no inf / inf for |z| > 709)
+            e = np.exp(-abs(z))
             denom = e + 1.0
-            result[i, j, 0] = e / denom
-            result[i, j, 1] = 1.0 / denom
+            if z >= 0:
+                result[i, j, 0] = e / denom
+                result[i, j, 1] = 1.0 / denom
+            else:
+                result[i, j, 0] = 1.0 / denom
+                result[i, j, 1] = e / denom
 
     return result
 
@@ -128,10 +133,11 @@ def chrom_open_close(P, inter_c, basal_c, kbar_c, k_close_const):
         z = basal_c[r]
         for g in range(P.shape[0]):
             z += P[g] * inter_c[g, r]
-        e = np.exp(-z)
-        ko[r] = kbar_c[r] / (1.0 + e)
+        e = np.exp(-abs(z))  # stable sigmoid
+        s_open = 1.0 / (1.0 + e) if z >= 0 else e / (1.0 + e)
+        ko[r] = kbar_c[r] * s_open
         if np.isnan(k_close_const[r]):
-            kc[r] = kbar_c[r] * e / (1.0 + e)
+            kc[r] = kbar_c[r] * (e / (1.0 + e) if z >= 0 else 1.0 / (1.0 + e))
         else:
             kc[r] = k_close_const[r]
     return ko, kc

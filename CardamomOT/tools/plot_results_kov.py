@@ -136,6 +136,16 @@ def _plot_celltype_panel(adatas, names, class_order=None):
 # Public API
 # ---------------------------------------------------------------------------
 
+def _samples_traj(p):
+    """data_samples.npy of the run (sample index of each trajectory state), None if absent."""
+    path = os.path.join(p, 'cardamomOT', 'data_samples.npy')
+    return np.load(path).astype(int) if os.path.exists(path) else None
+
+
+def _suffix(label):
+    return f' — {label}' if label else ''
+
+
 def plot_results_sim_kov(p, combo, stim=1.0, prior=1.0, project_on_full=False, normtransform=False, logtransform=True):
     """Compare wild-type simulation to a KO/OV perturbation (UMAP).
 
@@ -160,10 +170,15 @@ def plot_results_sim_kov(p, combo, stim=1.0, prior=1.0, project_on_full=False, n
     adata_kov = ad.read_h5ad(
         os.path.join(p, f'cardamomOT/adata_sim_{combo}_stim{s}_prior{q}.h5ad')
     )
+    # One figure per network condition (its cells and genes), as in the report
+    from ..condition_genes import by_condition, project_data
+    for label, adatas in by_condition(project_data(p), [adata_traj, adata_sim, adata_kov], _samples_traj(p)):
+        _plot_sim_kov(adatas, [n + _suffix(label) for n in ("Train", "Sim", combo)], project_on_full,
+                      normtransform, logtransform)
 
-    adatas = [adata_traj, adata_sim, adata_kov]
-    names = ["Train", "Sim", combo]
 
+def _plot_sim_kov(adatas, names, project_on_full, normtransform, logtransform):
+    adata_traj = adatas[0]
     class_order = None
     if "cell_type" in adata_traj.obs:
         class_order = adata_traj.obs['cell_type'].astype(str).unique().tolist()
@@ -224,9 +239,12 @@ def compare_cell_types(p, combo_name, split="full", stim=1.0, prior=1.0, label_k
     cats = adata_full.obs[label_key].astype(str).unique().tolist()
     colors = [cmap_cat(i % 8) for i in range(len(cats))]
 
-    plot_cell_type_proportions(
-        adatas=[adata_traj, adata_sim, adata_perturb],
-        labels=["data", "sim wt", combo_name],
-        label_key=label_key,
-        colors=colors,
-    )
+    # One plot per network condition (its cells), as in the report
+    from ..condition_genes import by_condition
+    for label, adatas in by_condition(adata_full, [adata_traj, adata_sim, adata_perturb], _samples_traj(p)):
+        plot_cell_type_proportions(
+            adatas=adatas,
+            labels=[n + _suffix(label) for n in ("data", "sim wt", combo_name)],
+            label_key=label_key,
+            colors=colors,
+        )

@@ -11,7 +11,9 @@ Usage:
 Required input files:
     - Data/data.h5ad: input count matrix, with temporal information in obs['time']
 Optional:
-    - times_inference (times sheet): with split = 'train', cells after its largest time are left out
+    - times_inference (times sheet): with split = 'train', cells after its largest time are left out of the train
+    - times_test (times sheet): with split = 'train', test cells only at these times (0 added); a time beyond the
+      inference ones gives as many test cells as a train share would have (no train cell)
     - perturbation_inference sheet: samples with remove_from_inference
 
 Output:
@@ -30,21 +32,28 @@ from CardamomOT.inputs import input_dir, removed_samples
 from CardamomOT.run_options import parse_step_options, configure
 
 
-def split_labels(times, samples, split, rate, max_time=None, removed=None, seed=None):
-    """obs['split'] of the cells (see module docstring); removed: bool mask of the held-out samples."""
+def split_labels(times, samples, split, rate, max_time=None, removed=None, seed=None, test_times=None):
+    """obs['split'] of the cells (see module docstring); removed: bool mask of the held-out samples; test_times:
+    times of the test cells (None = the inference ones)."""
     labels = np.full(len(times), 'full' if split == 'full' else 'unused', dtype=object)
     removed = np.zeros(len(times), bool) if removed is None else removed
     if split == 'train':
         rng = np.random.default_rng(seed)
         kept = ~removed & (times <= max_time if max_time is not None else True)
-        for t in np.unique(times[kept]):
-            for s in np.unique(samples[kept]):
-                idx = np.flatnonzero(kept & (times == t) & (samples == s))
+        tested = kept if test_times is None else ~removed & np.isin(times, test_times)
+        sel = kept | tested
+        for t in np.unique(times[sel]):
+            for s in np.unique(samples[sel]):
+                idx = np.flatnonzero(sel & (times == t) & (samples == s))
                 rng.shuffle(idx)
                 n_train = max(min(100, len(idx)), int(len(idx) * float(rate)))
-                labels[idx[:n_train]] = 'train'
-                # Test cells of each (time, sample) capped at its number of train cells
-                labels[idx[n_train:2 * n_train]] = 'test'
+                if kept[idx].any():
+                    labels[idx[:n_train]] = 'train'
+                    test_idx = idx[n_train:2 * n_train]  # test cells capped at the number of train cells
+                else:
+                    test_idx = idx[:n_train]  # time held out for the test only: the share a train would have
+                if tested[idx].any():
+                    labels[test_idx] = 'test'
     labels[removed] = 'test'
     return labels
 
@@ -90,9 +99,17 @@ def main(argv):
             max_time = max(float(line) for line in f if line.strip())
         print(f"[split_dataset] Cells after t = {max_time:g} (times_inference) left out")
 
+    # Test timepoints (times_test), 0 added; default: the inference ones
+    test_times = None
+    test_file = os.path.join(input_dir(p), 'times_test.txt')
+    if split == 'train' and os.path.exists(test_file):
+        with open(test_file) as f:
+            test_times = sorted({0.0} | {float(line) for line in f if line.strip()})
+        print(f"[split_dataset] Test cells at t = {test_times} (times_test)")
+
     # Reproducible split (seed 0 if none): every later step depends on it
     adata.obs['split'] = split_labels(times, samples, split, rate, max_time, removed,
-                                      0 if model.seed is None else model.seed)
+                                      0 if model.seed is None else model.seed, test_times)
     counts = adata.obs['split'].value_counts()
     print("[split_dataset] Cells per split: " + ', '.join(f'{k} {v}' for k, v in counts.items()))
     adata.obs['split'] = adata.obs['split'].astype('category')

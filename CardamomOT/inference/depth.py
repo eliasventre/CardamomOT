@@ -66,7 +66,7 @@ def diagnose_depth(X, lib, groups, times, cell_types=None, s=None, doublet=None,
     Depth diagnostic on raw counts X (cells x genes, whole transcriptome).
     s: depth factors of the chosen method (group_median if None) giving the spread within groups.
     Reference genes: the n_ref most variable genes (log1p of x / s) expressed in > 5% of the cells,
-    on at most n_cells cells per group. Returns (per-group DataFrame, dict of global indicators,
+    on at most n_cells cells per group (None = all). Returns (per-group DataFrame, dict of global indicators,
     with 'recommended' = share of the within-group correlation due to depth > corr_max, or share of
     genes whose NB-initialization modes are closer than the depth spread > close_max).
     """
@@ -85,7 +85,8 @@ def diagnose_depth(X, lib, groups, times, cell_types=None, s=None, doublet=None,
             continue
         noise, n_poisson = np.nan, 0
         if m.sum() >= 50:
-            idx = rng.choice(np.flatnonzero(m), min(n_cells, int(m.sum())), replace=False)
+            idx = rng.choice(np.flatnonzero(m), int(m.sum()) if n_cells is None else min(n_cells, int(m.sum())),
+                             replace=False)
             Yg = X[idx]
             Yg = Yg.toarray().astype(float) if scipy.sparse.issparse(Yg) else np.asarray(Yg, dtype=float)
             noise, P = _group_poisson(Yg, rng, 0.1, 50, 500, 5)
@@ -98,7 +99,8 @@ def diagnose_depth(X, lib, groups, times, cell_types=None, s=None, doublet=None,
     spread = float(np.median(per_group.s_q95 / per_group.s_q05)) if len(per_group) else np.nan
 
     # Reference genes and cells
-    sub = np.concatenate([rng.choice(np.flatnonzero(groups == g), min(n_cells, int(np.sum(groups == g))), replace=False)
+    sub = np.concatenate([rng.choice(np.flatnonzero(groups == g), int(np.sum(groups == g)) if n_cells is None
+                                     else min(n_cells, int(np.sum(groups == g))), replace=False)
                           for g in np.unique(groups)])
     Xs = X[sub]
     Xs = Xs.toarray() if scipy.sparse.issparse(Xs) else np.asarray(Xs)
