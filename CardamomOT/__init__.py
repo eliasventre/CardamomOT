@@ -71,7 +71,7 @@ from .inference import (
 # ============================================================================
 # Core model classes
 # ============================================================================
-from .model import NetworkModel, load_network_array, load_simul_parameters
+from .model import NetworkModel, load_network_array, load_simul_parameters, load_state_growth
 
 # ============================================================================
 # Visualization and analysis tools
@@ -131,6 +131,7 @@ __all__ = [
     "NetworkModel",
     "load_network_array",
     "load_simul_parameters",
+    "load_state_growth",
     # Visualization
     "plot_data_distrib",
     "plot_data_pmf_temporal",

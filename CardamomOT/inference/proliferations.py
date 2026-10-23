@@ -190,6 +190,48 @@ def interval_stimulus(prot, times_data, ns=1):
     return np.concatenate([S[1:], S[-1:]], axis=0).reshape(T * N, ns)
 
 
+def birth_heads(net):
+    """
+    Numpy parameters of the birth / death rates of a ProliferationMLP or ConditionProliferation (light enough to be
+    sent to the simulation workers): (heads, sample_cond), one head per network condition (None if absent),
+    sample_cond the condition of each sample (None: a single head). See head_rates.
+    """
+    def one(m, cols=None):
+        if m is None:
+            return None
+        two = bool(int(m.two_heads))
+        seq = m.split_net if two else m.net
+        layers = [(l.weight.detach().double().numpy(), l.bias.detach().double().numpy())
+                  for l in seq if isinstance(l, nn.Linear)]
+        return dict(x_mean=m.x_mean.double().numpy(), x_std=m.x_std.double().numpy(), n_stim=int(m.n_stim),
+                    cols=cols, layers=layers, two=two, split_scale=float(m.split_scale),
+                    r_mean=float(m.r_mean), r_scale=float(m.r_scale))
+    if isinstance(net, ConditionProliferation):
+        return [one(m, c) for m, c in zip(net.nets, net.cols)], net.sample_cond
+    return [one(net)], None
+
+
+def head_rates(head, prot, stim=None):
+    """(birth, death) of one state from birth_heads parameters, as predict_rates; prot (n_proteins,) without the
+    stimuli, stim (n_stim,) or None."""
+    x = np.asarray(prot, dtype=float)
+    if head['cols'] is not None:
+        x = x[head['cols']]
+    k = head['n_stim']
+    if k > 0:
+        x = np.concatenate([np.zeros(k) if stim is None else np.asarray(stim, dtype=float)[:k], x])
+    z = (x - head['x_mean']) / head['x_std']
+    for i, (W, b) in enumerate(head['layers']):
+        z = W @ z + b
+        if i < len(head['layers']) - 1:
+            z = np.tanh(z)
+    if head['two']:
+        sp = head['split_scale'] * np.logaddexp(0.0, z)  # softplus
+        return float(sp[0]), float(sp[1])
+    R = head['r_mean'] + head['r_scale'] * float(z[0])
+    return max(R, 0.0), max(-R, 0.0)
+
+
 def quadrature(n_nodes: int):
     """Relative nodes in [0, 1] and trapezoidal weights (summing to 1) on one interval."""
     u = np.linspace(0.0, 1.0, max(2, n_nodes))

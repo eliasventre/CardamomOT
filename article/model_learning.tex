@@ -1,0 +1,432 @@
+%======================================================================
+% CardamomOT model learning: project note
+%======================================================================
+\documentclass[a4paper, 11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage[margin=1in]{geometry}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\kon}{k_{\mathrm{on}}^{\theta}}
+\newcommand{\koni}{k_{\mathrm{on},i}^{\theta}}
+\newcommand{\CE}{\mathrm{CE}}
+\newcommand{\F}{\mathcal{F}}
+\newcommand{\tofill}[1]{\par\smallskip\noindent\emph{[To be completed: #1]}\par\smallskip}
+
+\theoremstyle{plain}
+\newtheorem{prop}{Proposition}
+\theoremstyle{remark}
+\newtheorem{rem}{Remark}
+
+\title{CardamomOT-ML\\[0.3em] \large Learning the regulation function of a mechanistic gene regulatory network\\ from single-cell RNA time series}
+\author{Project note}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+%======================================================================
+\section*{Project note}
+%======================================================================
+
+\paragraph{Objective.} CardamomOT~\cite{mauge2026cardamomot} infers a gene regulatory network (GRN), hidden protein trajectories and kinetic rates from scRNA-seq time series, with a burst frequency that is a sigmoid of a linear combination of the proteins. This shape is an assumption, inherited from Harissa~\cite{herbachinferring2017}, not a result. The article will make the regulation function a quantity learned \emph{gene by gene} during the inference: each target gene chooses, among a family of candidate functions, the one that best explains its basins along the reconstructed trajectories, while the network stays a single matrix $\theta$ whose support and signs keep their meaning.
+
+\paragraph{The thread.} With bimodal burst frequencies, a cell only reveals whether a gene is in its low or high mode; the shape of the regulation function between the two modes is invisible at a steady state. It becomes visible along \emph{transients}: proteins relax slowly ($1/d_1$), so the reconstructed trajectories cross intermediate protein levels, and the time at which a target switches, relative to the protein level of its regulators, depends on the shape of the function (Section~\ref{sec:identifiability}). The mechanistic trajectories of CardamomOT, which time the switches of every gene, are therefore exactly the object on which the regulation function can be learned. The selection must be protected against the circularity of the loop: trajectories built with a function favour it, so each family is scored on held-out states against the mixture alone (Section~\ref{sec:selection}).
+
+\paragraph{What already exists in the code.} The inference loop is an EM algorithm (Section~\ref{sec:em}). The counts of each gene are read by a continuous model of its burst frequency, so that a cell caught during a switch is read at an intermediate level; the basin update and the network fit maximise the same likelihood; the network is fitted on the expected levels; the trajectories are forced by a mass-constrained assignment of the same costs; and the regulation function is compared with the targets along the memory of the mRNA (Section~\ref{sec:memory}). The regulation function is computed by a single module, \texttt{CardamomOT/inference/sigma.py}, for the whole inference and every simulator (numba kernels, and a torch mirror for the free-running fit of the kinetic rates). Its families are given by a specification per gene (transformation $\varphi$ of the regulators and link). The network fit supports any $\varphi$ with the logistic link. The selection of Section~\ref{sec:selection} is implemented in \texttt{fit\_network} (\texttt{model\_learning\_grn}), with the candidate families \texttt{model\_learning\_phi = ['identity', 'logarithm']} and \texttt{model\_learning\_link = ['logistic']}; the chromatin opening function of the multiome extension has its own, independent families (\texttt{model\_learning\_chrom}). The benchmark of Section~\ref{sec:benchmark} (\texttt{projet\_modellearning/}) simulates the networks of the CardamomOT article with genes that are either sigmoid or Hill targets.
+
+\paragraph{Where we stand.}
+\begin{enumerate}[nosep]
+\item The model learning improves the networks (Section~\ref{sec:results}), but the families are recovered at $0.55$--$0.68$ only, also in the oracle on the true proteins (Section~\ref{sec:oracle}).
+\item With noise-free targets, the oracle recovers every family: the transients carry the information. Accounting for the memory of the mRNA brings the oracle with targets read on the counts from $0.53$ to $0.68$ (Section~\ref{sec:res_memory}). The rest is lost in the counts themselves: the accuracy does not change with the number of cells, the burst size, the share of cells in transition, the mixture model or the score.
+\item The two families of the benchmark share their endpoints and differ mostly in how $\sigma$ approaches $0$ and $1$, where the targets read on the counts are biased towards the interior (Remark~\ref{rem:tails}). The likelihood of the counts, which could use these tails, is dominated by the misspecification of the negative binomial and selects the Hill family for almost every gene.
+\end{enumerate}
+
+\paragraph{Next steps.}
+\begin{enumerate}[nosep]
+\item Candidate families whose differences are not confined to the tails of $\sigma$ (for instance the asymmetric Richards link, Section~\ref{sec:richards}), screened for identifiability in the oracle before any implementation.
+\item Data that inform the tails: perturbations (KO/OV), several doses of the stimulus.
+\item Control of the gain of AUPR: the current loop (soft posteriors, continuous model) without model learning.
+\item The Herbach family (saturating $\varphi$, Section~\ref{sec:herbach}), with the thresholds set by the modes of the regulators, then pairwise co-regulation terms (Section~\ref{sec:coreg}) if the data require them.
+\item Validation of the selected families in the free-running fit of the kinetic rates (generative criterion), then real data.
+\end{enumerate}
+
+%======================================================================
+\section{Introduction}\label{sec:intro}
+%======================================================================
+
+Mechanistic GRN models fix the form of the regulation function before the inference: Hill functions in ODE models, sums of sigmoids in neural-network-inspired models, logistic links in the bursty models of single-cell data~\cite{herbachinferring2017, mauge2026cardamomot}. The form matters: it decides how a target responds to an intermediate level of its regulators, hence the timing of switches, the existence of bistability, and the interpretation of an interaction strength. The thermodynamic models of transcription~\cite{shea1985lambda, bintu2005transcriptional} show that the input function of a promoter depends on how transcription factors bind and interact, and differs from gene to gene.
+
+Learning the form of a dynamical model from data is the object of model selection and of sparse identification of nonlinear dynamics~\cite{brunton2016sindy, mangan2016inferring}, in which the vector field is expanded on a library of candidate terms. These approaches require observed trajectories. Single-cell RNA time series give snapshots of independent cells, with unobserved proteins, and the regulation function acts on bursty transcription. CardamomOT reconstructs the hidden protein trajectories by mechanistic optimal transport; the regulation function can therefore be learned on them, at the level of each target gene, in the same alternation as the network.
+
+%======================================================================
+\section{Background: CardamomOT}\label{sec:background}
+%======================================================================
+
+The promoter of each gene $i$ produces mRNA in bursts at frequency $\koni(P)$, and the proteins are translated from the mRNA~\cite{herbachinferring2017}:
+\begin{equation}\label{eq:pdmp}
+M_i \xrightarrow{\ \koni(P)\ } M_i + \mathcal{E}\Bigl(\frac{k_{\mathrm{off},i}}{s_{0,i}}\Bigr), \qquad
+\frac{dM_i}{dt} = -d_{0,i}M_i, \qquad \frac{dP_i}{dt} = s_{1,i}M_i - d_{1,i}P_i,
+\end{equation}
+with
+\begin{equation}\label{eq:kon}
+\koni(P) = k_{0,i} + (k_{1,i} - k_{0,i})\,\sigma_i(P), \qquad \sigma_i(P) = \sigma\Bigl(\beta_i + \sum_j \theta_{ij}P_j\Bigr),
+\end{equation}
+$\sigma$ the logistic function and $s_1$ chosen so that $P_i \in [0,1]$ (high mode at 1). The negative binomial mixture of each gene gives the burst parameters and the posterior probabilities of its basins in each cell. The loop then alternates between (1) the coupling of consecutive timepoints by entropic OT with a mechanistic bridge cost, which reconstructs the protein trajectories and the switching time of each gene, (2) the network fit, a cross-entropy between $\sigma_i$ and the position $\tau_i \in [0,1]$ of the basin of the target between $k_0$ and $k_1$, with a sparsity penalty, and (3) the update of the basins, which balances the mixture likelihood and the consistency with the network under constraints on the proportions of the modes. In the published version, steps (2) and (3) use hard basins, and the network term of step (3) is a heuristic proximity between the predicted and the modal burst frequencies. The next section turns the loop into an EM algorithm, which is the ground on which the regulation function can be learned.
+
+%======================================================================
+\section{CardamomOT as an EM algorithm}\label{sec:em}
+%======================================================================
+
+\paragraph{Observation model.} The counts of gene $i$ follow a negative binomial mixture whose components are burst frequencies of the gene. With a few modes $\mathbf{k}_{0,i} < \dots < \mathbf{k}_{M_i-1,i}$, the mixture is fitted by a classification EM under mode masses per timepoint, then refined by a soft EM with the same masses (\texttt{max\_iter\_softEM}), which removes the truncation bias of the classification EM. The mixture is then the continuous model of the counts:
+\begin{equation}\label{eq:grid}
+x_{ni} \sim \sum_{l=1}^{L} w_{l,i}(t_n)\,\mathrm{NB}\bigl(x;\ k_{0,i} + (k_{1,i} - k_{0,i})\,\sigma_l,\ c_i\bigr), \qquad \sigma_l = \frac{l-1}{L-1},
+\end{equation}
+at the depth of the cell, with $L$ levels chosen per gene between $2$ and \texttt{max\_grid\_levels} by a BIC or ICL on the soft likelihood of the refined grids (\texttt{mixture\_selection\_criterion}), weights per timepoint under a Dirichlet prior that favours the extreme levels, and $(k_{0,i}, k_{1,i}, c_i)$ and the weights fitted by EM from the extremes of the mixture with modes. Its levels are the modes of the whole inference, $\mathbf{k}_{l,i} = k_{0,i} + (k_{1,i} - k_{0,i})\sigma_l$: a cell caught during a switch is read at an intermediate level rather than at an extreme mode, and the expected level of a cell under the mixture alone, $\E[\sigma \mid x_{ni}]$, is its position between $k_{0,i}$ and $k_{1,i}$ given its counts.
+
+\paragraph{Latent variables and likelihood.} The basin $z_{ni}$ (mode or level) of gene $i$ in cell $n$ is latent; given the proteins of the trajectory reaching $n$, the complete likelihood of the mRNA $x_{ni}$ and of the basin is
+\begin{equation}\label{eq:complete}
+p(x_{ni}, z_{ni} = m \mid P_n) \;\propto\; \mathrm{NB}\bigl(x_{ni};\, \mathbf{k}_{m,i}\bigr)\, \exp\bigl(-\kappa_i\, \mathrm{KL}(\tau_{m,i} \,\|\, \bar\sigma_i(n))\bigr),
+\end{equation}
+with $\tau_{m,i} = (\mathbf{k}_{m,i} - k_{0,i})/(k_{1,i} - k_{0,i})$ the position of mode $m$ between the extreme modes, $\mathrm{KL}(\tau\,\|\,\sigma) = \tau\log(\tau/\sigma) + (1-\tau)\log((1-\tau)/(1-\sigma))$, and $\bar\sigma_i(n)$ the regulation function along the memory of the mRNA of the cell (Section~\ref{sec:memory}; $\bar\sigma_i(n) = \sigma_i(P_n)$ without it). With two modes, $\kappa_i = 1$ and the second factor is $\bar\sigma_i(n)$ or $1 - \bar\sigma_i(n)$: the network gives the probability of the high mode, as in the regulated two-state promoter. With the levels of~\eqref{eq:grid}, $\exp(-\mathrm{KL}(\sigma_l \,\|\, \bar\sigma))$ alone is nearly flat over the levels, of width $\sim\bar\sigma(1 - \bar\sigma)$; the precision $\kappa_i$ sets how sharply the network places a cell at the level $\bar\sigma_i(n)$. It is set per gene at each update by moment matching on the cells reached by the trajectories: the width $\bar\sigma(1-\bar\sigma)/\kappa_i$ of the prior matches the mean second moment $\E_q[(\tau_{z,i} - \bar\sigma_i)^2]$ of the levels under the posteriors, clipped to $[1, \kappa_{\max}]$ (\texttt{grid\_network\_precision\_max}).
+
+\paragraph{E-step: posteriors and basins.} At each timepoint, the cells (uniform mass) are coupled to the modes (masses given by the mixture), with $\pi_{ni}$ the posterior of the mixture alone. (i) The posteriors are the rows of the entropic OT of regularisation $1$ with the cost $-\log\pi_{ni}(m) + \kappa_i\,\mathrm{KL}(\tau_{m,i}\,\|\,\bar\sigma_i(n))$: $q_{ni}(m) \propto \pi_{ni}(m)\, e^{-\kappa_i \mathrm{KL}(\tau_{m,i}\|\bar\sigma_i(n))}\, a_{m,i}$, with one factor $a_{m,i}$ per mode so that the masses match, i.e.\ the posteriors of~\eqref{eq:complete} under the mass constraint. (ii) The basins are the exact OT (EMD) with the cost
+\begin{equation}\label{eq:costs}
+C_{nm} = -\log\pi_{ni}(m) + (1 - \omega_k)\,\kappa_i\, w_i\, \mathrm{KL}(\tau_{m,i} \,\|\, \bar\sigma_i(n)),
+\end{equation}
+with $\omega_k = \max(0.96^{k-1}, 0.1)$ at iteration $k$ and $w_i = 1 - k_{0,i}/k_{1,i}$: one basin per cell, with exactly the prescribed masses. The network enters the hard assignment slowly, and weakly for genes whose modes are weakly separated, because a label set by the network is then explained perfectly by it (the classification EM locks in); the mass constraint protects the proportions of the modes against an early network, which can only reassign basins between cells. The posteriors need no such protection: a cell whose counts do not discriminate the modes gets the network prediction as target ($q$ close to the prior), and its cross-entropy gradient vanishes at the current network, so that it slows the updates without orienting them; a bad network is corrected by the informative cells, and its precision $\kappa_i$ falls with their residuals. A weaker network term in (i) would instead give such cells the mean of their timepoint as target, which pulls every network towards a constant ($\theta$ attenuated by the reliability of the counts). The posteriors (i) give the targets of the network fit, the basins (ii) force the trajectories. The network term is the log-likelihood~\eqref{eq:complete}, instead of the proximity of burst frequencies of the published version.
+
+\paragraph{M-step: network fit on the expected levels.} The network is fitted on the expected positions $\bar\tau_{ni} = \E_{q}[\tau_{z_{ni},i}]$ (\texttt{one\_hot\_probas = False}; with \texttt{True}, on the basins (ii), a classification EM). The EM is started from the classification EM: the targets are $\lambda_k\tau_{z^{\mathrm{EMD}}_{ni},i} + (1 - \lambda_k)\bar\tau_{ni}$, with $\lambda_k$ decreasing linearly from $1$ at the first iteration to $0$ at \texttt{min\_n\_loops}. At the first iteration there is no network yet, and the expected positions of the cells whose counts do not discriminate the modes would be the mean of their timepoint: a flat network, from which the EM leaves slowly.
+
+\begin{prop}\label{prop:mstep}
+$\sum_n \CE\bigl(\bar\sigma_i(n), \bar\tau_{ni}\bigr) = \sum_n \E_{q}\bigl[\mathrm{KL}(\tau_{z_{ni},i} \,\|\, \bar\sigma_i(n))\bigr] + C$, with $C$ independent of $(\beta_i, \theta_{i\cdot})$. The network fit on the expected levels minimises the expected complete negative log-likelihood~\eqref{eq:complete}: it is the M-step of the EM.
+\end{prop}
+
+\begin{proof}
+The cross-entropy relative to its target, $\CE(\sigma, \tau) = -\tau\log\sigma - (1-\tau)\log(1-\sigma) - H(\tau)$, is affine in $\tau$ up to the entropy $H(\tau)$, which does not depend on the network; the expectation over $q$ commutes with the affine part.
+\end{proof}
+
+The E-step and the M-step thus maximise the same likelihood, and the expected levels give the M-step of the full EM, with the variance of a draw removed (Rao--Blackwellisation). The factors $\kappa_i$ and $(1 - \omega_k)w_i$ weigh the network against the mixture in the E-step; the network fit, gene by gene, minimises the cross-entropy of each target without them.
+
+\paragraph{Trajectories: forcing by the mass-constrained basins.} The trajectories need, for each cell, the burst frequency that forces the proteins along the bridges and decides the switching times. They are forced by the basins (ii), recomputed at every iteration. With ordered levels, the EMD of the costs~\eqref{eq:costs} is a rank-preserving assignment: at each timepoint, the forcing frequencies have exactly the histogram of the mixture, the cells keep the order given by their posteriors and the network, and the assignment is deterministic. These are the triple-goal estimates of hierarchical models~\cite{shen1998triple}, whose histogram and ranks are right, unlike those of the expectations (contracted histogram) or of draws (noisy ranks). The expected levels are the right targets of the network fit (Proposition~\ref{prop:mstep}), but forcing the trajectories with them would contract the distribution of the burst frequencies ($\mathrm{Var}\,\E[\sigma\mid x] < \mathrm{Var}\,\sigma$): a cell with an uncertain basin would be forced at an intermediate frequency for a lack of information rather than because the network says so, which flattens the trajectories and the next network. A stochastic approximation~\cite{delyon1999saem}, which averages draws of the basins along the iterations, converges to the same contracted expectation, and before converging its average carries the posteriors of past iterations, a lag that mixes the current state of the loop with its history. The basins (ii) have neither the contraction nor the lag; with the levels of~\eqref{eq:grid}, a cell in a transient is forced at an intermediate frequency where the counts and the network put it. The initial proteins of the trajectories are the protein levels of the forced modes, per sample.
+
+\paragraph{Free-running fit of the kinetic rates.} Its loss compares distributions (Sinkhorn divergences between simulated and observed burst frequencies), so that its targets must have the right distribution, not the right mean: they are levels drawn from the posteriors $q$ at each minibatch. For genes with two modes, the simulated burst frequency is itself a Bernoulli draw of $\sigma$ between $k_0$ and $k_1$ (straight-through gradient), so that $\sigma$ keeps its meaning of a probability of the high mode.
+
+\paragraph{Stopping criterion.} The error of the loop is the network term of the OT between trajectories and cells, the cross-entropy between $\bar\sigma$ and the targets weighted by $w_i$ (and the flow-matching term when it is used): the transport, the basin update and the stopping criterion measure the same quantity.
+
+\paragraph{Test set.} The basins of the held-out cells come from the same two couplings, the network term being replaced by a classifier calibrated on how the training settled its cells: the EMD basins force their trajectories, as in the training, and the entropic coupling gives their posteriors and expected levels.
+
+\paragraph{Why it matters for model learning.} (i) A single likelihood~\eqref{eq:complete} is maximised by both steps, for any regulation function: comparing two families is comparing two likelihoods, and a new family only has to provide its own $\sigma_i$. (ii) Soft posteriors keep the uncertainty of the basins: with hard labels and a network term, the labels of undecided cells are set by the current regulation function, which then explains them perfectly; the expected levels, and the scores against the mixture alone of Section~\ref{sec:selection}, avoid this circularity. (iii) The continuous model and the forcing by the basins let the trajectories carry intermediate burst frequencies exactly where the counts and the network put them, which is where the shape of the regulation function between the two modes is expressed.
+
+%======================================================================
+\section{Targets along the memory of the mRNA}\label{sec:memory}
+%======================================================================
+
+The basin of a cell is read on its mRNA, which integrates the burst frequency over its lifetime: by~\eqref{eq:pdmp}, the mean mRNA at time $t$ is proportional to $\int_0^\infty \koni(P(t-u))\, d_{0,i}e^{-d_{0,i}u}\,du$. The target of a cell is therefore compared with the regulation function averaged along this memory,
+\begin{equation}\label{eq:memory}
+\bar\sigma_i(n) = \sum_{q=0}^{Q} w_{q,i}\, \sigma_i\bigl(P_n(t_n - h_q)\bigr), \qquad h_q = \frac{q}{Q}H, \quad H = \min\Bigl(\Delta t, \frac{5}{\min_j d_{0,j}}\Bigr),
+\end{equation}
+with $P_n(s)$ the proteins of the bridge reaching cell $n$, $\Delta t$ the interval between timepoints, and $w_{q,i}$ the trapezoidal weights of $d_{0,i}e^{-d_{0,i}h}$, the mass before the window being put on the earliest node. With a single node ($Q = 1$, \texttt{late\_mrna\_nodes = 1}), $\bar\sigma_i(n) = \sigma_i(P_n(t_n - 1/d_0))$, the mean lifetime of the mRNA (median over the genes). The regulation function itself stays instantaneous: the proteins drive transcription, and only its read-out is delayed. There is no circularity, since the proteins are built from the modes read on the mRNA, which is the input of translation.
+
+The average~\eqref{eq:memory} (\texttt{targets\_accounting\_late\_mrna}, $Q$ = \texttt{late\_mrna\_nodes}) is used in the network fit, the basin update (with $\bar\sigma$ averaged over the states that reach each cell), the stopping criterion and the score of the selection. The OT between trajectories and cells and the switching times of the forcing, which evaluate $\sigma$ for every pair of states, use the single node. The flow-matching nodes compare the burst frequency at a time $s$ with the regulation function at the proteins one mean lifetime earlier, and the free-running fit reads the burst frequency of the simulated cells at the same lag.
+
+%======================================================================
+\section{Families of regulation functions}\label{sec:families}
+%======================================================================
+
+\subsection{General form}
+
+The burst frequency keeps the form~\eqref{eq:kon}, with
+\begin{equation}\label{eq:family}
+\sigma_i(P) = \ell_i\Bigl(\beta_i + \sum_j \theta_{ij}\,\varphi_i(P_j)\Bigr),
+\end{equation}
+a link $\ell_i$ (increasing, from $0$ to $1$) and a transformation $\varphi_i$ of the regulators (increasing), both chosen by target $i$. The network is $\theta$ for every family: $\theta_{ij} \neq 0$ means that $j$ regulates $i$, its sign gives activation or repression, and the sparsity penalty, the prior network and the refinement of CardamomOT apply unchanged. The family of a target is a discrete parameter $f_i = (\ell_i, \varphi_i) \in \F$.
+
+\subsection{Sigmoid of a linear input}
+
+$\ell = \sigma$, $\varphi(P) = P$: the current model. Each regulator multiplies the odds of the high mode by $e^{\theta_{ij}P_j}$, without saturation: a regulator that is twice as abundant has the square of its effect on the odds.
+
+\subsection{Hill type}
+
+$\ell = \sigma$, $\varphi(P) = \bar P\,\log(1 + P/\kappa)/\log(1 + \bar P/\kappa)$, with $\kappa > 0$ a scale of the regulator and $\bar P$ the protein level of its high mode:
+\begin{equation}\label{eq:hill}
+\sigma_i(P) = \frac{A_i\prod_j (1 + P_j/\kappa_j)^{c_j\theta_{ij}}}{1 + A_i\prod_j (1 + P_j/\kappa_j)^{c_j\theta_{ij}}}, \qquad A_i = e^{\beta_i},\quad c_j = \frac{\bar P_j}{\log(1 + \bar P_j/\kappa_j)}.
+\end{equation}
+The normalisation gives $\varphi(0) = 0$ and $\varphi(\bar P) = \bar P$, as the identity: in both families, $\theta_{ij}\bar P_j$ is the change of the logit of $i$ when $j$ goes from $0$ to its high mode. The interactions of the two families are thus in the same units, which matters for the inference: the sparsity penalty acts on $|\theta_{ij}|$, and without normalisation the Hill interactions, smaller by the factor $c_j$ for the same effect, would be penalised less, which biases the selection towards the Hill family.
+
+\begin{prop}\label{prop:hill}
+For a single regulator $j$ and $P_j \gg \kappa_j$, \eqref{eq:hill} is a Hill function of $P_j$ with coefficient $n = c_j\theta_{ij}$ and dissociation constant $K = \kappa_j A_i^{-1/n}$: $\sigma_i \approx P_j^n / (K^n + P_j^n)$. For $\kappa_j \to 0$ with $\beta_i + n\log(1/\kappa_j)$ fixed, the approximation is exact.
+\end{prop}
+
+The family has the same parameters as the sigmoid: the Hill coefficients are the interactions (up to the known factor $c_j$), and the dissociation constants are carried by the basal. $\kappa$ plays the role of the offset $\varepsilon$ of $\log(\varepsilon + P)$: it avoids $\log 0$, sets the leak of the function at $P = 0$, and the constant $-\theta_{ij}\log\kappa_j$ is absorbed by $\beta_i$. It is not inferred: $\kappa_j = \kappa\,\bar P_j$, with $\bar P_j$ the protein level of the high mode of $j$ (known from the mixture; $\bar P_j = 1$ in the normalised model) and $\kappa = 0.1$ (\texttt{model\_learning\_kappa}). With several regulators, \eqref{eq:hill} multiplies their contributions to the odds, as the sigmoid does, but each contribution grows as a power of the regulator instead of an exponential: the function is concave in $P_j$ and saturates in each regulator only through the link.
+
+\subsection{The thermodynamic model of Herbach et al.}\label{sec:herbach}
+
+The model of~\cite{herbachinferring2017}, from which CardamomOT derives, defines
+\[
+\Phi_i(P) = e^{\theta_{ii}}\prod_{j \neq i}\frac{1 + e^{\theta_{ij}}(P_j/s_{ij})^{m_{ij}}}{1 + (P_j/s_{ij})^{m_{ij}}}, \qquad
+\koni(P) = \frac{k_{0,i} + k_{1,i}\,\Phi_i(P)\,(P_i/s_{ii})^{m_{ii}}}{1 + \Phi_i(P)\,(P_i/s_{ii})^{m_{ii}}}.
+\]
+
+\begin{prop}\label{prop:herbach}
+The model of~\cite{herbachinferring2017} is of the form~\eqref{eq:kon}--\eqref{eq:family} with the logistic link:
+\[
+\koni(P) = k_{0,i} + (k_{1,i} - k_{0,i})\,\sigma\Bigl(\theta_{ii} + m_{ii}\log\frac{P_i}{s_{ii}} + \sum_{j\neq i}\psi(\theta_{ij}, P_j/s_{ij})\Bigr),
+\qquad \psi(\theta, x) = \log\frac{1 + e^{\theta}x^m}{1 + x^m}.
+\]
+\end{prop}
+
+\begin{proof}
+$\koni = k_0 + (k_1 - k_0)\,u/(1 + u)$ with $u = \Phi_i(P)(P_i/s_{ii})^{m_{ii}}$, and $u/(1 + u) = \sigma(\log u)$.
+\end{proof}
+
+The self-regulation is a Hill term of fixed coefficient $m_{ii}$, the $\varphi = \log$ family of the previous section, and each other regulator enters through a \emph{saturating} contribution $\psi$, which goes from $0$ at $P_j = 0$ to $\theta_{ij}$ when $P_j \to \infty$, with a Hill transition of coefficient $m_{ij}$ around $s_{ij}$. Biologically it is the most realistic of the three: a transcription factor that saturates its binding sites has no further effect. The cost is the parameters $s_{ij}$ and $m_{ij}$. Fixing $m$ ($1$ or $2$) and taking one threshold per regulator, halfway between its low and high protein levels (known from the modes), gives a family without additional parameters; $\psi$ is nonlinear in $\theta$, which changes the gradient of the network fit but not its structure.
+
+\subsection{Richards link}\label{sec:richards}
+
+The generalised logistic of Richards~\cite{richards1959flexible}, $\ell_\nu(z) = (1 + e^{-z})^{-1/\nu}$, $\nu > 0$, is the logistic for $\nu = 1$. For $\nu \neq 1$ it is asymmetric: its inflection is at $\ell = (1 + \nu)^{-1/\nu} \neq 1/2$, so the switch towards the high mode and the switch back have different steepness (a gene that needs a large excess of activator to switch on, and switches off quickly, or the opposite). It adds one parameter $\nu_i$ per gene, and changes the shape of the response, not the way regulators combine.
+
+\subsection{Co-regulation within one network}\label{sec:coreg}
+
+The families above combine the regulators independently on the odds: $\log$-odds $= \beta_i + \sum_j \theta_{ij}\varphi_i(P_j)$. Synergy (two activators required together) or antagonism (one regulator cancelling another) needs interaction terms. Products of per-regulator functions (AND / OR gates) are the classical answer in Boolean and thermodynamic models; in the present setting, the factors would be occupancies $f_{ij}(P_j)$ of the binding sites of the regulators on the promoter of $i$, functions of the protein levels, not states of the regulator genes. A lighter version that keeps one network is a pairwise term
+\[
+\beta_i + \sum_j \theta_{ij}\varphi_i(P_j) + \sum_{j<k}\gamma_{ijk}\,\varphi_i(P_j)\varphi_i(P_k),
+\]
+with $\gamma_{ijk}$ defined only for pairs of regulators already in the support of $\theta_{i\cdot}$, and a strong $L^1$ penalty: $\gamma_{ijk} > 0$ is a co-activation, $\gamma_{ijk} < 0$ a redundancy. The network is still $\theta$, and $\gamma$ is a second-order annotation of its edges. The thermodynamic models of~\cite{shea1985lambda, bintu2005transcriptional} contain both forms as limits, at the price of more parameters.
+
+%======================================================================
+\section{Identifiability of the family}\label{sec:identifiability}
+%======================================================================
+
+\begin{prop}\label{prop:steady}
+Let target $i$ have a single regulator $j$, and let the observed states have $P_j \in \{0, \bar P_j\}$ only (no transient). Any family of~\eqref{eq:family} with increasing $\ell$ and $\varphi$ fits the basins of $i$ exactly when $\theta_{ij}$ and $\beta_i$ can be chosen so that $\sigma_i(0) = \tau_i^{\mathrm{low}}$ and $\sigma_i(\bar P_j) = \tau_i^{\mathrm{high}}$: the family is not identifiable.
+\end{prop}
+
+Two points fix two parameters. The family is identified by states at intermediate protein levels, and these exist along transients: after a switch of the regulator, $P_j$ relaxes at rate $d_{1,j}$, and the target switches when $\sigma_i(P_j(t))$ crosses the level that its basins indicate. A sigmoid of a linear input switches near the middle of the range of $P_j$ (for a symmetric $\beta_i$), a Hill target of the same endpoints switches earlier and saturates later, because $\log(1 + P/\kappa)$ is concave. The information is in the \emph{timing} of the switches relative to the protein levels, which the mechanistic bridge reconstructs; it grows with the protein lifetime (slow transients are sampled by more timepoints) and with the number of cells caught during the switch. The benchmark of Section~\ref{sec:benchmark} is built so that both families share their endpoints, and only this information separates them. Whether it survives the reading of the targets on the counts is the question of Section~\ref{sec:oracle}.
+
+%======================================================================
+\section{Selection of the family in the inference loop}\label{sec:selection}
+%======================================================================
+
+\paragraph{Criterion.} At an update of the network, the network is fitted with every candidate family $f$ for every target, on the same sub-samples of trajectory states as the standard fit (\texttt{n\_network\_fits} disjoint sub-samples, stratified by time, sample and cell type). The fit $\hat\theta^{(f,k)}$ on sub-sample $k$ is scored on the states of the other sub-samples:
+\begin{equation}\label{eq:score}
+S_i(f) = \frac{1}{K}\sum_{k=1}^K \frac{1}{|\bar{\mathcal{S}}_k|}\sum_{n \in \bar{\mathcal{S}}_k} \CE\bigl(\bar\sigma_i^{(f,\hat\theta^{(f,k)})}(n),\ \tau^0_{i}(n)\bigr),
+\end{equation}
+with $\bar\sigma_i^{(f,\theta)}(n)$ the regulation function of family $f$ along the memory of the mRNA~\eqref{eq:memory}, and $\tau^0_i(n)$ the expected position of gene $i$ in the real cell of state $n$ under the posteriors of the \emph{mixture alone}, $\E[\sigma \mid x]$ with the continuous model~\eqref{eq:grid}. Two choices protect the selection. (i) Held-out states: the families of~\eqref{eq:family} have the same number of parameters, but the scores are compared on states that did not enter the fit, which also covers families with more parameters without an explicit penalty. (ii) Targets of the mixture: the basins updated by the loop include the network term, i.e.\ they are pulled towards the current $\sigma_i$; scoring against them would favour the family in place. The negative log-likelihood of the counts under the continuous model, with burst frequency $k_0 + (k_1 - k_0)\bar\sigma_i$, is an alternative score (\texttt{model\_learning\_score = 'nb'}); it is exact only if the counts follow its negative binomial, which is not the case for an mRNA with memory (Section~\ref{sec:oracle}), and the cross-entropy is the default. The selection forces the soft posteriors (\texttt{one\_hot\_probas = False}); it works with any \texttt{max\_grid\_levels}, a high value letting the targets of the cells in transition sit on intermediate levels.
+
+\paragraph{Schedule.} Before the selection window (iterations $< n_{\mathrm{start}}$, by default \texttt{min\_n\_loops}), every target is a sigmoid of a linear input: the trajectories, the transport and the basins stabilise as in CardamomOT, while the weight of the network in the costs~\eqref{eq:costs} and the transport are ramped up. During the window ($n_{\mathrm{start}} \leq n < n_{\mathrm{freeze}}$, five iterations by default), each update runs the candidate fits; target $i$ moves to the family $\argmin_f S_i(f)$ when its score is lower than that of the current family by a relative margin (\texttt{model\_learning\_margin}) at two consecutive selections (hysteresis against oscillations, since the next trajectories are built with the selected function). The parameters of each target are those of the fit of its family. Each family keeps its own $\theta$ from one update to the next (warm start); a family fitted for the first time starts from the current $\theta$, which has the same units for every $\varphi$. After the window, the families are fixed and the loop converges with them, so that its stopping criterion keeps its meaning.
+
+\paragraph{As an EM.} The family index is a discrete parameter of the M-step of Section~\ref{sec:em}: with the posteriors (E-step) and the trajectories fixed, each target maximises over $(f, \theta_{i\cdot}, \beta_i)$, the continuous parameters by the network fit (Proposition~\ref{prop:mstep}) and the family by the held-out likelihood. Freezing the families after a few updates turns the procedure back into the EM of Section~\ref{sec:em} on a fixed model.
+
+\paragraph{Cost.} The network fits of the targets are independent and parallel: the window multiplies the cost of the network update by $|\F|$, during five iterations. With a single candidate family, it is imposed on every target from the first iteration, without selection: the whole pipeline (inference, kinetic rates, simulations) then runs with that regulation function, at the cost of the standard method.
+
+\paragraph{After the loop.} The kinetic rates are recalibrated by the free-running fit of the simulation model (refined $\theta$, rates and scale of $\theta$), which uses the selected families through the torch mirror of the regulation function. The generative loss of this fit, with all genes sigmoid against the selected families, is a validation of the selection at the level of the whole model.
+
+%======================================================================
+\section{Implementation}\label{sec:implementation}
+%======================================================================
+
+\begin{itemize}[nosep]
+\item \texttt{CardamomOT/inference/sigma.py}: specification \texttt{spec} $(G, 4)$: $\varphi$ and link of each gene as a target, scale $\kappa$ and high-mode level $\bar P$ of each gene as a regulator; kernels \texttt{sigma\_pairs}, \texttt{kon\_matrix}, \texttt{kon\_last}, \texttt{kon\_upper\_bound} (thinning bound of the explicit-mRNA PDMP, valid because $\varphi$ and $\ell$ are increasing), and \texttt{sigma\_torch}. \texttt{spec = None} reproduces the sigmoid of a linear input bit for bit.
+\item Mixture (\texttt{inference/mixture.py}): classification EM and soft EM with masses per timepoint (\texttt{max\_iter\_softEM}); continuous model~\eqref{eq:grid} (\texttt{fit\_grid\_mixture}; \texttt{max\_grid\_levels}, \texttt{mixture\_selection\_criterion}, \texttt{mixture\_criterion}).
+\item Loop (\texttt{model/base.py}, \texttt{fit\_network}): costs~\eqref{eq:costs} (\texttt{\_mode\_network\_cost}, precision $\kappa_i$, \texttt{grid\_network\_precision\_max}), EMD basins and entropic posteriors (\texttt{\_assign\_from\_costs}, \texttt{one\_hot\_probas}), memory of the mRNA~\eqref{eq:memory} (\texttt{targets\_accounting\_late\_mrna}, \texttt{late\_mrna\_nodes}).
+\item Network fit (\texttt{inference/network.py}): a target with $\varphi \neq$ identity is fitted on the features $\varphi(P_j)$ of its regulators, with the same loss, penalties and refinement; $\bar\sigma$ on the memory nodes.
+\item Selection (\texttt{model/base.py}): \texttt{\_select\_sigma\_families}, called by the network update of \texttt{fit\_network} during the window; parameters \texttt{model\_learning\_grn}, \texttt{model\_learning\_phi}, \texttt{model\_learning\_link}, \texttt{model\_learning\_kappa}, \texttt{model\_learning\_start}, \texttt{model\_learning\_freeze}, \texttt{model\_learning\_margin}, \texttt{model\_learning\_score}.
+\item Outputs: \texttt{cardamomOT/sigma\_spec\_grn.npy} (used by every later step: simulations, test set, report) and \texttt{sigma\_selection.npz} (scores~\eqref{eq:score} and families at each selection).
+\end{itemize}
+
+%======================================================================
+\section{Benchmark}\label{sec:benchmark}
+%======================================================================
+
+\paragraph{Networks.} FN4, CN5, BN8 and FN8, the simulated networks of the CardamomOT article, with their degradation rates, basals, interactions and the parameters of Harissa ($k_0 = 0$, $k_1 = 2$ in units of $d_0$, mRNA burst size $50$). Each gene is a Hill target~\eqref{eq:hill} with probability $1/2$, drawn per run, the others being sigmoid, with $\kappa = 0.1$ and $\bar P = 1$. A Hill target keeps the interactions of the network: with the normalised $\varphi$, both families have the same logit at $P = 0$ and at the high mode, switch between the same burst frequencies with different shapes, and only the transients separate them (Section~\ref{sec:identifiability}).
+
+\paragraph{Simulation.} Full model: bursty PDMP with explicit mRNA~\eqref{eq:pdmp} (\texttt{simulate\_next\_mrna\_pdmp}), independent cells with a burn-in of $5$\,h without stimulus, stimulus from $t = 0$, $1000$ cells over the ten timepoints $0, 6, \dots, 96$\,h, counts $\mathrm{Poisson}(M)$, ten runs per network (\texttt{projet\_modellearning/generate.py}).
+
+\paragraph{Metrics.} Accuracy of the family of each gene, recall of the Hill and of the sigmoid targets; AUPR of the inferred network (self-loops and edges towards the stimulus excluded) and sign of the true edges, with and without model learning (\texttt{run\_inference.py}).
+
+%======================================================================
+\section{Results}\label{sec:results}
+%======================================================================
+
+\subsection{First benchmark}
+
+Ten runs per network, with an earlier version of the loop (mixture with modes, forcing by a stochastic approximation of the expected modes, no memory of the mRNA), default parameters (hard basins), the model learning forcing the soft posteriors.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccccc}
+\toprule
+ & \multicolumn{2}{c}{AUPR} & \multicolumn{3}{c}{Family (model learning)} & \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-6}
+Network & standard & model learning & accuracy & Hill recall & sigmoid recall & \\
+\midrule
+FN4 & $0.87 \pm 0.07$ & $0.90 \pm 0.15$ & $0.68$ & $0.77$ & $0.58$ & \\
+CN5 & $0.96 \pm 0.03$ & $0.98 \pm 0.03$ & $0.50$ & $0.57$ & $0.44$ & \\
+BN8 & $0.62 \pm 0.11$ & $0.68 \pm 0.06$ & $0.48$ & $0.71$ & $0.24$ & \\
+FN8 & $0.65 \pm 0.05$ & $0.71 \pm 0.04$ & $0.55$ & $0.69$ & $0.37$ & \\
+\bottomrule
+\end{tabular}
+\caption{First benchmark (mean $\pm$ sd over ten runs). Sign of the true edges: unchanged on FN4 and CN5 ($1.00$), $0.95 \to 0.91$ on BN8, $0.93 \to 0.92$ on FN8.}
+\label{tab:bench1}
+\end{table}
+
+\paragraph{Network.} The model learning improves the AUPR on the four networks (in $32$ runs out of $40$, $+0.05$ on average), with the largest gains on the larger networks. The comparison mixes two changes, the selection of the families and the soft posteriors it requires; the current loop without model learning is the control that separates them (to be run).
+
+\paragraph{Families.} The families are not recovered: the accuracy is $0.55$ (chance $0.5$), with a bias towards the Hill family ($0.68$ of the Hill targets, $0.41$ of the sigmoid ones). More informative is the structure of the errors: the family selected for a given gene is almost the same in every run (probability of the Hill family $0$ or $1$ for most genes), whatever its true family, which is drawn independently in each run. The selection thus measures a property of the gene in the network, not its regulation function.
+
+\begin{rem}[Identifiability up to the scale of the proteins]\label{rem:scale}
+The proteins are latent: the trajectories reconstruct them up to a monotone distortion $\hat P_j = h_j(P_j)$, set by the forcing by the modes, the shrinkage of the mRNA and the bridges, and specific to each regulator. Since $\sigma_i(P) = \ell\bigl(\beta_i + \sum_j \theta_{ij}\varphi(P_j)\bigr) = \ell\bigl(\beta_i + \sum_j\theta_{ij}\,\varphi\circ h_j^{-1}(\hat P_j)\bigr)$, the family fitted on the reconstructed proteins is $\varphi\circ h_j^{-1}$, not $\varphi$. A concave reconstruction makes a sigmoid target look like a Hill one, and a convex one the opposite. In the benchmark, the two families differ only by their curvature between the endpoints (Section~\ref{sec:identifiability}), which is of the same order as the distortion: the selection then follows $h_j$, a property of the regulators of each gene, as observed.
+\end{rem}
+
+\paragraph{Oracle on the true proteins (FN4).} The selection (same network fit, same held-out score) is run on the true proteins of the observed cells instead of the reconstructed trajectories (\texttt{oracle\_families.py}), with two kinds of targets: the expected mode under the posteriors of the mixture, as in the method, or the true burst frequency (noise-free), and with the penalties of the method or nearly none (Table~\ref{tab:oracle}).
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llccc}
+\toprule
+Targets & Penalties & accuracy & Hill recall & sigmoid recall \\
+\midrule
+true burst frequency & weak & $0.97$ & $1.00$ & $0.95$ \\
+true burst frequency & default & $0.82$ & $1.00$ & $0.63$ \\
+mixture posteriors & default & $0.62$ & $1.00$ & $0.21$ \\
+mixture posteriors & weak & $0.57$ & $1.00$ & $0.11$ \\
+\midrule
+full method (reconstructed proteins) & default & $0.60$ & $0.85$ & $0.32$ \\
+\bottomrule
+\end{tabular}
+\caption{Family recovery on FN4 (ten runs) with the true proteins of the cells, against the full method.}
+\label{tab:oracle}
+\end{table}
+
+The families are identifiable in this design: with the true proteins and noise-free targets, the selection recovers $97\%$ of them, which confirms that the transients carry the information (Section~\ref{sec:identifiability}). Three losses then add up. (i) The penalties shrink the true interactions (on FN4, $\theta = 10$ is fitted around $7$, and spurious edges appear between correlated regulators); the error of the regularisation is then of the order of the difference of shape, and the accuracy drops to $0.82$. (ii) The targets of the mixture, which are what the method sees, bring the selection back to chance with a systematic bias towards the Hill family ($0.62$), even with the true proteins: the error is in the targets, not (only) in the proteins. Two mechanisms can produce it: the mode of a cell is read on its mRNA, which integrates the burst frequency over the mRNA lifetime and carries count noise, and the protein bursts make the regulators fluctuate within their high mode while the target stays in its high mode. (iii) The reconstruction of the proteins (Remark~\ref{rem:scale}) changes little on top of (ii).
+
+\subsection{Memory of the mRNA}\label{sec:res_memory}
+
+The first mechanism of (ii) is addressed by comparing the targets with the regulation function along the memory of the mRNA (Section~\ref{sec:memory}). In the oracle (true proteins, targets of the mixture with modes, ten runs), the family accuracy on FN4 goes from $0.525$ (instantaneous $\sigma$) to $0.575$ (single node at $\ln 2/d_0$), $0.625$ (single node at $1/d_0$) and $0.675$ (average on the memory); on BN8 it stays near chance ($0.49$ to $0.54$). In the full method (five runs, AUPR, Table~\ref{tab:memory}), the average on the memory also improves the network, while the single node is neutral.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Prediction of the targets & FN4 & BN8 \\
+\midrule
+instantaneous $\sigma_i(P_n)$ & $0.863$ & $0.687$ \\
+single node at $1/d_0$ ($Q = 1$) & $0.861$ & $0.689$ \\
+average on the memory ($Q = 4$) & $0.896$ & $0.701$ \\
+\bottomrule
+\end{tabular}
+\caption{AUPR of the full method (five runs) with the three predictions of the targets; $Q = 4$ wins $3$ runs out of $5$ on FN4 and $4$ on BN8.}
+\label{tab:memory}
+\end{table}
+
+\subsection{Identifiability from snapshot counts (oracle)}\label{sec:oracle}
+
+\paragraph{Design.} FN4, ten runs ($40$ genes). Fresh cells are simulated with the explicit-mRNA PDMP and their true protein paths are kept; the prediction of each target is $\bar\sigma_i$ along the memory of its mRNA, fitted by cross-entropy with a weak ridge, and the family is selected by the per-cell held-out score (five folds). The burst size is varied with the mean of the high mode kept at $100$ mRNA. Targets: the true instantaneous burst frequency (noise-free), the posterior of the high mode under the classification EM with two modes, or $\E[\sigma\mid x]$ under the continuous model~\eqref{eq:grid}; or, instead of the cross-entropy, the likelihood of the counts under the continuous model (score \texttt{'nb'}).
+
+\begin{table}[h]
+\centering
+\begin{tabular}{rrcccc}
+\toprule
+ & & \multicolumn{3}{c}{cross-entropy against} & likelihood \\
+\cmidrule(lr){3-5}
+cells & burst size & true frequency & two modes & continuous & of the counts \\
+\midrule
+$1000$ & $50$ & $1.000$ & $0.650$ & $0.550$ & $0.525$ \\
+$1000$ & $10$ & $0.950$ & $0.575$ & $0.600$ & $0.525$ \\
+$1000$ & $2$ & $0.775$ & $0.650$ & $0.600$ & $0.525$ \\
+$3000$ & $50$ & $1.000$ & $0.675$ & $0.550$ & $0.525$ \\
+$3000$ & $10$ & $0.975$ & $0.575$ & $0.625$ & $0.525$ \\
+$3000$ & $2$ & $0.775$ & $0.675$ & $0.600$ & $0.525$ \\
+$10000$ & $50$ & $1.000$ & $0.675$ & $0.625$ & $0.525$ \\
+$10000$ & $10$ & $1.000$ & $0.575$ & $0.650$ & $0.525$ \\
+$10000$ & $2$ & $0.775$ & $0.675$ & $0.625$ & $0.525$ \\
+\bottomrule
+\end{tabular}
+\caption{Family accuracy in the oracle (FN4, ten runs, true proteins, memory of the mRNA).}
+\label{tab:ident}
+\end{table}
+
+\paragraph{Findings.}
+\begin{itemize}[nosep]
+\item With targets read on the counts, the accuracy stays between $0.55$ and $0.68$, with no trend in the number of cells ($1000$ to $10000$) or the burst size ($2$ to $50$): the loss is a bias, not a variance. The paired per-cell differences of the scores are highly significant (median $|z|$ of $8$ to $11$) while the selection is often wrong: it is confidently biased.
+\item Enriching the cells in transition ($\bar\sigma \in [0.2, 0.8]$) does not help.
+\item Scores: the squared error (Brier score) instead of the cross-entropy gains a few points ($0.60 \to 0.675$ at burst size $10$), within the noise of $40$ genes; calibrating the score by the distortion of the targets under the fitted mixture helps only when the mixture fits the tails of the counts.
+\item The likelihood of the counts is at chance and selects the Hill family for almost every gene. A floor on the low burst frequency, $k_0 \geq \varepsilon k_1$ with $\varepsilon$ up to $0.1$, does not change it (Hill family selected for $97$ to $100\%$ of the genes), and the per-cell advantage of the Hill family comes from cells of low, intermediate and high $\bar\sigma$ alike: the negative binomial of~\eqref{eq:grid} is misspecified for an mRNA with memory, not only at its low end.
+\end{itemize}
+
+\begin{rem}[The family is decided in the tails]\label{rem:tails}
+With the same endpoints, the two families differ mostly in how $\sigma$ approaches $0$ and $1$, and the per-cell differences of the scores come mostly from cells whose target is close to a bound. The targets read on the counts are posterior means, pulled towards the interior at the bounds (a cell whose $\bar\sigma$ is close to $0$ gets a target of a few percent), and the cross-entropy gives these cells the largest weight. The family is therefore decided where the targets are the least reliable. Snapshot counts with an mRNA memory and burst sizes from $2$ to $50$ do not resolve the tails, whatever the mixture: on these benchmarks, the family is not identifiable from the counts, even with the true proteins. The model learning remains useful for the network (Table~\ref{tab:bench1}), but its selection of the families is not reliable.
+\end{rem}
+
+%======================================================================
+\section{Open questions}\label{sec:open}
+%======================================================================
+
+\begin{itemize}[nosep]
+\item Slower proteins, which keep the regulators longer at intermediate levels, and more contrasted families (smaller $\kappa$); the number of cells does not matter in the oracle (Table~\ref{tab:ident}).
+\item The exact distribution of the counts given the history of the burst frequency (shot noise with memory), which would make the likelihood of the counts a valid score.
+\item Soft selection: weights $w_{if} \propto e^{-N S_i(f)}$ instead of a hard choice, or a mixture of families, at the price of identifiability between the $\theta$ of the families.
+\item Selection by the generative loss of the free-running fit, gene by gene, which tests the families on the simulated dynamics and not only on the teacher-forced trajectories.
+\item Families shared by groups of genes (same transcription factor binding mode) instead of one per target.
+\end{itemize}
+
+%======================================================================
+\begin{thebibliography}{99}
+%======================================================================
+
+\bibitem{mauge2026cardamomot}
+Y.~Maugé, E.~Ventre.
+\newblock CardamomOT: a mechanistic optimal transport-based framework for gene regulatory network inference, trajectory reconstruction and generative modeling.
+\newblock \emph{bioRxiv}, 2026. doi:10.64898/2026.03.31.715390. Accepted in \emph{PLoS Computational Biology}.
+
+\bibitem{herbachinferring2017}
+U.~Herbach, A.~Bonnaffoux, T.~Espinasse, O.~Gandrillon.
+\newblock Inferring gene regulatory networks from single-cell data: a mechanistic approach.
+\newblock \emph{BMC Systems Biology}, 11:105, 2017.
+
+\bibitem{shea1985lambda}
+M.~A.~Shea, G.~K.~Ackers.
+\newblock The $O_R$ control system of bacteriophage lambda: a physical-chemical model for gene regulation.
+\newblock \emph{Journal of Molecular Biology}, 181(2):211--230, 1985.
+
+\bibitem{bintu2005transcriptional}
+L.~Bintu, N.~E.~Buchler, H.~G.~Garcia, U.~Gerland, T.~Hwa, J.~Kondev, R.~Phillips.
+\newblock Transcriptional regulation by the numbers: models.
+\newblock \emph{Current Opinion in Genetics \& Development}, 15(2):116--124, 2005.
+
+\bibitem{brunton2016sindy}
+S.~L.~Brunton, J.~L.~Proctor, J.~N.~Kutz.
+\newblock Discovering governing equations from data by sparse identification of nonlinear dynamical systems.
+\newblock \emph{Proceedings of the National Academy of Sciences}, 113(15):3932--3937, 2016.
+
+\bibitem{mangan2016inferring}
+N.~M.~Mangan, S.~L.~Brunton, J.~L.~Proctor, J.~N.~Kutz.
+\newblock Inferring biological networks by sparse identification of nonlinear dynamics.
+\newblock \emph{IEEE Transactions on Molecular, Biological and Multi-Scale Communications}, 2(1):52--63, 2016.
+
+\bibitem{richards1959flexible}
+F.~J.~Richards.
+\newblock A flexible growth function for empirical use.
+\newblock \emph{Journal of Experimental Botany}, 10(2):290--301, 1959.
+
+\bibitem{delyon1999saem}
+B.~Delyon, M.~Lavielle, E.~Moulines.
+\newblock Convergence of a stochastic approximation version of the EM algorithm.
+\newblock \emph{Annals of Statistics}, 27(1):94--128, 1999.
+
+\bibitem{shen1998triple}
+W.~Shen, T.~A.~Louis.
+\newblock Triple-goal estimates in two-stage hierarchical models.
+\newblock \emph{Journal of the Royal Statistical Society: Series B}, 60(2):455--471, 1998.
+
+\end{thebibliography}
+
+\end{document}

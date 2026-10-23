@@ -1,6 +1,6 @@
 {
  "estimated": false,
  "applied": false,
- "reason": "4329 genes < 10000",
+ "reason": "100 genes < 10000",
  "predicted_doublets": null
 }

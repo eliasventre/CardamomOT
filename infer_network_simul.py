@@ -28,7 +28,7 @@ Output files:
 """
 import sys; sys.path += ['../']
 import numpy as np
-from CardamomOT import (NetworkModel as NetworkModel_beta, read_stimulus_targets, stimulus_target_mask, resolve_cell_type_obs,
+from CardamomOT import (NetworkModel as NetworkModel_beta, load_state_growth, read_stimulus_targets, stimulus_target_mask, resolve_cell_type_obs,
                         load_network_array)
 from CardamomOT.inputs import input_dir
 from CardamomOT.inference import signed_floor
@@ -110,11 +110,17 @@ def main(argv):
         idx_path_ = os.path.join(p, 'cardamomOT', 'data_traj_real_idx.npy')
         if os.path.exists(idx_path_):
             model.traj_real_idx = np.load(idx_path_)
+        soft_path = os.path.join(p, 'cardamomOT', 'soft_modes.npz')
+        if os.path.exists(soft_path):  # one_hot_probas = False: targets of refine_network_degradations
+            soft = np.load(soft_path)
+            model.modes_soft = soft['modes_soft']
+            model.posteriors_soft = soft['posteriors_soft'].astype(float)
         model._load_ot_constraints(adata)
-        R_opt_path = os.path.join(p, 'cardamomOT', 'data_R_opt.npy')
-        if os.path.exists(R_opt_path):
-            model.R_opt = np.load(R_opt_path)
-            print("[infer_network_simul] Loaded R_opt for proliferation MLP training")
+        # Net growth of the states: R_opt of the growth pass, or the prior rates (use_recomputed_proliferation)
+        model.R_opt = load_state_growth(os.path.join(p, 'cardamomOT'), model.use_recomputed_proliferation)
+        if model.R_opt is not None:
+            print("[infer_network_simul] Loaded the net growth of the states ("
+                  + ("R_opt of the growth pass" if model.use_recomputed_proliferation else "prior rates") + ")")
         print("[infer_network_simul] Successfully loaded all network parameters")
     except FileNotFoundError as e:
         print(f"[infer_network_simul] Error: Missing parameter file: {e}")

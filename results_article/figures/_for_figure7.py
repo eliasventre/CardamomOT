@@ -250,8 +250,6 @@ def _prot_to_adata(model_c, adata_ref, ns, sim_times):
     c  = mixture_params[-1, :]   # overdispersion (G_tot,)
     kz = mixture_params[:-1, :]  # burst sizes    (n_modes, G_tot)
 
-    pi_zinb = getattr(model_c, '_pi_zinb', None)
-
     # NB paramétrique — même formule que check_KOV_to_sim.py :
     # np.max(kz, 0) = max sur axis=0 (sur les modes) → (G_tot,)
     lambda_ = np.max(kz, 0) * model_c.kon_theta             # (N_tot, G_tot)
@@ -262,10 +260,6 @@ def _prot_to_adata(model_c, adata_ref, ns, sim_times):
         np.maximum(lambda_genes.T, 1e-8),   # (G, N_tot)
         c_genes,                             # (G, 1)
     ).T.astype(float)                        # (N_tot, G)
-
-    if pi_zinb is not None:
-        mask = np.random.uniform(0, 1, rna_sim.shape) < pi_zinb.reshape(1, G)
-        rna_sim[mask] = 0.0
 
     # Times pour l'AnnData
     N_per_t = N_tot // len(sim_times) if len(sim_times) > 0 else N_tot
@@ -338,9 +332,6 @@ def prepare_wt_context(p, split, dataset_group, n_sims):
     model, adata, stim_sched = load_model(p, split)
     ns           = model.n_stimuli
     cardamom_dir = os.path.join(p, 'cardamomOT')
-
-    pi_zinb_path = os.path.join(cardamom_dir, 'pi_zinb.npy')
-    model._pi_zinb = np.load(pi_zinb_path) if os.path.exists(pi_zinb_path) else None
 
     basal_clean, basal_clean_samples, basal_t_clean = build_clean_baseline(p, model)
     model.basal   = basal_clean_samples.copy() if basal_clean_samples is not None else basal_clean.copy()

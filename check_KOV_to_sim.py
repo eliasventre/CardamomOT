@@ -124,7 +124,6 @@ def main(argv):
     # Load model parameters
     try:
         mixture_parameters = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
-        pi_zinb = np.load(os.path.join(p, 'cardamomOT', 'pi_zinb.npy'))
         samples_path = os.path.join(p, 'cardamomOT', 'data_samples.npy')
         samples_traj = np.load(samples_path).astype(int) if os.path.exists(samples_path) else None
         times_simulation = np.load(os.path.join(p, 'cardamomOT', 'simulation_times.npy'))
@@ -142,7 +141,7 @@ def main(argv):
     # n_stimuli inferred from mixture_parameters: columns 0..ns-1 are stimulus slots
     ns = mixture_parameters.shape[-1] - G
     # NB parameters of each simulated cell: its sample's mixture if per-sample (identical otherwise)
-    k1_sim, c_sim, pz_sim = nb_cell_parameters(mixture_parameters, pi_zinb, _sim_sample_idx(samples_traj, times_simulation))
+    k1_sim, c_sim = nb_cell_parameters(mixture_parameters, _sim_sample_idx(samples_traj, times_simulation))
     # Depth factors: each simulated cell drawn at the depth of the real cell it mimics (depth_model)
     depth_cells = (adata.obs['depth_factor'].values.astype(float)
                    if (depth_factor_used(p) and 'depth_factor' in adata.obs) else None)
@@ -184,13 +183,9 @@ def main(argv):
         data_sim = np.zeros((G+1, np.size(vect_kon_sim, 0)))
         data_sim[0, :] = times_simulation[:]
 
-        # Generate negative binomial noise + sparsity
-        zero_mask = (np.random.uniform(0, 1, data_sim[1:, :].shape) < pz_sim.T)
-        print(f'[check_KOV_to_sim] New zeros ratio for {label}: {np.sum(zero_mask == 1)/np.size(data_sim[1:, :]):.3f}')
-
+        # Negative binomial noise
         n_nb, p_nb = nb_numpy_params(k1_sim * vect_kon_sim, c_sim, s_sim, model.depth_model)
         data_sim[1:, :] = np.random.negative_binomial(n_nb[:, ns:].T, p_nb[:, ns:].T)
-        data_sim[1:, :] = np.where(zero_mask, 0, data_sim[1:, :])
 
         # Create AnnData object for simulated RNA
         adata_sim = ad.AnnData(X=data_sim[1:, ].T)

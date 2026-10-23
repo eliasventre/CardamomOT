@@ -14,7 +14,6 @@ Required input files:
     - Data/data_<split>.h5ad: count matrix with temporal information
     - cardamomOT/mixture_parameters.npy: inferred burst kinetics parameters
     - cardamomOT/modes.npy: mode of burst frequency distribution
-    - cardamomOT/pi_zinb.npy: zero-inflation probabilities
 
 Output files:
     - cardamomOT/adata_beta.h5ad: simulated data from mixture model
@@ -90,7 +89,6 @@ def main(argv):
     print("[check_mixture_to_data] Loading mixture model parameters...")
     try:
         mixture_parameters = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
-        pi_zinb = np.load(os.path.join(p, 'cardamomOT', 'pi_zinb.npy'))
         vect_kon_beta = np.load(os.path.join(p, 'cardamomOT', 'modes.npy')) + 1e-6
         print("[check_mixture_to_data] Successfully loaded mixture parameters")
     except FileNotFoundError as e:
@@ -112,15 +110,10 @@ def main(argv):
     # NB parameters of each cell (its sample's mixture if per-sample)
     ids = adata.obs['dataset_id'].values if 'dataset_id' in adata.obs else None
     sample_idx = np.searchsorted(np.unique(ids), ids) if ids is not None else None
-    k1c, cc, pzc = nb_cell_parameters(mixture_parameters, pi_zinb, sample_idx)
+    k1c, cc = nb_cell_parameters(mixture_parameters, sample_idx)
     print(f"[check_mixture_to_data] n_stimuli inferred: {ns}")
     data_beta = np.zeros((G+1, np.size(vect_kon_beta, 0)))
     data_beta[0, :] = times_data[:]
-
-    # Apply zero-inflation
-    zero_mask = (np.random.uniform(0, 1, (data_beta[1:, :].shape)) < pzc.T)
-    zero_ratio = np.sum(zero_mask == 1)/np.size(data_beta[1:, :])
-    print(f"[check_mixture_to_data] Applied zero-inflation with ratio: {zero_ratio:.4f}")
 
     # Sample from negative binomial distribution (exclude stimulus columns ns:)
     # Depth factors: each cell drawn at its own depth (depth_model: NB(k s, c) or NB(k, c / s))
@@ -130,7 +123,6 @@ def main(argv):
          if (depth_factor_used(p) and 'depth_factor' in adata.obs) else 1.0)
     n_nb, p_nb = nb_numpy_params((k1c + 1e-6) * vect_kon_beta, cc, s, depth_model_used(p))
     data_beta[1:, :] = np.random.negative_binomial(n_nb[:, ns:].T, p_nb[:, ns:].T)
-    data_beta[1:, :] = np.where(zero_mask, 0, data_beta[1:, :])
 
     # Save synthetic data 
     adata_beta = ad.AnnData(X=data_beta[1:, :].T)
@@ -158,7 +150,8 @@ def main(argv):
                 modes = np.argmax(pi[:, ns:, :], axis=2)
         # Real cells and draws in the representation of the report (cell_depth_for_representation)
         from CardamomOT.tools.characterize_cell_type import representation
-        rep = bool(settings(opts).cell_depth_for_representation)
+        # Counts / depth factor only when the mixture modelled the depth (else raw counts for data and draws)
+        rep = bool(settings(opts).cell_depth_for_representation) and depth_factor_used(p)
         real = adata.copy()
         real.X = representation(adata, rep)
         idt = identity_diagnostic(real, representation(adata_beta, rep), modes, seed=0)

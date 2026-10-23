@@ -137,8 +137,11 @@ def classifier_options(p):
     """Cell-type classifier options of a project for train_classifier (notebooks): dict(method = classifier_method,
     cell_depth = cell_depth_for_representation and a depth factor computed)."""
     from ..run_options import settings, StepOptions
+    from ..inputs import depth_factor_used
     cfg = settings(StepOptions(p=str(p).rstrip('/') + '/'))
-    return dict(method=cfg.classifier_method, cell_depth=bool(cfg.cell_depth_for_representation))
+    # Counts / depth factor only when the run modelled the depth (data and model draws transformed alike)
+    return dict(method=cfg.classifier_method,
+                cell_depth=bool(cfg.cell_depth_for_representation) and depth_factor_used(p))
 
 
 # 1. Entraînement du modèle

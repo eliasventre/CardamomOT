@@ -8,15 +8,15 @@ scRNA-seq data.
 
 Usage:
     python infer_mixture.py -i <project_path> [--mean-forcing <float>]
-(split, soft_em_refinement, integrate_samples, ref_sample_integration: model_parameters sheet)
+(split, max_iter_softEM, integrate_samples, ref_sample_integration: model_parameters sheet)
 
 Several samples (obs['dataset_id'] with >= 2 samples): the mixture is fitted per sample and kept per
-sample (mixture_parameters.npy (S, M+1, G)); integrate_samples lam in [0, 1] (default 1) pushes
-the parameters of each sample towards a common target (reference sample, or average of the samples
-keeping the mean and variance of each gene), and counts are quantile-matched accordingly.
-With lam > 0, Data/data_{full,train,test}.h5ad are rewritten with integrated counts in X and the raw
-counts in layers['counts_raw'] (a rerun always restarts from the raw counts); lam = 0 restores them.
-Genes listed for a sample in Data/KO_OV_inference.txt are never integrated for that sample.
+sample (mixture_parameters.npy (S, M+1, G)); with integrate_samples, the counts of each sample are
+projected, mode by mode (level by level for more than two levels), on the mixture of the reference sample
+(ref_sample_integration, default the first fitted sample) by quantile matching, and every sample takes the
+reference parameters. Data/data_{full,train,test}.h5ad are then rewritten with projected counts in X and the raw
+counts in layers['counts_raw'] (a rerun always restarts from the raw counts); without projection they are restored.
+Genes listed for a sample in Data/KO_OV_inference.txt are never projected for that sample.
 """
 
 import sys
@@ -85,6 +85,21 @@ def main(argv):
         adata = _restore_raw(ad.read_h5ad(data_path))
         if verb:
             print(f"[infer_mixture] Loaded data from {data_path}")
+        # Depth factors of data_<split> must be those of Data/data.h5ad (estimate_cell_depth rerun after select_genes?)
+        full_path = os.path.join(p, 'Data', 'data.h5ad')
+        if 'depth_factor' in adata.obs and os.path.exists(full_path):
+            obs_full = ad.read_h5ad(full_path, backed='r').obs
+            if 'depth_factor' not in obs_full:
+                print("[infer_mixture] Warning: obs['depth_factor'] in data_{split} but no longer in Data/data.h5ad: "
+                      "rerun select_genes (data files written before estimate_cell_depth)".format(split=split))
+            else:
+                common = adata.obs_names.intersection(obs_full.index[~obs_full.index.duplicated()])
+                diff = np.abs(np.log(np.maximum(adata.obs.loc[common, 'depth_factor'].to_numpy(float), 1e-12)
+                                     / np.maximum(obs_full.loc[common, 'depth_factor'].to_numpy(float), 1e-12)))
+                if len(common) and diff.max() > 1e-6:
+                    print(f"[infer_mixture] Warning: the depth factors of data_{split} differ from those of "
+                          f"Data/data.h5ad for {int((diff > 1e-6).sum())} cells: rerun select_genes (or split_dataset) "
+                          "after estimate_cell_depth")
     else:
         error_msg = (
             f"Error: Data file not found at {data_path}.\n"
@@ -120,7 +135,7 @@ def main(argv):
     configure(model, opts)
     if verb:
         print(f"[infer_mixture] mean_forcing_em={model.mean_forcing_em}, "
-              f"soft_em_refinement={model.soft_em_refinement}, integrate_samples={model.integrate_samples}")
+              f"max_iter_softEM={model.max_iter_softEM}, integrate_samples={model.integrate_samples}")
 
     if verb:
         print(f"[infer_mixture] Starting mixture model inference ({adata.shape[1]} genes)...")
@@ -129,9 +144,6 @@ def main(argv):
         adata,
         kov_genes=_load_kov_genes(p, list(adata.var_names)),
         gene_names=list(adata.var_names),
-        min_components=2,
-        max_components=2,
-        max_iter_kinetics=0,
         verb=verb,
         stimulus_schedule=stim_sched,
     )
@@ -175,7 +187,10 @@ def main(argv):
     np.save(os.path.join(out_dir, 'proba_init'),         model.proba_init)
     np.save(os.path.join(out_dir, 'weights'),            model.weights)
     np.save(os.path.join(out_dir, 'mixture_parameters'), model.a)
-    np.save(os.path.join(out_dir, 'pi_zinb'),            model.pi_zinb)
+    # Depth settings of the fit: every later step uses them (the NB parameters depend on them)
+    import json
+    with open(os.path.join(out_dir, 'mixture_depth.json'), 'w') as fh:
+        json.dump({'use_depth_factor': bool(model.use_depth_factor), 'depth_model': str(model.depth_model)}, fh)
 
     with open(os.path.join(out_dir, 'pi_init.pkl'), 'wb') as f:
         pickle.dump(model.pi_init, f)

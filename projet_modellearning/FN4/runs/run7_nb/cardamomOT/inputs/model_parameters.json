@@ -1,0 +1,15 @@
+{
+ "estimate_proliferation_rates": false,
+ "simulate_with_proliferation": false,
+ "select_genes": false,
+ "build_prior_network": false,
+ "simulate_perturbations": false,
+ "run_test": false,
+ "run_classical_OT": false,
+ "split": "full",
+ "compute_depth_factor": false,
+ "allow_depth_correction": false,
+ "seed": 0,
+ "model_learning_grn": false,
+ "nb_likelihood": true
+}

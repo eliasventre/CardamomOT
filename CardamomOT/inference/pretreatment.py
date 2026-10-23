@@ -1,6 +1,6 @@
 """
-Core functions for selecting the most variable genes according to the
-Zero‑Inflated Negative Binomial (ZiNB) model.
+Gene pretreatment: degradation rates of the literature and differentially expressed genes
+from the NB mixture posteriors.
 """
 from typing import Any
 import pandas as pd

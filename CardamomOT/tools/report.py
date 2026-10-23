@@ -29,7 +29,7 @@ from .velocity import knn_velocity_embedding as _knn_velocity_embedding
 from ..config import find_data_file, resolve_cell_type_obs
 from ..inputs import input_dir
 from ..inference.trajectory import kon_ref_vector
-from ..model.base import load_network_array, drop_network_axis
+from ..model.base import load_network_array, drop_network_axis, load_state_growth
 from ..inference.proliferations import ProliferationMLP, growth_path_states, quadrature, interval_stimulus
 
 A4_LANDSCAPE = (11.69, 8.27)
@@ -372,6 +372,12 @@ class _ReportData:
         self.adata_data = ad.read_h5ad(os.path.join(p, 'Data', f'data_{split}.h5ad'))
         from ..inputs import depth_factor_used
         self.use_depth = depth_factor_used(p)
+        # Counts / depth factor only if the run modelled the depth: otherwise the model describes the raw counts and
+        # data and model draws are both shown raw (one transformation for both)
+        if self.depth_emb and not self.use_depth:
+            print("[report] cell_depth_for_representation ignored: the run does not use the depth factors "
+                  "(use_depth_factor = False), data and model shown as raw counts")
+        self.depth_emb = self.depth_emb and self.use_depth
         self.genes = list(self.adata_data.var_names)
         # Genes of each network condition (select_genes_per_condition); None: one gene space
         from ..condition_genes import condition_gene_sets
@@ -1209,7 +1215,8 @@ def _model_umap_page(pdf, R, samples=None, label=''):
                 ('' if samples is None else f"Samples {', '.join(samples)}. ")
                 + f'{R.emb_name} learned on the observed data' + ('' if samples is None else ' of these samples')
                 + '; the trajectories (Reference: one state per ancestor, i.e. '
-                + ('growth-weighted by exp ∫R_opt, as the simulation has proliferation)' if R.growth_ref
+                + (f"growth-weighted by exp ∫{'R_opt' if getattr(R, 'use_recomputed_proliferation', True) else 'R_prior'}, "
+                   'as the simulation has proliferation)' if R.growth_ref
                    else 'without proliferation, as the simulation)')
                 + ', the NB mixture and network-driven modes along them and the full simulation are projected onto it.')
     smp_data = _sample_labels(stages['Data'], sub['Data'])
@@ -1688,10 +1695,11 @@ def _integration_page(pdf, R, rep, sample_key='dataset_id'):
     A = R.adata_data
     fig = plt.figure(figsize=A4_LANDSCAPE)
     pct = rep.groupby('sample')['integrated'].mean() * 100
-    lam = float(rep['integrate_samples'].iloc[0]) if 'integrate_samples' in rep else 1.0
-    _page_title(fig, f'1. Generative model — per-sample mixtures (integrate_samples = {lam:g})',
-                'Mixture fitted per sample, parameters pushed towards the common target by integrate_samples '
-                '(counts quantile-matched accordingly). Genes with sample-specific parameters: '
+    integ = bool(float(rep['integrate_samples'].iloc[0])) if 'integrate_samples' in rep else True
+    refs = rep['reference'].iloc[0] if 'reference' in rep else '?'
+    _page_title(fig, f'1. Generative model — per-sample mixtures (integrate_samples = {integ})',
+                f'Mixture fitted per sample; counts projected mode by mode on the reference sample {refs} '
+                '(quantile matching). Genes projected: '
                 + ', '.join(f'sample {s}: {v:.0f}%' for s, v in pct.items()) + '.')
     gs = gridspec.GridSpec(1, 3, figure=fig, left=0.06, right=0.97, top=0.86, bottom=0.14, wspace=0.25)
     ax = fig.add_subplot(gs[0, 0])
@@ -1708,10 +1716,10 @@ def _integration_page(pdf, R, rep, sample_key='dataset_id'):
             ax.scatter(x[~integ], y[~integ], s=12, facecolors='none', edgecolors=cols[s], linewidths=0.6)
     lim = ax.get_xlim()
     ax.plot(lim, lim, 'k--', lw=0.6)
-    ax.set_xlabel('log10 global mode mean', fontsize=8); ax.set_ylabel('log10 sample mode mean', fontsize=8)
+    ax.set_xlabel('log10 reference mode mean', fontsize=8); ax.set_ylabel('log10 sample mode mean', fontsize=8)
     ax.tick_params(labelsize=7)
     ax.legend(handles=[Line2D([0], [0], marker='o', ls='', color=cols[s], label=f'sample {s}') for s in samples]
-              + [Line2D([0], [0], marker='o', ls='', color='k', label='integrated'),
+              + [Line2D([0], [0], marker='o', ls='', color='k', label='projected'),
                  Line2D([0], [0], marker='o', ls='', mfc='none', color='k', label='kept raw')],
               fontsize=6.5, frameon=False)
     ax.set_title('Mode means per sample (all modes)', fontsize=9)
@@ -2126,6 +2134,8 @@ class _Dynamics:
         self.a = load('mixture_parameters.npy')
         self.basal, self.inter = (None if x is None else drop_network_axis(x)
                                   for x in (load('basal_simul.npy'), load('inter_simul.npy')))
+        from ..inference.sigma import load_sigma_spec_grn
+        self.spec = load_sigma_spec_grn(cdir)  # families of the GRN sigma (model_learning_grn run), None = logistic
 
         # Real cell behind each state, its prior rate and cell type
         self.real_idx = load('data_traj_real_idx.npy')
@@ -2137,7 +2147,12 @@ class _Dynamics:
         self.ct = self._per_state(obs[LABEL_KEY].astype(str).values, fill='') if R.has_ct else None
 
         # Growth: OT pass (rate over the next interval) and proliferation MLP R(P)
-        self.R_opt = load('data_R_opt.npy')
+        # Net growth of the states used after the inference: R_opt of the growth pass, or the prior rates
+        self.recomputed = bool(getattr(R, 'use_recomputed_proliferation', True))
+        self.R_opt = load_state_growth(cdir, self.recomputed)
+        # Label of these rates: growth OT pass (R_opt), or the prior rates (use_recomputed_proliferation = False)
+        self.growth_label = 'growth OT pass' if self.recomputed else 'prior rates (used)'
+        self.growth_sym = 'R_opt' if self.recomputed else 'R_prior'
         if self.R_opt is not None and len(self.R_opt) != len(self.times):
             self.R_opt = None
         # Proliferation MLP: one, or one per network condition (ConditionProliferation, rows routed by sample)
@@ -2173,7 +2188,7 @@ class _Dynamics:
             self.L_growth = np.vstack([np.zeros((1, self.N)), np.cumsum(gain, axis=0)]).ravel()
         # Learned rate per state: MLP if trained, else the OT pass estimate
         self.R_learned = self.R_mlp if self.R_mlp is not None else self.R_opt
-        self.learned_label = 'MLP R(P)' if self.R_mlp is not None else 'growth OT pass'
+        self.learned_label = 'MLP R(P)' if self.R_mlp is not None else self.growth_label
 
         # Birth rates per state (dilution of the proteins): prior of the real cell, its regression on the state (MLP), and the
         # one of the simulations (MLP if the simulation used it, else the prior); refitted d1 per interval
@@ -2270,7 +2285,7 @@ class _Dynamics:
             k1 = np.max(a[:-1], axis=0)
             b = self.basal[min(s, self.basal.shape[0] - 1)] if self.basal.ndim == 2 else self.basal
             i = self.inter[min(s, self.inter.shape[0] - 1)] if self.inter.ndim == 3 else self.inter
-            out[m] = kon_ref_vector(self.prot_full[m].astype(float), (a[:-1] / k1).T, i, b)
+            out[m] = kon_ref_vector(self.prot_full[m].astype(float), (a[:-1] / k1).T, i, b, self.spec)
             scale[m] = k1 / a[-1]
         out, scale = out[:, self.ns:], scale[:, self.ns:]
         if self.gene_cols is not None:  # genes of the condition (for_condition)
@@ -2341,7 +2356,7 @@ def _weighted_cosine(A, B):
 
 def _proliferation_pages(pdf, R, D):
     if D.R_learned is None:
-        raise FileNotFoundError('no growth estimate (data_R_opt.npy from infer_network_structure)')
+        raise FileNotFoundError('no growth estimate (data_R_opt.npy / data_R_prior.npy from infer_network_structure)')
     has_prior = D.prior_cells is not None
     n_cells = R.adata_data.n_obs
     learned_cells = D.per_cell(D.R_learned, n_cells)
@@ -2427,20 +2442,44 @@ def _proliferation_pages(pdf, R, D):
             for c, dlt in ct.items():
                 stim_ct[c] = stim_ct.get(c, '') + f' {dlt:+.3g}·u{k}'
         fmt = lambda x: f'{x:.3g}' if np.isfinite(x) else '—'
+        mean_of = lambda v, c: np.nanmean(v[ct_cells == c]) if v is not None and np.isfinite(v[ct_cells == c]).any() \
+            else np.nan
         rows = [[c, fmt(anchors.get(c, np.nan)) + stim_ct.get(c, ''),
-                 fmt(np.nanmean(D.prior_cells[ct_cells == c])) if has_prior else '—',
-                 fmt(np.nanmean(learned_cells[ct_cells == c])) if np.isfinite(learned_cells[ct_cells == c]).any() else '—']
+                 fmt(mean_of(D.prior_cells, c)) if has_prior else '—', fmt(mean_of(learned_cells, c)),
+                 fmt(mean_of(learned_cells, c) - mean_of(D.prior_cells, c)) if has_prior else '—']
                 for c in cats]
         ax = fig.add_subplot(gs[1, 2]); ax.axis('off')
         t = ax.table(cellText=rows, colLabels=['Cell type', 'Anchor' + (' (+ stimulus)' if stim_ct else ''), 'Prior',
-                                               'Learned'],
-                     loc='upper center', cellLoc='center', colWidths=[0.34, 0.30, 0.18, 0.18])
+                                               'Learned', 'Δ'],
+                     loc='upper center', cellLoc='center', colWidths=[0.30, 0.28, 0.15, 0.15, 0.14])
         t.auto_set_font_size(False); t.set_fontsize(7); t.scale(1, 1.3)
         for (r, c), cell in t.get_celld().items():
             cell.set_linewidth(0.3)
             if r == 0:
                 cell.set_facecolor('#E8EEF7'); cell.set_text_props(fontweight='bold')
-        ax.set_title(f'Mean net rate per cell type ({pkey})', fontsize=9)
+        ax.set_title(f'Mean net rate per cell type ({pkey}; Δ = learned − prior)', fontsize=9)
+        # Can R(P) separate these types at all? MLP fit on its target, and separability of the types from the proteins
+        notes = []
+        if D.R_mlp is not None and D.R_opt is not None:
+            ok = np.isfinite(D.R_opt) & np.isfinite(D.R_learned)
+            if ok.sum() > 2 and np.var(D.R_opt[ok]) > 0:
+                r2 = 1 - np.mean((D.R_learned[ok] - D.R_opt[ok]) ** 2) / np.var(D.R_opt[ok])
+                notes.append(f"MLP fit of its target ({D.growth_sym}, per state): R² = {r2:.2f}")
+        if p_states is not None and len(set(p_states) - {''}) > 1:
+            from sklearn.linear_model import LogisticRegression
+            from sklearn.model_selection import cross_val_score
+            lab = np.asarray(p_states)
+            idx = np.flatnonzero(lab != '')
+            idx = R.rng.choice(idx, min(len(idx), 5000), replace=False)
+            if min(np.bincount(np.unique(lab[idx], return_inverse=True)[1])) >= 3:
+                acc = cross_val_score(LogisticRegression(max_iter=2000, class_weight='balanced'), D.P[idx], lab[idx],
+                                      cv=3, scoring='balanced_accuracy').mean()
+                notes.append(f"types separated from the model's proteins with balanced accuracy {acc:.2f} "
+                             f"(logistic regression, 3-fold; chance {1 / len(set(lab[idx])):.2f}): R(P) cannot learn "
+                             "rates that differ between types it cannot tell apart")
+        if notes:
+            ax.text(0.0, 0.05, textwrap.fill('. '.join(notes) + '.', 60), transform=ax.transAxes, fontsize=7,
+                    va='bottom', ha='left', color='#444444')
     pdf.savefig(fig); plt.close(fig)
 
     # Page: population growth, rates over time, genes driving R
@@ -2457,7 +2496,7 @@ def _proliferation_pages(pdf, R, D):
         curves.append(('prior', '#9AA5B1', '--', np.nanmean(np.exp(pr * dt[:, None]), axis=1)))
     if D.R_opt is not None:
         ro = D.R_opt.reshape(T, N)[:-1]
-        curves.append(('growth OT pass', '#E67E22', '-', np.nanmean(np.exp(ro * dt[:, None]), axis=1)))
+        curves.append((D.growth_label, '#E67E22', '-', np.nanmean(np.exp(ro * dt[:, None]), axis=1)))
     if D.mlp is not None:
         states, _ = growth_path_states(D.prot_full, D.times, ns=D.ns, n_nodes=5)
         if D.gene_cols is not None:  # genes of the condition (inputs of its MLP)
@@ -2528,7 +2567,7 @@ def _proliferation_pages(pdf, R, D):
     fig = plt.figure(figsize=A4_LANDSCAPE)
     _page_title(fig, '4. Proliferation — growth-weighted trajectories and MLP fit',
                 'The OT selection keeps one descendant per ancestor (trajectories without proliferation); weighting '
-                'each path by its expansion exp(∫R_opt) should bring them back to the observed data.'
+                f'each path by its expansion exp(∫{D.growth_sym}) should bring them back to the observed data.'
                 + (' The simulation used the proliferation MLP.' if R.growth_ref else ''))
     gs = gridspec.GridSpec(1, 3, figure=fig, left=0.06, right=0.97, top=0.86, bottom=0.14, wspace=0.35)
     t_obs = pd.to_numeric(R.adata_data.obs['time']).values
@@ -2586,14 +2625,14 @@ def _proliferation_pages(pdf, R, D):
             ax.spines[sp].set_visible(False)
     else:
         ax.axis('off')
-        ax.text(0.5, 0.5, 'Needs cell types and the growth OT pass (data_R_opt.npy)',
+        ax.text(0.5, 0.5, 'Needs cell types and the net growth of the states (data_R_opt.npy / data_R_prior.npy)',
                 ha='center', va='center', fontsize=9, color='#555555', transform=ax.transAxes)
 
     ax = fig.add_subplot(gs[0, 2])
     if D.mlp_diag is not None:
         d = D.mlp_diag
         x = np.arange(len(d['growth_target']))
-        ax.bar(x - 0.18, d['growth_target'], width=0.36, color='#E67E22', label='growth OT pass')
+        ax.bar(x - 0.18, d['growth_target'], width=0.36, color='#E67E22', label=D.growth_label)
         ax.bar(x + 0.18, d['growth_mlp'], width=0.36, color=REG_COLOR, label='MLP along paths')
         ax.set_xticks(x); ax.set_xticklabels([f"{t:g}" for t in d['interval_start']], fontsize=7)
         ax.axhline(0, color='k', lw=0.4)
@@ -2859,7 +2898,8 @@ def _presentation_page(pdf, R, D, idx, E, V_traj, t, growth, labels=None, color_
 def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
                     normtransform=False, logtransform=True, n_umap=4000, top_regulators=20,
                     top_targets=10, seed=0, depth_embeddings=True, embedding_method_visualization='umap',
-                    protein_dilution=True, classifier_method='random_forest', select_genes=False):
+                    protein_dilution=True, classifier_method='random_forest', select_genes=False,
+                    use_recomputed_proliferation=True):
     """Write the final multi-page PDF report of a CardamomOT run.
 
     Parameters
@@ -2906,6 +2946,7 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
     R = _ReportData(p, split, stim, prior, normtransform, logtransform, list(perturbations), n_umap, seed,
                     depth_embeddings, embedding_method_visualization, classifier_method)
     R.protein_dilution = bool(protein_dilution)
+    R.use_recomputed_proliferation = bool(use_recomputed_proliferation)
 
     inter = load_network_array(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))
     # Network conditions: one network per condition (inter per sample, condition of each sample in network_conditions.json)

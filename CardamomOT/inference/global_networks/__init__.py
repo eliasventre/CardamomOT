@@ -1,5 +1,5 @@
 """
-Methods building the coarse global network on which the gene selection (Steiner tree) is run.
+Methods building the coarse global network on which the gene selection (prize-collecting Steiner selection) is run.
 
 A method is a module exposing
 

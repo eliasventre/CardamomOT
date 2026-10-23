@@ -92,7 +92,8 @@ def main(argv):
                               embedding_method_visualization=str(model.embedding_method_visualization),
                               protein_dilution=bool(model.protein_dilution),
                               classifier_method=str(model.classifier_method),
-                              select_genes=bool(model.select_genes))
+                              select_genes=bool(model.select_genes),
+                              use_recomputed_proliferation=bool(model.use_recomputed_proliferation))
     except FileNotFoundError as e:
         print(f"[report_results] Error: {e}")
         sys.exit(1)

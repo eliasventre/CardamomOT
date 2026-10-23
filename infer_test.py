@@ -30,7 +30,6 @@ Usage:
 Required input files (from training pipeline):
     - Data/data_test.h5ad: test count matrix with temporal information
     - cardamomOT/mixture_parameters.npy: mixture model parameters
-    - cardamomOT/pi_zinb.npy: zero-inflation parameters
     - cardamomOT/inter.npy, basal.npy: core inferred network (used for infer_test)
     - cardamomOT/basins_final.npy, proba_init.npy, alpha.npy, data_prot.npy, data_kon_beta.npy, data_times.npy,
       data_samples.npy, data_traj_valid.npy: training basins and trajectories
@@ -134,8 +133,6 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
     try:
         model.a = np.load(os.path.join(cardamom_dir, 'mixture_parameters.npy'))
         model.d = np.load(os.path.join(cardamom_dir, 'degradations.npy'))
-        pi_zinb = np.load(os.path.join(cardamom_dir, 'pi_zinb.npy'))
-        model.pi_zinb = pi_zinb   # per-gene zero-inflation (used by fit_mixture_test as ZINB prior)
         pi_init_path = os.path.join(cardamom_dir, 'pi_init.pkl')
         if os.path.exists(pi_init_path):
             with open(pi_init_path, 'rb') as f:
@@ -171,8 +168,6 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
 
     if model.a.ndim == 3:
         model.a = _sample_rows(model.a)
-        pi_zinb = _sample_rows(pi_zinb)
-        model.pi_zinb = pi_zinb
 
     # ─── LOAD CORE NETWORK (raw CardamomOT infer_network output) ────────────
     # inter.npy / basal.npy are the main result of CardamomOT inference and
@@ -407,18 +402,16 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
         vect_kon_theta = kon_theta_test + 1e-6
         vect_kon_sim = model.kon_theta + 1e-6       # (N_sim, G_tot) after simulation
 
-        # Helper: NB sample matrix of shape (G, N) using pi_zinb sparsity (per-sample mixtures if any)
+        # Helper: NB sample matrix of shape (G, N) (per-sample mixtures if any)
         def _nb_sample(kon, times_vec, sample_idx=None, depth=None):
             n_cells = kon.shape[0]
-            k1c, cc, pzc = nb_cell_parameters(model.a, pi_zinb, sample_idx)
+            k1c, cc = nb_cell_parameters(model.a, sample_idx)
             sd = 1.0 if depth is None else depth[:, None]  # depth_model: NB(k s, c) or NB(k, c / s)
             n_param, p_param = nb_numpy_params((k1c + 1e-6) * kon, cc, sd, model.depth_model)
             n_param, p_param = n_param[:, ns:].T, np.broadcast_to(p_param, n_param.shape)[:, ns:].T  # (G, N)
             n_param = np.maximum(n_param, 1e-6)
             p_param = np.clip(p_param, 1e-6, 1 - 1e-6)
-            zero_mask = np.random.uniform(0, 1, (G, n_cells)) < pzc.T
             counts = np.random.negative_binomial(n_param, p_param)
-            counts = np.where(zero_mask, 0, counts)
             out = np.zeros((G + 1, n_cells))
             out[0, :] = times_vec
             out[1:, :] = counts
@@ -529,7 +522,6 @@ def validation_pass(p, opts, adata_rem, removed, refs, cardamom_dir):
     base, _ = load_simulation_model(p, opts, train, tag='[infer_test]')
     ns = base.n_stimuli
     default, overrides = test_schedule(p, ns)
-    pi_zinb = np.load(os.path.join(cardamom_dir, 'pi_zinb.npy'))
     T_tr = np.sort(np.unique(base.times_data))
     N = int(np.sum(base.times_data == T_tr[0]))
     sd = (np.asarray(base.samples_data).astype(int)[:N] if base.samples_data is not None
@@ -572,7 +564,7 @@ def validation_pass(p, opts, adata_rem, removed, refs, cardamom_dir):
         # mRNA drawn from the simulated kon with the reference sample's mixture (depth of the observed cells)
         kon = m.kon_theta + 1e-6
         n_sim = kon.shape[0]
-        k1c, cc, pzc = nb_cell_parameters(m.a, pi_zinb, np.full(n_sim, ref_idx))
+        k1c, cc = nb_cell_parameters(m.a, np.full(n_sim, ref_idx))
         depth = None
         if m.use_depth_factor and 'depth_factor' in cells.obs:
             depth = np.random.choice(cells.obs['depth_factor'].to_numpy(dtype=float), n_sim)
@@ -581,7 +573,6 @@ def validation_pass(p, opts, adata_rem, removed, refs, cardamom_dir):
         n_param = np.maximum(n_param[:, ns:], 1e-6)
         p_param = np.clip(np.broadcast_to(p_param, (n_sim, p_param.shape[-1]))[:, ns:], 1e-6, 1 - 1e-6)
         x = np.random.negative_binomial(n_param, p_param)
-        x = np.where(np.random.uniform(0, 1, x.shape) < pzc, 0, x)  # pzc (1 or N, genes)
         a = ad.AnnData(X=x.astype(float))
         if depth is not None:  # depth of the draw (representation of the report)
             a.obs['depth_factor'] = depth

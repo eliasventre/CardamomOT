@@ -32,7 +32,8 @@ network_structure:
 # Network inference
 network:
   enabled: true
-  scale_pen: 20          # Penalization scale
+  qut_level: 0.5         # Sparsity: quantile universal threshold level
+  network_ridge: 20      # Ridge on the edge effects: expected error 1/network_ridge
   max_iterations: 40     # Maximum optimization iterations
 
 # Simulations

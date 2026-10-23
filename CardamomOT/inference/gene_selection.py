@@ -14,10 +14,12 @@ With several samples (obs['dataset_id']), the selection runs before the integrat
 signal is computed within each sample: entropy changes, NB basins and Wilcoxon groups per sample (a gene
 informative in one sample is a candidate: union), highly variable genes with the sample as batch, and one
 network per sample turned into edge probabilities against its own nulls, combined with weights
-cells x transitions (consensus of the shared network); literature and Steiner tree on the combination.
-3. a directed Steiner tree rooted at the stimuli reaching the terminals, the remaining budget
-   (num_max_genes - terminals) going to intermediate genes on the paths (a path may go through
-   several terminals), built greedily by shortest paths on costs -log(|C| / max|C|).
+cells x transitions (consensus of the shared network); literature and Steiner selection on the combination.
+3. a budgeted prize-collecting Steiner selection (steiner_selection): a set of genes, not a tree, in which the
+   terminals are anchored to the stimuli by the most probable paths (anchoring = noisy-OR over every edge of the
+   selection, so that several paths add up and loops are allowed), then grown by the genes worth the most
+   (regulations brought to the selected genes + anchoring brought to the terminals), each gene costing closure_min,
+   the remaining budget going to further terminals of the round robins.
 """
 import re
 import heapq
@@ -252,26 +254,30 @@ def literature_probabilities(W, ns, F, covered, weight=1.0, pseudo=1.0):
 def steiner_selection(W, roots, required, optional, budget, k_in=10, k_stim=10, w_min=0.05, edge_prior=0.9, C=None,
                       closure_min=0.5, W_parts=None):
     """
-    Budgeted directed Steiner tree on edge probabilities W (greedy shortest-path heuristic, path
-    cost = -log of the product of the edge probabilities, i.e. most probable paths).
+    Budgeted prize-collecting Steiner selection on edge probabilities W: a set of genes, not a tree, every edge
+    between selected genes counting.
 
-    Edges i -> j with W >= w_min, the k_in most probable regulators of each gene and the k_stim
-    most probable targets of each root; each edge costs -log(W * edge_prior): edge_prior < 1 makes
-    every extra step cost something, so that among equally probable paths the shortest is taken.
-    Ties in W (many edges at w = 1) are broken by |C| when C is given. A terminal left without
-    incoming edge keeps its best one (probability floored at 1e-3: costly, used as a last resort). All required terminals are selected; the paths to them
-    are added while the total number of selected genes stays within budget. Then the regulation
-    of the selection is closed: the gene bringing the most probable regulation to the selected genes
-    (sum of its W >= w_min towards them) is added, repeatedly, while it brings at least closure_min
-    (missing regulators bias an inference restricted to the selection). Finally the optional
-    terminals are tried in order (terminal + its path) until the budget is full.
-    W_parts (list of per-sample W, combination 'any'): balanced closure, each step serving the sample whose regulation
-    of the selection comes least from inside it (closure_fraction), with the gene bringing it the most probable
-    regulation (at least closure_min in that sample).
-    Returns the selected nodes (in order of addition), the parent and path cost of each connected
-    node, the set of optional terminals added and the list of closure regulators.
+    Graph: edges i -> j with W >= w_min, the k_in most probable regulators of each gene and the k_stim most probable
+    targets of each root (ties in W broken by |C| when C is given); a terminal left without incoming edge keeps its
+    best one (probability floored at 1e-3: a last resort). Each edge is real with probability p = W * edge_prior
+    (edge_prior < 1: every extra step costs something, so that among equally probable paths the shortest wins).
+    Anchoring of a selected gene: probability that it is reached from the roots through the selection, noisy-OR over
+    its selected regulators, a_j = 1 - prod_i (1 - p_ij a_i) (fixed point; several paths add up, loops allowed).
+    1. Required terminals: all selected; the most probable path to each terminal not yet anchored is added, cheapest
+       first, starting from any anchored gene (path probability times its anchoring), within budget.
+    2. Prize-collecting growth: each gene outside the selection is worth the expected number of real regulations it
+       brings to the selected genes, sum_j W_kj (W >= w_min; a missing regulator, even of a gene that has others,
+       biases an inference restricted to the selection), plus the anchoring it brings to the terminals,
+       sum_t a_k p_kt (1 - a_t) (new or redundant paths from the stimuli); the best gene is added, repeatedly, while
+       it is worth at least closure_min (the cost of a gene).
+    3. Optional terminals in order (terminal + its most probable path) while the budget allows.
+    W_parts (list of per-sample W, combination 'any'): balanced growth, each step serving the sample whose regulation
+    of the selection comes least from inside it (closure_fraction), with the regulation term of that sample.
+    Returns the selected nodes (in order of addition), the best anchoring regulator and the anchoring of each anchored
+    node, the set of optional terminals added and the list of the genes of step 2.
     """
     n = W.shape[0]
+    roots = list(roots)
     Wk = np.where(W >= w_min, W, 0.0)
     # Ranking score: probability, then raw strength as tie-breaker
     rank = Wk + (1e-6 * np.abs(C) / max(np.abs(C).max(), 1e-12) if C is not None else 0.0) * (Wk > 0)
@@ -287,19 +293,48 @@ def steiner_selection(W, roots, required, optional, budget, k_in=10, k_stim=10, 
             if W[i, j] > 0 or (C is not None and C[i, j] != 0):
                 Wk[i, j] = max(W[i, j], 1e-3)
                 rank[i, j] = Wk[i, j]
-    adj = [[] for _ in range(n)]
+    # Probabilities of the kept edges (the k_in most probable regulators of each gene), no self-loop
+    P = np.zeros((n, n))
     for j in range(n):
-        col = Wk[:, j]
-        for i in np.argsort(-rank[:, j])[:k_in]:
-            if col[i] > 0 and i != j:
-                adj[i].append((j, -np.log(col[i] * edge_prior)))
+        top = [i for i in np.argsort(-rank[:, j])[:k_in] if Wk[i, j] > 0 and i != j]
+        P[top, j] = np.minimum(Wk[top, j] * edge_prior, 1.0 - 1e-9)
+    adj = [[(int(j), -np.log(P[i, j])) for j in np.flatnonzero(P[i])] for i in range(n)]
+    parts = [W] if W_parts is None else list(W_parts)
+    Wgs = []
+    for Wp in parts:
+        Wg = np.where(Wp >= w_min, Wp, 0.0)
+        np.fill_diagonal(Wg, 0.0)
+        Wgs.append(Wg)
 
-    def dijkstra_from(sources):
+    selected = list(dict.fromkeys(required))
+    chosen = set(selected)
+    terminals = list(selected)
+    extra, closure = set(), []
+
+    def anchoring():
+        # Noisy-OR fixed point on the roots and the selection (least fixed point, from a = 0 off the roots)
+        nodes = roots + [v for v in selected if v not in set(roots)]
+        sub = P[np.ix_(nodes, nodes)]
+        is_root = np.arange(len(nodes)) < len(roots)
+        a_sub = is_root.astype(float)
+        for _ in range(200):
+            new = np.where(is_root, 1.0, -np.expm1(np.log1p(-sub * a_sub[:, None]).sum(axis=0)))
+            done = np.max(np.abs(new - a_sub)) < 1e-8
+            a_sub = new
+            if done:
+                break
+        a = np.zeros(n)
+        a[nodes] = a_sub
+        return a
+
+    def paths(a):
+        # Most probable paths from the anchored genes (distance -log(path probability x anchoring of its start))
         dist = np.full(n, np.inf)
         prev = np.full(n, -1)
-        heap = [(0.0, s) for s in sources]
-        for s in sources:
-            dist[s] = 0.0
+        src = np.flatnonzero(a > 0)
+        dist[src] = -np.log(a[src])
+        heap = [(dist[s_], int(s_)) for s_ in src]
+        heapq.heapify(heap)
         while heap:
             d, u = heapq.heappop(heap)
             if d > dist[u]:
@@ -310,85 +345,76 @@ def steiner_selection(W, roots, required, optional, budget, k_in=10, k_stim=10, 
                     heapq.heappush(heap, (d + w, v))
         return dist, prev
 
-    selected = list(dict.fromkeys(required))
-    chosen = set(selected)
-    in_tree, parent, cost, extra = set(roots), {}, {}, set()
-
-    def attach(t, dist, prev):
-        # Path from the tree to t; returns its new nodes (not yet selected) or None
+    def new_nodes(t, prev):
+        # Genes of the path to t not selected yet
         path, u = [], t
-        while u not in in_tree:
+        while prev[u] != -1:
             path.append(u)
             u = prev[u]
-        return path
+        return [v for v in reversed(path) if v not in chosen]
 
-    def commit(path, dist, prev):
-        for v in reversed(path):
-            in_tree.add(v)
-            parent[v] = prev[v]
-            cost[v] = float(dist[v])
+    def add(nodes):
+        for v in nodes:
             if v not in chosen:
                 chosen.add(v)
                 selected.append(v)
 
-    # 1. Required terminals, cheapest first
-    pending = set(selected)
-    while pending:
-        dist, prev = dijkstra_from(list(in_tree))
-        done = False
-        for t in sorted((t for t in pending if np.isfinite(dist[t])), key=lambda x: dist[x]):
-            path = attach(t, dist, prev)
-            if len(chosen) + sum(v not in chosen for v in path) <= budget:
-                commit(path, dist, prev)
-                pending -= in_tree
-                done = True
-                break
-        if not done:
+    # 1. Required terminals not yet anchored, cheapest path first
+    while True:
+        a = anchoring()
+        dist, prev = paths(a)
+        pending = sorted((t for t in terminals if a[t] <= 0 and np.isfinite(dist[t])), key=lambda t: dist[t])
+        path = next((p for p in (new_nodes(t, prev) for t in pending) if p and len(chosen) + len(p) <= budget), None)
+        if path is None:
             break
-    # 2. Regulatory closure of the selection (balanced over the samples with W_parts)
-    parts = [W] if W_parts is None else list(W_parts)
-    Wgs = []
-    for Wp in parts:
-        Wg = np.where(Wp >= w_min, Wp, 0.0)
-        Wg[list(roots), :] = 0.0
-        Wgs.append(Wg)
-    scores = [Wg[:, sorted(chosen)].sum(axis=1) for Wg in Wgs]
-    for sc in scores:
-        sc[sorted(chosen)] = -np.inf
-        sc[list(roots)] = -np.inf
-    closure = []
+        add(path)
+    # 2. Prize-collecting growth: regulation explained in the selection + anchoring brought to the terminals
+    excluded = np.zeros(n, bool)
+    excluded[roots] = True
     while len(chosen) < budget:
-        # Samples in increasing share of inside regulation, the first with a candidate above closure_min
-        order = np.argsort([closure_fraction(Wp, sorted(chosen), roots, w_min) for Wp in parts]) if len(parts) > 1 \
-            else [0]
+        a = anchoring()
+        inside = roots + [v for v in selected if v not in set(roots)]
+        sel = sorted(chosen)
+        excluded[sel] = True
+        # Anchoring gain of each candidate k: its anchoring through the selection, times its edges to the terminals
+        a_k = -np.expm1(np.log1p(-P[inside] * a[inside][:, None]).sum(axis=0))
+        term = [t for t in terminals if t in chosen]
+        anchor_gain = a_k * (P[:, term] @ (1.0 - a[term])) if term else np.zeros(n)
+        order = np.argsort([closure_fraction(Wp, sel, roots, w_min) for Wp in parts]) if len(parts) > 1 else [0]
         k = None
         for i in order:
-            c = int(np.argmax(scores[i]))
-            if scores[i][c] >= closure_min:
+            gain = Wgs[i][:, sel].sum(axis=1) + anchor_gain
+            gain[excluded] = -np.inf
+            c = int(np.argmax(gain))
+            if gain[c] >= closure_min:
                 k = c
                 break
         if k is None:
             break
-        chosen.add(k)
-        selected.append(k)
+        add([k])
         closure.append(k)
-        for sc, Wg in zip(scores, Wgs):
-            sc += Wg[:, k]
-            sc[k] = -np.inf
     # 3. Optional terminals in order, while the budget allows
     for t in optional:
         if len(chosen) >= budget:
             break
         if t in chosen:
             continue
-        dist, prev = dijkstra_from(list(in_tree))
-        if not np.isfinite(dist[t]):
-            continue
-        path = attach(t, dist, prev)
-        if len(chosen) + sum(v not in chosen for v in path) <= budget:
-            commit(path, dist, prev)
+        dist, prev = paths(anchoring())
+        path = new_nodes(t, prev) if np.isfinite(dist[t]) else None
+        if path is not None and len(chosen) + len(path) <= budget:
+            add(path)
+            terminals.append(t)
             extra.add(t)
-    return selected, parent, cost, extra, closure
+    # Best anchoring regulator and anchoring of each anchored node
+    a = anchoring()
+    inside = roots + [v for v in selected if v not in set(roots)]
+    parent, anchor = {}, {}
+    for v in selected:
+        if a[v] > 0 and v not in set(roots):
+            contrib = P[inside, v] * a[inside]
+            parent[v] = int(inside[int(np.argmax(contrib))])
+            anchor[v] = float(a[v])
+    return selected, parent, anchor, extra, closure
 
 
 def selection_edges(W, node_names, sel, ns, p_min=0.6, F=None, covered=None):
@@ -444,8 +470,9 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
     method run on cells permuted gene by gene (edge_probabilities). null_network: 'hybrid' (gene
     edges against a within-(sample, time) permutation: evidence beyond shared temporal trends,
     which CardamomOT explains by the stimulus and basals; stimulus edges against an all-cell
-    permutation), 'within_time' or 'all_cells' for both. The Steiner tree follows the most probable
-    paths; remaining budget is filled with further terminals of the round robins.
+    permutation), 'within_time' or 'all_cells' for both. The Steiner selection anchors the terminals to the
+    stimuli by the most probable paths and grows by prize (steiner_selection); remaining budget is filled with
+    further terminals of the round robins.
     literature: edge probabilities reweighted by OmniPath feasibility (paths of at most
     literature_depth edges ending with a TF -> target edge, literature_probabilities; species
     detected from the gene names if None), and literature prior of the selection returned.
@@ -453,7 +480,7 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
     BUB-entropy change between consecutive timepoints (Gandrillon MDE, bits) must reach
     min_entropy_change, and the NB-mixture initialization (nb_init_separation, n_cells_mixture
     cells per time, seuil_mixture) must separate its extreme modes by min_nb_separation.
-    entropy_preselection: queries, drivers and the genes of the network (Steiner paths, closure) are taken
+    entropy_preselection: queries, drivers and the genes of the network (Steiner paths, growth) are taken
     among the entropy candidates (Gandrillon KD & MDE, top n_top_entropy per transition) and the forced genes only.
     stim: (n_times, n_stimuli) schedule on the sorted timepoints, or {sample: schedule} (None: default).
     drivers: [(gene, 'fate=<type>')] fate drivers of the classical OT (round robin over the fates,
@@ -548,7 +575,7 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
         hvg[np.flatnonzero(eligible)[tmp.var['highly_variable'].values]] = True
     nb_check = bool(dyn) or (cts is not None and len(np.unique(cts)) > 1)
     if nb_check:
-        # NB basins checked here on the candidate terminals only; the genes the Steiner tree or the
+        # NB basins checked here on the candidate terminals only; the genes the Steiner selection or the
         # closure would add are checked on demand (most network genes are never selected)
         ent0 = set(u_names[gandrillon_genes(kd, mde, top_n=n_top_entropy)]) if kd is not None else set()
         cand = np.flatnonzero(eligible & np.isin(u_names, list(ent0) + list(queries) + [g for g, _ in drivers]))
@@ -591,7 +618,7 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
         if verb:
             print(f"[gene_selection] Entropy genes (KD top {n_top_entropy} & MDE top {n_top_entropy} per transition): "
                   f"{len(ent_candidates)}")
-    # Entropy pre-selection: queries, drivers and every gene of the network (hence of the Steiner tree and of the
+    # Entropy pre-selection: queries, drivers and every gene of the network (hence of the Steiner selection and of the
     # closure) among the entropy candidates only; the perturbed genes are always kept
     allowed = None
     if entropy_preselection and ent_candidates:
@@ -766,13 +793,13 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
                                                    len(net_genes), literature_depth, verb)
         else:
             res = steiner(num_max_genes)
-        chosen, parent, cost, extra, closure = res
+        chosen, parent, anchor, extra, closure = res
         if verb and nb_check:
             print(f"[gene_selection] Variability floor of the genes added by the tree or the closure: "
                   f"{len(checked) - len({idx[g] for g in pool if g in idx})} checked, {len(rejected)} rejected")
         sel = [node_names[v] for v in chosen]
         for v, u in parent.items():
-            rows[node_names[v]] = dict(steiner_parent=node_names[u], cost=cost[v], edge_prob=float(W[u, v]))
+            rows[node_names[v]] = dict(anchor_parent=node_names[u], anchoring=anchor[v], edge_prob=float(W[u, v]))
         chosen_set = list(chosen)
         for v in closure:
             role[node_names[v]] = 'regulator'
@@ -815,8 +842,8 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
     fmt = lambda lst: ', '.join(f"{u} ({w:.2f}{'' if c else '*'})" for u, w, c in lst)
     report = pd.DataFrame([dict(gene=g, role=role.get(g, 'steiner'), group=group.get(g, ''),
                                 required=g in required, **rows.get(g, {})) for g in sel],
-                          columns=['gene', 'role', 'group', 'required', 'steiner_parent', 'cost', 'edge_prob'])
-    report['in_tree'] = report['steiner_parent'].notna()
+                          columns=['gene', 'role', 'group', 'required', 'anchor_parent', 'anchoring', 'edge_prob'])
+    report['anchored'] = report['anchor_parent'].notna()
     reg_by, regs = ([edges.get(g, ([], []))[k] for g in report['gene']] for k in (0, 1))
     report['n_regulators'] = [len(x) for x in reg_by]
     report['is_regulated_by'] = [fmt(x) for x in reg_by]
@@ -833,9 +860,9 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
         print(f"[gene_selection] Selected {len(sel)} genes (budget {num_max_genes}): {(r == 'query').sum()} queries, "
               f"{(r == 'driver').sum()} fate drivers, "
               f"{(r == 'entropy').sum()} entropy genes, {(r == 'steiner').sum()} Steiner genes, "
-              f"{(r == 'regulator').sum()} closure regulators "
+              f"{(r == 'regulator').sum()} growth genes (regulators, redundant paths) "
               f"({int((~report['required'] & r.isin(['query', 'entropy', 'driver'])).sum())} extra terminals); "
-              f"{int((~report['in_tree'] & report['required']).sum())} required terminals outside the Steiner tree")
+              f"{int((~report['anchored'] & report['required']).sum())} required terminals not anchored to the stimuli")
         if net is not None:
             print(f"[gene_selection] Edges inside the selection (w >= {report_edge_prob}"
                   + (", literature-feasible" if lg is not None else "") + f"): {int(report['n_regulators'].sum())}; "
@@ -914,3 +941,80 @@ def _literature(names, species, use, resources, verb):
         if verb:
             print(f"[gene_selection] Warning: literature unavailable ({e}); selection on the data only")
         return None
+
+
+def proliferation_markers(adata, n, use_depth=False, anchors=None, exclude=(), cell_type_keys=('cell_type_proliferation',
+                          'cell_type'), group_keys=('dataset_id', 'time'), max_cells=20000, max_corr=0.8, n_pool=60,
+                          seed=0, verb=True):
+    """
+    n genes that best predict the prior net proliferation rate of the cells (obs['proliferation_net_rate']), to be
+    always selected so that the proliferation MLP R(P) can tell dividing and arrested cells apart. Genes are ranked by
+    |correlation| of log1p(counts, / depth factor with use_depth) with the rate within (sample, time) groups (no batch
+    or time trend), then kept greedily when correlated below max_corr with those already kept (non-redundant).
+    Without a per-cell rate: indicator of the most proliferative cell type (highest rate in anchors {cell type: rate},
+    else a name containing 'prolif') of the first of cell_type_keys in obs. exclude: genes already forced. Mitochondrial
+    and ribosomal genes are left out. Returns (genes, description) — ([], reason) when nothing applies.
+    """
+    import scipy.sparse
+    if n <= 0:
+        return [], 'n_proliferation_markers = 0'
+    obs = adata.obs
+    rng = np.random.default_rng(seed)
+    target, what = None, ''
+    if 'proliferation_net_rate' in obs:
+        r = obs['proliferation_net_rate'].to_numpy(dtype=float)
+        if np.isfinite(r).all() and np.nanstd(r) > 0:
+            target, what = r, "prior net rate (obs['proliferation_net_rate'])"
+    if target is None:
+        key = next((k for k in cell_type_keys if k in obs), None)
+        if key is None:
+            return [], "no obs['proliferation_net_rate'] nor cell types"
+        types = obs[key].astype(str).to_numpy()
+        cats = sorted(set(types))
+        rates = {c: anchors[c] for c in cats if anchors and c in anchors}
+        best = max(rates, key=rates.get) if rates else next((c for c in cats if 'prolif' in c.lower()), None)
+        if best is None or len(cats) < 2:
+            return [], f"no proliferation rate per cell and no proliferative type in obs['{key}']"
+        target, what = (types == best).astype(float), f"cell type '{best}' of obs['{key}'] (most proliferative)"
+    names = np.asarray(adata.var_names).astype(str)
+    up = np.char.upper(names)
+    ok_gene = ~(np.char.startswith(up, 'MT-') | np.char.startswith(up, 'RPL') | np.char.startswith(up, 'RPS')
+                | np.isin(names, list(exclude)))
+    rows = np.arange(adata.n_obs) if adata.n_obs <= max_cells else np.sort(rng.choice(adata.n_obs, max_cells, replace=False))
+    X = adata.X[rows]
+    X = scipy.sparse.csr_matrix(X) if not scipy.sparse.issparse(X) else X.tocsr()
+    X = X.astype(float)
+    if use_depth and 'depth_factor' in obs:
+        X = scipy.sparse.diags(1.0 / obs['depth_factor'].to_numpy(dtype=float)[rows]) @ X
+    X = X.log1p()
+    t = target[rows]
+    keys = [k for k in group_keys if k in obs]
+    grp = (np.unique(np.array(['|'.join(map(str, v)) for v in zip(*[obs[k].to_numpy()[rows] for k in keys])]),
+                     return_inverse=True)[1] if keys else np.zeros(len(rows), dtype=int))
+    G = scipy.sparse.csr_matrix((np.ones(len(rows)), (grp, np.arange(len(rows)))))
+    n_g = np.asarray(G.sum(axis=1)).ravel()
+    # Within-group centring: covariance with the centred target, within-group variances
+    t_c = t - (G @ t / n_g)[grp]
+    cov = np.asarray(X.T @ t_c).ravel()
+    S = np.asarray((G @ X).todense())
+    var = np.asarray(X.multiply(X).sum(axis=0)).ravel() - (S ** 2 / n_g[:, None]).sum(axis=0)
+    corr = cov / np.sqrt(np.maximum(var, 1e-12) * max(float(t_c @ t_c), 1e-12))
+    corr[~ok_gene] = 0.0
+    pool = np.argsort(-np.abs(corr))[:n_pool]
+    pool = pool[np.abs(corr[pool]) > 0]
+    if not len(pool):
+        return [], f'no gene correlated with the {what}'
+    Z = np.asarray(X[:, pool].todense())
+    Z = Z - (G @ Z / n_g[:, None])[grp]
+    Z /= np.maximum(Z.std(axis=0), 1e-12)
+    kept = []
+    for j in range(len(pool)):
+        if all(abs(float(Z[:, j] @ Z[:, k]) / len(rows)) < max_corr for k in kept):
+            kept.append(j)
+        if len(kept) == n:
+            break
+    genes = [names[pool[j]] for j in kept]
+    if verb:
+        print(f"[gene_selection] Proliferation markers ({what}, within (sample, time), non-redundant): "
+              + ', '.join(f"{names[pool[j]]} ({corr[pool[j]]:+.2f})" for j in kept))
+    return genes, what

@@ -11,7 +11,7 @@ The selection only sees the cells with obs['split'] = 'train' (or 'full'), writt
 the test cells do not leak into it.
 With select_genes = True, genes are selected from the whole transcriptome of Data/data.h5ad in two steps
 (CardamomOT.inference.gene_selection): a coarse global GRN (network_method, OTVelo-Granger by default) on log(x+1) counts
-(highly variable, protein-coding, non mito/ribo genes), then a directed Steiner tree linking the
+(highly variable, protein-coding, non mito/ribo genes), then a prize-collecting Steiner selection linking the
 stimulus to the genes of genes_queries (gene_lists sheet), to the fate drivers of run_classical_OT (n_driver_genes,
 cardamomOT/classical_OT/fate_drivers.csv) and to the highest-entropy genes, within a budget
 of model.num_max_genes genes. With select_genes = False all genes are kept. With literature_selection, the
@@ -34,7 +34,7 @@ Output files (selected genes only):
       select_genes_per_condition, the union of the per-condition selections and uns['condition_genes']
       ({network_condition: genes}, also cardamomOT/condition_genes.json)
     - cardamomOT/gene_selection_report.csv: role of each selected gene (query, entropy, Steiner, regulator), its
-      Steiner parent, and its regulators (is_regulated_by) and targets (regulates) inside the selection: edges of
+      anchoring to the stimuli and best anchoring regulator, and its regulators (is_regulated_by) and targets (regulates) inside the selection: edges of
       the global network with probability >= selection_edge_prob, feasible in the literature (path of at most
       literature_depth edges; '*': pair not covered by the literature, kept as in the prior)
     - cardamomOT/global_network.npz: global network C, its null C_null, edge probabilities W, genes (stimuli first)
@@ -105,6 +105,29 @@ def perturbed_genes(p, names=None):
     return genes
 
 
+def proliferation_markers(p, model, ad_sel, exclude=()):
+    """Proliferation markers always selected when the proliferation is modelled (protein_dilution or
+    simulate_with_proliferation): the n_proliferation_markers genes that best predict the prior net rate of the cells
+    of ad_sel (gene_selection.proliferation_markers), so that the proliferation MLP R(P) reads informative proteins."""
+    n = int(model.n_proliferation_markers or 0)
+    if n <= 0 or not (model.protein_dilution or model.simulate_with_proliferation):
+        return []
+    from CardamomOT.inference.gene_selection import proliferation_markers as markers
+    from CardamomOT.config import find_data_file
+    anchors = {}
+    pr = find_data_file(input_dir(p), 'proliferation_rates')
+    if pr is not None:
+        tab = pd.read_csv(pr, sep=None, engine='python', header=None)
+        anchors = {str(k): float(v) for k, v in zip(tab.iloc[:, 0], tab.iloc[:, 1])
+                   if pd.notna(pd.to_numeric(v, errors='coerce'))}
+    genes, what = markers(ad_sel, n, use_depth=bool(model.use_depth_factor), anchors=anchors, exclude=exclude,
+                          seed=0 if model.seed is None else int(model.seed))
+    if not genes:
+        print(f"[select_genes] Warning: no proliferation marker forced ({what}); the proliferation MLP may not "
+              "separate dividing and arrested cells")
+    return genes
+
+
 def main(argv):
     """Select the genes on the train cells and write data_full/train/test (-i <project>, --prior)."""
     opts = parse_step_options(argv, 'select_genes', __doc__)
@@ -165,7 +188,7 @@ def main(argv):
         max_free = model.max_free_params if build_prior else None
         budget = f"{max_free} free network parameters" if max_free else f"{model.num_max_genes} genes"
         print(f"[select_genes] Gene selection: {model.n_query_genes} queries (of {len(queries)}) + "
-              f"{model.n_entropy_genes} entropy genes, '{model.network_method}' network and directed Steiner tree "
+              f"{model.n_entropy_genes} entropy genes, '{model.network_method}' network and prize-collecting Steiner selection "
               f"from the stimulus, budget {budget}")
 
         # Stimulus schedule per sorted timepoint (default: 0 at the first time, 1 after)
@@ -201,6 +224,10 @@ def main(argv):
         from CardamomOT.inference.depth_model import set_depth_model
         set_depth_model(model.depth_model)  # NB of the depth factors in the separation of the modes
 
+        # Genes always selected: perturbations, and the proliferation markers (of the cells selected on) when the
+        # proliferation is modelled
+        perturbed = perturbed_genes(p, list(adata.var_names))
+
         def run(ad_sel, combo):
             """select_genes on the cells ad_sel (sample_combination combo)."""
             return select_genes(
@@ -216,7 +243,8 @@ def main(argv):
                 min_entropy_change=model.min_entropy_change, min_nb_separation=model.min_nb_separation,
                 n_cells_mixture=model.batch_size_mixture, seuil_mixture=model.seuil,
                 n_cells_network=model.batch_size_mixture or 1000,  # cost of the network: capped without batch_size_mixture
-                forced_genes=perturbed_genes(p, list(adata.var_names)), stimulus_targets=read_stimulus_targets(input_dir(p)),
+                forced_genes=list(dict.fromkeys(perturbed + proliferation_markers(p, model, ad_sel, perturbed))),
+                stimulus_targets=read_stimulus_targets(input_dir(p)),
                 drivers=drivers, n_driver=int(model.n_driver_genes), entropy_preselection=bool(model.entropy_preselection),
                 use_depth_factor=model.use_depth_factor, report_edge_prob=model.selection_edge_prob,
                 sample_combination=combo, seed=model.seed)

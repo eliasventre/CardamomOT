@@ -5,7 +5,7 @@ import numpy as np
 from CardamomOT import NetworkModel
 
 # Number of runs
-N = 10
+N = 3
 # Print information
 verb = 1
 # number of initial couplings
@@ -115,12 +115,12 @@ for n in [5, 10, 20]:
         t1 = timer.time()
         runtime[r] = t1 - t0
         print(runtime[r])
-        score = model.inter_tmp
+        score = model.inter
         for _ in range(n_repet):
             model = NetworkModel(G - 1)
             model.d = np.loadtxt('Trees{}/Data/Rates/degradation_rates.txt'.format(n), dtype=float, delimiter='\t').T 
             model.fit(x, verb=verb)
-            score += model.inter_tmp
+            score += model.inter
         np.save('Trees{}/CARDAMOM2/score_{}'.format(n,r+1), score)
         np.save('Trees{}/CARDAMOM2/loss_traj_{}'.format(n, r+1), model.loss_trajectory)
         np.save('Trees{}/CARDAMOM2/score_traj_{}'.format(n, r+1), model.theta_trajectory)

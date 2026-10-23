@@ -2,7 +2,10 @@
 Free-running fit (no teacher forcing) of the simulation model on the observed mode distributions.
 
 The model of the simulations is integrated from the trajectory states of a starting time over the next intervals
-and compared, at each reached time, with the kon of the observed modes (debiased Sinkhorn on kon, per sample).
+and compared, at each reached time, with the kon of the observed modes (debiased Sinkhorn on kon, per sample); with
+the mRNA memory (targets_accounting_late_mrna, group 'lag'), the kon of each target at the proteins the lag of its
+class earlier (mean of the memory kernel truncated at the start of the interval), the modes being read on the mRNA,
+which follows the burst frequency with this delay (the lag is that of fit_network: no gradient through d0 = d1 / eps).
 Horizon curriculum: windows of 1 interval first (close to the teacher-forced fits), then 2, ... up to the whole
 time course, so that the errors accumulated along the simulations are corrected.
 
@@ -24,6 +27,8 @@ import numpy as np
 import torch
 from geomloss import SamplesLoss
 
+from .sigma import sigma_torch
+
 SCALE_BOUNDS = (0.2, 5.0)  # scale of theta per target gene: within [1/5, 5] (network neither erased nor blown up)
 
 
@@ -31,23 +36,40 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                      learn_d=True, learn_eps=True, learn_scale=True, temporal=True, lam_theta=1.0, lam_rates=1.0,
                      eps_bounds=(1 / 50, 1 / 1.5), epochs=30, lr=1e-2, n_sub=20, batch_size=256, n_rep=2,
                      max_horizon=9, n_windows=10, n_cond=1, d1_ref=None, eps_ref=None, only_max_horizon=False,
-                     blur=0.05, noise='gamma', scale_p=1.0, seed=0, verb=False):
+                     blur=0.05, noise='gamma', scale_p=1.0, seed=0, verb=False, spec=None, support_tol=0.0,
+                     memory_filter=False, ce_weight=0.0):
     """
     groups: one dict per sample s with
         'X' (T, n, G) trajectory states (starts of the windows; mode 'sde2' also 'M' (T, n, G) normalised mRNA
         and 'M_targets' list of T arrays of observed normalised mRNA),
         'targets' list of T arrays (n_t, G) of observed kon (None: time not observed), 'k_lo', 'k_hi', 'k1' (G,),
+        optionally 'post' / 'levels' lists of T arrays (n_t, G, L): posteriors and levels of each observed cell, the
+        targets being then drawn from them at every minibatch (their mean 'targets' would contract the distribution),
+        optionally 'tau' (T, n, G) sigmoid targets of the network fit of each trajectory state, 'tau_ok' (T, n) observed
+        states and 'gw' (G,) gene weights: deterministic model ('ode'), cross-entropy of each trajectory against its
+        targets (the pairing of the trajectories), added with weight ce_weight to the Sinkhorn between distributions,
+        optionally 'binary' (G,) bool: genes of two modes, whose simulated kon is compared as a Bernoulli draw of
+        sigma (probability of the high mode) between k_lo and k_hi,
         'stim' (T - 1, ns) stimulus of each interval, 'idx' index of its basal / network rows, 'cond' index of its
         kinetics (network condition, 0 .. n_cond - 1: d1, eps and scale per condition),
         'start_ok' (T,) bool times observed for the sample (windows start only there, virtual states being copies),
-        'birth' f(P (n, G), t, slots) -> (n,) or None, 'rate' f(P (n, G), t) -> (n,) or None (branching weights).
-    theta (G, G) or (S, G, G), basal (S, G): starting network (support and signs kept, rappel lam_theta);
+        'birth' f(P (n, G), kon (n, G), t, slots) -> (n,) birth rates of the dilution or None, re-evaluated at every
+        integration step ('birth_every_step' True, default) or at the start of each interval only (False),
+        'rate' f(P (n, G), t) -> (n,) or None: net rate of the branching weights, integrated along the steps,
+        'lag' (optional, (T - 1, K) hours per interval and class of targets) and 'lag_w' ((K, G) one-hot class of
+        each gene): the observed modes of a target are compared with its kon at the proteins the lag of its class
+        before each reached time (integration step nearest to it, the start of the interval at most).
+    theta (G, G) or (S, G, G), basal (S, G): starting network (support |theta| > support_tol and signs kept,
+    the other entries set to 0; rappel lam_theta on the support);
     d1, eps, scale (T - 1, G): starting rates (rappel lam_rates on the logs towards d1_ref, eps_ref, default the
     starting values, and towards a scale of 1); only_max_horizon: no curriculum, windows of max_horizon only (with
     T - 1 <= max_horizon, the whole time course from the first timepoint only); temporal: one value per interval,
     else shared; max_horizon: longest window (intervals) of the curriculum; n_windows: window starts drawn at each
     step (None: all; the cost of a step grows as n_windows x horizon instead of T^2), integrated together in one
-    batch; scale_p: protein level of a kon of 1 (scale_proteins, also for the normalised mRNA). Returns
+    batch; scale_p: protein level of a kon of 1 (scale_proteins, also for the normalised mRNA); spec: families of the
+    GRN sigma (sigma.py, model_learning_grn), None = logistic. memory_filter: the observed modes are compared with
+    the kon read on the mRNA, Kb' = d0 (kon - Kb) at the d0 = d1 / eps of the model, carried along the windows from
+    the kon of the start states (groups 'K0' (T, n, G)), instead of the lagged proteins. Returns
     (theta, basal, d1, eps, scale (n_cond, T - 1, G), history).
     """
     seed = 0 if seed is None else int(seed)  # no model seed: fixed draws
@@ -60,7 +82,9 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
     gmask = torch.ones(G, dtype=f64)
     gmask[:ns] = 0.0
 
+    # Support: |theta| > support_tol (residues of the smoothed L1 and of the averaged fits are absent edges)
     theta0 = np.asarray(theta, dtype=float)
+    theta0 = np.where(np.abs(theta0) > support_tol, theta0, 0.0)
     mask = torch.tensor(theta0 != 0, dtype=f64)
     sgn = torch.tensor(np.sign(theta0), dtype=f64)
     th = torch.tensor(np.abs(theta0), dtype=f64, requires_grad=learn_theta)
@@ -82,15 +106,28 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         ref[3] = log_par(eps_ref, *eps_bounds, False)
     ref[4] = torch.zeros_like(ls)  # scale rappel towards 1
 
-    # Per-gene units of the kon distances (floor: constant genes)
-    allk = np.concatenate([tg[:, ns:] for g in groups for tg in g['targets'] if tg is not None and len(tg)])
-    sdk = torch.tensor(np.maximum(allk.std(axis=0), 0.05), dtype=f64)
+    # Per-gene units of the kon distances (floor: constant genes); with posteriors, total variance of the draws
+    # (from the posteriors alone, whatever the forcing modes in 'targets')
+    if all(g.get('post') is not None for g in groups):
+        pl = [(p_[:, ns:], lv[:, ns:]) for g in groups for p_, lv in zip(g['post'], g['levels'])
+              if p_ is not None and len(p_)]
+        m1 = np.concatenate([(p_ * lv).sum(-1) for p_, lv in pl])
+        m2 = np.concatenate([(p_ * lv ** 2).sum(-1) for p_, lv in pl])
+        var_k = np.maximum(m2.mean(axis=0) - m1.mean(axis=0) ** 2, 0.0)
+    else:
+        allk = np.concatenate([tg[:, ns:] for g in groups for tg in g['targets'] if tg is not None and len(tg)])
+        var_k = allk.var(axis=0)
+    sdk = torch.tensor(np.maximum(np.sqrt(var_k), 0.05), dtype=f64)
     if mode == 'sde2':
         allm = np.concatenate([tg[:, ns:] for g in groups for tg in g['M_targets'] if tg is not None and len(tg)])
         sdm = torch.tensor(np.maximum(allm.std(axis=0), 0.05), dtype=f64)
     sink = SamplesLoss('sinkhorn', p=2, blur=blur, scaling=0.5, debias=True)  # geomloss default annealing
     tens = [dict(k_lo=torch.tensor(g['k_lo'], dtype=f64), k_hi=torch.tensor(g['k_hi'], dtype=f64),
-                 k1=torch.tensor(np.maximum(g['k1'], 1e-8), dtype=f64)) for g in groups]
+                 k1=torch.tensor(np.maximum(g['k1'], 1e-8), dtype=f64),
+                 binary=None if g.get('binary') is None or not np.any(g['binary'][ns:]) else
+                 torch.tensor(np.asarray(g['binary'][ns:], dtype=bool)),
+                 lag_w=None if g.get('lag') is None else torch.tensor(np.asarray(g['lag_w'], dtype=float)))
+            for g in groups]
 
     def theta_of(i):
         t_ = sgn * torch.relu(th) * mask
@@ -104,8 +141,15 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
     def kon_of(P, gi, s):
         """kon (W, n, G) of the states P (W, n, G) of group gi, scale of theta s (W, G) of each window."""
         g, c = groups[gi], tens[gi]
-        z = torch.einsum('wng,gj->wnj', P, theta_of(g['idx'])) * s[:, None, :] + (ba[g['idx']] * s)[:, None, :]
-        return c['k_lo'] + (c['k_hi'] - c['k_lo']) * torch.sigmoid(z)
+        return c['k_lo'] + (c['k_hi'] - c['k_lo']) * sigma_torch(P, theta_of(g['idx']), ba[g['idx']], s, spec)
+
+    def kon_read(P_obs, gi, s):
+        """kon (W, n, G) compared with the observed modes: at the proteins P_obs (W, n, G), or with the mRNA memory
+        P_obs (K, W, n, G) at the lagged node of the class of each target."""
+        lw = tens[gi]['lag_w']
+        if lw is None:
+            return kon_of(P_obs, gi, s)
+        return sum(lw[k] * kon_of(P_obs[k], gi, s) for k in range(lw.shape[0]))
 
     def bursts(rate, size, h):
         """Bursts over a step h: Gamma increments with the mean (rate h size) and variance (2 rate h size^2) of the
@@ -115,18 +159,39 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         conc = torch.clamp(rate * h / 2, min=1e-6)
         return torch.distributions.Gamma(conc, 1.0 / (2 * size)).rsample()
 
-    def run_interval(P, Mn, gi, tw, b):
+    def run_interval(P, Mn, gi, tw, sl, Kb=None):
         """Integration of the windows over their intervals [times[tw], times[tw + 1]] (n_sub steps each, exact
-        relaxation over a step); P, Mn (W, n, G), b (W, n) birth rates."""
-        d, e, s = rates_of(tw, groups[gi].get('cond', 0))
+        relaxation over a step); P, Mn (W, n, G), sl (W, n) trajectory slots of the cells. Birth rates of the
+        dilution re-evaluated on the current states (every step, or at the start of the interval), branching net
+        rate integrated along the steps (trapezoids). Kb (W, n, G) given (memory_filter): kon read on the mRNA,
+        relaxed towards kon at the d0 = d1 / eps of the model. Returns (P, Mn, s, increment of the log-weights (W, n),
+        proteins compared with the observed modes: P without lag, else the proteins (K, W, n, G) the lag of each class
+        before the end of each interval, Kb)."""
+        g = groups[gi]
+        W = P.shape[0]
+        d, e, s = rates_of(tw, g.get('cond', 0))
         d, e = d[:, None, :], e[:, None, :]
         k1 = tens[gi]['k1']
-        h = torch.tensor((times[tw + 1] - times[tw]) / n_sub, dtype=f64)[:, None, None]
-        dp = d + b[..., None]                     # protein decay with dilution
-        decay_p = torch.exp(-dp * h)
+        h_np = (times[tw + 1] - times[tw]) / n_sub
+        h = torch.tensor(h_np, dtype=f64)[:, None, None]
+        b = torch.zeros(P.shape[:2], dtype=f64)
+        rate_of = None if g['rate'] is None else \
+            (lambda X: np.stack([np.asarray(g['rate'](X[w], tw[w]), float) for w in range(W)]))
+        R_prev = None if rate_of is None else rate_of(P.detach().numpy())
+        dlogw = np.zeros(P.shape[:2])
         keep = gmask.bool()
-        for _ in range(n_sub):
+        lag = g.get('lag') if Kb is None else None
+        hist = [P] if lag is not None else None  # states at the steps, for the lagged comparison
+        for k in range(n_sub):
             kon = kon_of(P, gi, s)
+            if Kb is not None:  # mean mRNA (kon units) given the kon path: memory kernel of the model's d0
+                Kb = kon + (Kb - kon) * torch.exp(-(d / e) * h)
+            if g['birth'] is not None and (k == 0 or g.get('birth_every_step', True)):
+                Pn, kn = P.detach().numpy(), kon.detach().numpy()
+                b = torch.tensor(np.stack([np.asarray(g['birth'](Pn[w], kn[w], tw[w], sl[w]), float)
+                                           for w in range(W)]), dtype=f64)
+            dp = d + b[..., None]                     # protein decay with dilution
+            decay_p = torch.exp(-dp * h)
             if mode == 'sde2':
                 d0 = d / e
                 # mRNA bursts of rate kon k1 d0 and mean size 1 / k1 (normalised), proteins translated from them
@@ -138,12 +203,44 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
             else:
                 P_new = P * decay_p + d * scale_p * kon * (1 - decay_p) / dp
             P = torch.relu(torch.where(keep, P_new, P))
-        return P, Mn, s
+            if hist is not None:
+                hist.append(P)
+            if rate_of is not None:  # branching: weights exp(int R) along the steps
+                R_new = rate_of(P.detach().numpy())
+                dlogw = dlogw + 0.5 * (R_prev + R_new) * h_np[:, None]
+                R_prev = R_new
+        if hist is None:
+            return P, Mn, s, dlogw, P, Kb
+        k_lag = np.clip(np.rint(np.asarray(lag)[tw] / h_np[:, None]).astype(int), 0, n_sub)  # (W, K) steps
+        P_lag = torch.stack([torch.stack([hist[n_sub - k_lag[w, k]][w] for w in range(W)])
+                             for k in range(k_lag.shape[1])])
+        return P, Mn, s, dlogw, P_lag, Kb
+
+    def observed_kon(kon, gi, r):
+        """Simulated kon (W, n, G - ns) read as the observed modes: genes of two modes ('binary') as a Bernoulli draw
+        of sigma, the probability of the high mode (as in the network fit), straight-through gradient through sigma."""
+        b = tens[gi]['binary']
+        if b is None:
+            return kon
+        lo, hi = tens[gi]['k_lo'][ns:], tens[gi]['k_hi'][ns:]
+        sig = ((kon - lo) / torch.clamp(hi - lo, min=1e-12)).clamp(0.0, 1.0)
+        z = torch.tensor(r.random(tuple(kon.shape)) < sig.detach().numpy(), dtype=f64)
+        return torch.where(b, lo + (hi - lo) * (z + sig - sig.detach()), kon)
+
+    def kon_targets(g, t, i, r):
+        """Observed kon (len(i), G - ns) of the cells i at time t: levels drawn from their posteriors (generator r),
+        else their 'targets'."""
+        if g.get('post') is None:
+            return g['targets'][t][i][:, ns:]
+        P, lev = g['post'][t][i][:, ns:], g['levels'][t][i][:, ns:]
+        k = (np.cumsum(P, axis=-1) < r.random(P.shape[:2])[..., None]).sum(-1).clip(max=P.shape[-1] - 1)
+        return np.take_along_axis(lev, k[..., None], axis=-1)[..., 0]
 
     def windows_loss(a_sel, H, full=False):
         """Mean loss of the windows starting at a_sel (H intervals each), all windows of a group in one batch: one
-        batched Sinkhorn per interval (targets resampled to a common size)."""
+        batched Sinkhorn per interval (targets resampled to a common size; full: fixed draws of the targets)."""
         loss, n_terms = 0.0, 0
+        r_tg = np.random.default_rng(seed + 2) if full else rng
         for gi, g in enumerate(groups):
             a_ok = np.array([a for a in a_sel if g['start_ok'][a]], dtype=int)  # virtual states are no start
             if not len(a_ok):
@@ -154,34 +251,47 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
             slots = np.repeat(slots, n_rep, axis=1)                       # (W, n_p)
             P = torch.tensor(g['X'][a_ok[:, None], slots], dtype=f64)
             Mn = torch.tensor(g['M'][a_ok[:, None], slots], dtype=f64) if mode == 'sde2' else None
+            # kon read on the mRNA (memory_filter): from the kon of the start states
+            Kb = torch.tensor(g['K0'][a_ok[:, None], slots], dtype=f64) if memory_filter else None
             logw = np.zeros(slots.shape)
             stim = torch.tensor(g['stim'], dtype=f64)
             for k in range(H):
                 tw = a_ok + k
                 P = P.clone()
                 P[..., :ns] = stim[tw][:, None, :]
-                Pn = P.detach().numpy()
-                b = np.zeros(slots.shape) if g['birth'] is None else \
-                    np.stack([np.asarray(g['birth'](Pn[w], tw[w], slots[w]), float) for w in range(W)])
-                R0 = None if g['rate'] is None else np.stack([np.asarray(g['rate'](Pn[w], tw[w]), float)
-                                                              for w in range(W)])
-                P, Mn, s = run_interval(P, Mn, gi, tw, torch.tensor(b, dtype=f64))
+                P, Mn, s, dlogw, P_obs, Kb = run_interval(P, Mn, gi, tw, slots, Kb)
                 P = P.clone()
                 P[..., :ns] = stim[tw][:, None, :]
-                if R0 is not None:  # branching: weights exp(int R) along the window
-                    Pn = P.detach().numpy()
-                    R1 = np.stack([np.asarray(g['rate'](Pn[w], tw[w]), float) for w in range(W)])
-                    logw = logw + 0.5 * (R0 + R1) * (times[tw + 1] - times[tw])[:, None]
+                P_obs = P_obs.clone()
+                P_obs[..., :ns] = stim[tw][:, None, :]
+                logw = logw + dlogw
                 obs = [w for w in range(W) if g['targets'][tw[w] + 1] is not None and len(g['targets'][tw[w] + 1])]
                 if not obs:
                     continue
+                if g.get('tau') is not None and ce_weight > 0:  # ODE: + cross-entropy of each trajectory (its mode)
+                    P_sel = P_obs[obs] if tens[gi]['lag_w'] is None else P_obs[:, obs]
+                    lo, hi = tens[gi]['k_lo'][ns:], tens[gi]['k_hi'][ns:]
+                    sig = ((kon_read(P_sel, gi, s[obs])[..., ns:] - lo) / torch.clamp(hi - lo, min=1e-12))
+                    sig = sig.clamp(1e-6, 1 - 1e-6)
+                    tau = torch.tensor(np.stack([g['tau'][tw[w] + 1][slots[w]] for w in obs])[..., ns:], dtype=f64)
+                    ok = torch.tensor(np.stack([g['tau_ok'][tw[w] + 1][slots[w]] for w in obs]), dtype=f64)
+                    gw = torch.tensor(g['gw'][ns:], dtype=f64) * (1.0 if g.get('gmask') is None else
+                                                                torch.tensor(g['gmask'][ns:], dtype=f64))
+                    ce = -(tau * torch.log(sig) + (1 - tau) * torch.log(1 - sig))
+                    per = (ce * gw).sum(-1) / gw.sum().clamp(min=1e-12)
+                    wo = torch.softmax(torch.tensor(logw[obs], dtype=f64), dim=1) * ok
+                    loss = loss + ce_weight * ((per * wo).sum(1) / wo.sum(1).clamp(min=1e-12)).sum()
                 M = len(g['targets'][tw[obs[0]] + 1]) if full else batch_size
                 sel = [rng.choice(len(g['targets'][tw[w] + 1]), M, replace=len(g['targets'][tw[w] + 1]) < M)
                        if not full else np.arange(M) for w in obs]
-                Y = torch.tensor(np.stack([g['targets'][tw[w] + 1][i][:, ns:] for w, i in zip(obs, sel)]), dtype=f64)
+                Y = torch.tensor(np.stack([kon_targets(g, tw[w] + 1, i, r_tg) for w, i in zip(obs, sel)]), dtype=f64)
                 wts = torch.softmax(torch.tensor(logw[obs], dtype=f64), dim=1)
                 u = torch.full((len(obs), M), 1.0 / M, dtype=f64)
-                kon = kon_of(P[obs], gi, s[obs])[..., ns:]
+                if Kb is not None:
+                    kon = observed_kon(Kb[obs][..., ns:], gi, r_tg)
+                else:
+                    P_sel = P_obs[obs] if tens[gi]['lag_w'] is None else P_obs[:, obs]
+                    kon = observed_kon(kon_read(P_sel, gi, s[obs])[..., ns:], gi, r_tg)
                 # Genes of the group's condition only (select_genes_per_condition): the others are not compared
                 gk = sdk if g.get('gmask') is None else sdk / torch.tensor(g['gmask'][ns:], dtype=f64).clamp(min=1e-12)
                 loss = loss + sink(wts, kon / gk, u, Y / gk).sum()

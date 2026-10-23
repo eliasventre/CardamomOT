@@ -36,12 +36,24 @@ PARAMETER_GROUPS = [
         'use_depth_factor', 'compute_depth_factor', 'allow_depth_correction', 'depth_method', 'depth_by_cell_type',
         'depth_model']),
     ('NB mixture and samples', [
-        'mean_forcing_em', 'batch_size_mixture', 'soft_em_refinement', 'integrate_samples', 'ref_sample_integration']),
+        'mean_forcing_em', 'batch_size_mixture', 'max_iter_softEM', 'min_mixture_components', 'max_grid_levels',
+        'mixture_selection_criterion', 'integrate_samples', 'ref_sample_integration']),
     ('Network inference', [
         'force_basins', 'temporal_basins', 'min_n_loops', 'max_iter', 'batch_size_traj', 'n_network_fits',
-        'constrain_basal_uniform', 'network_condition_pen', 'degradation_rates_per_condition', 'exact_flow_matching']),
+        'constrain_basal_uniform', 'network_condition_pen', 'weight_flow_matching', 'flow_matching_nodes',
+        'qut_level', 'network_ridge', 'one_hot_probas', 'weight_network_distribution']),
+    ('mRNA memory and trajectories', [
+        'inference_mrnas_direct', 'mrna_bridge', 'targets_accounting_late_mrna', 'late_mrna_nodes',
+        'late_mrna_classes', 'min_ratio']),
+    ('Refine: kinetic rates by the free-running fit', [
+        'refine_theta_with_sde', 'fit_scale_theta', 'degradation_rates_per_condition', 'use_temporal_degradations',
+        'sde_epochs', 'refine_in_loop']),
+    ('Model learning of the regulation function', [
+        'model_learning_grn', 'model_learning_phi', 'model_learning_link', 'model_learning_kappa',
+        'model_learning_start', 'model_learning_freeze', 'model_learning_margin']),
     ('Proliferation and simulation', [
-        'growth_reg_source', 'prolif_uses_stimulus', 'ProliferationMLP_per_condition', 'simulation_stochastic',
+        'growth_reg_source', 'prolif_uses_stimulus', 'n_proliferation_markers', 'ProliferationMLP_per_condition',
+        'simulation_stochastic',
         'simulation_mrnas_direct',
         'protein_dilution']),
     ('Report', ['classifier_method', 'embedding_method_visualization', 'cell_depth_for_representation',
@@ -765,8 +777,34 @@ def project_parameters(project):
     return json.load(open(path)) if os.path.exists(path) else {}
 
 
+def fitted_depth(project):
+    """Depth settings of the fitted mixture ({'use_depth_factor', 'depth_model'}, written by infer_mixture), or None."""
+    import json
+    path = os.path.join(project, 'cardamomOT', 'mixture_depth.json')
+    return json.load(open(path)) if os.path.exists(path) else None
+
+
+def apply_fitted_depth(model, project, verb=True):
+    """use_depth_factor and depth_model of the fitted mixture on model (the NB parameters were fitted with them);
+    a warning when the workbook now says otherwise (rerun infer_mixture to change them)."""
+    fit = fitted_depth(project)
+    if fit is None:
+        return model
+    for attr in ('use_depth_factor', 'depth_model'):
+        v = type(getattr(model, attr))(fit[attr])
+        if verb and getattr(model, attr) != v:
+            print(f"[CardamomOT] Warning: {attr} = {getattr(model, attr)!r} in the workbook, but the mixture was fitted "
+                  f"with {v!r}: {v!r} used (rerun infer_mixture to change it)")
+        setattr(model, attr, v)
+    return model
+
+
 def depth_factor_used(project):
-    """use_depth_factor of the project (model_parameters sheet, else the default of NetworkModel)."""
+    """use_depth_factor of the run: that of the fitted mixture (mixture_depth.json), else the model_parameters sheet,
+    else the default of NetworkModel."""
+    fit = fitted_depth(project)
+    if fit is not None:
+        return bool(fit['use_depth_factor'])
     from .model.base import NetworkModel
     m = NetworkModel(1)
     m.apply_project_parameters(project, verb=False)
@@ -774,7 +812,11 @@ def depth_factor_used(project):
 
 
 def depth_model_used(project):
-    """depth_model of the project (model_parameters sheet, else the default of NetworkModel)."""
+    """depth_model of the run: that of the fitted mixture (mixture_depth.json), else the model_parameters sheet, else
+    the default of NetworkModel."""
+    fit = fitted_depth(project)
+    if fit is not None:
+        return str(fit['depth_model'])
     from .model.base import NetworkModel
     m = NetworkModel(1)
     m.apply_project_parameters(project, verb=False)

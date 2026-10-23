@@ -114,13 +114,13 @@ for n in [5, 10, 20]:
         model.fit(x, verb=verb)
         t1 = timer.time()
         runtime[r] = t1 - t0
-        score = model.inter_tmp
+        score = model.inter
         for _ in range(n_repet):
             model = NetworkModel(G - 1)
             model.d = np.loadtxt('Trees{}/Data/Rates/degradation_rates.txt'.format(n), dtype=float, delimiter='\t').T 
             model.intensity_prior = 0
             model.fit(x, verb=verb)
-            score += model.inter_tmp
+            score += model.inter
         np.save('Trees{}/random init/score_{}'.format(n,r+1), score)
     # Save running times
     np.savetxt('Trees{}/random init/runtime.txt'.format(n), runtime.T)

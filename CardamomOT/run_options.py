@@ -56,7 +56,7 @@ REMOVED_OPTIONS = {
     '--overwrite': 'overwrite_degradation_rates', '--no-senescence-gating': 'senescence_gating',
     '--integrate-samples': 'integrate_samples', '--no-integrate-samples': 'integrate_samples',
     '--ref-sample': 'ref_sample_integration',
-    '--soft-em-refinement': 'soft_em_refinement', '--norm': 'report_normalize',
+    '--norm': 'report_normalize',
     '--no-log': 'report_log1p', '--n-umap': 'report_n_umap',
 }
 
@@ -66,6 +66,7 @@ class StepOptions:
     p: str                                        # project path, with a trailing separator
     values: dict = field(default_factory=dict)    # NetworkModel attribute -> value given on the command line
     output: str = None                            # -o (report_results only)
+    step: str = None                              # step being run (parse_step_options)
 
 
 def parse_step_options(argv, step, doc=None, output=False):
@@ -103,12 +104,15 @@ def parse_step_options(argv, step, doc=None, output=False):
     if not inputfile:
         print(f"{tag} Error: missing required argument -i <project>")
         sys.exit(1)
-    return StepOptions(p=os.path.join(inputfile, ''), values=values, output=out)
+    return StepOptions(p=os.path.join(inputfile, ''), values=values, output=out, step=step)
 
 
 def configure(model, opts, verb=True):
     """Workbook values, then the command-line options (which dominate), on a NetworkModel; returns it."""
     model.apply_project_parameters(opts.p, verb=verb)
+    if getattr(model, 'model_learning_grn', False):  # families of the GRN sigma of the run (inference/sigma.py)
+        from .inference.sigma import load_sigma_spec_grn
+        model.sigma_spec_grn = load_sigma_spec_grn(os.path.join(opts.p, 'cardamomOT'))
     # Per-sample schedules of the inference stimuli (stimulus_inference_schedule, sample_id rows)
     from .schedules import load_overrides
     model._stim_overrides = load_overrides(opts.p, 'inference', model.n_stimuli)
@@ -118,6 +122,13 @@ def configure(model, opts, verb=True):
         model._project_overrides = getattr(model, '_project_overrides', set()) | {attr}
     if opts.values and verb:
         print(f"[CardamomOT] Command-line options (override the workbook): {opts.values}")
+    # Steps after infer_mixture: depth settings of the fitted mixture (its parameters depend on them)
+    steps = list(STEP_OPTIONS)
+    if opts.step in steps and steps.index(opts.step) > steps.index('infer_mixture'):
+        from .inputs import apply_fitted_depth
+        apply_fitted_depth(model, opts.p, verb=verb)
+    if hasattr(model, '_enforce_soft_basins'):  # model learning relies on soft posteriors
+        model._enforce_soft_basins(verb=verb)
     return model
 
 

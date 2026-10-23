@@ -2,7 +2,8 @@
 Entropy-based gene selection of the From_fastq_to_CardamomOT workflow (O. Gandrillon,
 github.com/ogandril/From_fastq_to_CardamomOT, Define_genes.ipynb), on raw counts:
 
-- KD: 1-D Wasserstein distance of the counts of each gene between consecutive timepoints;
+- KD: 1-D Wasserstein distance of the counts of each gene between consecutive timepoints, divided by the standard
+  deviation of the gene over the two timepoints (scale-free: the raw distance grows with the expression level);
 - MDE: absolute change of the discrete entropy of the counts between consecutive timepoints,
   the entropy being estimated per timepoint with the BUB estimator (Paninski 2003, R code of
   M. Gaillard ported here);
@@ -67,10 +68,17 @@ def bub_entropy(x, k_max=11):
     return float(_bub_coefficients(N, len(h), k_max) @ hist_eff)
 
 
+def _scaled_wasserstein(x0, x1):
+    """1-D Wasserstein distance of x0 and x1 over the standard deviation of their union (0 for a constant gene)."""
+    sd = np.std(np.concatenate([x0, x1]))
+    return wasserstein_distance(x0, x1) / sd if sd > 0 else 0.0
+
+
 def gandrillon_scores(X, times, n_cells=1000, rng=None):
     """
-    KD and MDE scores per transition (T-1, G) of raw counts X (cells x genes); entropies use at
-    most n_cells cells per timepoint (the BUB matrices are (N+1)^2).
+    KD and MDE scores per transition (T-1, G) of raw counts X (cells x genes); KD in units of the standard deviation
+    of the gene over the two timepoints; entropies use at most n_cells cells per timepoint (the BUB matrices are
+    (N+1)^2).
     """
     rng = np.random.default_rng(rng)
     X = np.asarray(X)
@@ -83,7 +91,7 @@ def gandrillon_scores(X, times, n_cells=1000, rng=None):
         H.append([bub_entropy(Xs[:, g]) for g in range(X.shape[1])])
     H = np.array(H)
     mde = np.abs(np.diff(H, axis=0))
-    kd = np.array([[wasserstein_distance(X[i0, g], X[i1, g]) for g in range(X.shape[1])]
+    kd = np.array([[_scaled_wasserstein(X[i0, g], X[i1, g]) for g in range(X.shape[1])]
                    for i0, i1 in zip(idx[:-1], idx[1:])])
     return kd, mde, H
 

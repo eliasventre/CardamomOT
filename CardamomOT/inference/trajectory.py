@@ -9,6 +9,7 @@ from numba import njit, prange
 import multiprocessing as mp
 from joblib import Parallel, delayed
 from .network import cross_entropy, sigmoid_amplitudes, sigmoid_target, gene_weights
+from .sigma import sigma_pairs, kon_matrix as kon_ref_vector  # noqa: F401 (kon_ref_vector: public name)
 from .simulations import simulate_next_prot_ode
 from .seeding import seeded_call, task_seed
 from .sampling import stratified_choice
@@ -37,41 +38,6 @@ def minimal_repetition_choice(N, M, seed=None, labels=None):
         result.append(remainder_sample)
     
     return np.concatenate(result)
-
-
-@njit(cache=True)
-def base_kon_vector(theta_basal, theta_inter, y_prot) -> np.ndarray:
-    """(1 - sigmoid(Z), sigmoid(Z)) per cell and gene, Z = basal + prot @ inter (basal (G,), inter (G, G))."""
-    n_cells, G = y_prot.shape
-    Gm1 = theta_basal.shape[0]
-    result = np.zeros((n_cells, Gm1, 2))
-    for i in range(n_cells):
-        for j in range(Gm1):
-            z = theta_basal[j]
-            for g in range(G):
-                z += y_prot[i, g] * theta_inter[g, j]
-            # Stable sigmoid: exp of a negative argument only (no inf / inf for |z| > 709)
-            e = np.exp(-abs(z))
-            denom = e + 1.0
-            if z >= 0:
-                result[i, j, 0] = e / denom
-                result[i, j, 1] = 1.0 / denom
-            else:
-                result[i, j, 0] = 1.0 / denom
-                result[i, j, 1] = e / denom
-
-    return result
-
-
-@njit(cache=True)
-def _k_high(kz, j):
-    # Highest mode amplitude of gene j
-    k = kz[j, 0]
-    for m in range(1, kz.shape[1]):
-        if kz[j, m] > k:
-            k = kz[j, m]
-    return k
-
 
 
 @njit(cache=True)
@@ -171,28 +137,21 @@ def _bridge_moments(d1, d0, r0, r1, P0, x0, m0, m1, alpha, alpha_b, T, tau):
 
 
 @njit(cache=True)
-def prot_bridge_end(d1, d0, r0, r1, P0, x0, x1, m0, m1, alpha, alpha_b, T, beta, z):
+def prot_bridge_end(d1, d0, r0, r1, P0, x0, x1, m0, m1, alpha, alpha_b, T):
     """
     Protein at T of the linear (two-moment) bridges of the bursty mRNA from x0 (t = 0) to x1 (t = T), P' = d1 x - r P:
-    conditional mean + sqrt(beta x conditional variance) z (beta: mean burst size, kon units; z = 0: the mean).
-    mRNA levels (kon units) m0 before alpha T, m1 after; protein rates r0 before alpha_b T, r1 after (r0 = r1 = d1
-    without dilution). The variance is scaled by the ratio of the burst-driven part of P(T) with and without the
-    conditioning on x1 (shot noise: variance ~ mean).
+    conditional mean given x1. mRNA levels (kon units) m0 before alpha T, m1 after; protein rates r0 before
+    alpha_b T, r1 after (r0 = r1 = d1 without dilution).
     """
-    _, (muT, VT, PfT, QT, ST, _, _) = _bridge_moments(d1, d0, r0, r1, P0, x0, m0, m1, alpha, alpha_b, T, T)
-    VT = np.maximum(VT, 1e-12)
-    mean = PfT + QT / VT * (x1 - muT)
-    _, (_, _, Pdet, _, _, _, _) = _bridge_moments(d1, d0, r0, r1, P0, x0, 0.0 * m0, 0.0 * m1, alpha, alpha_b, T, T)
-    ratio = np.maximum(mean - Pdet, 0.0) / np.maximum(PfT - Pdet, 1e-12)
-    var = np.maximum(ST - QT * QT / VT, 0.0) * ratio
-    return np.maximum(mean + np.sqrt(beta * var) * z, 0.0)
+    _, (muT, VT, PfT, QT, _, _, _) = _bridge_moments(d1, d0, r0, r1, P0, x0, m0, m1, alpha, alpha_b, T, T)
+    return np.maximum(PfT + QT / np.maximum(VT, 1e-12) * (x1 - muT), 0.0)
 
 
 @njit(cache=True)
 def prot_bridge(d1, d0, r0, r1, P0, x0, x1, m0, m1, alpha, alpha_b, T, tau, P1):
     """
     Mean protein at tau in [0, T] of the bridges of prot_bridge_end, conditioned on x1 and on the protein P1 at T
-    (P1 = prot_bridge_end, sampled or not).
+    (P1 = prot_bridge_end).
     """
     (_, _, Pf, _, _, _, _), (muT, VT, PfT, QT, ST, Cx, Cp) = _bridge_moments(
         d1, d0, r0, r1, P0, x0, m0, m1, alpha, alpha_b, T, tau)
@@ -230,32 +189,18 @@ def _birth_alpha_row(alpha, kon_init, kon_end, tol):
     return w * alpha + (1 - w) * mean_alpha
 
 
-def count_errors(vect_prot, vect_kon, ks, Y, X, n_stimuli=1):
+def count_errors(vect_prot, vect_kon, ks, Y, X, n_stimuli=1, spec=None):
     """
-    Cross-entropy between the sigmoid of the network (basal Y, interactions X) and the sigmoid target of the
-    kon vect_kon, mean over the cells and over the genes weighted by gene_weights.
+    Cross-entropy between the sigmoid of the network (basal Y, interactions X; spec: families of sigma) and the
+    sigmoid target of the kon vect_kon, mean over the cells and over the genes weighted by gene_weights.
     """
     N, G = vect_prot.shape
     ns = n_stimuli
-    sigma = base_kon_vector(Y, X, vect_prot)[:, ns:, 1]
+    sigma = sigma_pairs(Y, X, vect_prot, spec)[:, ns:, 1]
     kb = sigmoid_amplitudes(ks)[ns:]
     w = gene_weights(ks)[ns:]
     ce = cross_entropy(sigma, sigmoid_target(vect_kon[:, ns:], kb[:, 0], kb[:, 1]))
     return float(np.sum(ce * w)) / (N * max(float(np.sum(w)), EPS))
-
-
-@njit(fastmath=True, parallel=True, cache=True)
-def kon_ref_vector(y_prot, kz, theta_inter, theta_basal) -> np.ndarray:
-    # kon = k_low * (1 - sigmoid) + k_high * sigmoid, with k_low the lowest mode and k_high the highest
-    sigma = base_kon_vector(theta_basal, theta_inter, y_prot)
-    out = np.zeros(sigma.shape[:2])  # shape: (n_cells, Gm1)
-
-    for i in prange(sigma.shape[0]):
-        for j in prange(sigma.shape[1]):
-            out[i, j] += kz[j, 0] * sigma[i, j, 0]
-            out[i, j] += _k_high(kz, j) * sigma[i, j, 1]
-
-    return out
 
 
 def ks_of(ks, s_idx):
@@ -281,9 +226,9 @@ def s1_rows(s1, samples_data):
     return s1[np.minimum(pos, s1.shape[0] - 1)]
 
 
-def _kon_per_sample(y_prot, ks, inter, basal, samples_data=None):
+def _kon_per_sample(y_prot, ks, inter, basal, samples_data=None, spec=None):
     """
-    kon_ref_vector with per-sample basal and mixture support.
+    kon_ref_vector with per-sample basal and mixture support (spec: families of sigma, None = logistic).
 
     When neither basal is 2-D (n_samples, G) nor ks is 3-D (n_samples, G, n_modes)
     nor inter is 3-D (n_samples, G, G), or samples_data is None, delegates to
@@ -292,7 +237,7 @@ def _kon_per_sample(y_prot, ks, inter, basal, samples_data=None):
     if (basal.ndim < 2 and np.ndim(ks) < 3 and np.ndim(inter) < 3) or samples_data is None:
         if np.ndim(inter) == 3:
             raise ValueError("per-sample interactions (network conditions) need samples_data")
-        return kon_ref_vector(y_prot, ks, inter, basal)
+        return kon_ref_vector(y_prot, ks, inter, basal, spec)
     samples_id = np.sort(np.unique(samples_data))
     out = np.zeros((y_prot.shape[0], y_prot.shape[1]))
     for s_idx, s in enumerate(samples_id):
@@ -300,18 +245,35 @@ def _kon_per_sample(y_prot, ks, inter, basal, samples_data=None):
         if not np.any(mask):
             continue
         basal_s = basal[min(s_idx, basal.shape[0] - 1)] if basal.ndim == 2 else basal
-        out[mask] = kon_ref_vector(y_prot[mask], ks_of(ks, s_idx), inter_of(inter, s_idx), basal_s)
+        out[mask] = kon_ref_vector(y_prot[mask], ks_of(ks, s_idx), inter_of(inter, s_idx), basal_s, spec)
     return out
 
     
+@njit(cache=True)
+def _pair_state(f, kind, d1, d0, d1_i, d1_end_j, prot_init_i, x0, x1, mode_init_raw, mode_init_i, mode_end_j, alpha_i,
+                alpha_b_j, delta_t, prot_end_j, rna_init_i, rna_end_j, c_i, s1):
+    """Proteins (G,) of the pair (source i, target j) at the fractions f (G,) of the interval (one per gene), with the same
+    bridge or flow as its end state (kind 0: mRNA bridge, 1: dilution, 2: flow of find_next_prot); f -> 0: start state."""
+    f = np.maximum(f, 1e-9)
+    if kind == 0:
+        return prot_bridge(d1, d0, d1_i, d1_end_j, prot_init_i, x0, x1, mode_init_raw, mode_end_j, alpha_i, alpha_b_j,
+                           delta_t, f * delta_t, prot_end_j)
+    if kind == 1:
+        return find_next_prot_dilution(d1_i, d1_end_j, prot_init_i, mode_init_i, mode_end_j * (d1 / d1_end_j),
+                                       np.minimum(alpha_i / f, 1.0), np.minimum(alpha_b_j / f, 1.0), s1, delta_t * f)
+    return find_next_prot(d1_i, prot_init_i, rna_init_i, rna_end_j, mode_init_i, mode_end_j * c_i,
+                          np.minimum(alpha_i / f, 1.0), s1, delta_t * f)
+
+
 @njit(fastmath=True, parallel=True, cache=True)
 def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, vect_rna_end,
                             mode_init, mode_end, alpha, s1, d1, delta_t, basal, inter, tau_end, w_genes,
                             n_iter=1, intensity_prior=1,
                             n_stimuli=1, stim_vals=np.ones(1), scale_proteins=1, weight_fixed=-1.0,
                             b_init=np.zeros(0), b_end=np.zeros(0), alpha_tol=0.6,
-                            d0=np.zeros(0), rna_to_x=1.0, beta=np.zeros(0), z=np.zeros((0, 0)),
-                            g_active=np.zeros(0)) -> np.ndarray:
+                            d0=np.zeros(0), rna_to_x=1.0,
+                            g_active=np.zeros(0), spec=None, mem_frac=np.zeros(0),
+                            mem_w=np.zeros((0, 0))) -> np.ndarray:
     """
     OT cost between n1 trajectory ends and n2 real cells: w A + (1 - w) [(1 - 1/G) B + (1/G) P], with
     A = |Δ mRNA s1|² (mRNA in kon units, as the modes and proteins: k_z / k1 at the mean of mode z, up to the
@@ -325,16 +287,17 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
     Network term: cross-entropy between the sigmoid of the network at the end states and tau_end (n2, G), the sigmoid
     targets of the real cells (sigmoid_target), summed over the genes with the weights w_genes (G,) (gene_weights).
     d0 (G,) given: end proteins from the mRNA bridges (prot_bridge_end), mode_init / mode_end being then the kon levels
-    of the modes and the mRNA rna * s1 * rna_to_x in the same units; empty: find_next_prot on shrunk modes. Bridge
-    proteins sampled with the noise z (n1, G) of each source, shared by its targets, and burst sizes beta (G,)
-    (empty: the bridge means). g_active (G,): 1 for the genes of the sample's condition, 0 for the others (left out of
+    of the modes and the mRNA rna * s1 * rna_to_x in the same units; empty: find_next_prot on shrunk modes. g_active (G,): 1 for the genes of the sample's condition, 0 for the others (left out of
     the mRNA and protein terms; the network term already ignores them through w_genes); empty = every gene.
+    spec: families of the GRN sigma (model_learning_grn), None = logistic.
+    mem_frac (Q,), mem_w (Q + 1, G) given (targets_accounting_late_mrna): network term on sigma averaged along the mRNA
+    memory of each target, w_0 sigma(end) + sum_q w_q sigma(P(mem_frac_q delta_t)), the proteins at the nodes from the
+    same bridge or flow as the end state.
     """
     n1, G = vect_rna_init.shape
     gmask = g_active if g_active.shape[0] == G else np.ones(G)
     G_eff = max(np.sum(gmask), 1.0)
     bridge = d0.shape[0] == G
-    sampled = z.shape[0] == n1
     n2 = vect_rna_end.shape[0]
     ns = n_stimuli
     # First pass with intensity_prior < 1 (training): zero cost, i.e. random couplings (independent coupling)
@@ -369,6 +332,8 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
         mode_init_i = mode_init_i * c_i
 
         prot_end_i = np.zeros((n2, G))
+        alpha_b_i = np.zeros((n2, G))
+        d1_end_i = np.zeros((n2, G))
         # Full end states (stimuli + genes) of cell i, for the kon computation
         prot_full_i = np.empty((n2, G + ns))
         prot_full_i[:, :ns] = stim_vals * scale_proteins
@@ -381,20 +346,48 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
                     if b_end.shape[0] == n2 else alpha_i
                 prot_end_i[j, :] = prot_bridge_end(d1, d0, d1_i, r_j, prot_init_i, kon_rna_init_i * rna_to_x,
                                                    kon_rna_end[j] * rna_to_x, mode_init[i], mode_end[j],
-                                                   alpha_i, alpha_b, delta_t, beta if sampled else 0.0 * d1,
-                                                   z[i] if sampled else 0.0 * d1)
+                                                   alpha_i, alpha_b, delta_t)
+                alpha_b_i[j], d1_end_i[j] = alpha_b, r_j
             elif b_end.shape[0] == n2:
                 d1_j = d1 + b_end[j]
                 alpha_b = _birth_alpha_row(alpha_i, kon_init_i, vect_kon_end[j], alpha_tol)
                 prot_end_i[j, :] = find_next_prot_dilution(d1_i, d1_j, prot_init_i, mode_init_i, mode_end[j] * (d1 / d1_j),
                                                            alpha_i, alpha_b, s1, delta_t)
+                alpha_b_i[j], d1_end_i[j] = alpha_b, d1_j
             else:
                 prot_end_i[j, :] = find_next_prot(d1_i, prot_init_i, rna_init_i, vect_rna_end[j], mode_init_i,
                                                   mode_end[j] * c_i, alpha_i, s1, delta_t)
         prot_full_i[:, ns:] = prot_end_i
+        kind = 0 if bridge else (1 if b_end.shape[0] == n2 else 2)
 
         # --- Terms of the cost; network term = cross-entropy on the sigmoid of the genes, weighted by w_genes ---
-        sigma = base_kon_vector(basal, inter, prot_full_i)
+        single = mem_frac.shape[0] == 1 and np.max(mem_w[0]) == 0.0
+        if single:  # single node of weight 1 (late_mrna_nodes = 1): sigma at the lagged proteins only
+            prot_q = np.empty((n2, G + ns))
+            prot_q[:, :ns] = stim_vals * scale_proteins
+            f = np.full(G, mem_frac[0])
+            for j in range(0, n2):
+                prot_q[j, ns:] = _pair_state(f, kind, d1, d0, d1_i, d1_end_i[j], prot_init_i, kon_rna_init_i * rna_to_x,
+                                             kon_rna_end[j] * rna_to_x, mode_init[i], mode_init_i, mode_end[j], alpha_i,
+                                             alpha_b_i[j], delta_t, prot_end_i[j], rna_init_i, vect_rna_end[j], c_i, s1)
+            sigma = sigma_pairs(basal, inter, prot_q, spec)
+        else:
+            sigma = sigma_pairs(basal, inter, prot_full_i, spec)
+        if mem_frac.shape[0] > 0 and not single:
+            # sigma averaged along the mRNA memory of each target (nodes of the same bridge / flow)
+            sig_bar = mem_w[0] * sigma[:, ns:, 1]
+            prot_q = np.empty((n2, G + ns))
+            prot_q[:, :ns] = stim_vals * scale_proteins
+            for q in range(mem_frac.shape[0]):
+                f = np.full(G, mem_frac[q])
+                for j in range(0, n2):
+                    prot_q[j, ns:] = _pair_state(f, kind, d1, d0, d1_i, d1_end_i[j], prot_init_i,
+                                                 kon_rna_init_i * rna_to_x, kon_rna_end[j] * rna_to_x, mode_init[i],
+                                                 mode_init_i, mode_end[j], alpha_i, alpha_b_i[j], delta_t,
+                                                 prot_end_i[j], rna_init_i, vect_rna_end[j], c_i, s1)
+                sig_bar = sig_bar + mem_w[q + 1] * sigma_pairs(basal, inter, prot_q, spec)[:, ns:, 1]
+            for j in range(0, n2):
+                sigma[j, ns:, 1] = np.minimum(np.maximum(sig_bar[j], 0.0), 1.0)
         for j in range(0, n2):
             diff_prot = gmask * (prot_end_i[j] - prot_init_i) / scale_proteins
             diff_rna = gmask * (kon_rna_end[j] - kon_rna_init_i)
@@ -409,7 +402,7 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
     cost_prot *= median_ref /_median_scale(cost_prot)
     dist = (cost_rna * weight_init + (1 - weight_init) *
             ((1.0 - 1.0 / G_eff) * cost_net + (1.0 / G_eff) * cost_prot))
-    return np.minimum(dist, 100.0)
+    return dist
 
 
 @njit(cache=True)
@@ -421,13 +414,39 @@ def _median_scale(cost):
     return m if m > 1e-12 else 1.0
 
 
+def mrna_step_delay(d0, L):
+    """Delay s of the step of the mRNA level equivalent to its exponential relaxation (rate d0) after a switch of kon,
+    over the remaining time L: same integral of the mRNA up to L as the relaxation, the step reaching the (partially
+    relaxed) level at L: s = L (1 / x - 1 / (e^x - 1)), x = d0 L; s <= L / 2, s -> 1 / d0 for x large."""
+    x = np.maximum(np.asarray(d0, dtype=float) * L, 0.0)
+    small = x < 1e-4
+    xs = np.where(small, 1.0, x)
+    return L * np.where(small, 0.5 - x / 12.0, 1.0 / xs - 1.0 / np.expm1(xs))
+
+
+def kon_switch_fraction(alpha, d0, delta_t, n_iter=40):
+    """Fraction t of the interval at which kon switches when the mRNA-level forcing switches at alpha
+    (alpha = t + mrna_step_delay(d0, (1 - t) delta_t) / delta_t, increasing in t; bisection, 0 below its value at 0)."""
+    alpha = np.asarray(alpha, dtype=float)
+    d0 = np.broadcast_to(np.asarray(d0, dtype=float), alpha.shape)
+    lo, hi = np.zeros(alpha.shape), np.minimum(alpha, 1.0)
+    for _ in range(n_iter):
+        mid = 0.5 * (lo + hi)
+        above = mid + mrna_step_delay(d0, (1.0 - mid) * delta_t) / delta_t > alpha
+        hi, lo = np.where(above, mid, hi), np.where(above, lo, mid)
+    return 0.5 * (lo + hi)
+
+
 def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init, y_rna_init,
                     y_kon_end_true, y_kon_end, y_prot_end, y_rna_end, mode_init, mode_end,
                     basal, inter, ks, delta_t, tol=0.6, n_pas=25, samples_data=None, stim_vals=np.ones(1), scale_proteins=1,
-                    d1_end=None, d0=None, d1_prod=None, rna_to_x=1.0):
+                    d1_end=None, d0=None, d1_prod=None, rna_to_x=1.0, spec=None, d0_mem=None):
     """
     Switching fractions: for each gene whose mode changes, the earliest fraction of the step at which the network
-    commits it to its new mode (blended with the previous value by the size of the change). d1 / d1_end: relaxation
+    commits it to its new mode (blended with the previous value by the size of the change). d0_mem (N, G_genes) given
+    (targets_accounting_late_mrna, forcing = mRNA level): the mRNA follows the burst frequency with its memory, so the
+    forcing switches after the commitment by the delay of the equivalent step (mrna_step_delay over the rest of the
+    step, at most half of it); kon forcings (bridges, modes) switch at the commitment. d1 / d1_end: relaxation
     rates before / after the switch of the birth rate (d1 + birth of the source / of the target; d1_end=None: no
     dilution switch, find_next_prot),
     which happens at birth_alpha in the equation of each gene (alpha itself is not changed by it).
@@ -451,25 +470,29 @@ def inference_alpha(d1, s1, alpha_init, y_kon_init_true, y_kon_init, y_prot_init
         r_end = d1 if d1_end is None else d1_end
 
     while t < 1 and np.min(cnt) < 1:
+        tp = t
         if d0 is not None:
             alpha_b = alpha if d1_end is None else birth_alpha(alpha, y_kon_init_true[:, ns:], y_kon_end_true[:, ns:], tol)
             y_prot[:, ns:] = prot_bridge(d1_prod, d0, d1, r_end, y_prot_init[:, ns:], x_init, x_end,
-                                         mode_init, mode_end, alpha, alpha_b, delta_t, t * delta_t, y_prot_end[:, ns:])
+                                         mode_init, mode_end, alpha, alpha_b, delta_t, tp * delta_t, y_prot_end[:, ns:])
         elif d1_end is None:
             y_prot[:, ns:] = find_next_prot(d1, y_prot_init[:, ns:], y_rna_init[:, ns:], y_rna_end[:, ns:],
-                        mode_init, mode_end, np.minimum(alpha / t, 1.0), s1, t * delta_t)
+                        mode_init, mode_end, np.minimum(alpha / tp, 1.0), s1, tp * delta_t)
         else:
             alpha_b = birth_alpha(alpha, y_kon_init_true[:, ns:], y_kon_end_true[:, ns:], tol)
             y_prot[:, ns:] = find_next_prot_dilution(d1, d1_end, y_prot_init[:, ns:], mode_init, mode_end,
-                        np.minimum(alpha / t, 1.0), np.minimum(alpha_b / t, 1.0), s1, t * delta_t)
-        kon_new = _kon_per_sample(y_prot, ks, inter, basal, samples_data=samples_data)  # shape (N, G)
+                        np.minimum(alpha / tp, 1.0), np.minimum(alpha_b / tp, 1.0), s1, tp * delta_t)
+        kon_new = _kon_per_sample(y_prot, ks, inter, basal, samples_data=samples_data, spec=spec)  # shape (N, G)
 
         # Condition: if abs(kon_new[i] - y_kon_init[i]) > abs(kon_new[i] - y_kon_end[i])
         # Only apply where cnt < 1
         diff_init = np.abs(kon_new[:, ns:] - y_kon_init[:, ns:])
         diff_end = np.abs(kon_new[:, ns:] - y_kon_end[:, ns:])
         bool_var = (cnt == 0) & (diff_init >= diff_end)
-        alpha[bool_var] = alpha[bool_var] * (1 - weights[bool_var]) + t * weights[bool_var]
+        # Switch of the forcing: the commitment, delayed by the equivalent step of the mRNA (forcing = mRNA level)
+        t_switch = t if d0_mem is None else np.minimum(t + mrna_step_delay(d0_mem, (1 - t) * delta_t) / delta_t, 1.0)
+        t_switch = np.broadcast_to(t_switch, alpha.shape)
+        alpha[bool_var] = alpha[bool_var] * (1 - weights[bool_var]) + t_switch[bool_var] * weights[bool_var]
         cnt[bool_var] = 1
 
         t += 1 / n_pas
@@ -488,7 +511,7 @@ def inference_alpha_1thread(*args, **kwargs):
 
 
 def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
-                   seuil_intensity=1e-2, seuil_variations=1e-2, n_order=10, samples_data=None, seed=None):
+                   seuil_intensity=1e-2, seuil_variations=1e-2, n_order=10, samples_data=None, seed=None, spec=None):
 
     if seuil_variations <= 0:
         inter = inter_ref * (np.abs(inter_ref) >= seuil_intensity)
@@ -496,7 +519,7 @@ def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
     
     G = basal_ref.shape[-1]
 
-    kon_vector = _kon_per_sample(prot_traj, ks, inter_ref, basal_ref, samples_data=samples_data)
+    kon_vector = _kon_per_sample(prot_traj, ks, inter_ref, basal_ref, samples_data=samples_data, spec=spec)
 
     # With per-sample interactions (network conditions), an edge is removed from every sample at once
     def core_filter(inter_ref, kon_vector, genes_list):
@@ -507,7 +530,8 @@ def filter_network(T, N_traj, prot_traj, ks, basal_ref, inter_ref,
             inter_tmp = inter_ref.copy()
             for g1 in genes_list:
                 inter_tmp[..., g1, :] = 0
-                kon_vector_nog1 = _kon_per_sample(prot_traj, ks, inter_tmp, basal_ref, samples_data=samples_data)
+                kon_vector_nog1 = _kon_per_sample(prot_traj, ks, inter_tmp, basal_ref, samples_data=samples_data,
+                                                  spec=spec)
                 for g2 in range(0, G):
                     val = np.max(np.abs(inter_ref[..., g1, g2]))
                     if val >= seuil_intensity:
@@ -557,6 +581,7 @@ def filter_network_fancy(
     seuil_synergy=1.5,
     samples_data=None,
     n_jobs=-1,
+    spec=None,
 ):
     """
     Structured three-pass edge filtering that avoids both the greedy
@@ -657,7 +682,7 @@ def filter_network_fancy(
         inter_tmp[g1, g2] = 0
 
         kon_no_edge = _kon_per_sample(
-            prot_traj, ks, inter_tmp, basal_ref, samples_data=samples_data
+            prot_traj, ks, inter_tmp, basal_ref, samples_data=samples_data, spec=spec
         )
 
         diff_sq = (
@@ -691,7 +716,7 @@ def filter_network_fancy(
         inter_tmp[g1b, g2b] = 0
 
         kon_no_pair = _kon_per_sample(
-            prot_traj, ks, inter_tmp, basal_ref, samples_data=samples_data
+            prot_traj, ks, inter_tmp, basal_ref, samples_data=samples_data, spec=spec
         )
 
         # Measure impact on both target genes and take the max
@@ -721,7 +746,7 @@ def filter_network_fancy(
     log.debug("Pass 1: canonical individual scoring")
 
     kon_full = _kon_per_sample(
-        prot_traj, ks, inter_ref, basal_ref, samples_data=samples_data
+        prot_traj, ks, inter_ref, basal_ref, samples_data=samples_data, spec=spec
     )
 
     all_edges = [(g1, g2) for g1 in range(G) for g2 in range(G)]
@@ -766,7 +791,7 @@ def filter_network_fancy(
     inter_filtered = inter_ref * mask_p1
 
     kon_filtered = _kon_per_sample(
-        prot_traj, ks, inter_filtered, basal_ref, samples_data=samples_data
+        prot_traj, ks, inter_filtered, basal_ref, samples_data=samples_data, spec=spec
     )
 
     # Re-evaluate only the rejected (non-silent) edges in this reduced context

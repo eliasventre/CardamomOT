@@ -11,8 +11,8 @@
 #   Copycat_sc   : split=train, train_rate=0.1, select_genes=True, estimate_proliferation_rates=True,
 #                  simulate_with_proliferation=True, simulate_perturbations=True, species=human
 
-# ./run.sh experimental_datasets/Semrau 1 1 5 1 1 --from infer_network_simul
-# ./run.sh experimental_datasets/Kameneva 0.2 1 1 1 1 --from infer_network_simul
-# ./run.sh experimental_datasets/Schiebinger 1 1 1 1 1 --from infer_network_simul
+# ./run.sh experimental_datasets/Semrau 1 1 1 1 1 --from infer_mixture
+./run.sh experimental_datasets/Kameneva 0.2 1 1 1 1 --from infer_mixture
+./run.sh experimental_datasets/Schiebinger 1 1 1 1 1 --from infer_mixture
 
 ./run.sh collaborations/Copycat_RMS2trt 1 1 1 1 1 

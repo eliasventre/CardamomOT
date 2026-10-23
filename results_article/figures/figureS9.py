@@ -123,9 +123,6 @@ def run_single_fit(cfg):
     model.fit_mixture(
         adata,
         gene_names      = list(adata.var_names),
-        min_components  = 2,
-        max_components  = 2,
-        max_iter_kinetics = 0,
         verb            = True,
         stimulus_schedule = stim_sched,
     )

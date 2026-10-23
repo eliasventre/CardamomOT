@@ -4,8 +4,8 @@ check_sim_to_data.py
 Compare network simulations with observed data.
 
 Validates the quality of the inferred gene regulatory network by comparing
-simulated expression dynamics with the real data used for inference. Computes
-zero-inflation adjusted distributions and generates comparison plots.
+simulated expression dynamics with the real data used for inference. Draws NB
+counts from the mixture and generates comparison plots.
 
 Usage:
     python check_sim_to_data.py -i <project_path> [--stimulus <float>] [--prior <float>]
@@ -25,7 +25,7 @@ import numpy as np
 import sys
 from CardamomOT.run_options import parse_step_options, settings, configure
 import anndata as ad
-from CardamomOT import NetworkModel, plot_data_umap_altogether, plot_data_distrib
+from CardamomOT import NetworkModel, plot_data_umap_altogether, plot_data_distrib, load_state_growth
 from CardamomOT.inference.integration import nb_cell_parameters
 from CardamomOT.inference.depth_model import nb_numpy_params
 from CardamomOT.inference.depth import state_depth, simulation_depth
@@ -137,7 +137,6 @@ def main(argv):
     print("[check_sim_to_data] Loading mixture and simulation parameters...")
     try:
         mixture_parameters = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
-        pi_zinb = np.load(os.path.join(p, 'cardamomOT', 'pi_zinb.npy'))
         samples_path = os.path.join(p, 'cardamomOT', 'data_samples.npy')
         samples_traj = np.load(samples_path).astype(int) if os.path.exists(samples_path) else None
         
@@ -185,8 +184,8 @@ def main(argv):
     data_sim[0, :] = times_simulation[:]
 
     # NB parameters of each state: its sample's mixture if per-sample (identical otherwise)
-    k1_tr, c_tr, pz_tr = nb_cell_parameters(mixture_parameters, pi_zinb, samples_traj)
-    k1_sim, c_sim, pz_sim = nb_cell_parameters(mixture_parameters, pi_zinb, _sim_sample_idx(samples_traj, times_simulation))
+    k1_tr, c_tr = nb_cell_parameters(mixture_parameters, samples_traj)
+    k1_sim, c_sim = nb_cell_parameters(mixture_parameters, _sim_sample_idx(samples_traj, times_simulation))
     k1_tr, k1_sim = k1_tr + 1e-6, k1_sim + 1e-6
     # Depth factors (estimate_cell_depth.py): each state / simulated cell drawn at the depth of the
     # real cell it mimics (depth_model: NB(k s, c) or NB(k, c / s))
@@ -210,26 +209,14 @@ def main(argv):
         print("[check_sim_to_data] data_sim built from the explicit mRNA simulation (no NB sampling)")
     else:
         # Standard mode: sample counts from the NB burst model
-        zero_mask = (np.random.uniform(0, 1, (data_sim[1:, :].shape)) < pz_sim.T)
-        zero_ratio_sim = np.sum(zero_mask == 1)/np.size(data_sim[1:, :])
-        print(f"[check_sim_to_data] Simulation zero-inflation ratio: {zero_ratio_sim:.4f}")
         n_nb, p_nb = nb_numpy_params(k1_sim * vect_kon_sim, c_sim, s_sim, model.depth_model)
         data_sim[1:, :] = np.random.negative_binomial(n_nb[:, ns:].T, p_nb[:, ns:].T)
-        data_sim[1:, :] = np.where(zero_mask, 0, data_sim[1:, :])
 
-    zero_mask = (np.random.uniform(0, 1, (data_beta[1:, :].shape)) < pz_tr.T)
-    zero_ratio_beta = np.sum(zero_mask == 1)/np.size(data_beta[1:, :])
-    print(f"[check_sim_to_data] Beta (mixture) zero-inflation ratio: {zero_ratio_beta:.4f}")
     n_nb, p_nb = nb_numpy_params(k1_tr * vect_kon_beta, c_tr, s_tr, model.depth_model)
     data_beta[1:, :] = np.random.negative_binomial(n_nb[:, ns:].T, p_nb[:, ns:].T)
-    data_beta[1:, :] = np.where(zero_mask, 0, data_beta[1:, :])
 
-    zero_mask = (np.random.uniform(0, 1, (data_netw_theta[1:, :].shape)) < pz_tr.T)
-    zero_ratio_theta = np.sum(zero_mask == 1)/np.size(data_netw_theta[1:, :])
-    print(f"[check_sim_to_data] Theta (network) zero-inflation ratio: {zero_ratio_theta:.4f}")
     n_nb, p_nb = nb_numpy_params(k1_tr * vect_kon_theta, c_tr, s_tr, model.depth_model)
     data_netw_theta[1:, :] = np.random.negative_binomial(n_nb[:, ns:].T, p_nb[:, ns:].T)
-    data_netw_theta[1:, :] = np.where(zero_mask, 0, data_netw_theta[1:, :])
 
     # Depth each model draw was taken at (obs['depth_factor']): the report divides data and draws by it
     # (cell_depth_for_representation), the explicit mRNA simulation being at the reference depth
@@ -248,8 +235,8 @@ def main(argv):
     # ancestor); a simulation with proliferation is compared with the growth-weighted trajectories
     flag_path = os.path.join(cardamom_dir, 'simulation_with_proliferation.npy')
     sim_prolif = bool(np.load(flag_path)[0]) if os.path.exists(flag_path) else False
-    R_opt_path = os.path.join(cardamom_dir, 'data_R_opt.npy')
-    R_opt = np.load(R_opt_path) if os.path.exists(R_opt_path) else None
+    # Net growth of the states: R_opt of the growth pass, or the prior rates (use_recomputed_proliferation)
+    R_opt = load_state_growth(cardamom_dir, model.use_recomputed_proliferation)
     L_growth = growth_log_weights(R_opt, times_data) if (R_opt is not None and len(R_opt) == len(times_data)) else None
     valid_path = os.path.join(cardamom_dir, 'data_traj_valid.npy')
     traj_valid = np.load(valid_path) if os.path.exists(valid_path) else np.ones(len(times_data), dtype=bool)
@@ -257,7 +244,7 @@ def main(argv):
                   if L_growth is not None else None)
     if sim_prolif:
         print("[check_sim_to_data] Simulation with proliferation: growth-weighted trajectories written "
-              + ("(adata_*_growth_*.h5ad)" if growth_idx is not None else "— skipped, data_R_opt.npy missing"))
+              + ("(adata_*_growth_*.h5ad)" if growth_idx is not None else "— skipped, data_R_opt.npy / data_R_prior.npy missing"))
 
     sample_names = (sorted(adata.obs['dataset_id'].astype(str).unique()) if 'dataset_id' in adata.obs else None)
 

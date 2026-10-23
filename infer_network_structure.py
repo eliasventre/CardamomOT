@@ -374,6 +374,19 @@ def main(argv):
     np.save(os.path.join(cardamom_dir, 'inter_t'), model.inter_t)
     np.save(os.path.join(cardamom_dir, 'basal_tmp'), model.basal_tmp)
     np.save(os.path.join(cardamom_dir, 'inter_tmp'), model.inter_tmp)
+    # Families of the GRN sigma (model_learning_grn), used by every later step; removed otherwise (logistic)
+    from CardamomOT.inference.sigma import save_sigma_spec_grn
+    save_sigma_spec_grn(cardamom_dir, model._spec_grn())
+    hist = getattr(model, 'model_learning_history', None) if model.model_learning_grn else None
+    sel_path = os.path.join(cardamom_dir, 'sigma_selection.npz')
+    if hist:  # held-out cross-entropy (selections, families, genes) and family of each gene at each selection
+        from CardamomOT.inference.sigma import PHI_NAMES, LINK_NAMES
+        cands = model._model_learning_candidates()
+        np.savez(sel_path, n_iter=np.array([h['n_iter'] for h in hist]), scores=np.stack([h['scores'] for h in hist]),
+                 family=np.stack([h['family'] for h in hist]),
+                 candidates=np.array([f'{PHI_NAMES[p]}/{LINK_NAMES[l]}' for p, l in cands]))
+    elif os.path.exists(sel_path):
+        os.remove(sel_path)
     # Network conditions: condition of each sample, shared network and edges that differ
     stim_names = ['Stimulus'] if ns == 1 else [f'Stimulus_{i}' for i in range(ns)]
     model.save_network_conditions(cardamom_dir, gene_names=stim_names + list(adata.var_names))
@@ -393,8 +406,17 @@ def main(argv):
     np.save(os.path.join(cardamom_dir, 'degradations'), model.d)
     if model.R_opt is not None:
         np.save(os.path.join(cardamom_dir, 'data_R_opt'), model.R_opt)
+    if model.R_prior is not None:  # prior rates of the states (use_recomputed_proliferation = False downstream)
+        np.save(os.path.join(cardamom_dir, 'data_R_prior'), model.R_prior)
     # Real cell (row of data_<split>.h5ad) behind each trajectory state, -1 if none
     np.save(os.path.join(cardamom_dir, 'data_traj_real_idx'), model.traj_real_idx)
+    # one_hot_probas = False: expected modes and posteriors updated by the network, per real cell (targets of
+    # refine_network_degradations)
+    soft_path = os.path.join(cardamom_dir, 'soft_modes.npz')
+    if model.posteriors_soft is not None:
+        np.savez(soft_path, modes_soft=model.modes_soft, posteriors_soft=model.posteriors_soft.astype(np.float32))
+    elif os.path.exists(soft_path):
+        os.remove(soft_path)
     # Final soft couplings, indexed by the rows of data_<split>.h5ad (cells never reached have no entry)
     if model.couplings:
         from CardamomOT.tools.velocity import save_couplings
