@@ -441,7 +441,7 @@ class NetworkModel:
 
         ## Simulations
         self.simulation_stochastic = True # 1 if we simulate Bursty-like proteins, 0 if deterministic limit for proteins
-        self.simulation_mrnas_direct = True  # True: the PDMP simulations carry explicit mRNA (mRNA bursts, proteins translated from them) and return mRNA counts; refine then fits d1 on mRNA-driven trajectories and d0 from d1_eff (protein-only fit on the modes). The ODE (simulation_stochastic = 0) stays on the proteins
+        self.simulation_mrnas_direct = False  # True: the PDMP simulations carry explicit mRNA (mRNA bursts, proteins translated from them) and return mRNA counts; refine then fits d1 on mRNA-driven trajectories and d0 from d1_eff (protein-only fit on the modes). The ODE (simulation_stochastic = 0) stays on the proteins
         self.chromatin = None  # Chromatin regions of the simulations: dict(w (G, R), basal_c (R,), inter_c (G, R), kbar_c (R,), optional k_close_const, c_levels, diploid, c0), see ChromatinModel; None = no region
 
         ## Gene selection (select_genes.py, select_genes = True): terminals + global network + prize-collecting Steiner selection
@@ -460,7 +460,7 @@ class NetworkModel:
         self.min_edge_prob = 0.05        # edges with probability (1 - FDR against the permuted-data network) below are dropped
         self.edge_prior = 0.9            # each Steiner edge is real with probability prob * edge_prior (paths and anchoring): favours short paths among equally probable ones
         self.null_network = 'hybrid'     # edge probabilities vs permuted data: 'hybrid' (gene edges within (sample, time), stimulus all cells), 'within_time', 'all_cells'
-        self.select_genes_per_condition = False  # with >= 2 network conditions: genes selected separately per condition (data = union, uns['condition_genes']); each condition fitted on its own genes, fused penalty on the shared edges only
+        self.select_genes_per_condition = True  # with >= 2 network conditions: genes selected separately per condition (data = union, uns['condition_genes']); each condition fitted on its own genes, fused penalty on the shared edges only
         self.sample_network_combination = 'auto'  # several samples, gene selection: 'consensus' (edge probabilities averaged, shared network), 'any' (probabilistic OR + closure balanced over the samples, independent condition networks); 'auto' = 'any' with >= 2 network conditions and network_condition_pen = 0
         self.selection_edge_prob = 0.6   # gene_selection_report: is_regulated_by / regulates list the edges inside the selection with probability >= this (and literature-feasible)
         self.closure_min = 0.5           # cost of a gene in the growth of the Steiner selection: the gene worth the most (sum of its w towards the selected genes + anchoring it brings to the terminals) is added while worth >= this
@@ -2744,7 +2744,7 @@ class NetworkModel:
             weight_fm = self.weight_flow_matching * min(1, (n_iter-1)/min_n_loops) # Flow matching from second iteration and small at early ones
             # Network targets (one_hot_probas = False) from the EMD basins at the first iteration to the expected modes
             # at min_n_loops: the EM started from the classification EM, not from the flat network of the mixture alone
-            self._target_mix = max(0.0, 1.0 - (n_iter - 1) / max(min_n_loops - 1, 1)) if ramp_targets else 0.0
+            self._target_mix = max(0.0, 1.0 - (n_iter - 1) / max(2 * min_n_loops - 1, 1)) if ramp_targets else 0.0
 
             # Stop only at the end of a cycle of the degradation updates
             cycle_done = last_deg is None or n_iter - last_deg >= self.refine_in_loop_period
