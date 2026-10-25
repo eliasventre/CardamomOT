@@ -208,6 +208,108 @@ def predict_cell_types(adata_new, clf, label_key='cell_type', sample_key=SAMPLE_
 
     return adata_new
 
+# Model stages compared with the data, as check_sim_to_data writes them (cardamomOT/adata_<file>_<tag>.h5ad)
+STAGE_FILES = (('Reference', 'rna_traj'), ('NB mixture', 'beta'), ('Network', 'theta'), ('Simulation', 'sim'))
+
+
+def predicted_key(label_key='cell_type'):
+    """obs key of the out-of-fold predicted labels of the observed cells."""
+    return f'{label_key}_predicted'
+
+
+def attach_samples(A, samples_idx, names):
+    """
+    obs['dataset_id'] of a stage when absent: trajectory states (one row per entry of data_samples.npy) or simulated
+    cells (the first slots of data_samples.npy tiled over the simulated times). The cell types are then predicted with
+    the classifier of the sample of each cell.
+    """
+    if A is None or SAMPLE_KEY in A.obs or samples_idx is None or not len(names) or 'time' not in A.obs:
+        return A
+    n, S = A.n_obs, len(samples_idx)
+    t = A.obs['time'].to_numpy(dtype=float)
+    N = int(np.sum(t == t.min())) if len(t) else 0
+    if n == S:
+        idx = samples_idx
+    elif N and n % N == 0 and N <= S:
+        idx = np.tile(samples_idx[:N], n // N)
+    else:
+        return A
+    A.obs[SAMPLE_KEY] = pd.Categorical(np.asarray(names)[np.minimum(idx, len(names) - 1)])
+    return A
+
+
+def read_model_stages(p, tag, names):
+    """
+    Model stages of a run (STAGE_FILES, tag 'stim<s>_prior<q>'): obs['dataset_id'] attached when absent (names: sorted
+    samples of the data), virtual trajectory states (obs['observed'] False: time not observed for their sample) left
+    out. {stage: AnnData, None if the file is missing}; the same stages for the report and the notebooks.
+    """
+    import os
+    import anndata as ad
+    cdir = os.path.join(p, 'cardamomOT')
+    samples_path = os.path.join(cdir, 'data_samples.npy')
+    samples_traj = np.load(samples_path).astype(int) if os.path.exists(samples_path) else None
+    out = {}
+    for stage, name in STAGE_FILES:
+        path = os.path.join(cdir, f'adata_{name}_{tag}.h5ad')
+        A = ad.read_h5ad(path) if os.path.exists(path) else None
+        if A is not None:
+            attach_samples(A, samples_traj, names)  # one row per state (before the virtual states are left out)
+            if 'observed' in A.obs and not A.obs['observed'].astype(bool).all():
+                A = A[A.obs['observed'].astype(bool).values].copy()
+        out[stage] = A
+    return out
+
+
+def predict_out_of_fold(adata, label_key='cell_type', sample_key=SAMPLE_KEY, n_folds=3, seed=0, **kw):
+    """
+    Cell types of the observed cells of adata predicted by classifiers trained without them (n_folds folds stratified
+    by sample and label; train_classifier options kw): the labels the classifier gives to cells it has not seen, the
+    reference of the model stages it classifies (the annotated labels differ from them by its errors).
+    """
+    import warnings
+    from sklearn.model_selection import StratifiedKFold
+    y = adata.obs[label_key].astype(str).values
+    strata = y if sample_key not in adata.obs else adata.obs[sample_key].astype(str).values + '|' + y
+    pred = np.empty(adata.n_obs, dtype=object)
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', message='The least populated class')
+        folds = list(StratifiedKFold(n_folds, shuffle=True, random_state=seed).split(np.zeros(len(y)), strata))
+    for tr, te in folds:
+        clf = train_classifier(adata[tr], label_key=label_key, sample_key=sample_key, seed=seed, **kw)
+        part = adata[te].copy()
+        predict_cell_types(part, clf, label_key='_oof', sample_key=sample_key)
+        pred[te] = part.obs['_oof'].astype(str).values
+    return pred
+
+
+def reference_labels(ref, data_labels):
+    """Labels of the Reference stage when it holds the counts of the real cells behind the states (obs['real_idx'],
+    uns['real_counts'] from check_sim_to_data): those of these cells in data_labels (e.g. out-of-fold); else None."""
+    if ref is None or 'real_idx' not in ref.obs or not bool(ref.uns.get('real_counts', False)):
+        return None
+    idx = ref.obs['real_idx'].to_numpy(dtype=int)
+    if idx.min() < 0 or idx.max() >= len(data_labels):
+        return None
+    return np.asarray(data_labels)[idx]
+
+
+def project_classifier(p, label_key='cell_type'):
+    """
+    Observed cells of a run (Data/data_<split>.h5ad) and the cell-type classifier of the report on them (per sample,
+    classifier_method and representation of the project, assign = reference samples of the held-out ones), with its
+    options (for predict_out_of_fold). Returns (adata, clf, options).
+    """
+    import os
+    import anndata as ad
+    from ..run_options import settings, StepOptions
+    from ..inputs import removed_samples
+    split = settings(StepOptions(p=str(p).rstrip('/') + '/')).split
+    adata = ad.read_h5ad(os.path.join(p, 'Data', f'data_{split}.h5ad'))
+    opts = dict(classifier_options(p), assign=removed_samples(p)[1])
+    return adata, train_classifier(adata, label_key=label_key, **opts), opts
+
+
 # 3. Création du plot de proportions
 def plot_cell_type_proportions(adatas, labels, label_key='cell_type', colors=None):
     proportions = []
@@ -235,93 +337,70 @@ def plot_cell_type_proportions(adatas, labels, label_key='cell_type', colors=Non
     return prop_df
 
 
-def check_cell_types_full(clf, p, stim=1.0, prior=1.0, label_key='cell_type'):
-    """Predict cell types on all pipeline outputs and plot proportions.
-
-    Runs the classifier on RNA trajectories, NB mixture, network modes and
-    simulation, writes predictions back to the h5ad files, then plots stacked
-    bar proportions.
+def check_cell_types_full(p, stim=1.0, prior=1.0, label_key='cell_type'):
+    """
+    Cell-type proportions of the data and of the model stages of a run, as in the report: same stage files
+    (read_model_stages), same classifier (project_classifier), predictions in memory (nothing written). Bars: Data
+    (annotated labels), Data (predicted) (out-of-fold predictions, the reference of the classified stages), Reference
+    (out-of-fold label of the real cell behind each state), NB mixture, Network, Simulation. Returns the table (%).
 
     Parameters
     ----------
-    clf : sklearn classifier
-        Trained classifier (e.g. from :func:`train_classifier`).
     p : str
-        Path to the project directory (trailing slash included).
-    stim : float
-        Stimulus value used during inference.
-    prior : float
-        Prior value used during inference.
+        Path to the project directory.
+    stim, prior : float
+        Stimulus and prior values of the run (tag of the files).
     label_key : str
-        ``obs`` key to store predictions in.
+        Annotated cell types (obs).
     """
-    import anndata as ad
-    import matplotlib.pyplot as plt
-    s, q = stim, prior
-    adata_train = ad.read_h5ad(p + f'cardamomOT/adata_rna_traj_stim{s}_prior{q}.h5ad')
-    adata_beta = ad.read_h5ad(p + f'cardamomOT/adata_beta_stim{s}_prior{q}.h5ad')
-    adata_sim_train = ad.read_h5ad(p + f'cardamomOT/adata_sim_stim{s}_prior{q}.h5ad')
-    adata_theta_train = ad.read_h5ad(p + f'cardamomOT/adata_theta_stim{s}_prior{q}.h5ad')
-
-    # Reference trajectories = real cells; the others = model draws (representation of the classifier)
-    adata_train = predict_cell_types(adata_train, clf, label_key=label_key)
-    adata_beta = predict_cell_types(adata_beta, clf, label_key=label_key)
-    adata_sim_train = predict_cell_types(adata_sim_train, clf, label_key=label_key)
-    adata_theta_train = predict_cell_types(adata_theta_train, clf, label_key=label_key)
-
-    adata_train.write(p + f'cardamomOT/adata_rna_traj_stim{s}_prior{q}.h5ad')
-    adata_beta.write(p + f'cardamomOT/adata_beta_stim{s}_prior{q}.h5ad')
-    adata_sim_train.write(p + f'cardamomOT/adata_sim_stim{s}_prior{q}.h5ad')
-    adata_theta_train.write(p + f'cardamomOT/adata_theta_stim{s}_prior{q}.h5ad')
-
-    cmap_cat = plt.get_cmap('Dark2')
-    cats = adata_train.obs[label_key].astype(str).unique().tolist()
-    colors = [cmap_cat(i % 8) for i in range(len(cats))]
-
-    plot_cell_type_proportions(
-        adatas=[adata_train, adata_beta, adata_theta_train, adata_sim_train],
-        labels=["data", "NB mixture", "modes", "sim"],
-        label_key=label_key,
-        colors=colors,
-    )
+    adata, clf, opts = project_classifier(p, label_key)
+    names = sorted(adata.obs[SAMPLE_KEY].astype(str).unique()) if SAMPLE_KEY in adata.obs else []
+    stages = read_model_stages(p, f'stim{stim}_prior{prior}', names)
+    missing = [k for k, A in stages.items() if A is None]
+    if missing:
+        raise FileNotFoundError(f"Missing check_sim_to_data outputs for {missing} (tag stim{stim}_prior{prior})")
+    pred = predict_out_of_fold(adata, label_key=label_key, **opts)
+    data_pred = adata.copy()
+    data_pred.obs[label_key] = pd.Categorical(pred)
+    for stage, A in stages.items():
+        predict_cell_types(A, clf, label_key=label_key)
+    ref = reference_labels(stages['Reference'], pred)
+    if ref is not None:
+        stages['Reference'].obs[label_key] = pd.Categorical(ref)
+    return plot_cell_type_proportions(adatas=[adata, data_pred] + list(stages.values()),
+                                      labels=['Data', 'Data (predicted)'] + list(stages), label_key=label_key)
 
 
-def check_cell_types_mixture(clf, p, adata_full, stim=1.0, prior=1.0, label_key='cell_type'):
-    """Predict cell types on the NB mixture and compare to observed data.
+def check_cell_types_mixture(p, label_key='cell_type'):
+    """
+    Cell types of the NB-mixture check (cardamomOT/adata_beta.h5ad of check_mixture_to_data: one draw per real cell)
+    with the classifier of the report (project_classifier), against the annotated and the out-of-fold predicted labels
+    of the data; nothing written. Returns the table (%).
 
     Parameters
     ----------
-    clf : sklearn classifier
-        Trained classifier.
     p : str
-        Path to the project directory (trailing slash included).
-    adata_full : AnnData
-        Observed data AnnData (used as the reference proportion).
-    stim : float
-        Stimulus value (unused here, kept for API consistency).
-    prior : float
-        Prior value (unused here, kept for API consistency).
+        Path to the project directory.
     label_key : str
-        ``obs`` key to store/read predictions in.
+        Annotated cell types (obs).
     """
+    import os
     import anndata as ad
-    adata_train = ad.read_h5ad(p + 'cardamomOT/adata_beta.h5ad')
-    # Files written before obs['dataset_id'] was saved: one NB draw per cell of the data, in the same order
-    if SAMPLE_KEY not in adata_train.obs and SAMPLE_KEY in adata_full.obs:
-        if adata_train.n_obs == adata_full.n_obs and np.allclose(adata_train.obs['time'].astype(float).values,
-                                                                 adata_full.obs['time'].astype(float).values):
-            adata_train.obs[SAMPLE_KEY] = adata_full.obs[SAMPLE_KEY].values
+    adata, clf, opts = project_classifier(p, label_key)
+    draws = ad.read_h5ad(os.path.join(p, 'cardamomOT', 'adata_beta.h5ad'))
+    # Files without obs['dataset_id']: one NB draw per cell of the data, in the same order
+    if SAMPLE_KEY not in draws.obs and SAMPLE_KEY in adata.obs:
+        if draws.n_obs == adata.n_obs and np.allclose(draws.obs['time'].astype(float).values,
+                                                      adata.obs['time'].astype(float).values):
+            draws.obs[SAMPLE_KEY] = adata.obs[SAMPLE_KEY].values
         else:
-            print(f"[cell types] Warning: adata_beta has no obs['{SAMPLE_KEY}'] and does not match adata_full: "
+            print(f"[cell types] Warning: adata_beta has no obs['{SAMPLE_KEY}'] and does not match the data: "
                   "rerun check_mixture_to_data.py")
-    adata_train = predict_cell_types(adata_train, clf, label_key=label_key)
-    adata_train.write(p + 'cardamomOT/adata_beta.h5ad')
-
-    plot_cell_type_proportions(
-        adatas=[adata_full, adata_train],
-        labels=["train", "mixture train"],
-        label_key=label_key,
-    )
+    predict_cell_types(draws, clf, label_key=label_key)
+    data_pred = adata.copy()
+    data_pred.obs[label_key] = pd.Categorical(predict_out_of_fold(adata, label_key=label_key, **opts))
+    return plot_cell_type_proportions(adatas=[adata, data_pred, draws],
+                                      labels=['Data', 'Data (predicted)', 'NB mixture (draws)'], label_key=label_key)
 
 # 4. Cell-type identity kept by a model (fair baseline for the proportions)
 def _identity_classifiers(seed=0):

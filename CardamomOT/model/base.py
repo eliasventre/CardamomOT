@@ -482,11 +482,12 @@ class NetworkModel:
         ## Proliferation
         self.simulate_with_proliferation = True # apply branching process in simulate_trajectories
         self.n_proliferation_markers = 10  # with protein_dilution or simulate_with_proliferation: genes always selected so that R(P) of the proliferation MLP can tell the proliferation states apart, half separating the labels of obs['cell_type_proliferation'], half predicting the prior net rate (non-redundant); 0 = none
+        self.proliferation_mlp = False  # True: ProliferationMLP R(u, P) trained in refine_network_degradations (infer_network_simul), its net rate drives the branching and its birth head the dilution in the refine SDE and the simulations; False: no MLP, each simulated cell takes at the start of each interval the rates of the nearest trajectory state of its sample (match_distance on proteins and kon): birth of the dilution (mean of its two ends) and net growth over the interval (R_opt, or the prior with use_recomputed_proliferation = False), in the refine SDE and the simulations alike
         self.ProliferationMLP_per_condition = True  # with network conditions: one proliferation MLP per condition (its samples and genes); False: one shared MLP (forced True with select_genes_per_condition)
         self.protein_dilution = True             # proteins diluted at the birth rate b of each cell: dP/dt = d1 u - (d1 + b) P (obs['proliferation_birth_rate']; independent of simulate_with_proliferation)
         self.prolif_uses_stimulus = True         # inference stimuli are inputs of the ProliferationMLP, R(u, P): it learns their effects on the rates (RATEk of perturbation_inference, included in the targets), the simulations feeding it their schedule; False: those effects are averaged out (no effect if the stimulus is constant over the intervals)
-        self.prolif_network = None               # ProliferationMLP trained in refine_network_degradations (if simulate_with_proliferation or protein_dilution), not a parameter
-        self.use_recomputed_proliferation = False # after infer_network_structure: net growth of the trajectory states = R_opt of the growth pass (True) or the prior rates of their real cells (False, obs['proliferation_net_rate'], data_R_prior.npy): proliferation MLP, birth / death of the states (dilution), growth-weighted checks and report
+        self.prolif_network = None               # ProliferationMLP trained in refine_network_degradations (proliferation_mlp, with simulate_with_proliferation or protein_dilution), not a parameter
+        self.use_recomputed_proliferation = False # after infer_network_structure: net growth of the trajectory states = R_opt of the growth pass (True) or the prior rates of their real cells (False, obs['proliferation_net_rate'], data_R_prior.npy): proliferation MLP, birth / death of the states (dilution), test set and report; R_opt is then never used
         self.R_prior = None                      # prior net rate of each trajectory state (rate of its real cell, same layout as R_opt)
         self.R_opt = None                        # net growth rate of each trajectory state over the next interval (NaN at last time), from the final growth OT pass
         self.growth_reg_source = 2.0             # source-marginal relaxation (x typical excess cost of the batch) of the growth OT pass: small = data-driven but noisy, large = prior kept
@@ -2030,6 +2031,12 @@ class NetworkModel:
         return prot_modified, prot_formodes, rna_modified, kon_modified, \
                 alpha_modified, vect_samples_id_modified, R_opt_traj, to_keep_for_update
 
+    @staticmethod
+    def _weight_prob(n_iter):
+        """Weight of the mixture posteriors in the basin costs at iteration n_iter (network term: 1 - weight_prob),
+        0.95^(n_iter - 1) down to 0.1; the test set uses that of the last training iteration."""
+        return max(.95 ** (n_iter - 1), .1)
+
     def _reg_factor(self, n_iter, context):
         """Factor of the entropic regularization of the OT: 0.1 at the last iteration (n_iter = max_iter) only when
         max_iter < min_n_loops (the regularization ramp then not completed), else 1; that of the last training
@@ -3025,7 +3032,7 @@ class NetworkModel:
             # --- Update modes ---
             n_cells = self.proba_init.shape[0]
             # The weight of the network increases slowly because it aims to get the right attribution given probabilities that are close
-            weight_prob = max(.95**(n_iter - 1), .1)
+            weight_prob = self._weight_prob(n_iter)
 
             # Mode amplitudes and number of levels of each real cell's sample (per-sample mixtures: each sample has its
             # own levels and masses, its cells are assigned apart)
@@ -3187,7 +3194,7 @@ class NetworkModel:
             ip = intensity_prior * compute_theta * (1 - hard_forcing_ref)
             context = {'n_iter_reg': n_reg,
                        'weight_init': float(n_reg <= ip) * (1 / n_reg)**(1 - 1 / n_reg),
-                       'weight_prob': max(.96**(n_iter - 1), .1),
+                       'weight_prob': self._weight_prob(n_iter - 1),
                        'reg_factor': self._reg_factor(n_iter - 1, None)}
         self.final_context = context
 
@@ -3329,9 +3336,14 @@ class NetworkModel:
         d1_s, eps_s = (self.d[1].copy(), 1.0 / r) if mode == 'sde2' else (self.d[1] * r / (1 + r), 1.0 / (1 + r))
         d1_ref, eps_ref = self._literature_rates(mode)
         b_states = self._dilution(y_real)[2]
+        # Net growth of the states for the branching (no growth pass yet): prior rates of their real cells
+        r_pr = getattr(self, '_prolif_net_rate', None)
+        r_states = None if r_pr is None else \
+            np.where(y_real >= 0, np.asarray(r_pr, dtype=float)[np.maximum(y_real, 0)], np.nan)
         basal_n, inter_n, d1_c, eps_c, _, _ = self._fit_free_running(
             y_prot, basal, inter, mode, d1_s, eps_s, valid, times, N_tot, ks, k1, sample_idx, b_states, verb=verb,
-            samples_rows=y_samples, kon_targets=y_kon, real_idx=y_real, rna=y_rna, prolif=None, temporal=False, learn_scale=False,
+            samples_rows=y_samples, kon_targets=y_kon, real_idx=y_real, rna=y_rna, r_states=r_states, prolif=None,
+            temporal=False, learn_scale=False,
             learn_theta=self.refine_theta_with_sde, epochs=self.refine_in_loop_epochs, per_condition=True,
             d1_ref=d1_ref, eps_ref=eps_ref, only_max_horizon=True,
             lam_rates=self.sde_lambda_rates * self.refine_in_loop_decay ** self._n_refine_in_loop, tag='fit_network')
@@ -4053,7 +4065,7 @@ class NetworkModel:
         self._train_proliferation_mlp(verb=verb)
         basal, inter, d1_c, eps_c, scale_c, cond = self._fit_free_running(
             y_prot, basal, inter, mode, d1_start, eps_start, valid, times, N_tot, ks, k1, samples_id, b_states,
-            verb=verb)
+            verb=verb, r_states=self.R_opt)
         T1 = len(times) - 1
         if d1_c.shape[0] > 1:
             # Kinetics per network condition, stored per sample (as inter): d_t (T-1, 2, S, G), ratios (T-1, S, G)
@@ -4106,6 +4118,12 @@ class NetworkModel:
         """Proliferation MLP along the trajectories self.prot (branching and birth rate of the dilution)."""
         ns = self.n_stimuli
         # Proliferation MLP for the simulations: branching (simulate_with_proliferation) and birth rate of the dilution
+        if not self.proliferation_mlp:
+            self.prolif_network = None
+            if verb and (self.simulate_with_proliferation or self.protein_dilution):
+                print("[refine_network_degradations] proliferation_mlp = False: rates of the nearest trajectory states "
+                      "(refine SDE and simulations)")
+            return
         if (self.simulate_with_proliferation or self.protein_dilution) and self.R_opt is not None:
             if verb:
                 print("[refine_network_degradations] Training ProliferationMLP on R_opt...")
@@ -4158,25 +4176,26 @@ class NetworkModel:
         b = None if b is None else np.asarray(b, dtype=float)
         return None if b is None or not np.isfinite(b).any() else (float(np.nanmin(b)), float(np.nanmax(b)))
 
-    def _nearest_state_birth(self, X, K, B, V):
+    def _nearest_state_rate(self, X, K, B, V, interval=False):
         """
-        Birth rate of simulated states without the MLP: that of the nearest trajectory state at the start of the
-        interval (mean of its rates at both ends), with match_distance on proteins and kon (as the re-assignment
-        of alpha). X, K (T, n, G) trajectory proteins (units of the fit) and kon, B (T, n) birth rates, V (T, n)
-        observed. Returns f(P, kon, t, slots).
+        Rate of simulated states without the MLP: that of the nearest trajectory state at the start of the interval,
+        with match_distance on proteins and kon (as the re-assignment of alpha); the mean of its rates at both ends
+        (birth of the dilution), or with interval its rate over the interval (net growth B[t], R_opt layout; NaN: 0).
+        X, K (T, n, G) trajectory proteins (units of the fit) and kon, B (T, n) rates, V (T, n) observed. Returns
+        f(P, kon, t, slots).
         """
         ns = self.n_stimuli
 
-        def birth(P, kon, t, sl):
+        def rate(P, kon, t, sl):
             ok = np.flatnonzero(V[t]) if V[t].any() else np.arange(X.shape[1])
             dist = match_distance(np.asarray(P)[:, ns:], np.asarray(kon)[:, ns:], X[t, ok, ns:], K[t, ok, ns:])
             nn = ok[np.argmin(dist, axis=1)]
-            return 0.5 * (B[t, nn] + B[t + 1, nn])
-        return birth
+            return np.nan_to_num(B[t, nn]) if interval else 0.5 * (B[t, nn] + B[t + 1, nn])
+        return rate
 
     def _fit_free_running(self, y_prot, basal, inter, mode, d1_start, eps_start, valid, times, N_tot, ks, k1,
                           samples_id, b_states, verb=True, samples_rows=None, kon_targets=None, real_idx=None,
-                          rna=None,
+                          rna=None, r_states=None,
                           prolif='model', temporal=None, learn_scale=None, learn_theta=None, epochs=None,
                           per_condition=True, d1_ref=None, eps_ref=None, only_max_horizon=False, lam_rates=None,
                           tag='refine_network_degradations'):
@@ -4186,8 +4205,10 @@ class NetworkModel:
         explicit mRNA) from the trajectory states, on the kon of the observed modes (one_hot_probas = False: levels
         drawn from the posteriors updated by the network at every minibatch); the network (support and
         signs kept) refined with refine_theta_with_sde, else fixed. Dilution and branching as in the simulations.
-        The keyword arguments override the attributes for the fit inside fit_network (refine_in_loop): trajectory
-        arrays (samples_rows, kon_targets, real_idx, rna), prolif (None: no MLP), temporal / learn_scale / learn_theta /
+        Without the MLP (prolif None), the rates of the nearest trajectory state at the start of each interval: birth
+        b_states (dilution) and net growth r_states (branching, simulate_with_proliferation; R_opt layout), as in
+        simulate_trajectories. The keyword arguments override the attributes for the fit inside fit_network
+        (refine_in_loop): trajectory arrays (samples_rows, kon_targets, real_idx, rna), prolif (None: no MLP), temporal / learn_scale / learn_theta /
         epochs, per_condition, rappel targets d1_ref / eps_ref (default the starting values) and strength lam_rates
         (default sde_lambda_rates), only_max_horizon.
         Returns (basal, inter, d1, eps, scale (C, T-1, G), condition of each sample position (S,)).
@@ -4210,6 +4231,8 @@ class NetworkModel:
         R = None if mode != 'sde2' else np.asarray(self.rna if rna is None else rna, dtype=float).reshape(T, N_tot, G)
         prolif = self.prolif_network if prolif == 'model' else prolif
         bt_all = None if b_states is None else np.asarray(b_states, dtype=float).reshape(T, N_tot)
+        rt_all = None if (r_states is None or len(r_states) != T * N_tot) else \
+            np.asarray(r_states, dtype=float).reshape(T, N_tot)
         b_bounds = None if prolif is None else self._birth_bounds()
         # Kinetics per network condition (index of each sample position): one separate fit per condition (its samples,
         # its genes, its network as rappel), else one shared fit
@@ -4251,21 +4274,23 @@ class NetworkModel:
                 g['M'] = M
                 g['M_targets'] = [None if g['targets'][t] is None else
                                   M[t][valid[N_tot * t + slots]] for t in range(T)]
-            # Birth rate of the dilution on the simulated states: MLP birth head at every integration step, else at
-            # the start of each interval that of the nearest trajectory state of the sample (kon and proteins);
-            # net rate of the branching, as in simulate_trajectories
-            g['birth'], g['rate'], g['birth_every_step'] = None, None, True
+            # Birth rate of the dilution and net rate of the branching on the simulated states: MLP at every
+            # integration step, else at the start of each interval those of the nearest trajectory state of the
+            # sample (kon and proteins), as in simulate_trajectories
+            g['birth'], g['rate'], g['rate_start'], g['birth_every_step'] = None, None, None, True
+            K_traj, V_traj = kon_targets.reshape(T, N_tot, G)[:, slots], valid.reshape(T, N_tot)[:, slots]
             if self.protein_dilution and prolif is not None:
                 lo, hi = b_bounds if b_bounds is not None else (-np.inf, np.inf)
                 g['birth'] = lambda P, kon, t, sl, st=stim, si=s_idx, lo=lo, hi=hi: np.clip(prolif.predict_birth(
                     P[:, ns:], np.repeat(st[t][None], len(P), 0), samples=np.full(len(P), si)), lo, hi)
             elif self.protein_dilution and bt_all is not None:
-                g['birth'] = self._nearest_state_birth(X[:, slots], kon_targets.reshape(T, N_tot, G)[:, slots],
-                                                       bt_all[:, slots], valid.reshape(T, N_tot)[:, slots])
+                g['birth'] = self._nearest_state_rate(X[:, slots], K_traj, bt_all[:, slots], V_traj)
                 g['birth_every_step'] = False
             if self.simulate_with_proliferation and prolif is not None:
                 g['rate'] = lambda P, t, st=stim, si=s_idx: prolif.predict(
                     P[:, ns:], np.repeat(st[t][None], len(P), 0), samples=np.full(len(P), si))
+            elif self.simulate_with_proliferation and rt_all is not None:
+                g['rate_start'] = self._nearest_state_rate(X[:, slots], K_traj, rt_all[:, slots], V_traj, interval=True)
             act = self.active_genes(s_idx)
             g['gmask'] = None if act is None else act.astype(float)  # genes of the sample's condition
             if self._memory_filter():  # kon of the start states: initial kon read on the mRNA
@@ -4529,16 +4554,26 @@ class NetworkModel:
         for dst, _, _, _ in starts:
             gate_rows(np.arange(dst, dst + N))
 
-        # Proliferation: R(P) integrated along each simulated path (states recorded at the quadrature nodes)
+        # Proliferation: R(P) of the MLP integrated along each simulated path (states recorded at the quadrature
+        # nodes); without the MLP, the net growth over the interval of the nearest trajectory state at its start (as in
+        # the refine SDE): R_opt layout (T, N) of the trajectory states (R_opt, or the prior rates)
         _prolif_fn = None
         if self.simulate_with_proliferation and self.prolif_network is not None:
             # (N, ..., n_proteins), stimuli of the interval -> (N, ...); rows routed by sample (per-condition MLPs)
             _prolif_fn = lambda path, st: self.prolif_network.predict(path, st, samples=s_cells)
-        # RATE effects of perturbation stimuli (added to R); without the MLP, R = 0 + effects
+        T_tr = len(times_train)
+        R_traj = None
+        R_st = getattr(self, 'R_opt', None)
+        if self.simulate_with_proliferation and _prolif_fn is None and R_st is not None and len(R_st) == len(self.prot):
+            R_traj = np.asarray(R_st, dtype=float).reshape(T_tr, -1)
+        elif self.simulate_with_proliferation and _prolif_fn is None and verb:
+            print("[simulate] Warning: simulate_with_proliferation without the MLP nor the net growth of the trajectory "
+                  "states (data_R_opt.npy / data_R_prior.npy): no branching")
+        # RATE effects of perturbation stimuli (added to R); without any net rate, R = 0 + effects
         _rates = list(getattr(self, 'rate_perturbation', None) or [])
-        if _rates and _prolif_fn is None and verb:
-            print("[simulate] Warning: RATE effects without the proliferation MLP: base net rate 0")
-        _branching = _prolif_fn is not None or bool(_rates)
+        if _rates and _prolif_fn is None and R_traj is None and verb:
+            print("[simulate] Warning: RATE effects without the proliferation MLP nor state growth: base net rate 0")
+        _branching = _prolif_fn is not None or R_traj is not None or bool(_rates)
         self.log_population = np.zeros(len(times)) if _branching else None
         # Dilution of the proteins at the birth rate of each simulated cell, as in the trajectories and the refit of
         # d1: its regression on the simulated state (birth head of the MLP, numpy copy re-evaluated by each worker at
@@ -4555,17 +4590,18 @@ class NetworkModel:
             head_of_cell = np.zeros(N, dtype=int) if hcond is None else \
                 hcond[np.minimum(np.asarray(s_cells, dtype=int), len(hcond) - 1)]
             b_bounds = self._birth_bounds()
-        b_traj = d_traj = None
+        b_traj = d_traj = ref_P = None
         if self.protein_dilution and not _mlp_birth:
             bp, dp = self._state_rates()  # those of infer_network_simul (load_state_rates), else the prior
-            T_tr = len(times_train)
             if bp is not None and len(bp) % T_tr == 0 and len(bp) == len(self.prot):
-                N_tr = len(bp) // T_tr
-                b_traj = bp.reshape(T_tr, N_tr)
-                d_traj = (dp if dp is not None else np.zeros_like(bp)).reshape(T_tr, N_tr)
-                ref_P = self.prot.reshape(T_tr, N_tr, -1)[..., ns:]
-                ref_K = self.kon_beta.reshape(T_tr, N_tr, -1)[..., ns:]
-                ref_s = np.asarray(self.samples_data).reshape(T_tr, N_tr)[0]  # sample of each trajectory slot
+                b_traj = bp.reshape(T_tr, -1)
+                d_traj = (dp if dp is not None else np.zeros_like(bp)).reshape(T_tr, -1)
+        if b_traj is not None or R_traj is not None:
+            # Trajectory states whose rates the simulated cells take (nearest at the start of each interval)
+            N_tr = len(self.prot) // T_tr
+            ref_P = self.prot.reshape(T_tr, N_tr, -1)[..., ns:]
+            ref_K = self.kon_beta.reshape(T_tr, N_tr, -1)[..., ns:]
+            ref_s = np.asarray(self.samples_data).reshape(T_tr, N_tr)[0]  # sample of each trajectory slot
         if _branching or _mlp_birth:
             u_growth, w_growth = quadrature(self.n_growth_nodes)
         if _branching:
@@ -4616,28 +4652,34 @@ class NetworkModel:
                     out = out + (u * eff['delta'])[:, None] * score
                 return out
 
-            # Birth rate of each cell (dilution): with the MLP, re-evaluated by the workers along the path (RATE
-            # effects of the start state); else from the nearest trajectory state at the start of the interval
-            b_cells = delta_cells = None
+            # Rates of each cell: with the MLP, birth re-evaluated by the workers along the path (RATE effects of the
+            # start state) and net rate along the path; else those of the nearest trajectory state at the start of the
+            # interval (same sample, match_distance on proteins and kon), as in the refine SDE
+            b_cells = delta_cells = R_cells = None
+            P_start = prot_modified[start_index:start_index + N, ns:]
             if self.protein_dilution and (_mlp_birth or b_traj is not None):
-                P_start = prot_modified[start_index:start_index + N, ns:]
                 delta_cells = rate_effects(P_start[:, None, :])[:, 0]
+            if ref_P is not None:
+                # Inference interval containing time (last one beyond)
+                k = int(np.clip(np.searchsorted(times_train, time, side='right') - 1, 0, T_tr - 1))
+                k_end = min(k + 1, T_tr - 1)
+                K_start = kon_vector[start_index:start_index + N, ns:]
+                nn_cells = np.zeros(N, dtype=int)
+                for s_ in np.unique(s_cells):
+                    rows = np.flatnonzero(s_cells == s_)
+                    ref = np.flatnonzero(ref_s == s_)
+                    ref = ref if len(ref) else np.arange(len(ref_s))
+                    nn_cells[rows] = ref[np.argmin(match_distance(P_start[rows], K_start[rows], ref_P[k, ref],
+                                                                  ref_K[k, ref]), axis=1)]
                 if b_traj is not None:
-                    # Inference interval containing time (last one beyond): mean of the rates of the start and end
-                    # states of the nearest trajectory, as the birth linear in time of the refit
-                    k = int(np.clip(np.searchsorted(times_train, time, side='right') - 1, 0, len(times_train) - 1))
-                    k_end = min(k + 1, len(times_train) - 1)
-                    K_start = kon_vector[start_index:start_index + N, ns:]
-                    b0, d0 = np.zeros(N), np.zeros(N)
-                    for s_ in np.unique(s_cells):
-                        rows = np.flatnonzero(s_cells == s_)
-                        ref = np.flatnonzero(ref_s == s_)
-                        ref = ref if len(ref) else np.arange(len(ref_s))
-                        nn = ref[np.argmin(match_distance(P_start[rows], K_start[rows], ref_P[k, ref], ref_K[k, ref]),
-                                           axis=1)]
-                        b0[rows] = 0.5 * (b_traj[k, nn] + b_traj[k_end, nn])
-                        d0[rows] = 0.5 * (d_traj[k, nn] + d_traj[k_end, nn])
+                    # Birth: mean of the rates of the start and end states of the nearest trajectory, as the birth
+                    # linear in time of the refit
+                    b0 = 0.5 * (b_traj[k, nn_cells] + b_traj[k_end, nn_cells])
+                    d0 = 0.5 * (d_traj[k, nn_cells] + d_traj[k_end, nn_cells])
                     b_cells = split_net_change(b0, d0, delta_cells)[0] if np.any(delta_cells) else b0
+                if R_traj is not None:
+                    # Net growth over the interval (the last interval with a rate beyond the inference times)
+                    R_cells = np.nan_to_num(R_traj[min(k, T_tr - 2), nn_cells])
 
             mrna_pdmp = mrna_mode and bool(self.simulation_stochastic)
             stoch, scale_p = bool(self.simulation_stochastic), self.scale_proteins
@@ -4765,7 +4807,12 @@ class NetworkModel:
                 path = np.stack([prot_modified[start_index:start_index + N, ns:]]
                                 + [np.array([results[n].p[i_orig[n][q]][ns - 1:] for n in range(N)])
                                    for q in range(len(t_rec_base))], axis=1)  # (N, Q, G)
-                R_path = _prolif_fn(path, stim_cells[:, None, :]) if _prolif_fn is not None else np.zeros(path.shape[:2])
+                if _prolif_fn is not None:
+                    R_path = _prolif_fn(path, stim_cells[:, None, :])
+                elif R_cells is not None:  # rate of the nearest trajectory state, constant over the interval
+                    R_path = np.repeat(R_cells[:, None], path.shape[1], axis=1)
+                else:
+                    R_path = np.zeros(path.shape[:2])
                 R_path = R_path + rate_effects(path)
                 log_weights = (R_path * w_growth).sum(axis=1) * delta_t
                 # Population size: mean growth factor of the cells over the interval
@@ -5149,7 +5196,7 @@ class NetworkModel:
 
         if context is None:
             context = {'n_iter_reg': self.min_n_loops, 'weight_init': 0.0,
-                       'weight_prob': max(.96**(self.min_n_loops - 1), .1), 'reg_factor': 1.0}
+                       'weight_prob': self._weight_prob(self.min_n_loops), 'reg_factor': 1.0}
         self._assign_calibrated_basins(train, vect_t, times, ks, ks_cells, cell_s, samples_id, G_tot,
                                        context['weight_prob'], act_cells=self.cell_gene_mask(cell_s))
         if kov_cell_mask is not None:  # KO cells at the lowest mode, OV cells at the highest one

@@ -25,7 +25,7 @@ import numpy as np
 import sys
 from CardamomOT.run_options import parse_step_options, settings, configure
 import anndata as ad
-from CardamomOT import NetworkModel, plot_data_umap_altogether, plot_data_distrib, load_state_growth
+from CardamomOT import NetworkModel, plot_data_umap_altogether, plot_data_distrib
 from CardamomOT.inference.integration import nb_cell_parameters
 from CardamomOT.inference.depth_model import nb_numpy_params
 from CardamomOT.inference.depth import state_depth, simulation_depth
@@ -41,38 +41,6 @@ def _sim_sample_idx(samples_traj, times_simulation):
         return None
     N = int(np.sum(times_simulation == times_simulation[0]))
     return np.tile(np.asarray(samples_traj)[:N], len(times_simulation) // N)
-
-
-def growth_log_weights(R_opt, times_data):
-    """
-    Cumulative log mass of each trajectory state, L_n(t_k) = sum_{j<k} R_opt[j, n] dt_j: the growth
-    the OT pass attributes to the path of slot n up to t_k (0 at the first time).
-    """
-    tu = np.sort(np.unique(times_data))
-    T = len(tu)
-    N = len(times_data) // T
-    gain = np.nan_to_num(np.asarray(R_opt, dtype=float)[:T * N].reshape(T, N)[:-1] * np.diff(tu)[:, None])
-    return np.vstack([np.zeros((1, N)), np.cumsum(gain, axis=0)]).ravel()
-
-
-def growth_resample(L, times_data, samples, seed=0, valid=None):
-    """
-    Indices of the trajectory states drawn with weights exp(L) within each (sample, time): the
-    trajectories with the expansion of their population, i.e. what a simulation with proliferation
-    should reproduce (multinomial resampling, as in the branching simulation). Virtual states
-    (valid = False: time not observed for their sample) are left as they are.
-    """
-    rng = np.random.default_rng(seed)
-    idx = np.arange(len(L))
-    samples = np.zeros(len(L), dtype=int) if samples is None else np.asarray(samples)[:len(L)]
-    valid = np.ones(len(L), dtype=bool) if valid is None else np.asarray(valid, dtype=bool)
-    for t in np.unique(times_data):
-        for s in np.unique(samples):
-            g = np.flatnonzero((times_data == t) & (samples == s) & valid)
-            if len(g) and np.ptp(L[g]) > 1e-12:   # uniform weights (first time): states kept as they are
-                w = np.exp(L[g] - L[g].max())
-                idx[g] = g[rng.choice(len(g), len(g), replace=True, p=w / w.sum())]
-    return idx
 
 
 def main(argv):
@@ -233,20 +201,12 @@ def main(argv):
 
     cardamom_dir = os.path.join(p, 'cardamomOT')
 
-    # Growth of the trajectories: the OT selection removes the proliferation (one descendant per
-    # ancestor); a simulation with proliferation is compared with the growth-weighted trajectories
+    # Trajectory states are drawn at each time among the observed cells (target marginal of the OT): they follow the
+    # observed composition, the reference of the simulations with or without proliferation (no reweighting)
     flag_path = os.path.join(cardamom_dir, 'simulation_with_proliferation.npy')
     sim_prolif = bool(np.load(flag_path)[0]) if os.path.exists(flag_path) else False
-    # Net growth of the states: R_opt of the growth pass, or the prior rates (use_recomputed_proliferation)
-    R_opt = load_state_growth(cardamom_dir, model.use_recomputed_proliferation)
-    L_growth = growth_log_weights(R_opt, times_data) if (R_opt is not None and len(R_opt) == len(times_data)) else None
     valid_path = os.path.join(cardamom_dir, 'data_traj_valid.npy')
     traj_valid = np.load(valid_path) if os.path.exists(valid_path) else np.ones(len(times_data), dtype=bool)
-    growth_idx = (growth_resample(L_growth, times_data, samples_traj, seed=model.seed or 0, valid=traj_valid)
-                  if L_growth is not None else None)
-    if sim_prolif:
-        print("[check_sim_to_data] Simulation with proliferation: growth-weighted trajectories written "
-              + ("(adata_*_growth_*.h5ad)" if growth_idx is not None else "— skipped, data_R_opt.npy / data_R_prior.npy missing"))
 
     sample_names = (sorted(adata.obs['dataset_id'].astype(str).unique()) if 'dataset_id' in adata.obs else None)
 
@@ -257,7 +217,7 @@ def main(argv):
         return A
 
     def _write_states(X, name, var_names=None):
-        # Trajectory-state AnnData (+ growth weights), and its growth-resampled version if needed
+        # Trajectory-state AnnData
         A = ad.AnnData(X=X)
         A.var = adata.var.copy()
         A.obs['time'] = times_data
@@ -274,15 +234,14 @@ def main(argv):
             # Depth of the real cell behind each state (counts of the real cells), even if the run did not use it;
             # none for the trajectory mRNA (reference depth)
             A.obs['depth_factor'] = state_depth(adata.obs['depth_factor'].values.astype(float), real_idx)
-        if L_growth is not None:
-            A.obs['growth_log_weight'] = L_growth
+        if name == 'rna_traj' and real_idx is not None and len(real_idx) == A.n_obs:
+            # Real cell behind each state (row of data_<split>): its out-of-fold cell type labels the state (report)
+            A.obs['real_idx'] = np.asarray(real_idx, dtype=int)
+            A.uns['real_counts'] = bool(ref_real)
         A.write(os.path.join(cardamom_dir, f'adata_{name}_{tag}.h5ad'))
-        if sim_prolif and growth_idx is not None:
-            B = A[growth_idx].copy()
-            B.obs_names_make_unique()
-            B.obs['state'] = growth_idx
-            B.uns['growth_resampled'] = True
-            B.write(os.path.join(cardamom_dir, f'adata_{name}_growth_{tag}.h5ad'))
+        stale = os.path.join(cardamom_dir, f'adata_{name}_growth_{tag}.h5ad')  # growth-resampled states, no longer used
+        if os.path.exists(stale):
+            os.remove(stale)
 
     tag = f'stim{model.stimulus}_prior{model.prior_network_pen}'
 
@@ -306,7 +265,7 @@ def main(argv):
             adata_sim.uns['log_population'] = np.load(pop_path)
         adata_sim.write(os.path.join(cardamom_dir, f'adata_sim_stim{model.stimulus}_prior{model.prior_network_pen}.h5ad'))
 
-        # Trajectory RNA (without proliferation), and growth-weighted if the simulation has proliferation
+        # Trajectory RNA
         _write_states(data_ref[1:, :].T, 'rna_traj')
 
         data_prot_traj = np.load(os.path.join(cardamom_dir, 'data_prot.npy'))  # trajectories of fit_network
@@ -325,9 +284,7 @@ def main(argv):
     if plot_in_script:
         print("[check_sim_to_data] Generating distribution comparison plots...")
         try:
-            # Reference equivalent to the simulation: trajectories, growth-weighted with proliferation
-            g = growth_idx if (sim_prolif and growth_idx is not None) else np.arange(data_ref.shape[1])
-            ref_sc, beta_sc, theta_sc = data_ref[:, g], data_beta[:, g], data_netw_theta[:, g]
+            ref_sc, beta_sc, theta_sc = data_ref, data_beta, data_netw_theta
             plot_data_distrib(ref_sc, data_sim, t_data, t_simul, names, inputfile, outputfile, complement1)
             plot_data_umap_altogether(data_real, ref_sc, beta_sc, theta_sc,
                                   data_sim, t_data, t_simul, inputfile, 'Check', 'altogether_sim')

@@ -23,7 +23,8 @@ from matplotlib.lines import Line2D
 from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.neighbors import NearestNeighbors
 
-from .characterize_cell_type import train_classifier, predict_cell_types
+from .characterize_cell_type import (train_classifier, predict_cell_types, read_model_stages, attach_samples,
+                                     predict_out_of_fold, reference_labels, predicted_key)
 from .embedding import data_embedding, Embedder, embedding_name
 from .velocity import knn_velocity_embedding as _knn_velocity_embedding
 from ..config import find_data_file, resolve_cell_type_obs
@@ -41,6 +42,7 @@ REG_COLOR = '#4C9BE8'
 STIM_COLOR = '#F39C12'
 TGT_COLOR = '#A569BD'
 LABEL_KEY = 'cell_type'
+LABEL_PRED = predicted_key(LABEL_KEY)  # out-of-fold predicted labels of the observed cells
 
 
 # ---------------------------------------------------------------------------
@@ -82,14 +84,24 @@ def _time_subsample(t, n_max, rng):
     return np.sort(np.concatenate(idx))
 
 
-def _proportions(adata, categories):
-    counts = adata.obs[LABEL_KEY].astype(str).value_counts(normalize=True) * 100
+def _proportions(adata, categories, key=LABEL_KEY):
+    counts = adata.obs[key].astype(str).value_counts(normalize=True) * 100
     return counts.reindex(categories).fillna(0.0)
 
 
-def _proportions_by_time(adata, categories):
+def _with_predicted(props, data, categories, name='Data'):
+    """Proportion rows {stage: proportions} with 'Data (predicted)' (out-of-fold labels) after the data row."""
+    out = {}
+    for k, v in props.items():
+        out[k] = v
+        if k == name and data is not None and LABEL_PRED in data.obs:
+            out[f'{name} (predicted)'] = _proportions(data, categories, LABEL_PRED)
+    return out
+
+
+def _proportions_by_time(adata, categories, key=LABEL_KEY):
     df = pd.DataFrame({'time': pd.to_numeric(adata.obs['time']).values,
-                       'ct': adata.obs[LABEL_KEY].astype(str).values})
+                       'ct': adata.obs[key].astype(str).values})
     tab = pd.crosstab(df['time'], df['ct'], normalize='index') * 100
     return tab.reindex(columns=categories).fillna(0.0)
 
@@ -332,27 +344,6 @@ def _labelled_violin(ax, values, names, top_idx, title, ylabel, extra=None, min_
 # Report sections
 # ---------------------------------------------------------------------------
 
-def _attach_samples(A, samples_idx, names):
-    """
-    obs['dataset_id'] of a stage when absent: trajectory states (one row per entry of data_samples.npy) or simulated
-    cells (the first slots of data_samples.npy tiled over the simulated times). The cell types are then predicted with
-    the classifier of the sample of each cell.
-    """
-    if A is None or 'dataset_id' in A.obs or samples_idx is None or not len(names) or 'time' not in A.obs:
-        return A
-    n, S = A.n_obs, len(samples_idx)
-    t = A.obs['time'].to_numpy(dtype=float)
-    N = int(np.sum(t == t.min())) if len(t) else 0
-    if n == S:
-        idx = samples_idx
-    elif N and n % N == 0 and N <= S:
-        idx = np.tile(samples_idx[:N], n // N)
-    else:
-        return A
-    A.obs['dataset_id'] = pd.Categorical(np.asarray(names)[np.minimum(idx, len(names) - 1)])
-    return A
-
-
 class _ReportData:
     """Loads every pipeline output needed by the report once."""
 
@@ -383,15 +374,12 @@ class _ReportData:
         from ..condition_genes import condition_gene_sets
         self.condition_genes = condition_gene_sets(self.adata_data)
         self.parent, self.samples, self.condition = None, None, None
-        # Data = observed cells; Reference = RNA of the trajectories (one state per ancestor: without
-        # proliferation), growth-weighted below if the simulation used the proliferation MLP
-        self.stages = {
-            'Data': self.adata_data.copy(),  # shown as configured (_mrna_view); adata_data stays raw
-            'Reference': _read(os.path.join(cdir, f'adata_rna_traj_{tag}.h5ad')),
-            'NB mixture': _read(os.path.join(cdir, f'adata_beta_{tag}.h5ad')),
-            'Network': _read(os.path.join(cdir, f'adata_theta_{tag}.h5ad')),
-            'Simulation': _read(os.path.join(cdir, f'adata_sim_{tag}.h5ad')),
-        }
+        # Data = observed cells; Reference = RNA of the trajectories: states drawn at each time among the observed
+        # cells (target marginal of the OT), hence the observed composition, with or without proliferation
+        # Model stages as the notebooks read them (read_model_stages: samples attached, virtual states left out)
+        names = (sorted(self.adata_data.obs['dataset_id'].astype(str).unique()) if 'dataset_id' in self.adata_data.obs else [])
+        self.stages = {'Data': self.adata_data.copy(),  # shown as configured (_mrna_view); adata_data stays raw
+                       **read_model_stages(p, tag, names)}
         missing = [k for k, v in self.stages.items() if v is None]
         if missing:
             raise FileNotFoundError(f"Missing check_sim_to_data outputs with tag '{tag}' for: {missing}. "
@@ -399,22 +387,8 @@ class _ReportData:
         self.prot = {'Trajectories': _read(os.path.join(cdir, f'adata_prot_traj_{tag}.h5ad')),
                      'Simulation': _read(os.path.join(cdir, f'adata_prot_simul_{tag}.h5ad'))}
 
-        # Simulation with proliferation: trajectory stages replaced by their growth-weighted version
-        # (check_sim_to_data), the raw states being kept for the dynamics (one row per state)
-        self.beta_states = self.stages['NB mixture']
-        self.growth_ref = False
-        if bool(self.stages['Simulation'].uns.get('proliferation', False)):
-            growth = {k: _read(os.path.join(cdir, f'adata_{n}_growth_{tag}.h5ad'))
-                      for k, n in (('Reference', 'rna_traj'), ('NB mixture', 'beta'), ('Network', 'theta'),
-                                   ('Trajectories', 'prot_traj'))}
-            if all(v is not None for v in growth.values()):
-                self.stages['Reference'] = growth['Reference']
-                self.stages['NB mixture'], self.stages['Network'] = growth['NB mixture'], growth['Network']
-                self.prot['Trajectories'] = growth['Trajectories']
-                self.growth_ref = True
-            else:
-                print("[report] Warning: simulation with proliferation but no growth-weighted trajectories "
-                      "(rerun check_sim_to_data.py); raw trajectories shown")
+        self.beta_states = self.stages['NB mixture']  # one row per trajectory state (dynamics)
+        self.sim_prolif = bool(self.stages['Simulation'].uns.get('proliferation', False))
 
         # Perturbations listed in KO_OV_Stim_simulate.txt: (label, description, adata or None)
         self.perturbations, self.perturbed_genes = [], set()
@@ -422,29 +396,19 @@ class _ReportData:
             self.perturbations.append((label, desc, _read(os.path.join(cdir, f'adata_sim_{label}_{tag}.h5ad'))))
             self.perturbed_genes.update(genes)
 
-        # Virtual trajectory states (timepoints missed by their sample) are left out of the comparisons
-        for k in ('Reference', 'NB mixture', 'Network'):
-            A = self.stages[k]
-            if 'observed' in A.obs and not A.obs['observed'].astype(bool).all():
-                self.stages[k] = A[A.obs['observed'].astype(bool).values].copy()
-
         # mRNA as shown (cell_depth_for_representation): before the classifier, so that every stage is in one space
         for k, A in self.stages.items():
             self.view(A, 'observed' if k == 'Data' else 'reference' if k == 'Reference' else 'model', k)
         for label, _, A in self.perturbations:
             self.view(A, 'model', label)
 
-        # Sample of each state / simulated cell (the stages written by older runs have none)
+        # Sample of each perturbed simulated cell and protein state (model stages: read_model_stages)
         samples_path = os.path.join(cdir, 'data_samples.npy')
         samples_traj = np.load(samples_path).astype(int) if os.path.exists(samples_path) else None
-        names = (sorted(self.adata_data.obs['dataset_id'].astype(str).unique()) if 'dataset_id' in self.adata_data.obs else [])
-        for k, A in self.stages.items():
-            if k != 'Data':
-                _attach_samples(A, samples_traj, names)
         for _, _, A in self.perturbations:
-            _attach_samples(A, samples_traj, names)
+            attach_samples(A, samples_traj, names)
         for A in self.prot.values():
-            _attach_samples(A, samples_traj, names)
+            attach_samples(A, samples_traj, names)
 
         # Network conditions: samples of each condition (network_conditions.json, samples in sorted order)
         self.conditions = {}
@@ -465,11 +429,18 @@ class _ReportData:
             from ..inputs import removed_samples
             self.categories = self.adata_data.obs[LABEL_KEY].astype(str).unique().tolist()
             self.color_map = _cell_type_colors(self.categories)
-            clf = train_classifier(self.stages['Data'], label_key=LABEL_KEY, assign=removed_samples(p)[1],
-                                   method=classifier_method)
+            clf_kw = dict(assign=removed_samples(p)[1], method=classifier_method)
+            clf = train_classifier(self.stages['Data'], label_key=LABEL_KEY, **clf_kw)
             for A in [a for k, a in self.stages.items() if k != 'Data'] + [a for _, _, a in self.perturbations if a is not None]:
                 predict_cell_types(A, clf, label_key=LABEL_KEY)
             self.clf = clf
+            # Data (predicted): out-of-fold labels of the observed cells, the reference of the classified stages (the
+            # annotated labels differ from them by the errors of the classifier); Reference: those of its real cells
+            D_ = self.stages['Data']
+            D_.obs[LABEL_PRED] = pd.Categorical(predict_out_of_fold(D_, label_key=LABEL_KEY, **clf_kw))
+            ref = reference_labels(self.stages['Reference'], D_.obs[LABEL_PRED].astype(str).values)
+            if ref is not None:
+                self.stages['Reference'].obs[LABEL_KEY] = pd.Categorical(ref)
         else:
             self.categories, self.color_map = [], {}
 
@@ -493,6 +464,9 @@ class _ReportData:
                         predict_cell_types(sim, self.clf, label_key=LABEL_KEY, use=ref_r)
                         if LABEL_KEY not in obs_r.obs:
                             predict_cell_types(obs_r, self.clf, label_key=LABEL_KEY, use=ref_r)
+                        # Predicted labels of the observed cells of r (not seen by the classifier)
+                        obs_r.obs[LABEL_PRED] = predict_cell_types(obs_r.copy(), self.clf, label_key=LABEL_KEY,
+                                                                   use=ref_r).obs[LABEL_KEY].values
                     self.validation[r] = (obs_r, sim, str(sim.uns.get('reference_sample', refs.get(r, ''))))
             if removed:
                 data_test = data_test[~sid.isin(removed).to_numpy()].copy()
@@ -507,11 +481,14 @@ class _ReportData:
                 names_t = sorted(data_test.obs['dataset_id'].astype(str).unique()) if 'dataset_id' in data_test.obs else []
                 for k, A in stages.items():
                     if k != 'Test data':
-                        _attach_samples(A, np.load(st_path).astype(int) if os.path.exists(st_path) else None, names_t)
+                        attach_samples(A, np.load(st_path).astype(int) if os.path.exists(st_path) else None, names_t)
                 if self.has_ct:
                     for k, A in stages.items():
                         if k != 'Test data' or LABEL_KEY not in A.obs:
                             predict_cell_types(A, self.clf, label_key=LABEL_KEY)
+                    # Predicted labels of the test cells (not seen by the classifier): reference of the test stages
+                    T_ = stages['Test data']
+                    T_.obs[LABEL_PRED] = predict_cell_types(T_.copy(), self.clf, label_key=LABEL_KEY).obs[LABEL_KEY].values
 
         if self.no_ref_depth:
             print(f"[report] Warning: no obs['depth_factor'] for {sorted(set(self.no_ref_depth))} (shown as drawn): rerun "
@@ -1231,11 +1208,9 @@ def _model_umap_page(pdf, R, samples=None, label=''):
     _page_title(fig, f'1. Generative model — trajectories and simulation{label}',
                 ('' if samples is None else f"Samples {', '.join(samples)}. ")
                 + f'{R.emb_name} learned on the observed data' + ('' if samples is None else ' of these samples')
-                + '; the trajectories (Reference: one state per ancestor, i.e. '
-                + (f"growth-weighted by exp ∫{'R_opt' if getattr(R, 'use_recomputed_proliferation', True) else 'R_prior'}, "
-                   'as the simulation has proliferation)' if R.growth_ref
-                   else 'without proliferation, as the simulation)')
-                + ', the NB mixture and network-driven modes along them and the full simulation are projected onto it.')
+                + '; the trajectories (Reference: states drawn at each time among the observed cells), the NB mixture '
+                + 'and network-driven modes along them and the full simulation'
+                + (' (with proliferation)' if R.sim_prolif else ' (without proliferation)') + ' are projected onto it.')
     smp_data = _sample_labels(stages['Data'], sub['Data'])
     if smp_data is not None and len(np.unique(smp_data)) < 2:
         smp_data = None  # a single sample: no sample panel
@@ -1290,11 +1265,12 @@ def _model_checks_page(pdf, R, samples=None, label=''):
     fig = plt.figure(figsize=A4_LANDSCAPE)
     _page_title(fig, f'1. Generative model — quantitative checks{label}',
                 ('' if samples is None else f"Samples {', '.join(samples)}. ")
-                + 'Reference = RNA of the trajectories equivalent to the simulation '
-                + ('(growth-weighted: simulation with proliferation).' if R.growth_ref else '(without proliferation).'))
+                + 'Reference = RNA of the trajectories (states drawn at each time among the observed cells: the observed '
+                + 'composition); simulation ' + ('with' if R.sim_prolif else 'without') + ' proliferation.')
     gs = gridspec.GridSpec(2, 3, figure=fig, left=0.06, right=0.97, top=0.88, bottom=0.12, hspace=0.45, wspace=0.3)
     if R.has_ct:
-        prop = pd.DataFrame({k: _proportions(stages[k], R.categories) for k in names}).T
+        prop = pd.DataFrame(_with_predicted({k: _proportions(stages[k], R.categories) for k in names},
+                                            stages['Data'], R.categories)).T
         ax = fig.add_subplot(gs[0, 0]); _stacked_bars(ax, prop, R.color_map, 'Cell-type proportions'); _panel_label(ax, 'A', -0.2)
         ax = fig.add_subplot(gs[0, 1:])
         _proportions_over_time(ax, _proportions_by_time(stages['Reference'], R.categories),
@@ -1472,9 +1448,12 @@ def _test_pages(pdf, R):
 
     if R.has_ct:
         ax = fig.add_subplot(gs[1, 1:])
-        _proportions_over_time(ax, _proportions_by_time(data_te, R.categories),
+        # Test cells labelled by the classifier (not seen in its training), as the simulated ones
+        pred_te = LABEL_PRED in data_te.obs
+        _proportions_over_time(ax, _proportions_by_time(data_te, R.categories, LABEL_PRED if pred_te else LABEL_KEY),
                                _proportions_by_time(sim_te, R.categories), R.color_map,
-                               'Cell-type proportions over time', 'Test data', 'Test simulation')
+                               'Cell-type proportions over time', 'Test data (predicted)' if pred_te else 'Test data',
+                               'Test simulation')
         _panel_label(ax, 'E', -0.08)
         _celltype_legend(fig, R.color_map, y=0.01)
     pdf.savefig(fig); plt.close(fig)
@@ -1552,16 +1531,25 @@ def _validation_page(pdf, R, r):
     # Cell-type proportions at the last observed time
     if R.has_ct:
         ax = fig.add_subplot(gs[1, 1])
-        bars = [(f'Observed {r}', obs_r), ('Prediction', sim)] + ([(f'Data {ref}', ref_data)] if ref_data is not None else [])
-        for i, (lab, A) in enumerate(bars):
+        # Observed cells: annotated and predicted labels (the prediction is labelled by the same classifier)
+        bars = [(f'Observed {r}', obs_r, LABEL_KEY)]
+        if LABEL_PRED in obs_r.obs:
+            bars.append((f'Observed {r} (predicted)', obs_r, LABEL_PRED))
+        bars.append(('Prediction', sim, LABEL_KEY))
+        if ref_data is not None:
+            bars.append((f'Data {ref}', ref_data, LABEL_KEY))
+            if LABEL_PRED in ref_data.obs:
+                bars.append((f'Data {ref} (predicted)', ref_data, LABEL_PRED))
+        for i, (lab, A, key) in enumerate(bars):
             t = R.times(A)
-            labs = R.labels(A)[np.isclose(t, t_last)] if np.any(np.isclose(t, t_last)) else R.labels(A)
+            all_labs = A.obs[key].astype(str).values
+            labs = all_labs[np.isclose(t, t_last)] if np.any(np.isclose(t, t_last)) else all_labs
             bottom = 0.0
             for cat in R.categories:
                 v = 100 * np.mean(labs == cat) if len(labs) else 0
                 ax.bar(i, v, bottom=bottom, color=R.color_map[cat], width=0.6)
                 bottom += v
-        ax.set_xticks(range(len(bars))); ax.set_xticklabels([b[0] for b in bars], fontsize=7)
+        ax.set_xticks(range(len(bars))); ax.set_xticklabels([b[0] for b in bars], fontsize=6.5, rotation=25, ha='right')
         ax.set_ylabel('% of cells', fontsize=8); ax.set_title(f'Cell types at t = {t_last:g}', fontsize=9)
         ax.tick_params(labelsize=7)
         _panel_label(ax, 'E', -0.2)
@@ -2010,14 +1998,15 @@ def _perturbation_pages(pdf, R):
         fig = plt.figure(figsize=A4_LANDSCAPE)
         _page_title(fig, '3. In-silico perturbations — overview',
                     f'Cell types predicted by per-sample classifiers ({R.classifier_method}) trained on the observed data.'
-                    + (' Population sizes from the branching simulation (proliferation MLP + RATE effects).'
+                    + (' Population sizes from the branching simulation (net rates + RATE effects).'
                        if pops else ''))
         gs = gridspec.GridSpec(1, 3 if pops else 2, figure=fig, left=0.06, right=0.97, top=0.86, bottom=0.36,
                                wspace=0.55, width_ratios=[1.1, 1.1, 1] if pops else None)
-        prop = pd.DataFrame({'Data': _proportions(R.stages['Data'], R.categories),
-                             'Reference': _proportions(R.stages['Reference'], R.categories),
-                             'WT': _proportions(sim, R.categories),
-                             **{pid[l]: _proportions(A, R.categories) for l, _, A in done}}).T
+        prop = pd.DataFrame(_with_predicted({'Data': _proportions(R.stages['Data'], R.categories),
+                                             'Reference': _proportions(R.stages['Reference'], R.categories),
+                                             'WT': _proportions(sim, R.categories),
+                                             **{pid[l]: _proportions(A, R.categories) for l, _, A in done}},
+                                            R.stages['Data'], R.categories)).T
         ax = fig.add_subplot(gs[0, 0]); _stacked_bars(ax, prop, R.color_map, 'Cell-type proportions (all times)')
         _panel_label(ax, 'A', -0.12)
 
@@ -2098,10 +2087,11 @@ def _perturbation_pages(pdf, R):
 
         g_bot = gs[1].subgridspec(1, 3, wspace=0.35, width_ratios=[0.8, 1.2, 1.1])
         if R.has_ct:
-            prop = pd.DataFrame({'Data': _proportions(R.stages['Data'], R.categories),
-                                 'Reference': _proportions(R.stages['Reference'], R.categories),
-                                 'Sim. WT': _proportions(sim, R.categories),
-                                 'Perturbed': _proportions(A, R.categories)}).T
+            prop = pd.DataFrame(_with_predicted({'Data': _proportions(R.stages['Data'], R.categories),
+                                                 'Reference': _proportions(R.stages['Reference'], R.categories),
+                                                 'Sim. WT': _proportions(sim, R.categories),
+                                                 'Perturbed': _proportions(A, R.categories)},
+                                                R.stages['Data'], R.categories)).T
             _stacked_bars(fig.add_subplot(g_bot[0, 0]), prop, R.color_map, 'Cell-type proportions')
             _proportions_over_time(fig.add_subplot(g_bot[0, 1]), _proportions_by_time(sim, R.categories),
                                    _proportions_by_time(A, R.categories), R.color_map,
@@ -2193,11 +2183,6 @@ class _Dynamics:
         # The effects of the inference stimuli on the rates (RATEk) are learned by the MLP from its stimulus inputs
         diag_path = os.path.join(cdir, 'prolif_network_diagnostics.json')
         self.mlp_diag = json.load(open(diag_path)) if (self.mlp is not None and os.path.exists(diag_path)) else None
-        # Cumulative log mass of each state along its path (growth OT pass), for the growth-weighted trajectories
-        self.L_growth = None
-        if self.R_opt is not None:
-            gain = np.nan_to_num(self.R_opt.reshape(len(self.tu), self.N)[:-1] * np.diff(self.tu)[:, None])
-            self.L_growth = np.vstack([np.zeros((1, self.N)), np.cumsum(gain, axis=0)]).ravel()
         # Learned rate per state: MLP if trained, else the OT pass estimate
         self.R_learned = self.R_mlp if self.R_mlp is not None else self.R_opt
         self.learned_label = 'MLP R(P)' if self.R_mlp is not None else self.growth_label
@@ -2240,7 +2225,7 @@ class _Dynamics:
         D.N = len(slots)
         take = lambda v: None if v is None else np.asarray(v)[rows]
         for attr in ('times', 'samples', 'valid', 'prot_full', 'P', 'M', 'rna_ref', 'prior', 'ct', 'R_opt', 'R_mlp',
-                     'R_learned', 'L_growth', 'birth_prior', 'death_prior', 'birth_mlp', 'death_mlp', 'birth_sim',
+                     'R_learned', 'birth_prior', 'death_prior', 'birth_mlp', 'death_mlp', 'birth_sim',
                      'stim_state'):
             setattr(D, attr, take(getattr(self, attr)))
         cols = np.asarray(Rc.gene_cols)
@@ -2571,12 +2556,14 @@ def _proliferation_pages(pdf, R, D):
         _celltype_legend(fig, p_cmap, y=0.01)
     pdf.savefig(fig); plt.close(fig)
 
-    # Page: growth-weighted trajectories (what a simulation with proliferation must reproduce) and MLP fit
+    # Page: cell-type composition of the trajectories and of the simulation, and MLP fit
     fig = plt.figure(figsize=A4_LANDSCAPE)
-    _page_title(fig, '4. Proliferation — growth-weighted trajectories and MLP fit',
-                'The OT selection keeps one descendant per ancestor (trajectories without proliferation); weighting '
-                f'each path by its expansion exp(∫{D.growth_sym}) should bring them back to the observed data.'
-                + (' The simulation used the proliferation MLP.' if R.growth_ref else ''))
+    _page_title(fig, '4. Proliferation — cell-type composition and MLP fit',
+                'Trajectory states are drawn at each time among the observed cells (target marginal of the OT): they '
+                'follow the observed composition, which a simulation with proliferation (branching) should reproduce.'
+                + ((' Branching at the net rate of the proliferation MLP.' if D.mlp is not None else
+                    ' Branching at the net growth of the nearest trajectory states (proliferation_mlp = False).')
+                   if R.sim_prolif else ' The simulation has no proliferation.'))
     gs = gridspec.GridSpec(1, 3, figure=fig, left=0.06, right=0.97, top=0.86, bottom=0.14, wspace=0.35)
     t_obs = pd.to_numeric(R.adata_data.obs['time']).values
     sim = R.stages['Simulation']
@@ -2595,16 +2582,16 @@ def _proliferation_pages(pdf, R, D):
         return out
 
     ax = fig.add_subplot(gs[0, 0])
-    if p_states is not None and D.L_growth is not None:
-        w_growth = np.zeros_like(D.L_growth)
-        for t in D.tu:
-            m = D.times == t
-            w_growth[m] = np.exp(D.L_growth[m] - D.L_growth[m].max())
-        props = {'data': _props(p_cells, t_obs), 'trajectories': _props(p_states, D.times),
-                 'growth-weighted': _props(p_states, D.times, w_growth)}
+    if p_states is not None:
+        # Trajectories: annotated labels of their real cells (as the data); simulation: labels of the classifier, compared
+        # with the out-of-fold predicted labels of the data
+        props = {'data': _props(p_cells, t_obs), 'trajectories': _props(p_states, D.times)}
         if sim_lab is not None:
+            obs_d = R.stages['Data'].obs  # rows of R.adata_data
+            if LABEL_PRED in obs_d:
+                props['data (predicted)'] = _props(obs_d[LABEL_PRED].astype(str).values, t_obs)
             props['simulation'] = _props(sim_lab, t_sim)
-        styles = {'data': ('-', 2.0), 'trajectories': (':', 1.2), 'growth-weighted': ('--', 1.2),
+        styles = {'data': ('-', 2.0), 'data (predicted)': ('-', 0.8), 'trajectories': (':', 1.2),
                   'simulation': ('-.', 1.0)}
         for j, c in enumerate(p_cats):
             for name, P in props.items():
@@ -2620,12 +2607,14 @@ def _proliferation_pages(pdf, R, D):
         # Distance to the data: total variation between proportion vectors, per time
         ax = fig.add_subplot(gs[0, 1])
         for name, P in props.items():
-            if name == 'data':
+            if name.startswith('data'):
                 continue
-            tv = 0.5 * np.nansum(np.abs(P - props['data']), axis=1)
+            ref_p = props['data (predicted)'] if (name == 'simulation' and 'data (predicted)' in props) else props['data']
+            tv = 0.5 * np.nansum(np.abs(P - ref_p), axis=1)
             tv[np.all(np.isnan(P), axis=1)] = np.nan
-            ax.plot(D.tu, tv, ls=styles[name][0], marker='o', ms=3, lw=1.3, label=f'{name} (mean {np.nanmean(tv):.1f})',
-                    color={'trajectories': '#9AA5B1', 'growth-weighted': '#E67E22', 'simulation': REG_COLOR}[name])
+            vs = ' vs predicted data' if ref_p is not props['data'] else ''
+            ax.plot(D.tu, tv, ls=styles[name][0], marker='o', ms=3, lw=1.3, label=f'{name}{vs} (mean {np.nanmean(tv):.1f})',
+                    color={'trajectories': '#9AA5B1', 'simulation': REG_COLOR}[name])
         ax.set_xlabel('time', fontsize=8); ax.set_ylabel('distance to data (total variation, %)', fontsize=8)
         ax.tick_params(labelsize=7); ax.legend(fontsize=6.5, frameon=False)
         ax.set_title('Cell-type composition vs observed data', fontsize=9)
@@ -2633,7 +2622,7 @@ def _proliferation_pages(pdf, R, D):
             ax.spines[sp].set_visible(False)
     else:
         ax.axis('off')
-        ax.text(0.5, 0.5, 'Needs cell types and the net growth of the states (data_R_opt.npy / data_R_prior.npy)',
+        ax.text(0.5, 0.5, 'Needs cell types of the trajectory states',
                 ha='center', va='center', fontsize=9, color='#555555', transform=ax.transAxes)
 
     ax = fig.add_subplot(gs[0, 2])

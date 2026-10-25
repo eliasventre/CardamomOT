@@ -332,9 +332,9 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
     # No network inference, MLP training, or degradation update is performed.
     print(f"[infer_test] Running restricted post-processing (estimate_trajectories + kon_theta)...")
     # Net growth of the test states as in the training (use_recomputed_proliferation): the growth pass, else the prior
-    # rates of their real cells (birth / death of the dilution, fit_birth_death_to_growth)
-    if not model.use_recomputed_proliferation and getattr(model, 'R_prior', None) is not None:
-        model.R_opt = model.R_prior
+    # rates of their real cells (birth / death of the dilution, fit_birth_death_to_growth); never the growth pass then
+    if not model.use_recomputed_proliferation:
+        model.R_opt = getattr(model, 'R_prior', None)
     try:
         model.refine_network_degradations(test=True, stimulus_schedule=stim_sched)
         print(f"[infer_test] Restricted post-processing completed")

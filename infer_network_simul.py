@@ -275,7 +275,8 @@ def main(argv):
         # Proliferation model of an earlier run (single or per condition) removed before saving the new one
         import glob
         for f in glob.glob(os.path.join(cardamom_dir, 'prolif_network*.pt')) + [
-                os.path.join(cardamom_dir, n) for n in ('prolif_network_n_proteins.npy', 'prolif_network_conditions.json')]:
+                os.path.join(cardamom_dir, n) for n in ('prolif_network_n_proteins.npy', 'prolif_network_conditions.json',
+                                                         'prolif_network_diagnostics.json')]:
             if os.path.exists(f):
                 os.remove(f)
         if model.prolif_network is not None:

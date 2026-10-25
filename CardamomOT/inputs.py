@@ -52,7 +52,7 @@ PARAMETER_GROUPS = [
         'model_learning_grn', 'model_learning_phi', 'model_learning_link', 'model_learning_kappa',
         'model_learning_start', 'model_learning_freeze', 'model_learning_margin']),
     ('Proliferation and simulation', [
-        'growth_reg_source', 'prolif_uses_stimulus', 'n_proliferation_markers', 'ProliferationMLP_per_condition',
+        'growth_reg_source', 'proliferation_mlp', 'prolif_uses_stimulus', 'n_proliferation_markers', 'ProliferationMLP_per_condition',
         'simulation_stochastic',
         'simulation_mrnas_direct',
         'protein_dilution']),

@@ -211,22 +211,10 @@ def main(argv):
 
     ns = model.n_stimuli
 
-    # Proliferation network: branching (simulate_with_proliferation) and birth rate of the dilution
+    # Proliferation (MLP, or rates of the nearest trajectory states): branching and birth rate of the dilution
     if simulate_with_proliferation or model.protein_dilution:
-        from CardamomOT.inference.proliferations import load_proliferation
-        # One MLP (one or two heads), or one per network condition (ProliferationMLP_per_condition)
-        prolif_net = load_proliferation(os.path.join(p, 'cardamomOT'))
-        if prolif_net is not None and not simulate_with_proliferation:
-            model.prolif_network = prolif_net
-            print("[simulate_network_KOV] Loaded proliferation network — birth rate of the dilution (no branching)")
-        elif prolif_net is not None:
-            model.prolif_network = prolif_net
-            model.simulate_with_proliferation = True
-            print("[simulate_network_KOV] Loaded proliferation network — branching simulation enabled")
-        elif simulate_with_proliferation:
-            print("[simulate_network_KOV] Warning: simulate_with_proliferation = True but prolif_network.pt not found (run infer_network_simul first)")
-        else:
-            print("[simulate_network_KOV] No prolif_network.pt: dilution at the birth rates of the trajectory slots")
+        from simulate_network import attach_proliferation
+        attach_proliferation(model, p, tag='[simulate_network_KOV]', branching=simulate_with_proliferation)
 
     def sample_schedules(k, scenario):
         """{sample index: t -> value} of perturbation stimulus k for the samples with their own schedule."""

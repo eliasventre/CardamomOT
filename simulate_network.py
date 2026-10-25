@@ -27,11 +27,36 @@ import os
 import torch
 
 def attach_proliferation(model, p, tag='[simulate_network]', branching=True):
-    """Proliferation MLP (prolif_network.pt, one or two heads) attached to model: birth rate of the dilution
-    (protein_dilution) and, with branching, branching simulation at the net rate of the MLP (stimulus as input)."""
+    """
+    Proliferation of the simulations, as in the refine SDE. proliferation_mlp: the MLP (prolif_network.pt, one or two
+    heads) gives the birth rate of the dilution (protein_dilution) and, with branching, the net rate of the branching
+    (stimulus as input). Without it, each simulated cell takes at the start of each interval the rates of the nearest
+    trajectory state of its sample: birth (data_state_rates.npz) and net growth over the interval (data_R_opt.npy, or
+    data_R_prior.npy with use_recomputed_proliferation = False). Returns whether the simulation branches.
+    """
+    from CardamomOT import load_state_growth
     from CardamomOT.inference.proliferations import load_proliferation
+    cdir = os.path.join(p, 'cardamomOT')
+    model.simulate_with_proliferation = False
+    if not model.proliferation_mlp:
+        model.prolif_network = None
+        if not branching:
+            print(f"{tag} proliferation_mlp = False: dilution at the birth rates of the nearest trajectory states")
+            return False
+        # Net growth of the trajectory states (those of the model when it already holds them, e.g. test states)
+        R, prot = getattr(model, 'R_opt', None), getattr(model, 'prot', None)
+        if R is None or (prot is not None and len(R) != len(prot)):
+            model.R_opt = load_state_growth(cdir, model.use_recomputed_proliferation)
+        if model.R_opt is None:
+            print(f"{tag} Warning: simulate_with_proliferation = True but no net growth of the trajectory states "
+                  "(data_R_opt.npy / data_R_prior.npy, infer_network_structure): no branching")
+            return False
+        model.simulate_with_proliferation = True
+        print(f"{tag} proliferation_mlp = False: branching and dilution at the rates of the nearest trajectory states "
+              f"({'R_opt' if model.use_recomputed_proliferation else 'prior net rates'})")
+        return True
     # One MLP (one or two heads), or one per network condition (ProliferationMLP_per_condition)
-    prolif = load_proliferation(os.path.join(p, 'cardamomOT'))
+    prolif = load_proliferation(cdir)
     if prolif is None:
         if branching:
             print(f"{tag} Warning: simulate_with_proliferation = True but prolif_network.pt not found; "
@@ -161,7 +186,7 @@ def main(argv):
         np.save(os.path.join(cardamom_dir, 'simulation_times'), model.times_simul)
         # Whether the cells were resampled by the proliferation MLP (reference used by check_sim_to_data)
         np.save(os.path.join(cardamom_dir, 'simulation_with_proliferation'),
-                np.array([bool(model.simulate_with_proliferation and model.prolif_network is not None)]))
+                np.array([bool(model.simulate_with_proliferation)]))
         if model.log_population is not None:
             np.save(os.path.join(cardamom_dir, 'data_log_population'), model.log_population)
         # Explicit mRNA counts (simulation_mrnas_direct) and chromatin accessibility (model.chromatin)

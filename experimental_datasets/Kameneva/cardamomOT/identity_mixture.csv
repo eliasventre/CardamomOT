@@ -1,29 +1,29 @@
 classifier,version,cell_type,share,recall,n_cells
 ,observed,chromaffin,0.2746031746031746,,346
 random forest,data (cross-validated),chromaffin,0.273015873015873,0.976878612716763,346
-random forest,data permuted within modes,chromaffin,0.26587301587301587,0.9132947976878613,346
-random forest,model draws,chromaffin,0.29444444444444445,0.9277456647398844,346
+random forest,data permuted within modes,chromaffin,0.26746031746031745,0.9132947976878613,346
+random forest,model draws,chromaffin,0.2857142857142857,0.9219653179190751,346
 logistic regression,data (cross-validated),chromaffin,0.2706349206349206,0.9739884393063584,346
-logistic regression,data permuted within modes,chromaffin,0.28015873015873016,0.9277456647398844,346
-logistic regression,model draws,chromaffin,0.3,0.9132947976878613,346
+logistic regression,data permuted within modes,chromaffin,0.28015873015873016,0.9248554913294798,346
+logistic regression,model draws,chromaffin,0.3103174603174603,0.9248554913294798,346
 ,observed,intermediate,0.11507936507936507,,145
 random forest,data (cross-validated),intermediate,0.11746031746031746,0.9655172413793104,145
-random forest,data permuted within modes,intermediate,0.10476190476190476,0.7448275862068966,145
-random forest,model draws,intermediate,0.09126984126984126,0.6413793103448275,145
+random forest,data permuted within modes,intermediate,0.10476190476190476,0.7103448275862069,145
+random forest,model draws,intermediate,0.09285714285714286,0.6206896551724138,145
 logistic regression,data (cross-validated),intermediate,0.12142857142857143,0.9862068965517241,145
-logistic regression,data permuted within modes,intermediate,0.10634920634920635,0.7586206896551724,145
-logistic regression,model draws,intermediate,0.08888888888888889,0.6206896551724138,145
+logistic regression,data permuted within modes,intermediate,0.10158730158730159,0.6827586206896552,145
+logistic regression,model draws,intermediate,0.08095238095238096,0.5517241379310345,145
 ,observed,precursors,0.35555555555555557,,448
 random forest,data (cross-validated),precursors,0.3523809523809524,0.9821428571428571,448
-random forest,data permuted within modes,precursors,0.3619047619047619,0.9754464285714286,448
-random forest,model draws,precursors,0.353968253968254,0.9575892857142857,448
+random forest,data permuted within modes,precursors,0.35793650793650794,0.9642857142857143,448
+random forest,model draws,precursors,0.35555555555555557,0.9598214285714286,448
 logistic regression,data (cross-validated),precursors,0.353968253968254,0.9866071428571429,448
-logistic regression,data permuted within modes,precursors,0.35714285714285715,0.9709821428571429,448
-logistic regression,model draws,precursors,0.3547619047619048,0.9665178571428571,448
+logistic regression,data permuted within modes,precursors,0.35634920634920636,0.9665178571428571,448
+logistic regression,model draws,precursors,0.3547619047619048,0.9620535714285714,448
 ,observed,sympathoblasts,0.25476190476190474,,321
 random forest,data (cross-validated),sympathoblasts,0.2571428571428571,0.9844236760124611,321
-random forest,data permuted within modes,sympathoblasts,0.26746031746031745,0.9158878504672897,321
-random forest,model draws,sympathoblasts,0.26031746031746034,0.8722741433021807,321
+random forest,data permuted within modes,sympathoblasts,0.2698412698412698,0.9158878504672897,321
+random forest,model draws,sympathoblasts,0.26587301587301587,0.8753894080996885,321
 logistic regression,data (cross-validated),sympathoblasts,0.25396825396825395,0.9813084112149533,321
-logistic regression,data permuted within modes,sympathoblasts,0.2563492063492063,0.9003115264797508,321
-logistic regression,model draws,sympathoblasts,0.2563492063492063,0.8535825545171339,321
+logistic regression,data permuted within modes,sympathoblasts,0.2619047619047619,0.9003115264797508,321
+logistic regression,model draws,sympathoblasts,0.25396825396825395,0.8504672897196262,321
