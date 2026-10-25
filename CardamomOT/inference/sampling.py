@@ -5,27 +5,29 @@ network, degradations): strata are cell types when available.
 import numpy as np
 
 
-def stratified_order(idx, labels):
+def stratified_order(idx, labels, rng=None):
     """
     Random order of idx such that any contiguous window holds each stratum of
-    labels in proportion (systematic sampling with a random offset per stratum).
+    labels in proportion (systematic sampling with a random offset per stratum); rng: Generator (None: np.random).
     """
+    rng = np.random if rng is None else rng
     keys = np.empty(len(idx))
     for lab in np.unique(labels):
         pos = np.flatnonzero(labels == lab)
         n = len(pos)
-        keys[pos[np.random.permutation(n)]] = (np.arange(n) + np.random.random()) / n
+        keys[pos[rng.permutation(n)]] = (np.arange(n) + rng.random()) / n
     return idx[np.argsort(keys, kind='stable')]
 
 
-def stratified_choice(idx, n, labels=None):
-    """n elements of idx without replacement, in proportion to labels if given (all of idx if n >= len(idx))."""
+def stratified_choice(idx, n, labels=None, rng=None):
+    """n elements of idx without replacement, in proportion to labels if given (all of idx if n >= len(idx));
+    rng: Generator (None: np.random)."""
     idx = np.asarray(idx)
     if n >= len(idx):
         return idx
     if labels is None:
-        return np.random.choice(idx, n, replace=False)
-    return stratified_order(idx, np.asarray(labels))[:n]
+        return (np.random if rng is None else rng).choice(idx, n, replace=False)
+    return stratified_order(idx, np.asarray(labels), rng)[:n]
 
 
 def grouped_partition(groups, budget, n_parts, labels=None):

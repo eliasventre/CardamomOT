@@ -93,7 +93,9 @@ def main(argv):
                               protein_dilution=bool(model.protein_dilution),
                               classifier_method=str(model.classifier_method),
                               select_genes=bool(model.select_genes),
-                              use_recomputed_proliferation=bool(model.use_recomputed_proliferation))
+                              use_recomputed_proliferation=bool(model.use_recomputed_proliferation),
+                              simulation_model='sde2' if (model.simulation_mrnas_direct and model.simulation_stochastic)
+                              else ('sde1' if model.simulation_stochastic else 'ode'))
     except FileNotFoundError as e:
         print(f"[report_results] Error: {e}")
         sys.exit(1)

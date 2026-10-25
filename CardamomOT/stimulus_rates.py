@@ -10,13 +10,10 @@ TARGET:delta entries (per hour):
 A cell at time t receives u_k * delta, u_k being the value of inference stimulus k over the interval
 that starts at t (that of the next timepoint, as in the simulations), in the schedule of its sample.
 
-The effects are used in three places, always on mRNA:
-1. get_proliferation_rates: prior rate of the observed cells (all genes; counts normalised by the
-   library size if the transcriptome is available);
-2. infer_network_simul: the stimulus part is removed from the growth targets, so that the
-   proliferation MLP learns the rate without stimulus (StimulusRateModel, model genes);
-3. simulations: the stimulus part is added back with the simulated schedule, on the mRNA drawn from
-   the simulated proteins (same StimulusRateModel).
+The effects enter the prior rates of the observed cells (get_proliferation_rates, on mRNA: all genes, counts
+normalised by the library size if the transcriptome is available) and the anchors of fit_population_anchors. They
+stay in the growth targets of the inference: the proliferation MLP learns them from its stimulus inputs, and the
+simulations only feed it their schedule.
 """
 import json
 import os
@@ -24,6 +21,9 @@ import os
 import numpy as np
 
 from .inputs import input_dir
+
+# Genes of the scored data above which the counts are normalised by the library size (whole transcriptome)
+MIN_GENES_SCORING = 10000
 
 
 def load_effects(project):
@@ -37,11 +37,11 @@ def load_effects(project):
 def schedule_values(project, times_sorted, n_stimuli=None):
     """(T, n_stimuli) values of the inference stimuli at the sorted timepoints (stimulus_inference_schedule;
     default 0 at the first time, 1 after)."""
-    from .config import find_stimulus_schedule
+    from .config import inference_schedule
     T = len(times_sorted)
-    path = find_stimulus_schedule(input_dir(project))
-    if path is not None:
-        U = np.loadtxt(path, ndmin=2).astype(float)
+    U = inference_schedule(input_dir(project), times_sorted)  # by time when the workbook gives the times of its rows
+    if U is not None:
+        U = U.astype(float)
         if len(U) < T:
             U = np.vstack([U, np.tile(U[-1], (T - len(U), 1))])
         return U[:T]
@@ -68,19 +68,6 @@ def cell_values(project, cell_times, cell_samples, times_sorted, n_stimuli=None,
         m = cell_times == t
         out[m] = sched.per_cell(float(t), cell_samples[m])
     return out
-
-
-def slot_offsets(project, S, tu, slot_samples, names):
-    """
-    Stimulus part of the net rate along trajectories: S (T, N, K) stimulus parts at the states, slot_samples
-    (N,) sample index of each slot. Interval k: u(t_k+1) of the slot's sample x mean of S at both ends. (T, N).
-    """
-    T, N, K = S.shape
-    U = cell_values(project, np.repeat(np.asarray(tu, dtype=float)[1:], N), np.tile(slot_samples, T - 1), tu,
-                    K, names)[:, :K].reshape(T - 1, N, K)
-    off = np.zeros((T, N))
-    off[:-1] = np.sum((S[:-1] + S[1:]) / 2 * U, axis=-1)
-    return off
 
 
 def split_effects(effects, cell_types):
@@ -113,53 +100,25 @@ def signature_score(L, idx, q99):
     return np.clip(L[:, idx] / q99, 0.0, 1.0).mean(axis=1)
 
 
-class StimulusRateModel:
+def signature_scores(X, genes, targets, project, normalize=False):
     """
-    Stimulus part of the net rate of cells from their mRNA counts on the model genes:
-    S_k(x) = sum_c p(c | x) delta_{k,c} + sum_s delta_{k,s} score_s(x), p(c | x) by a logistic regression
-    trained on the observed cells (log1p counts, labels cell_type_proliferation). The rate of a cell
-    over an interval is then sum_k u_k S_k(x).
+    {target: (n,) score of each cell} of the signature targets of the RATE effects: mean over the genes of the target
+    of log1p(counts) (normalised by the library size if normalize) / its 99th percentile over the cells, clipped to
+    [0, 1]. Only the genes of the targets are densified (the library size is summed on the sparse counts).
     """
-
-    def __init__(self, project, effects, genes, X, cell_types=None, verb=True):
-        from .tools.perturbations import rate_target_genes
-        self.n_stimuli = max(effects) if effects else 0
-        self.genes = list(genes)
-        L = log_counts(X)
-        labels = np.asarray(cell_types).astype(str) if cell_types is not None else None
-        parts = split_effects(effects, np.unique(labels) if labels is not None else [])
-        self.ct_delta, self.sig = {}, []
-        for k, (ct, sig) in parts.items():
-            for c, d in ct.items():
-                self.ct_delta.setdefault(c, np.zeros(self.n_stimuli))[k - 1] += d
-            for target, d in sig:
-                idx = [self.genes.index(g) for g in rate_target_genes(target, self.genes, input_dir(project))]
-                q99 = np.maximum(np.percentile(L[:, idx], 99, axis=0), 1e-6)
-                self.sig.append((k, target, float(d), np.array(idx), q99))
-        self.clf = None
-        if self.ct_delta:
-            from sklearn.linear_model import LogisticRegression
-            from sklearn.pipeline import make_pipeline
-            from sklearn.preprocessing import StandardScaler
-            self.clf = make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000, C=1.0))
-            self.clf.fit(L, labels)
-            # Effect per class, in the order of the classifier (0 for the cell types without effect)
-            self.class_delta = np.array([self.ct_delta.get(c, np.zeros(self.n_stimuli)) for c in self.clf.classes_])
-            if verb:
-                acc = float(np.mean(self.clf.predict(L) == labels))
-                print(f"[stimulus rates] cell types {list(self.clf.classes_)} from mRNA (logistic regression, "
-                      f"training accuracy {acc:.2f}); effects per type and stimulus: "
-                      + ', '.join(f'{c}: {np.round(v, 5).tolist()}' for c, v in self.ct_delta.items()))
-        if verb:
-            for k, target, d, idx, _ in self.sig:
-                print(f"[stimulus rates] stimulus {k}: {target} ({len(idx)} model genes) {d:+g} at maximal score")
-
-    def effect(self, X):
-        """(n, n_stimuli) stimulus part S_k of the net rate for mRNA counts X (n, model genes)."""
-        L = log_counts(X)
-        S = np.zeros((len(L), self.n_stimuli))
-        if self.clf is not None:
-            S += self.clf.predict_proba(L) @ self.class_delta
-        for k, _, d, idx, q99 in self.sig:
-            S[:, k - 1] += d * signature_score(L, idx, q99)
-        return S
+    import scipy.sparse
+    from .tools.perturbations import rate_target_genes
+    genes = [str(g) for g in genes]
+    lib = None
+    if normalize:
+        lib = np.asarray(X.sum(axis=1)).ravel().astype(float)
+        lib = np.maximum(lib, 1e-12) / np.median(np.maximum(lib, 1e-12))
+    out = {}
+    for target in dict.fromkeys(targets):
+        tg = rate_target_genes(target, genes, input_dir(project))
+        idx = np.arange(len(genes)) if tg is None else np.array([genes.index(g) for g in tg])
+        Xg = X[:, idx]
+        Xg = Xg.toarray() if scipy.sparse.issparse(Xg) else np.asarray(Xg, dtype=float)
+        L = np.log1p(Xg if lib is None else Xg / lib[:, None])
+        out[target] = signature_score(L, np.arange(len(idx)), np.maximum(np.percentile(L, 99, axis=0), 1e-6))
+    return out

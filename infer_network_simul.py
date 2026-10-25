@@ -28,12 +28,12 @@ Output files:
 """
 import sys; sys.path += ['../']
 import numpy as np
-from CardamomOT import (NetworkModel as NetworkModel_beta, load_state_growth, read_stimulus_targets, stimulus_target_mask, resolve_cell_type_obs,
+from CardamomOT import (NetworkModel as NetworkModel_beta, load_state_growth, read_stimulus_targets, stimulus_target_mask,
                         load_network_array)
 from CardamomOT.inputs import input_dir
 from CardamomOT.inference import signed_floor
 from CardamomOT.run_options import parse_step_options, settings, configure
-from CardamomOT.config import find_stimulus_schedule
+from CardamomOT.config import inference_schedule
 import anndata as ad
 import pandas as pd
 import os
@@ -64,11 +64,10 @@ def main(argv):
         sys.exit(1)
 
     # ─── LOAD STIMULUS SCHEDULE (optional) ──────────────────────────────
-    stim_sched = None
-    sched_path = (find_stimulus_schedule(input_dir(p))
-                  or os.path.join(input_dir(p), 'stimulus_schedule_inference.txt'))
-    if os.path.exists(sched_path):
-        stim_sched = np.loadtxt(sched_path)
+    # Rows on the timepoints of the data, by their time when the workbook gives it
+    sched_path = os.path.join(input_dir(p), 'stimulus_schedule_inference.txt')
+    stim_sched = inference_schedule(input_dir(p), adata.obs['time'].values)
+    if stim_sched is not None:
         print(f"[infer_network_simul] Loaded stimulus schedule from {sched_path}")
     else:
         print("[infer_network_simul] No stimulus schedule found, using default")
@@ -159,38 +158,10 @@ def main(argv):
     else:
         print("[infer_network_simul] No reference network found, using inferred network only")
 
-    # Effects of the inference stimuli on the net rate (perturbation_inference, RATEk): part of R_opt removed
-    # before training the proliferation MLP, model saved for the simulations
+    # Effects of the inference stimuli on the net rate (perturbation_inference, RATEk): kept in the growth targets and
+    # learned by the proliferation MLP from its stimulus inputs (file of an earlier version, if any, removed)
     stim_pkl = os.path.join(p, 'cardamomOT', 'stimulus_rates.pkl')
-    if model.simulate_with_proliferation and model.R_opt is not None:
-        from CardamomOT.stimulus_rates import load_effects, slot_offsets, StimulusRateModel
-        from CardamomOT.schedules import sample_names
-        effects = load_effects(p)
-        idx_path = os.path.join(p, 'cardamomOT', 'data_traj_real_idx.npy')
-        if effects and os.path.exists(idx_path):
-            import pickle
-            X = adata.X.toarray() if hasattr(adata.X, 'toarray') else np.asarray(adata.X, dtype=float)
-            if model.use_depth_factor and 'depth_factor' in adata.obs:
-                X = X / adata.obs['depth_factor'].to_numpy(dtype=float)[:, None]  # reference depth, as simulated
-            ct_key = resolve_cell_type_obs(adata, 'proliferation')
-            srm = StimulusRateModel(p, effects, list(adata.var_names), X,
-                                    adata.obs[ct_key].to_numpy() if ct_key else None)
-            real_idx = np.load(idx_path)
-            tu = np.sort(np.unique(model.times_data))
-            T, N = len(tu), len(model.times_data) // len(tu)
-            S = srm.effect(X[real_idx]).reshape(T, N, -1)
-            # Rate part over interval k: u(t_k+1) of the slot's sample x mean of the stimulus part at both ends
-            slots = (np.asarray(model.samples_data).astype(int).reshape(T, N)[0]
-                     if getattr(model, 'samples_data', None) is not None else np.zeros(N, dtype=int))
-            offset = slot_offsets(p, S, tu, slots, sample_names(adata))
-            model.R_stim_offset = offset.ravel()
-            model.stimulus_rate_model = srm
-            pickle.dump(srm, open(stim_pkl, 'wb'))
-            print(f"[infer_network_simul] Inference stimuli: mean part of the net rate removed before training the "
-                  f"proliferation MLP {np.mean(offset[:-1]):+.5f} h^-1 (saved to stimulus_rates.pkl)")
-        elif os.path.exists(stim_pkl):
-            os.remove(stim_pkl)
-    elif os.path.exists(stim_pkl):
+    if os.path.exists(stim_pkl):
         os.remove(stim_pkl)
 
     model.ref_network = signed_floor(model.ref_network, model.prior_network_pen)  # keeps signed priors

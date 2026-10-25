@@ -12,8 +12,9 @@ reference genes due to depth and the share of genes whose NB modes are closer th
 spread. If the correction is recommended and model.allow_depth_correction is True, the depth
 factor of model.depth_method (CardamomOT/inference/depth_methods) is written to
 adata.obs['depth_factor'] of Data/data.h5ad (X untouched). With model.use_depth_factor (default
-False), the following steps then model counts as NB(k, c / s_i) and the simulations draw counts with
-the s_i of the cells they mimic; otherwise the factor is kept but ignored (s_i = 1).
+True), the following steps then model counts as NB(k, c / s_i) (model.depth_model 'mean', default) or
+NB(k s_i, c) ('burst_frequency') and the simulations draw counts with the s_i of the cells they mimic;
+otherwise the factor is kept but ignored (s_i = 1).
 With model.compute_depth_factor = False, nothing is computed: an existing obs['depth_factor'] is only
 read (summary printed) and never removed, and the previous diagnostic files are left as they are.
 

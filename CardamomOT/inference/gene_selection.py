@@ -56,18 +56,22 @@ def _dense(X):
     return X.toarray() if scipy.sparse.issparse(X) else np.asarray(X)
 
 
-def de_groups(adata, genes, cell_type_key=None, sample_key='dataset_id'):
+def de_groups(adata, genes, cell_type_key=None, sample_key='dataset_id', depth=None):
     """
     Wilcoxon scores (scanpy rank_genes_groups, log-normalised counts) of the genes for each cell type
     (cell_type_key) against the rest, within each sample (obs[sample_key]; sample differences are not taken
     for dynamics). No timepoint groups: the entropy changes of the candidates already carry the time.
+    depth: per-cell depth factors (log1p of the counts at the reference depth) or None (total-count normalisation).
     Returns a DataFrame genes x groups ('<key>=<c>', prefixed by '<sample>|' with several samples) of
     scores and one of adjusted p-values (empty without cell_type_key).
     """
     import scanpy as sc
     full = sc.AnnData(X=_dense(adata[:, genes].X).astype(np.float32), obs=adata.obs.copy())
     full.var_names = list(genes)
-    sc.pp.normalize_total(full, target_sum=1e4)
+    if depth is None:
+        sc.pp.normalize_total(full, target_sum=1e4)
+    else:
+        full.X = full.X / np.asarray(depth, dtype=np.float32)[:, None]
     sc.pp.log1p(full)
     smp = full.obs[sample_key].astype(str).values if sample_key in full.obs else np.zeros(full.n_obs).astype(str)
     multi = len(np.unique(smp)) > 1
@@ -90,32 +94,37 @@ def de_groups(adata, genes, cell_type_key=None, sample_key='dataset_id'):
     return pd.DataFrame(scores, index=genes), pd.DataFrame(padj, index=genes)
 
 
-def nb_init_separation(X, times, cell_types=None, n_cells=1024, seuil=0.01, seed=0, depth=None):
+def nb_init_separation(X, times, cell_types=None, n_cells=1024, seuil=0.01, seed=0, depth=None, dispersion_max=None):
     """
     Separation of the extreme modes found by the initialization of the NB mixture (group_init,
     as in infer_mixture: one mode per time, and per cell type, with a common rate; the most
     diverse labelling kept), per gene (column of X), on at most n_cells cells per timepoint (None = all).
     A gene whose initialization gives no distinct basins is unlikely to get them from the CEM.
-    depth: per-cell depth factors (NB(k, c / s_i)) or None.
+    depth: per-cell depth factors (NB(k, c / s_i)) or None. dispersion_max: cap of the rate c, as in the mixture.
+    The cells of each timepoint are drawn in proportion to the cell types, as the sub-sample of the mixture.
     """
+    from .sampling import stratified_choice
     rng = np.random.default_rng(seed)
-    sub = np.concatenate([rng.choice(np.flatnonzero(times == t), int(np.sum(times == t)) if n_cells is None
-                                     else min(n_cells, int(np.sum(times == t))), replace=False)
-                          for t in np.unique(times)])
+    ct = None if cell_types is None else np.asarray(cell_types)
+    sub = np.concatenate([stratified_choice(idx, len(idx) if n_cells is None else n_cells,
+                                            None if ct is None else ct[idx], rng=rng)
+                          for idx in (np.flatnonzero(times == t) for t in np.unique(times))])
     Xs = np.rint(X[sub]).astype(int)
     groups = [times[sub], None if cell_types is None else np.asarray(cell_types)[sub]]
 
     # Serial: a few ms per gene, less than the transfer overhead of parallel tasks
-    return _separation_block(Xs, groups, seuil, None if depth is None else np.asarray(depth, dtype=float)[sub])
+    return _separation_block(Xs, groups, seuil, None if depth is None else np.asarray(depth, dtype=float)[sub],
+                             dispersion_max)
 
 
-def nb_separation_samples(X, times, cell_types=None, samples=None, n_cells=1024, seuil=0.01, seed=0, depth=None):
+def nb_separation_samples(X, times, cell_types=None, samples=None, n_cells=1024, seuil=0.01, seed=0, depth=None,
+                          dispersion_max=None):
     """
     nb_init_separation within each sample (before integration, a shift between samples is not a basin),
     largest value over the samples: a gene with distinct basins in one sample is kept (per-sample mixtures).
     """
     if samples is None or len(np.unique(samples)) == 1:
-        return nb_init_separation(X, times, cell_types, n_cells, seuil, seed, depth)
+        return nb_init_separation(X, times, cell_types, n_cells, seuil, seed, depth, dispersion_max)
     out = np.zeros(X.shape[1])
     for s in np.unique(samples):
         m = np.asarray(samples) == s
@@ -123,16 +132,16 @@ def nb_separation_samples(X, times, cell_types=None, samples=None, n_cells=1024,
         if len(np.unique(times[m])) < 2 and (ct is None or len(np.unique(ct)) < 2):
             continue
         out = np.maximum(out, nb_init_separation(X[m], times[m], ct, n_cells, seuil, seed,
-                                                 None if depth is None else np.asarray(depth)[m]))
+                                                 None if depth is None else np.asarray(depth)[m], dispersion_max))
     return out
 
 
-def _separation_block(Xb, groups, seuil, s=None):
+def _separation_block(Xb, groups, seuil, s=None, dispersion_max=None):
     out = np.zeros(Xb.shape[1])
     for j in range(Xb.shape[1]):
         x = Xb[:, j]
         if x.min() < x.max():
-            res = group_init(x, groups, seuil, s)
+            res = group_init(x, groups, seuil, s, c_max=dispersion_max)
             out[j] = 0.0 if res is None else res[3]
     return out
 
@@ -460,6 +469,7 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
                  edge_prior=0.9, null_network='hybrid', closure_min=0.5, literature=True, literature_depth=3,
                  literature_weight=1.0, literature_resources='extended', max_free_params=None,
                  min_entropy_change=0.1, min_nb_separation=0.15, n_cells_mixture=1024, seuil_mixture=0.01,
+                 dispersion_max=None,
                  n_cells_network=1000, sample_key='dataset_id', forced_genes=None, stimulus_targets=None,
                  drivers=None, n_driver=0,
                  species=None, use_depth_factor=False, report_edge_prob=0.6, entropy_preselection=True,
@@ -479,7 +489,8 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
     Variability floor, applied to every gene (queries included) before anything else: the largest
     BUB-entropy change between consecutive timepoints (Gandrillon MDE, bits) must reach
     min_entropy_change, and the NB-mixture initialization (nb_init_separation, n_cells_mixture
-    cells per time, seuil_mixture) must separate its extreme modes by min_nb_separation.
+    cells per time, seuil_mixture, rate at most dispersion_max as in the mixture) must separate its extreme modes by
+    min_nb_separation.
     entropy_preselection: queries, drivers and the genes of the network (Steiner paths, growth) are taken
     among the entropy candidates (Gandrillon KD & MDE, top n_top_entropy per transition) and the forced genes only.
     stim: (n_times, n_stimuli) schedule on the sorted timepoints, or {sample: schedule} (None: default).
@@ -580,7 +591,7 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
         ent0 = set(u_names[gandrillon_genes(kd, mde, top_n=n_top_entropy)]) if kd is not None else set()
         cand = np.flatnonzero(eligible & np.isin(u_names, list(ent0) + list(queries) + [g for g, _ in drivers]))
         d = nb_separation_samples(_dense(Xa[:, np.flatnonzero(universe)[cand]]), times, cts, smp if multi else None,
-                                  n_cells_mixture, seuil_mixture, seed, depth)
+                                  n_cells_mixture, seuil_mixture, seed, depth, dispersion_max)
         eligible[cand[d < min_nb_separation]] = False
     # Forced genes stay selectable whatever their variability
     below = [g for g in forced if g in set(u_names[~eligible])]
@@ -632,7 +643,7 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
                   f"{len(queries)} queries kept, {len(out_q)} dropped{(' ' + str(out_q[:10])) if out_q else ''}; "
                   f"{len(drivers)} fate drivers kept, {len(out_d)} dropped")
     pool = list(dict.fromkeys(queries + [g for g, _ in drivers] + ent_candidates))
-    scores, padj = de_groups(ad_u, pool, cell_type_key, sample_key) if pool else (pd.DataFrame(), pd.DataFrame())
+    scores, padj = de_groups(ad_u, pool, cell_type_key, sample_key, depth) if pool else (pd.DataFrame(), pd.DataFrame())
 
     # At least two entropy genes per cell type (within each sample)
     if 2 * scores.shape[1] > n_entropy:
@@ -777,7 +788,8 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
                 if not new:
                     return res
                 d = nb_separation_samples(_dense(adata[:, [node_names[v] for v in new]].X), times, cts,
-                                          smp if multi else None, n_cells_mixture, seuil_mixture, seed, depth)
+                                          smp if multi else None, n_cells_mixture, seuil_mixture, seed, depth,
+                                          dispersion_max)
                 checked.update(new)
                 bad = [v for v, dv in zip(new, d) if dv < min_nb_separation]
                 if not bad:
@@ -943,39 +955,50 @@ def _literature(names, species, use, resources, verb):
         return None
 
 
-def proliferation_markers(adata, n, use_depth=False, anchors=None, exclude=(), cell_type_keys=('cell_type_proliferation',
-                          'cell_type'), group_keys=('dataset_id', 'time'), max_cells=20000, max_corr=0.8, n_pool=60,
-                          seed=0, verb=True):
+def proliferation_markers(adata, n, use_depth=False, anchors=None, exclude=(), label_key='cell_type_proliferation',
+                          cell_type_keys=('cell_type_proliferation', 'cell_type'), group_keys=('dataset_id', 'time'),
+                          max_cells=20000, max_corr=0.8, n_pool=60, seed=0, verb=True):
     """
-    n genes that best predict the prior net proliferation rate of the cells (obs['proliferation_net_rate']), to be
-    always selected so that the proliferation MLP R(P) can tell dividing and arrested cells apart. Genes are ranked by
-    |correlation| of log1p(counts, / depth factor with use_depth) with the rate within (sample, time) groups (no batch
-    or time trend), then kept greedily when correlated below max_corr with those already kept (non-redundant).
-    Without a per-cell rate: indicator of the most proliferative cell type (highest rate in anchors {cell type: rate},
-    else a name containing 'prolif') of the first of cell_type_keys in obs. exclude: genes already forced. Mitochondrial
-    and ribosomal genes are left out. Returns (genes, description) — ([], reason) when nothing applies.
+    n genes always selected so that the proliferation MLP R(P) can tell the proliferation states of the cells apart:
+    ceil(n / 2) that best separate the labels of obs[label_key] (one indicator per label, taken in turn), the others
+    that best predict the prior net rate (obs['proliferation_net_rate']; without it, the indicator of the most
+    proliferative cell type: highest rate in anchors {cell type: rate}, else a name containing 'prolif', of the first
+    of cell_type_keys in obs). All n go to the available target when only one applies. Net-rate markers alone are
+    mostly cell-cycle genes, which follow the labels (e.g. quiescent / proliferative) less well. Genes are ranked by
+    |correlation| of log1p(counts, / depth factor with use_depth) with each target within (sample, time) groups (no
+    batch or time trend), then kept greedily when correlated below max_corr with those already kept (non-redundant).
+    exclude: genes already forced. Mitochondrial and ribosomal genes are left out. Returns (genes, description) —
+    ([], reason) when nothing applies.
     """
     import scipy.sparse
     if n <= 0:
         return [], 'n_proliferation_markers = 0'
     obs = adata.obs
     rng = np.random.default_rng(seed)
-    target, what = None, ''
+    # Targets: label indicators, and the net rate (or the most proliferative type)
+    labels = []
+    if label_key in obs:
+        lab = obs[label_key].astype(str).to_numpy()
+        cats = sorted(set(lab))
+        if len(cats) >= 2:
+            labels = [(f"{label_key}={c}", (lab == c).astype(float)) for c in (cats if len(cats) > 2 else cats[:1])]
+    rate, what_rate = None, ''
     if 'proliferation_net_rate' in obs:
         r = obs['proliferation_net_rate'].to_numpy(dtype=float)
         if np.isfinite(r).all() and np.nanstd(r) > 0:
-            target, what = r, "prior net rate (obs['proliferation_net_rate'])"
-    if target is None:
+            rate, what_rate = r, 'net rate'
+    if rate is None:
         key = next((k for k in cell_type_keys if k in obs), None)
-        if key is None:
-            return [], "no obs['proliferation_net_rate'] nor cell types"
-        types = obs[key].astype(str).to_numpy()
-        cats = sorted(set(types))
-        rates = {c: anchors[c] for c in cats if anchors and c in anchors}
-        best = max(rates, key=rates.get) if rates else next((c for c in cats if 'prolif' in c.lower()), None)
-        if best is None or len(cats) < 2:
-            return [], f"no proliferation rate per cell and no proliferative type in obs['{key}']"
-        target, what = (types == best).astype(float), f"cell type '{best}' of obs['{key}'] (most proliferative)"
+        if key is not None:
+            types = obs[key].astype(str).to_numpy()
+            cats = sorted(set(types))
+            rates = {c: anchors[c] for c in cats if anchors and c in anchors}
+            best = max(rates, key=rates.get) if rates else next((c for c in cats if 'prolif' in c.lower()), None)
+            if best is not None and len(cats) >= 2:
+                rate, what_rate = (types == best).astype(float), f"{key}={best} (most proliferative)"
+    if not labels and rate is None:
+        return [], f"no obs['{label_key}'] labels, obs['proliferation_net_rate'] nor proliferative cell type"
+    n_lab = 0 if not labels else (n if rate is None else (n + 1) // 2)
     names = np.asarray(adata.var_names).astype(str)
     up = np.char.upper(names)
     ok_gene = ~(np.char.startswith(up, 'MT-') | np.char.startswith(up, 'RPL') | np.char.startswith(up, 'RPS')
@@ -987,34 +1010,57 @@ def proliferation_markers(adata, n, use_depth=False, anchors=None, exclude=(), c
     if use_depth and 'depth_factor' in obs:
         X = scipy.sparse.diags(1.0 / obs['depth_factor'].to_numpy(dtype=float)[rows]) @ X
     X = X.log1p()
-    t = target[rows]
     keys = [k for k in group_keys if k in obs]
     grp = (np.unique(np.array(['|'.join(map(str, v)) for v in zip(*[obs[k].to_numpy()[rows] for k in keys])]),
                      return_inverse=True)[1] if keys else np.zeros(len(rows), dtype=int))
     G = scipy.sparse.csr_matrix((np.ones(len(rows)), (grp, np.arange(len(rows)))))
     n_g = np.asarray(G.sum(axis=1)).ravel()
-    # Within-group centring: covariance with the centred target, within-group variances
-    t_c = t - (G @ t / n_g)[grp]
-    cov = np.asarray(X.T @ t_c).ravel()
     S = np.asarray((G @ X).todense())
     var = np.asarray(X.multiply(X).sum(axis=0)).ravel() - (S ** 2 / n_g[:, None]).sum(axis=0)
-    corr = cov / np.sqrt(np.maximum(var, 1e-12) * max(float(t_c @ t_c), 1e-12))
-    corr[~ok_gene] = 0.0
-    pool = np.argsort(-np.abs(corr))[:n_pool]
-    pool = pool[np.abs(corr[pool]) > 0]
-    if not len(pool):
-        return [], f'no gene correlated with the {what}'
-    Z = np.asarray(X[:, pool].todense())
+
+    def correlations(target):
+        # Within-group centring: covariance with the centred target, within-group variances
+        t = target[rows]
+        t_c = t - (G @ t / n_g)[grp]
+        corr = np.asarray(X.T @ t_c).ravel() / np.sqrt(np.maximum(var, 1e-12) * max(float(t_c @ t_c), 1e-12))
+        corr[~ok_gene] = 0.0
+        return corr
+
+    targets = [(nm, correlations(t)) for nm, t in labels] + ([(what_rate, correlations(rate))] if rate is not None else [])
+    pools = [(nm, corr, [g for g in np.argsort(-np.abs(corr))[:n_pool] if abs(corr[g]) > 0]) for nm, corr in targets]
+    union = sorted({g for _, _, pool in pools for g in pool})
+    if not union:
+        return [], 'no gene correlated with the proliferation labels or rate'
+    col = {g: j for j, g in enumerate(union)}
+    Z = np.asarray(X[:, union].todense())
     Z = Z - (G @ Z / n_g[:, None])[grp]
     Z /= np.maximum(Z.std(axis=0), 1e-12)
-    kept = []
-    for j in range(len(pool)):
-        if all(abs(float(Z[:, j] @ Z[:, k]) / len(rows)) < max_corr for k in kept):
-            kept.append(j)
-        if len(kept) == n:
-            break
-    genes = [names[pool[j]] for j in kept]
+    kept, why = [], []
+
+    def take(k):
+        # Next non-redundant gene of the pool of target k (None if exhausted)
+        nm, corr, pool = pools[k]
+        while pool:
+            g = pool.pop(0)
+            if g not in kept and all(abs(float(Z[:, col[g]] @ Z[:, col[h]]) / len(rows)) < max_corr for h in kept):
+                kept.append(g)
+                why.append(f"{names[g]} ({nm} {corr[g]:+.2f})")
+                return g
+        return None
+
+    n_lab_t = len(labels)
+    k, misses = 0, 0
+    while len(kept) < n_lab and misses < n_lab_t:  # label targets in turn
+        misses = 0 if take(k % n_lab_t) is not None else misses + 1
+        k += 1
+    while len(kept) < n and any(pool for _, _, pool in pools):  # net rate, then any target left
+        if take(len(pools) - 1) is None:
+            for kk in range(len(pools)):
+                if len(kept) < n:
+                    take(kk)
+    genes = [names[g] for g in kept]
+    what = (f"labels of obs['{label_key}']" if labels else '') + (' + ' if labels and rate is not None else '') + \
+        (f"prior {what_rate}" if rate is not None else '')
     if verb:
-        print(f"[gene_selection] Proliferation markers ({what}, within (sample, time), non-redundant): "
-              + ', '.join(f"{names[pool[j]]} ({corr[pool[j]]:+.2f})" for j in kept))
+        print(f"[gene_selection] Proliferation markers ({what}, within (sample, time), non-redundant): " + ', '.join(why))
     return genes, what

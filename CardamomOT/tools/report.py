@@ -29,7 +29,7 @@ from .velocity import knn_velocity_embedding as _knn_velocity_embedding
 from ..config import find_data_file, resolve_cell_type_obs
 from ..inputs import input_dir
 from ..inference.trajectory import kon_ref_vector
-from ..model.base import load_network_array, drop_network_axis, load_state_growth
+from ..model.base import load_network_array, drop_network_axis, load_state_growth, trajectory_pairs
 from ..inference.proliferations import ProliferationMLP, growth_path_states, quadrature, interval_stimulus
 
 A4_LANDSCAPE = (11.69, 8.27)
@@ -952,6 +952,8 @@ def _classical_ot_pages(pdf, R, seed=0):
         in_cond = obs['dataset_id'].astype(str).isin(R.samples).to_numpy() if 'dataset_id' in obs else in_cond
     tr['cell_type_from'], tr['cell_type_to'] = tr['cell_type_from'].astype(str), tr['cell_type_to'].astype(str)
     fg['cell_type'] = fg['cell_type'].astype(str)
+    if R.samples is not None and 'condition' in fg:  # classical OT of each condition apart: its fate genes
+        fg = fg[fg['condition'].astype(str) == str(R.condition)]
     vel = np.load(os.path.join(cdir, 'velocity.npz'), allow_pickle=True)
     fit = (pd.Series(vel['transported'], index=vel['obs_names'].astype(str)).reindex(E['obs_names'])
            .fillna(False).to_numpy(dtype=bool) if 'transported' in vel.files else np.ones(len(obs), bool))
@@ -965,7 +967,8 @@ def _classical_ot_pages(pdf, R, seed=0):
     _transition_page(pdf, 'Classical OT — cell-type transitions and fate genes',
                      'Waddington-OT couplings (every gene, train cells, per sample, growth from the net rate), pooled over '
                      + ('the samples' if R.samples is None else f'the samples of condition {R.condition} (fate genes of '
-                        'every sample)') + '. Sankey: node = share of the cell type; links leave ∝ fate and arrive ∝ ancestor '
+                        + ('the condition)' if 'condition' in fg else 'every sample)'))
+                     + '. Sankey: node = share of the cell type; links leave ∝ fate and arrive ∝ ancestor '
                      'probabilities. Table: weighted Welch t, genes of both top 10 in red (classical_OT/fate_genes.csv).' + warn,
                      tr[tr['sample'].astype(str) == 'all'], _shares(labels, times, fit), fg, cats, cmap)
 
@@ -1085,8 +1088,12 @@ def _teaser_fields(R, seed=0):
         m = F['obs']['dataset_id'].astype(str).isin(R.samples).to_numpy() if 'dataset_id' in F['obs'] \
             else np.ones(len(F['obs']), bool)
         E = dict(F['E'], emb=F['E']['emb'][m], pca=F['E']['pca'][m], obs_names=F['E']['obs_names'][m])
+        # Intervals of the samples of the condition
+        iv_samples = {iv: [x for x in ss if x in set(R.samples)] for iv, ss in F['interval_samples'].items()}
+        iv_samples = {iv: ss for iv, ss in iv_samples.items() if ss}
         R._teaser = dict(F, E=E, obs=F['obs'][m], labels=None if F['labels'] is None else F['labels'][m],
-                         times=F['times'][m], fields=[(n, V[m], o[m]) for n, V, o in F['fields']])
+                         times=F['times'][m], fields=[(n, V[m], o[m]) for n, V, o in F['fields']],
+                         cell_samples=F['cell_samples'][m], intervals=sorted(iv_samples), interval_samples=iv_samples)
         return R._teaser
     E, obs = data_embedding(R.p, seed=seed, depth=R.depth_emb, method=R.emb_method)
     labels = obs[LABEL_KEY].astype(str).values if LABEL_KEY in obs else None
@@ -1098,10 +1105,17 @@ def _teaser_fields(R, seed=0):
     if os.path.exists(os.path.join(R.p, 'cardamomOT', 'classical_OT', 'velocity.npz')):
         C = classical_velocity(R.p, E)
         fields.insert(0, ('Classical OT', C['V'], C['origin']))
-    # Intervals of the CardamomOT couplings (t_from -> t_to)
+    # Intervals of the CardamomOT couplings (t_from -> t_to) and the samples having each one (consecutive observed
+    # times of each sample; couplings indexed by the sorted dataset_id of data_<split>)
     cp = np.load(os.path.join(R.p, 'cardamomOT', 'couplings.npz'))
-    intervals = sorted({(float(a), float(b)) for a, b in zip(cp['t_from'], cp['t_to'])})
-    R._teaser = dict(E=E, obs=obs, labels=labels, cmap=cmap, times=times, fields=fields, intervals=intervals)
+    A = R.adata_data
+    names = sorted(A.obs['dataset_id'].astype(str).unique()) if 'dataset_id' in A.obs else ['0']
+    iv_samples = {}
+    for k, a, b in {(int(k), float(a), float(b)) for k, a, b in zip(cp['sample'], cp['t_from'], cp['t_to'])}:
+        iv_samples.setdefault((a, b), []).append(names[min(k, len(names) - 1)])
+    cell_samples = obs['dataset_id'].astype(str).values if 'dataset_id' in obs else np.full(len(obs), '0')
+    R._teaser = dict(E=E, obs=obs, labels=labels, cmap=cmap, times=times, fields=fields, cell_samples=cell_samples,
+                     intervals=sorted(iv_samples), interval_samples={iv: sorted(ss) for iv, ss in iv_samples.items()})
     return R._teaser
 
 
@@ -1145,6 +1159,7 @@ def _teaser_time_pages(pdf, R, seed=0, per_page=6):
     from .velocity import knn_velocity_embedding
     F = _teaser_fields(R, seed)
     E, labels, cmap, times, fields, intervals = (F[k] for k in ('E', 'labels', 'cmap', 'times', 'fields', 'intervals'))
+    cell_samples, iv_samples = F['cell_samples'], F['interval_samples']
     emb, pca = E['emb'], E['pca']
     lo, hi = emb.min(axis=0), emb.max(axis=0)
     size = float(np.clip(60000 / len(emb), 0.3, 6))
@@ -1152,14 +1167,16 @@ def _teaser_time_pages(pdf, R, seed=0, per_page=6):
         chunk = intervals[start:start + per_page]
         fig = plt.figure(figsize=A4_LANDSCAPE)
         _page_title(fig, 'Teaser — displacement fields over time, classical OT vs CardamomOT',
-                    'Cells of each t_from (coloured; other cells in grey) towards their mean descendant at t_to, '
-                    'kNN projection among the cells of t_from and t_to. cos: weighted cosine between the two methods on '
-                    'the cells of t_from with both direct displacements (PCA space).')
+                    'Cells of each t_from (coloured; other cells in grey) of the samples whose next timepoint is t_to, '
+                    'towards their mean descendant at t_to, kNN projection among their cells of t_from and t_to. cos: '
+                    'weighted cosine between the two methods on the cells of t_from with both direct displacements '
+                    '(PCA space).')
         gs = gridspec.GridSpec(len(fields), len(chunk), figure=fig, left=0.03, right=0.99, top=0.86, bottom=0.1,
                                hspace=0.12, wspace=0.04)
         for j, (t0, t1) in enumerate(chunk):
-            src = np.flatnonzero(times == t0)
-            pool = np.flatnonzero((times == t0) | (times == t1))
+            in_iv = np.isin(cell_samples, iv_samples[(t0, t1)])  # samples whose interval t0 -> t1 it is
+            src = np.flatnonzero(in_iv & (times == t0))
+            pool = np.flatnonzero(in_iv & ((times == t0) | (times == t1)))
             is_src = np.isin(pool, src)
             both = (_direct(fields[0][2]) & _direct(fields[-1][2]))[src]
             cos = (_weighted_cosine(fields[0][1][src][both], fields[1][1][src][both])
@@ -1563,9 +1580,16 @@ def _validation_page(pdf, R, r):
 def _depth_page(pdf, R, diag, per_group):
     """Per-cell depth diagnostic (estimate_cell_depth.py) and, on the selected genes, its effect."""
     fig = plt.figure(figsize=A4_LANDSCAPE)
+    # Depth model of the mixture fit (infer_mixture), else the default
+    mix_json = os.path.join(R.p, 'cardamomOT', 'mixture_depth.json')
+    model = 'mean'
+    if os.path.exists(mix_json):
+        import json
+        model = json.load(open(mix_json)).get('depth_model', model)
+    nb = 'NB(k s_i, c)' if model == 'burst_frequency' else 'NB(k, c / s_i)'
     _page_title(fig, '0. Per-cell sequencing depth',
                 'Diagnostic on the whole transcriptome within homogeneous groups (sample, time, cell type); '
-                'counts are modelled as NB(k, c / s_i) when the depth factor s_i is applied.')
+                f'counts are modelled as {nb} (depth model \'{model}\') when the depth factor s_i is used.')
     gs = gridspec.GridSpec(2, 3, figure=fig, left=0.06, right=0.97, top=0.88, bottom=0.1, hspace=0.45, wspace=0.3)
     ax = fig.add_subplot(gs[:, 0]); ax.axis('off')
     if not diag.get('estimated', False):
@@ -2123,6 +2147,10 @@ class _Dynamics:
         self.samples = samples.astype(int) if samples is not None else np.zeros(len(self.times), dtype=int)
         self.tu = np.sort(np.unique(self.times))
         self.N = len(self.times) // len(self.tu)
+        # Observed states (virtual ones: timepoints their sample misses)
+        valid = load('data_traj_valid.npy')
+        self.valid = (valid.astype(bool) if valid is not None and len(valid) == len(self.times)
+                      else np.ones(len(self.times), bool))
 
         # mRNA along trajectories: NB mixture sample of each state (as in figure 5), else trajectory counts
         beta = R.beta_states
@@ -2162,23 +2190,7 @@ class _Dynamics:
         # Stimuli of the interval starting at each state (as in training and simulation)
         self.stim_state = interval_stimulus(prot, self.times, self.ns) if self.ns > 0 else np.zeros((len(self.times), 0))
         self.R_mlp = self.mlp.predict(self.P, self.stim_state, samples=self.samples) if self.mlp is not None else None
-        # Part of the inference stimuli (perturbation_inference, RATEk): not in the MLP, added back with the
-        # inference schedule (rate of each state over the interval it starts, as for R_opt)
-        self.R_stim = None
-        stim_pkl = os.path.join(cdir, 'stimulus_rates.pkl')
-        if self.R_mlp is not None and self.real_idx is not None and os.path.exists(stim_pkl):
-            import pickle
-            from ..schedules import sample_names
-            from ..stimulus_rates import slot_offsets
-            srm = pickle.load(open(stim_pkl, 'rb'))
-            Xd = _dense(R.adata_data.X).astype(float)
-            if R.use_depth and 'depth_factor' in R.adata_data.obs:
-                Xd = Xd / R.adata_data.obs['depth_factor'].to_numpy(dtype=float)[:, None]
-            S = srm.effect(Xd[self.real_idx]).reshape(len(self.tu), self.N, -1)
-            slots = self.samples.reshape(len(self.tu), self.N)[0]
-            off = slot_offsets(R.p, S, self.tu, slots, sample_names(R.adata_data))
-            self.R_stim = off.ravel()
-            self.R_mlp = self.R_mlp + self.R_stim
+        # The effects of the inference stimuli on the rates (RATEk) are learned by the MLP from its stimulus inputs
         diag_path = os.path.join(cdir, 'prolif_network_diagnostics.json')
         self.mlp_diag = json.load(open(diag_path)) if (self.mlp is not None and os.path.exists(diag_path)) else None
         # Cumulative log mass of each state along its path (growth OT pass), for the growth-weighted trajectories
@@ -2202,18 +2214,14 @@ class _Dynamics:
             d_cells = np.maximum(b_cells - net, 0.0)
         self.birth_prior, self.death_prior = self._per_state(b_cells), self._per_state(d_cells)
         self.birth_mlp = self.death_mlp = None
-        nets = self.mlp.nets if self.per_condition_mlp else [self.mlp]
-        if self.mlp is not None and any(n is not None and int(getattr(n, 'two_heads', 0)) for n in nets):
-            from .estimate_proliferation import split_net_change
+        if self.mlp is not None:  # two heads: regressed prior rates; one head: max(R, 0), max(-R, 0)
             self.birth_mlp = self.mlp.predict_birth(self.P, self.stim_state, samples=self.samples)
             self.death_mlp = self.mlp.predict_death(self.P, self.stim_state, samples=self.samples)
-            if self.R_stim is not None:  # inference stimuli given apart: their part shared as in the simulations
-                self.birth_mlp, self.death_mlp = split_net_change(self.birth_mlp, self.death_mlp, np.nan_to_num(self.R_stim))
-        sim_prolif = bool(R.stages['Simulation'].uns.get('proliferation', False))
+        # The simulations dilute at the MLP birth whenever an MLP is present (with or without branching)
         self.birth_sim = None
         if R.protein_dilution:
-            self.birth_sim = self.birth_mlp if (sim_prolif and self.birth_mlp is not None) else self.birth_prior
-        self.birth_sim_label = ('MLP birth (prior regressed on the state)' if (sim_prolif and self.birth_mlp is not None)
+            self.birth_sim = self.birth_mlp if self.birth_mlp is not None else self.birth_prior
+        self.birth_sim_label = ('MLP birth (prior regressed on the state)' if self.birth_mlp is not None
                                 else "prior birth (obs['proliferation_birth_rate'])")
         self.d_t = load('degradations_temporal.npy')
         self.gene_cols = None  # all genes (for_condition: those of the condition)
@@ -2231,7 +2239,7 @@ class _Dynamics:
         rows = (np.arange(T)[:, None] * N + slots[None, :]).ravel()
         D.N = len(slots)
         take = lambda v: None if v is None else np.asarray(v)[rows]
-        for attr in ('times', 'samples', 'prot_full', 'P', 'M', 'rna_ref', 'prior', 'ct', 'R_opt', 'R_mlp', 'R_stim',
+        for attr in ('times', 'samples', 'valid', 'prot_full', 'P', 'M', 'rna_ref', 'prior', 'ct', 'R_opt', 'R_mlp',
                      'R_learned', 'L_growth', 'birth_prior', 'death_prior', 'birth_mlp', 'death_mlp', 'birth_sim',
                      'stim_state'):
             setattr(D, attr, take(getattr(self, attr)))
@@ -2293,12 +2301,13 @@ class _Dynamics:
         return out, scale
 
     def trajectory_velocity(self, X, rate=True):
-        """(x_{t+1} − x_t)/Δt along each trajectory slot, the displacement x_{t+1} − x_t if not rate; NaN at the
-        last time."""
+        """(x_b − x_a)/(t_b − t_a) along each trajectory slot, from each observed time a to the next observed time b
+        of its sample, the displacement x_b − x_a if not rate; NaN at the last observed time and the virtual states."""
         T, N = len(self.tu), self.N
         Y = X.reshape(T, N, -1)
         V = np.full_like(Y, np.nan, dtype=float)
-        V[:-1] = (Y[1:] - Y[:-1]) / (np.diff(self.tu)[:, None, None] if rate else 1.0)
+        for a, b, slots in trajectory_pairs(self.valid, T):
+            V[a, slots] = (Y[b, slots] - Y[a, slots]) / ((self.tu[b] - self.tu[a]) if rate else 1.0)
         return V.reshape(T * N, -1)
 
 
@@ -2435,22 +2444,23 @@ def _proliferation_pages(pdf, R, D):
         if pr_path is not None:
             tab = pd.read_csv(pr_path, sep=None, engine='python', header=None)
             anchors = {str(k): float(v) for k, v in zip(tab.iloc[:, 0], tab.iloc[:, 1])}
-        # Effects of the inference stimuli on the cell types (anchors are then rates without stimulus)
-        from ..stimulus_rates import load_effects, split_effects
-        stim_ct = {}
-        for k, (ct, _) in split_effects(load_effects(R.p), cats).items():
-            for c, dlt in ct.items():
-                stim_ct[c] = stim_ct.get(c, '') + f' {dlt:+.3g}·u{k}'
         fmt = lambda x: f'{x:.3g}' if np.isfinite(x) else '—'
         mean_of = lambda v, c: np.nanmean(v[ct_cells == c]) if v is not None and np.isfinite(v[ct_cells == c]).any() \
             else np.nan
-        rows = [[c, fmt(anchors.get(c, np.nan)) + stim_ct.get(c, ''),
+        # Anchors are rates without stimulus: add the mean effect of the inference stimuli on the cells of each type,
+        # as in the prior and in the MLP (trained with the stimulus)
+        obs_p = R.adata_data.obs
+        stim_eff = (obs_p['proliferation_net_rate'].to_numpy(dtype=float)
+                    - obs_p['proliferation_net_rate_base'].to_numpy(dtype=float)
+                    if {'proliferation_net_rate', 'proliferation_net_rate_base'} <= set(obs_p.columns) else None)
+        anchor_of = lambda c: anchors.get(c, np.nan) + (0.0 if stim_eff is None else np.nan_to_num(mean_of(stim_eff, c)))
+        rows = [[c, fmt(anchor_of(c)),
                  fmt(mean_of(D.prior_cells, c)) if has_prior else '—', fmt(mean_of(learned_cells, c)),
                  fmt(mean_of(learned_cells, c) - mean_of(D.prior_cells, c)) if has_prior else '—']
                 for c in cats]
         ax = fig.add_subplot(gs[1, 2]); ax.axis('off')
-        t = ax.table(cellText=rows, colLabels=['Cell type', 'Anchor' + (' (+ stimulus)' if stim_ct else ''), 'Prior',
-                                               'Learned', 'Δ'],
+        t = ax.table(cellText=rows, colLabels=['Cell type', 'Anchor' + (' + stimulus' if stim_eff is not None else ''),
+                                               'Prior', 'Learned', 'Δ'],
                      loc='upper center', cellLoc='center', colWidths=[0.30, 0.28, 0.15, 0.15, 0.14])
         t.auto_set_font_size(False); t.set_fontsize(7); t.scale(1, 1.3)
         for (r, c), cell in t.get_celld().items():
@@ -2504,8 +2514,6 @@ def _proliferation_pages(pdf, R, D):
         _, w = quadrature(5)
         S = D.prot_full[:T * N, :D.ns].reshape(T, N, D.ns)[1:, None]       # stimuli of each interval
         integ = (D.mlp.predict(states, S) * w[None, :, None]).sum(axis=1) * dt[:, None]
-        if D.R_stim is not None:  # part of the inference stimuli over each interval
-            integ = integ + D.R_stim.reshape(T, N)[:-1] * dt[:, None]
         curves.append(('MLP R(P) along paths', REG_COLOR, '-', np.mean(np.exp(integ), axis=1)))
     for z, (lab, col, ls, g) in enumerate(curves):
         # Prior drawn last: the OT pass is anchored on it (same mean growth)
@@ -2661,6 +2669,11 @@ def _dilution_page(pdf, R, D):
     ns = D.ns
     var = R.adata_data.var
     d1_lit = var['d1'].to_numpy(dtype=float) if 'd1' in var else D.d[1, ns:]
+    # Literature in the units of the refined rate: d1_eff = d0 d1 / (d0 + d1) for the ODE and the protein-only PDMP
+    eff = getattr(R, 'simulation_model', 'ode') != 'sde2'
+    if eff:
+        d0_lit = var['d0'].to_numpy(dtype=float) if 'd0' in var else D.d[0, ns:]
+        d1_lit = d0_lit * d1_lit / (d0_lit + d1_lit)
     # Temporal d1 (mean over the samples with kinetics per network condition)
     d1_tm = None if D.d_t is None else (D.d_t[:, 1] if D.d_t.ndim == 3 else np.nanmean(D.d_t[:, 1], axis=1))
     d1_fit = np.nanmean(d1_tm[:, ns:], axis=0) if d1_tm is not None else D.d[1, ns:]
@@ -2681,8 +2694,9 @@ def _dilution_page(pdf, R, D):
     lim = [min(hl_lit.min(), hl_eff.min()) * 0.8, max(hl_lit.max(), hl_eff.max()) * 1.2]
     ax.plot(lim, lim, 'k--', lw=0.6)
     ax.set_xscale('log'); ax.set_yscale('log'); ax.set_xlim(lim); ax.set_ylim(lim)
-    ax.set_xlabel('literature half-life ln2/d1 (h)', fontsize=8)
-    ax.set_ylabel('effective half-life ln2/(d1 refit + mean b) (h)', fontsize=8)
+    d1_name = 'd1_eff' if eff else 'd1'
+    ax.set_xlabel(f'literature half-life ln2/{d1_name} (h)', fontsize=8)
+    ax.set_ylabel(f'effective half-life ln2/({d1_name} refit + mean b) (h)', fontsize=8)
     ax.tick_params(labelsize=7)
     ax.set_title('Protein half-lives per gene', fontsize=9)
     cb = fig.colorbar(sca, ax=ax, fraction=0.05, pad=0.02); cb.set_label('share of dilution b/(d1 + b)', fontsize=7)
@@ -2733,8 +2747,8 @@ def _dilution_page(pdf, R, D):
 
     # D: summary
     ax = fig.add_subplot(gs[1, 2]); ax.axis('off')
-    rows = [['median literature d1 (h^-1)', f'{np.median(d1_lit):.4f}'],
-            ['median refitted d1 (h^-1)', f'{np.median(d1_fit):.4f}'],
+    rows = [[f'median literature {d1_name} (h^-1)', f'{np.median(d1_lit):.4f}'],
+            [f'median refitted {d1_name} (h^-1)', f'{np.median(d1_fit):.4f}'],
             ['mean birth b (h^-1)', f'{b_mean:.4f}'],
             ['median half-life, literature (h)', f'{np.median(hl_lit):.1f}'],
             ['median effective half-life (h)', f'{np.median(hl_eff):.1f}'],
@@ -2899,7 +2913,7 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
                     normtransform=False, logtransform=True, n_umap=4000, top_regulators=20,
                     top_targets=10, seed=0, depth_embeddings=True, embedding_method_visualization='umap',
                     protein_dilution=True, classifier_method='random_forest', select_genes=False,
-                    use_recomputed_proliferation=True):
+                    use_recomputed_proliferation=True, simulation_model='ode'):
     """Write the final multi-page PDF report of a CardamomOT run.
 
     Parameters
@@ -2927,6 +2941,8 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
         Cell types of the model outputs: 'random_forest' or 'logistic' (per-sample classifiers on the data).
     select_genes : bool
         Genes of the model chosen by the gene selection: the UMAP of all the cells is also drawn on these genes.
+    simulation_model : str
+        Model of the refined rates: 'ode' or 'sde1' (protein rate d1_eff = d0 d1 / (d0 + d1)), 'sde2' (explicit mRNA, d1).
     n_umap : int or None
         Max cells per dataset used in UMAPs (stratified by time); None = all.
     top_regulators, top_targets : int
@@ -2946,6 +2962,7 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
     R = _ReportData(p, split, stim, prior, normtransform, logtransform, list(perturbations), n_umap, seed,
                     depth_embeddings, embedding_method_visualization, classifier_method)
     R.protein_dilution = bool(protein_dilution)
+    R.simulation_model = str(simulation_model)
     R.use_recomputed_proliferation = bool(use_recomputed_proliferation)
 
     inter = load_network_array(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))

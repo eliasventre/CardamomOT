@@ -34,7 +34,7 @@ STEP_OPTIONS = {
     'run_classical_OT': (),
     'build_reference_network': (),
     'get_degradation_rates': (),
-    'infer_mixture': ('mean-forcing',),
+    'infer_mixture': ('mean-forcing', 'force-basins', 'temporal-basins'),  # basins of the mixture: masses, per time
     'check_mixture_to_data': (),
     'infer_network_structure': ('stimulus', 'prior', 'force-basins', 'temporal-basins'),
     'infer_network_simul': ('stimulus', 'prior'),

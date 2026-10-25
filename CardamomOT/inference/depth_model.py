@@ -2,9 +2,9 @@
 How the depth factor s_i of a cell enters the NB counts NB(k, c) (shape k, rate c: mean k / c at the reference
 depth s = 1), parameter depth_model of NetworkModel:
 
-- 'burst_frequency' (default): the depth multiplies the burst frequency, NB(k s_i, c): mean s k / c, Fano factor
+- 'burst_frequency': the depth multiplies the burst frequency, NB(k s_i, c): mean s k / c, Fano factor
   (1 + c) / c independent of the depth;
-- 'mean' (as scVI): the depth multiplies the burst size, i.e. only the mean, NB(k, c / s_i): mean s k / c,
+- 'mean' (default, as scVI): the depth multiplies the burst size, i.e. only the mean, NB(k, c / s_i): mean s k / c,
   dispersion (shape) k independent of the depth.
 
 Both coincide at s = 1. The setting is process-wide: it is set by the entry points that know the model
@@ -13,7 +13,7 @@ Both coincide at s = 1. The setting is process-wide: it is set by the entry poin
 import numpy as np
 
 MODELS = ('burst_frequency', 'mean')
-_MODEL = ['burst_frequency']
+_MODEL = ['mean']  # default of NetworkModel.depth_model
 
 
 def set_depth_model(model):

@@ -97,7 +97,7 @@ from CardamomOT.inference.halflife_db import detect_species
 
 
 # Genes needed in Data/data.h5ad to score the signatures without Data/data_complete.h5ad
-MIN_GENES_SCORING = 10000
+from CardamomOT.stimulus_rates import MIN_GENES_SCORING  # whole transcriptome: library-size normalisation
 
 def set_rates(obs, birth, death, suffix=''):
     """obs['proliferation_birth_rate'], ['proliferation_death_rate'] and ['proliferation_net_rate'] (= birth - death)."""
@@ -113,7 +113,7 @@ def assign_proliferation_rates(adata, prolif_path, species='human', proliferatio
     Compute and assign adata.obs['proliferation_net_rate'] (birth − death) in place.
 
     Estimated per-cell from literature proliferation/death/senescence gene
-    signatures (tools.estimate_proliferation). A senescence/arrest score
+    signatures (tools.estimate_proliferation), scored on the cells of each sample (dataset_id) alone. A senescence/arrest score
     gates the birth term toward 0 for cells that look arrested/senescent
     rather than actively proliferating, without touching the death term
     (see estimate_proliferation.estimate_growth_rates); set
@@ -153,12 +153,17 @@ def assign_proliferation_rates(adata, prolif_path, species='human', proliferatio
     if senescence_genes is not None:
         kwargs['senescence_genes'] = senescence_genes
 
-    net_lit, birth_lit, death_lit = estimate_growth_rates(adata, return_components=True, **kwargs)
+    # Signatures scored on the cells of each sample alone (control genes of score_genes binned on its own cells): the
+    # rates of a sample do not depend on the other samples of the data
+    samples = adata.obs['dataset_id'].astype(str).to_numpy() if 'dataset_id' in adata.obs else np.array(['0'] * adata.n_obs)
+    net_lit, birth_lit, death_lit = (np.zeros(adata.n_obs) for _ in range(3))
+    for sid in np.unique(samples):
+        m = samples == sid
+        net_lit[m], birth_lit[m], death_lit[m] = estimate_growth_rates(adata[m], return_components=True, **kwargs)
     print(f"{prefix} Estimated literature-based proliferation rates for "
           f"{len(net_lit)} cells (mean net={net_lit.mean():.4f}, birth={birth_lit.mean():.4f}, "
           f"death={death_lit.mean():.4f} h^-1)")
     set_rates(adata.obs, birth_lit, death_lit)
-    samples = adata.obs['dataset_id'].astype(str).to_numpy() if 'dataset_id' in adata.obs else np.array(['0'] * len(net_lit))
     specs = {s: v for s, v in (sample_specs or {}).items() if s in set(samples)}
     for s_ in sorted(set(sample_specs or {}) - set(specs)):
         print(f"{prefix} Warning: anchors given for sample {s_} absent from the data: ignored")
@@ -245,8 +250,7 @@ def add_stimulus_effects(adata_target, adata_score, p):
     stimulus is kept in obs['proliferation_net_rate_base'] (and birth / death in obs['proliferation_*_rate_base']).
     The change of the net rate is shared between birth and death by split_net_change.
     """
-    from CardamomOT.stimulus_rates import load_effects, cell_values, split_effects, log_counts, signature_score
-    from CardamomOT.tools.perturbations import rate_target_genes
+    from CardamomOT.stimulus_rates import load_effects, cell_values, split_effects, signature_scores
     prefix = "[get_proliferation_rates]"
     effects = load_effects(p)
     if not effects or 'proliferation_net_rate' not in adata_target.obs:
@@ -262,20 +266,20 @@ def add_stimulus_effects(adata_target, adata_score, p):
     ct_key = resolve_cell_type_obs(adata_target, 'proliferation')
     labels = obs[ct_key].astype(str).to_numpy() if ct_key else np.array([''] * len(obs))
     add = np.zeros(len(obs))
-    L = None
-    for k, (ct, sig) in split_effects(effects, np.unique(labels) if ct_key else []).items():
+    parts = split_effects(effects, np.unique(labels) if ct_key else [])
+    targets = [target for _, sig in parts.values() for target, _ in sig]
+    scores = {}
+    if targets:  # signature targets: scores on the mRNA of the scored cells (fit_population_anchors uses the same)
+        score_cells = adata_score[adata_target.obs_names]
+        scores = signature_scores(score_cells.X, list(adata_score.var_names), targets, p,
+                                  normalize=score_cells.n_vars >= MIN_GENES_SCORING)
+    for k, (ct, sig) in parts.items():
         for c, d in ct.items():
             add += U[:, k - 1] * d * (labels == c)
             print(f"{prefix} Stimulus {k}: {d:+g} h^-1 on '{c}' ({ct_key}), scaled by its schedule")
         for target, d in sig:
-            if L is None:
-                score_cells = adata_score[adata_target.obs_names]
-                L = log_counts(score_cells.X, normalize=score_cells.n_vars >= MIN_GENES_SCORING)
-            genes = list(adata_score.var_names)
-            idx = [genes.index(g) for g in rate_target_genes(target, genes, input_dir(p))]
-            score = signature_score(L, idx, np.maximum(np.percentile(L[:, idx], 99, axis=0), 1e-6))
-            add += U[:, k - 1] * d * score
-            print(f"{prefix} Stimulus {k}: {target} ({len(idx)} genes) {d:+g} h^-1 at maximal mRNA score")
+            add += U[:, k - 1] * d * scores[target]
+            print(f"{prefix} Stimulus {k}: {target} {d:+g} h^-1 at maximal mRNA score")
     if 'proliferation_birth_rate' not in obs:  # no signatures: birth = max(net, 0) (negligible death)
         set_rates(obs, np.maximum(base, 0.0), np.maximum(-base, 0.0))
     b0, d0 = obs['proliferation_birth_rate'].to_numpy(dtype=float), obs['proliferation_death_rate'].to_numpy(dtype=float)

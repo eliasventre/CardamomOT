@@ -162,8 +162,9 @@ def find_data_file(data_dir: Path, basename: str,
     return None
 
 
-# Obs columns tried in order for each task-specific cell-type grouping.
-# Proliferation and transition groupings fall back on each other before `cell_type`.
+# Obs columns tried in order for each task-specific cell-type grouping. 'selection': identity cell types of the gene
+# selection, of the initialisation and sub-sampling of the mixture and of the batches of the inference. Proliferation
+# and transition groupings (rates only) fall back on each other before `cell_type`.
 CELL_TYPE_OBS_KEYS = {
     "selection": ("cell_type_selection", "cell_type"),
     "proliferation": ("cell_type_proliferation", "cell_type_transition", "cell_type"),
@@ -311,6 +312,30 @@ def find_stimulus_schedule(data_dir) -> Optional[str]:
     return str(path) if path.exists() else None
 
 
+def inference_schedule_times(data_dir, kind='inference'):
+    """Times of the rows of the inference (or test) schedule, given by the workbook (stimulus_schedule_<kind>_times.txt),
+    or None: the rows then follow the sorted timepoints of the run."""
+    path = Path(data_dir) / f"stimulus_schedule_{kind}_times.txt"
+    return np.loadtxt(path, ndmin=1) if path.exists() else None
+
+
+def inference_schedule(data_dir, times=None):
+    """
+    Rows (one per sorted timepoint of `times`, n_stimuli columns) of the inference schedule: each timepoint takes the
+    row of the last time of the schedule at or before it (the first row before it) when the workbook gives the times of
+    its rows, else row k goes to the k-th timepoint. The rows of the file without times; None without schedule.
+    """
+    path = find_stimulus_schedule(data_dir)
+    if path is None:
+        return None
+    U = np.loadtxt(path, ndmin=2)
+    ref = inference_schedule_times(data_dir)
+    if times is None or ref is None:
+        return U
+    from .schedules import step_rows
+    return step_rows(U, ref, np.sort(np.unique(np.asarray(times, dtype=float))))
+
+
 def n_inference_stimuli(data_dir) -> int:
     """Number of stimuli of the inference: columns of its schedule (1 without schedule)."""
     path = find_stimulus_schedule(data_dir)
@@ -341,7 +366,7 @@ def simulation_schedule(data_dir, n_stimuli, scenario=None, with_times=False):
         path = Path(data_dir) / "stimulus_schedule_simulate.txt"
         if not path.exists():
             inf = find_stimulus_schedule(data_dir)
-            return out((np.loadtxt(inf, ndmin=2) if inf is not None else None), None, None)
+            return out((np.loadtxt(inf, ndmin=2) if inf is not None else None), None, inference_schedule_times(data_dir))
         arr = np.loadtxt(path, ndmin=2)
         t_path = Path(data_dir) / "stimulus_schedule_simulate_times.txt"
         times = np.loadtxt(t_path, ndmin=1) if t_path.exists() else 'simulation'

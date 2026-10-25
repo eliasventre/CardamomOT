@@ -27,7 +27,7 @@ import ot
 
 from CardamomOT.logging import get_logger
 from .sampling import stratified_choice
-from .depth_model import burst_frequency, set_depth_model
+from .depth_model import burst_frequency, set_depth_model, nb_numpy_params
 
 # module-level logger
 logger = get_logger(__name__)
@@ -68,12 +68,35 @@ def estim_gamma_poisson(x, mod=0, a_init=0, b_init=0):
     return a, b
 
 
+def _rate_mean_mle(A, x, s, b, n_steps=3):
+    """Rate b of the counts x ~ NB(A_i, b / s_i) (depth_model 'mean') given the shape A_i of each cell: Newton steps on
+    log b from b for sum_i A_i / b - (A_i + x_i) / (b + s_i) = 0 (the moment b = sum A s / sum x is the exact maximum
+    of the likelihood only without depth factors and with 'burst_frequency'); the moment if not concave there."""
+    A, x, s = (np.asarray(v, dtype=float) for v in (A, x, s))
+    moment = float(np.sum(A * s) / max(np.sum(x), EPS))
+    if not (np.isfinite(moment) and moment > 0):  # degenerate shapes (all 0): no likelihood to refine
+        return moment
+    b = float(b) if np.isfinite(b) and b > 0 else moment
+    for _ in range(n_steps):
+        g = np.sum(A / b - (A + x) / (b + s))
+        h = np.sum((A + x) / (b + s) ** 2 - A / b ** 2)
+        if not (np.isfinite(g) and np.isfinite(h)) or h >= 0:
+            return moment
+        step = float(np.clip(-g / (h * b), -1.0, 1.0))
+        b *= np.exp(step)
+        if abs(step) < 1e-10:
+            break
+    return float(b)
+
+
 def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=100, seuil=0.001, tol=1e-6, verb=False,
-                            s=None) -> tuple[Any, Any]:
+                            s=None, c_max=None) -> tuple[Any, Any]:
     """
     Original version used for initialization with discrete timepoints.
     s: per-cell depth factors (counts NB(a s_i, b) with depth_model 'burst_frequency', NB(a, b / s_i) with 'mean');
     None = 1.
+    c_max: cap of the rate b (None: 1 / seuil). Poisson-like counts have their likelihood increasing towards b -> infinity
+    (a / b fixed): b is then fixed at c_max and the a fitted at that rate.
     """
     t = np.sort(list(set(times)))
     m: int = t.size
@@ -99,13 +122,15 @@ def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=10
     
     # Moment equation for b on the raw counts: Σ_i (a_g(i) / b) s_i = Σ_i x_i, i.e. b = Σ_g a_g S_g / Σ x
     # with S_g the sum of the depth factors of group g (S_g = n_g without depth factors): the counts
-    # expected at the cells' depths keep the observed total
+    # expected at the cells' depths keep the observed total; exact maximum of likelihood without depth factors and
+    # with burst_frequency, refined by _rate_mean_mle with the depth model 'mean'
     sx: float = max(np.sum(x), EPS)
     gidx = np.searchsorted(t, times) if s is not None else None
     w_b = n if s is None else np.bincount(gidx, weights=s, minlength=m)
     bf = s is not None and burst_frequency()
 
     k, c = 0, 0
+    b_fixed = False
     while (k == 0) or (k < max_iter and c > tol):
         # Newton step on every a_i > 0 at once (trigamma = zeta(2, .)):
         # gradient Σ_i [ψ(x_i+a) + log(b/s_i) - log(1+b/s_i) - ψ(a)]
@@ -134,7 +159,12 @@ def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=10
         da = np.where(ok, -d / np.where(ok, h, 1.0), 0.0)
         
         a += np.maximum(da, -a)
-        b = np.sum(w_b * a) / sx
+        if not b_fixed:
+            # Rate: moment (exact without depth or with burst_frequency), else its maximum of likelihood (depth 'mean')
+            b = np.sum(w_b * a) / sx if (s is None or bf) else _rate_mean_mle(a[gidx], x, s, b)
+            if c_max is not None and b > c_max:  # Poisson-like drift: rate fixed at its cap, a fitted at that rate
+                a *= c_max / b
+                b, b_fixed = c_max, True
         c = np.max(np.abs(da))
         k += 1
         if (k > 100) and (b > 1/seuil or b < seuil): break
@@ -152,7 +182,7 @@ def infer_kinetics_temporal(x, times, a_init=np.ones(100), b_init=1, max_iter=10
         logger.warning("All a coefficients are zero")
     
     b_old = b
-    b = np.clip(b, seuil, 1/seuil)
+    b = np.clip(b, seuil, 1/seuil if c_max is None else min(1/seuil, c_max))
     a *= b/(b_old + EPS)
     # Keep a > 0 even when all a[i] == 0 (nbinom.logpmf is NaN for a zero rate).
     floor = b/2 if np.max(a) <= 0 else np.minimum(b/2, np.max(a)/100)
@@ -178,10 +208,10 @@ def large_groups(groups):
     return ok[inv]
 
 
-def group_init(x, groups_list, seuil=0.001, s=None):
+def group_init(x, groups_list, seuil=0.001, s=None, c_max=None):
     """
     Initialization of the mixture from labelled groups of cells (times, cell types): for each
-    labelling, one NB shape per group with a common rate (infer_kinetics_temporal), small groups
+    labelling, one NB shape per group with a common rate (infer_kinetics_temporal, rate at most c_max), small groups
     left out (large_groups); the labelling whose extreme modes are the most separated
     (nb_separation) is kept.
     Returns (kmin, kmax, c, separation, index of the labelling kept).
@@ -194,7 +224,7 @@ def group_init(x, groups_list, seuil=0.001, s=None):
         if len(np.unique(groups[keep])) <= 1:
             continue
         a, b = infer_kinetics_temporal(x[keep], groups[keep], seuil=seuil, max_iter=1e5,
-                                       s=None if s is None else s[keep])
+                                       s=None if s is None else s[keep], c_max=c_max)
         cand = (np.min(a), np.max(a), b, nb_separation(np.min(a), np.max(a), b), i)
         if best is None or cand[3] > best[3]:
             best = cand
@@ -203,7 +233,7 @@ def group_init(x, groups_list, seuil=0.001, s=None):
 
 def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=None, b_init=None,
                                    tol=1e-6, max_iter=100,  
-                                   damping=0.7, verb=False, s=None, floor=None) -> tuple[Any, Any]:
+                                   damping=0.7, verb=False, s=None, floor=None, c_max=None) -> tuple[Any, Any]:
     """
     Adapted version of ``infer_kinetics_temporal`` for EM when
     *preserve_mean_values* assignments are used.
@@ -229,6 +259,9 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
         smaller values increase stability at the cost of speed.
     floor : float or None
         Lower bound of ``a``; None: min(b / 2, max(a) / 100) (the CEM basins), a small value for the observation model.
+    c_max : float or None
+        Cap of ``b`` (None: 1 / seuil). Poisson-like components have their likelihood increasing towards b -> infinity
+        (a / b fixed): ``b`` is then fixed at c_max and the ``a`` fitted at that rate.
 
     Returns:
     --------
@@ -264,9 +297,14 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
     sx: np.bool_ | float = max(np.sum(resp * x[:, None]), EPS)
     w_b = n if s is None else resp.T @ np.asarray(s, dtype=float)
     bf = s is not None and burst_frequency()
+    if not bf:
+        # Digamma terms of a count only depend on its value: responsibilities summed over the cells of each distinct count
+        vals, inv = np.unique(x, return_inverse=True)
+        W = np.stack([np.bincount(inv, weights=resp[:, k], minlength=len(vals)) for k in range(K)], axis=1)
     
     # Newton-Raphson with damping
     iteration, conv_metric = 0, 0
+    b_fixed = False
     
     while (iteration == 0) or (iteration < max_iter and conv_metric > tol):
         da = np.zeros(K)
@@ -277,13 +315,13 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
                 gradient = np.sum(resp[:, k] * s * (psi(x + r) - psi(r) + np.log(b) - np.log(1 + b)))
                 hessian = np.sum(resp[:, k] * s ** 2 * (polygamma(1, x + r) - polygamma(1, r)))
             elif a[k] > seuil * 0.1:  # avoid divisions by zero
-                # z = a[k] + x for all observations
-                z = a[k] + x  # (N,)
+                # z = a[k] + x for the distinct counts, weighted by the responsibilities of their cells
+                z = a[k] + vals
                 
                 # weighted gradient and Hessian by resp[:, k]
                 # weighted d/da log p(x|a,b)
-                p0 = np.sum(resp[:, k] * psi(z))
-                p1: np.bool_ = np.sum(resp[:, k] * polygamma(1, z))
+                p0 = W[:, k] @ psi(z)
+                p1: np.bool_ = W[:, k] @ polygamma(1, z)
                 
                 if s is None:
                     gradient = n[k] * (np.log(b) - np.log(b + 1) - psi(a[k])) + p0
@@ -298,7 +336,12 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
                     da[k] = 0.0
         
         a += np.maximum(da, -a)
-        b = np.sum(w_b * a) / sx
+        if not b_fixed:
+            # Rate: moment (exact without depth or with burst_frequency), else its maximum of likelihood (depth 'mean')
+            b = np.sum(w_b * a) / sx if (s is None or bf) else _rate_mean_mle(resp @ a, x, s, b)
+            if c_max is not None and b > c_max:  # Poisson-like drift: rate fixed at its cap, a fitted at that rate
+                a *= c_max / b
+                b, b_fixed = c_max, True
         
         # convergence metric
         conv_metric = np.max(np.abs(da))
@@ -319,7 +362,7 @@ def infer_kinetics_preserve_mean_values_assignment(x, resp, seuil=0.01, a_init=N
     
     # Clipping final conservateur
     b_old: Any | float = b
-    b = np.clip(b, seuil, 1/seuil)
+    b = np.clip(b, seuil, 1/seuil if c_max is None else min(1/seuil, c_max))
     a *= b/(b_old + EPS)
     a = np.maximum(a, np.minimum(b/2, np.max(a)/100) if floor is None else floor)
     
@@ -392,7 +435,7 @@ def predict_resp(x, ks, c, pi=None, forcing=1.0, s=None) -> tuple[Any, Any]:
 
 
 def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=200,
-            vect_t=None, preserve_mean_values=0, mean_forcing=1.0, s=None):
+            vect_t=None, preserve_mean_values=0, mean_forcing=1.0, s=None, c_max=None):
     """
     Hard EM for a Negative Binomial mixture with temporal constraints.
     
@@ -400,6 +443,8 @@ def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=
     ----------
     mean_forcing : float
         Weight of the temporal constraint (0 = no constraint, 1 = strict constraint)
+    c_max : float or None
+        Cap of the rate c of the M-steps (infer_kinetics_temporal)
     """
     
     n_cells = data.size 
@@ -419,7 +464,7 @@ def hard_em(data, n_components, ks_init, c_init, seuil, tol=1e-6, max_iter_loop=
     for it in range(max_iter_loop):
         # M-step: update parameters
         ks_new, c_new = infer_kinetics_temporal(data, basins, a_init=ks, b_init=c,
-                                                 seuil=seuil, max_iter=1e5, tol=tol, s=s)
+                                                 seuil=seuil, max_iter=1e5, tol=tol, s=s, c_max=c_max)
 
         if np.size(ks_new) != n_components:
             # All cells collapsed into fewer basins, so ks shrank: keep the last consistent fit.
@@ -460,7 +505,10 @@ def _assign_basins(resp, data, ks, c, vect_t, preserve_mean_values, n_components
     n_cells = data.size
 
     if not preserve_mean_values:
-        return np.argmax(resp, axis=1), resp.sum(axis=0) / (resp.sum() + EPS)
+        basins = np.argmax(resp, axis=1)
+        if final and vect_t is not None:  # masses per time, as with the temporal constraint
+            return basins, {t: resp[vect_t == t].sum(axis=0) / (resp[vect_t == t].sum() + EPS) for t in np.unique(vect_t)}
+        return basins, resp.sum(axis=0) / (resp.sum() + EPS)
     
     if vect_t is None:
         mu = np.ones(n_cells) / n_cells
@@ -581,27 +629,25 @@ def compute_nu_star(
     return nu_star
 
 
-def ks_statistic(data_full, nu, r, p, repet=10, n_cells_init=200) -> Any | float:
-
-    n_cells: int = min(data_full.size, n_cells_init)
-    stat = 0
+def ks_statistic(data_full, nu, ks, c, s=None, repet=3, n_cells_init=2000) -> float:
+    """KS distance to the uniform of the randomised PIT u_i = F_i(x_i - 1) + V_i P_i(x_i) of the counts, F_i the CDF of
+    the mixture nu of NB(ks, c) at the depth s_i of cell i (1 without depth factors), mean over repet draws on at most
+    n_cells_init cells. Uniform under the model even for discrete counts (comparing the ECDF at sorted counts with
+    the CDF would measure the largest atom, e.g. P(X = 0), through the ties) and for cells of different depths; its
+    noise floor is ~0.87 / sqrt(n cells)."""
+    data_full = np.asarray(data_full, dtype=float)
+    nu = np.asarray(nu, dtype=float)
+    n_cells = min(data_full.size, n_cells_init)
+    j = np.arange(1, n_cells + 1) / n_cells
+    stat = 0.0
     for _ in range(repet):
-        # sorted data
-        data = data_full[np.random.choice(data_full.size, n_cells, replace=False)]
-        data_sorted = np.sort(data)
-        n: int = len(data_sorted)
-
-        # CDF empirique
-        emp_cdf = np.arange(1, n + 1) / n
-
-        # theoretical mixture CDF
-        model_cdf = np.zeros(n)
-        for k in range(len(nu)):
-            model_cdf += nu[k] * nbinom.cdf(data_sorted, r[k], p)
-
-        # statistique KS
-        stat += np.max(np.abs(emp_cdf - model_cdf))
-    
+        idx = np.random.choice(data_full.size, n_cells, replace=False)
+        x = data_full[idx][:, None]
+        n_nb, p_nb = nb_numpy_params(np.asarray(ks, dtype=float)[None, :], c,
+                                     None if s is None else np.asarray(s, dtype=float)[idx][:, None])
+        lo, hi = nbinom.cdf(x - 1, n_nb, p_nb) @ nu, nbinom.cdf(x, n_nb, p_nb) @ nu
+        u = np.sort(lo + np.random.random(n_cells) * (hi - lo))
+        stat += max(np.max(j - u), np.max(u - (j - 1 / n_cells)))
     return stat / repet
 
 
@@ -631,8 +677,8 @@ def _solve_mean_constraint(means_components, data_t, ks, c, nu_init, n_component
                             p_components=p_cells,
                             nu_init=nu_init
                             )
-    # KS statistic at the reference depth (counts rescaled by s and rounded)
-    stat_KS = ks_statistic(data_t if s is None else np.rint(data_t / s), nu_star, ks, c / (1 + c))
+    # Fit of the mixture: KS of the PIT of the counts, each cell at its depth
+    stat_KS = ks_statistic(data_t, nu_star, ks, c, s=s)
     if mean_forcing > 0: alpha_reg = np.clip(stat_KS / mean_forcing, 0.0, 1.0)
     else: alpha_reg = 1.0
 
@@ -676,13 +722,13 @@ def _log_masses_rows(masses, vect_t, n_cells, K):
 
 
 def em_vectorized_nb(x, ks_init, c_init, pi_init=None, max_iter=200, tol=1e-6, seuil=0.01,
-                     damping=0.7, verbose=False, s=None, vect_t=None, floor=None) -> Any:
+                     damping=0.7, verbose=False, s=None, vect_t=None, floor=None, c_max=None) -> Any:
     """
     EM for NB mixture with ANALYTICAL M-step via Newton-Raphson.
     
     Replaces moment-based estimates with direct optimization of the
     weighted log-likelihood, as in :func:`infer_kinetics_temporal`. vect_t given: masses per time (the modes are
-    shared by the times, their weights are not), pi returned as their cell-weighted mean.
+    shared by the times, their weights are not), pi returned as their cell-weighted mean. c_max: cap of the rate c.
     """
     x = np.asarray(x).reshape(-1)
     N: int = x.size
@@ -745,7 +791,8 @@ def em_vectorized_nb(x, ks_init, c_init, pi_init=None, max_iter=200, tol=1e-6, s
             damping=damping,
             verb=verbose,
             s=s,
-            floor=floor
+            floor=floor,
+            c_max=c_max
         )
 
     # Final likelihood
@@ -761,8 +808,8 @@ def em_vectorized_nb(x, ks_init, c_init, pi_init=None, max_iter=200, tol=1e-6, s
 # Continuous model of the counts (max_grid_levels): sigma on n_grid levels of [0, 1], NB(k_low + (k_high - k_low)
 # sigma_l, c), weights per time with a Dirichlet prior GRID_ALPHA on every level + GRID_ALPHA_EXT on the two extremes
 # (anchors k_low and k_high on occupied levels: without it, the extremes drift outwards with little mass); rate c at
-# most GRID_C_MAX (as the cap of the CEM rate in core_binarization)
-GRID_LEVELS, GRID_ALPHA, GRID_ALPHA_EXT, GRID_C_MAX = 11, 0.01, 1.0, 9.0
+# most c_max (dispersion_max of the model)
+GRID_LEVELS, GRID_ALPHA, GRID_ALPHA_EXT = 11, 0.01, 1.0
 
 
 def grid_weights_update(counts, alpha=GRID_ALPHA, alpha_ext=GRID_ALPHA_EXT):
@@ -824,7 +871,7 @@ def mixture_criterion(x, vect_t, levels, c, weights, s=None, criterion='icl', we
 
 
 def fit_grid_mixture(x, vect_t, k_low, k_high, c, s=None, seuil=0.01, n_grid=GRID_LEVELS, n_em=300, tol=1e-8,
-                     depth_model=None):
+                     depth_model=None, c_max=None):
     """
     Continuous model of the counts of one gene (max_grid_levels levels at most), started from the extreme modes of the CEM (+ soft
     EM): x ~ NB(k_low + (k_high - k_low) sigma_l, c) at the depth s of the cell (depth_model), sigma_l on n_grid levels
@@ -833,7 +880,7 @@ def fit_grid_mixture(x, vect_t, k_low, k_high, c, s=None, seuil=0.01, n_grid=GRI
     triples. Two modes read the cells in a transient as part of
     the extremes, which pulls them inwards; here they sit on intermediate levels. Returns (levels (n_grid,), c, weights
     {t: (n_grid,)}, posteriors (N, n_grid)), or None for a constant gene. depth_model: set in the process that runs the
-    fit (parallel workers), None: current setting.
+    fit (parallel workers), None: current setting. c_max: cap of the rate c (dispersion_max), None: 1 / seuil.
     """
     if depth_model is not None:
         set_depth_model(depth_model)
@@ -861,7 +908,7 @@ def fit_grid_mixture(x, vect_t, k_low, k_high, c, s=None, seuil=0.01, n_grid=GRI
         drate = -R * (r / rate - (X + r) / (1 + rate)) * (1.0 if bf else 1.0 / su)
         return -np.sum(R * lp), np.array([np.sum(dK) * kl, np.sum(dK * sig) * dk, np.sum(drate) * cc])
 
-    c_hi = min(1.0 / seuil, GRID_C_MAX)
+    c_hi = 1.0 / seuil if c_max is None else min(1.0 / seuil, c_max)
     th = np.log([max(k_low, 1e-8), max(k_high - k_low, 1e-8), np.clip(c, seuil, c_hi)])
     bounds = [(np.log(1e-8), np.log(1e5))] * 2 + [(np.log(seuil), np.log(c_hi))]
     W = np.full((len(times), n_grid), 1.0 / n_grid)
@@ -923,7 +970,7 @@ class NegativeBinomialMixtureEM:
     def __init__(self, min_components=1, max_components=3, hard_em=1, mean_forcing_em=1.0,
                  tol=1e-5, max_iter_em=200, verbose=False, preserve_mean_values=0,
                  compare_init_aic=True, damping=1.0,
-                 depth_model=None) -> None:
+                 depth_model=None, dispersion_max=None) -> None:
         """
         NB mixture with optimal analytical M-step.
 
@@ -935,6 +982,8 @@ class NegativeBinomialMixtureEM:
             Damping factor for Newton-Raphson (0.5-0.8 = stable, 1.0 = fast)
         depth_model : 'burst_frequency', 'mean' or None (current setting): how depth factors enter the NB
             (depth_model.py), set in the process that runs fit (parallel workers included).
+        dispersion_max : float or None
+            Cap of the rate c, applied while fitting (initialisation, CEM and soft EM M-steps); None: 1 / seuil.
         """
         assert min_components >= 1 and max_components >= min_components
         self.min_components: int = min_components
@@ -948,6 +997,7 @@ class NegativeBinomialMixtureEM:
         self.compare_init_aic: bool = compare_init_aic
         self.damping: float = damping
         self.depth_model = depth_model
+        self.dispersion_max = dispersion_max
         self.best_model = None
 
 
@@ -968,14 +1018,14 @@ class NegativeBinomialMixtureEM:
             c_glob = max(1e-6, k_glob / (mean + 1e-16))
 
         self._init_groups = 'time'
-        init = group_init(x, [vect_t, vect_celltypes], seuil, s) if vect_t is not None else None
+        init = group_init(x, [vect_t, vect_celltypes], seuil, s, c_max=self.dispersion_max) if vect_t is not None else None
         if init is not None:
             # Extreme modes of the most diverse labelling (times or cell types), common rate
             kmin, kmax, c_init, _, i = init
             ks_init = np.linspace(kmin, kmax, K)
             self._init_groups = ('time', 'celltype')[i]
         elif vect_t is not None:
-            a_per_time, b_est = infer_kinetics_temporal(x, vect_t, seuil=seuil, max_iter=1e5, s=s)
+            a_per_time, b_est = infer_kinetics_temporal(x, vect_t, seuil=seuil, max_iter=1e5, s=s, c_max=self.dispersion_max)
             ks_init = np.linspace(np.min(a_per_time), np.max(a_per_time), K)
             c_init = b_est
         else:
@@ -992,7 +1042,7 @@ class NegativeBinomialMixtureEM:
                 c_init = c_glob
             else:
                 if quant_init is None:
-                    a_per_type, b_est = infer_kinetics_temporal(x, vect_celltypes, seuil=seuil, max_iter=1e5)
+                    a_per_type, b_est = infer_kinetics_temporal(x, vect_celltypes, seuil=seuil, max_iter=1e5, c_max=self.dispersion_max)
                     ks_init = np.linspace(np.min(a_per_type), np.max(a_per_type), K)
                     c_init = b_est
                 else:
@@ -1003,12 +1053,15 @@ class NegativeBinomialMixtureEM:
                     a_per_quant = np.array([np.mean(x[(centers[k] <= x) & 
                                             (x <= centers[k+1])]) 
                                             for k in range(0, K)]) 
-                    a_per_type, b_type = infer_kinetics_temporal(x, vect_celltypes, seuil=seuil, max_iter=1e5)
+                    a_per_type, b_type = infer_kinetics_temporal(x, vect_celltypes, seuil=seuil, max_iter=1e5, c_max=self.dispersion_max)
                     ks_init = np.linspace(min(np.min(a_per_quant), np.min(a_per_type/b_type)), max(np.max(a_per_quant), np.max(a_per_type/b_type)), K)
                     c_init = b_type
                     ks_init *= c_glob
 
         
+        if self.dispersion_max is not None and c_init > self.dispersion_max:  # rate at its cap, same means
+            ks_init = np.asarray(ks_init, dtype=float) * self.dispersion_max / c_init
+            c_init = self.dispersion_max
         n = 1/2
         m, M = np.min(ks_init), np.max(ks_init)
         while (len(np.unique((ks_init/c_init).astype(int))) < K) and (n > 1/x.size):
@@ -1041,7 +1094,7 @@ class NegativeBinomialMixtureEM:
         basins: np.ndarray[Any, np.dtype[Any]] = np.zeros(N, dtype=int)
 
         # Same pi structure as _assign_basins(final=True).
-        if self.preserve_mean_values and vect_t_all is not None:
+        if vect_t_all is not None:
             pi: Any = {t: np.ones(1) for t in np.unique(vect_t_all)}
         else:
             pi = np.ones(1)
@@ -1129,7 +1182,7 @@ class NegativeBinomialMixtureEM:
                 ks_init, c_init, pi_init, basins = hard_em(
                     x, K_try, ks_init, c_init, seuil, tol=self.tol, vect_t=vect_t,
                     preserve_mean_values=self.preserve_mean_values,
-                    mean_forcing=self.mean_forcing_em, s=s
+                    mean_forcing=self.mean_forcing_em, s=s, c_max=self.dispersion_max
                 )
 
             # ── AIC de l'initialisation ───────────────────────────────────
@@ -1156,7 +1209,7 @@ class NegativeBinomialMixtureEM:
                     em_vectorized_nb(
                         x, ks_final, c_final, pi_final, max_iter=self.max_iter_em,
                         tol=self.tol, seuil=seuil, damping=self.damping,
-                        verbose=self.verbose, s=s, vect_t=vect_t
+                        verbose=self.verbose, s=s, vect_t=vect_t, c_max=self.dispersion_max
                     )
 
                 if self.verbose:

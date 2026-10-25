@@ -147,7 +147,8 @@ def add_hard_options(parser: argparse.ArgumentParser) -> None:
         'prior': 'weight of the edges absent from the literature prior cardamomOT/ref_network.csv '
                  '(0 = hard constraint, sparse; 1 = prior ignored) (model.prior_network_pen)',
         'mean-forcing': 'mean-forcing intensity of the NB mixture (model.mean_forcing_em)',
-        'force-basins': 'preservation of the NB basin weights in the network inference, in [0, 1] (model.force_basins)',
+        'force-basins': 'preservation of the NB basin weights (initial basins of the mixture and network '
+                        'inference), in [0, 1] (model.force_basins)',
         'temporal-basins': 'temporal consistency of the basins, 0 or 1 (model.temporal_basins)',
     }
     for h in HARD_OPTIONS:

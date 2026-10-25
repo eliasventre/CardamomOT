@@ -199,8 +199,10 @@ def main(argv):
     s_sim = 1.0 if s_sim is None else s_sim[:, None]
     if depth_cells is not None:
         print("[check_sim_to_data] Counts drawn at the depth of the cells mimicked (obs['depth_factor'])")
-    # RNA of the trajectories (slot n at t -> slot n at t+1): counts of the real cell behind each state
-    if real_idx is not None and len(real_idx) == data_ref.shape[1] and np.all(real_idx >= 0):
+    # RNA of the trajectories (slot n at t -> slot n at t+1): counts of the real cell behind each state, else the
+    # trajectory mRNA, already at the reference depth
+    ref_real = real_idx is not None and len(real_idx) == data_ref.shape[1] and np.all(real_idx >= 0)
+    if ref_real:
         data_ref[1:, :] = data_rna_extracted[:, real_idx]
 
     # Generate data_sim: either directly from the simulated mRNAs (simulation_mrnas_direct) or via NB sampling
@@ -268,8 +270,9 @@ def main(argv):
         if name == 'beta':
             # kon of each state (its mode per gene): mode-shuffle ceiling of the gene-pair correlations (report)
             A.layers['kon'] = np.asarray(vect_kon_beta[:, ns:], dtype=np.float32)
-        if name == 'rna_traj' and 'depth_factor' in adata.obs and real_idx is not None:
-            # Depth of the real cell behind each state (counts of the real cells), even if the run did not use it
+        if name == 'rna_traj' and 'depth_factor' in adata.obs and ref_real:
+            # Depth of the real cell behind each state (counts of the real cells), even if the run did not use it;
+            # none for the trajectory mRNA (reference depth)
             A.obs['depth_factor'] = state_depth(adata.obs['depth_factor'].values.astype(float), real_idx)
         if L_growth is not None:
             A.obs['growth_log_weight'] = L_growth

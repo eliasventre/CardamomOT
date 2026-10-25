@@ -30,7 +30,7 @@ import sys; sys.path += ['../']
 import os
 import numpy as np
 from CardamomOT import extract_degradation_rates
-from CardamomOT.inference.halflife_db import REFERENCES
+from CardamomOT.inference.halflife_db import REFERENCES, get_halflife_db
 import anndata as ad
 from CardamomOT.run_options import parse_step_options, settings
 
@@ -41,21 +41,23 @@ def assign_rates(adata, details, species, overwrite=False):
     """
     Write d0/d1 (h⁻¹) and their provenance into ``adata.var``.
 
-    Rates are clipped to [median / 10, 10 × median] of the dataset, as before,
-    now centred on the median so that a few very unstable genes do not shift
-    the window. Existing columns are kept unless ``overwrite``.
+    Rates are clipped to [median / 10, 10 × median], the median of the species' reference table: the same window
+    whatever the genes of the dataset (a gene gets the same rates in every project). Existing columns are kept
+    unless ``overwrite``.
     """
+    db = get_halflife_db()
     assert list(details["gene"]) == [str(g) for g in adata.var_names], "details must follow adata.var_names"
     for col, quantity in (("d0", "mrna"), ("d1", "protein")):
         if col in adata.var.columns and not overwrite:
             print(f"[get_degradation_rates] {col} already present, skipping (overwrite_degradation_rates = True to replace it)")
             continue
         rates = details[col].to_numpy(dtype=float)
-        med = np.median(rates)
+        med = float(np.log(2) / np.exp(db.median[species][quantity]))  # db medians: log half-lives (h)
         adata.var[col] = np.clip(rates, med / 10, 10 * med)
         adata.var[f"{col}_source"] = details[f"{quantity}_source"].to_numpy()
-        print(f"[get_degradation_rates] Assigned {quantity} degradation rates ({col}), "
-              f"median: {med:.4f} h^-1 (half-life {np.log(2) / med:.1f} h)")
+        print(f"[get_degradation_rates] Assigned {quantity} degradation rates ({col}), median of the genes "
+              f"{np.median(adata.var[col]):.4f} h^-1, clipped within x10 of the reference median {med:.4f} h^-1 "
+              f"(half-life {np.log(2) / med:.1f} h): {int(np.sum((rates < med / 10) | (rates > 10 * med)))} genes")
     adata.uns["degradation_rates"] = {"units": "hour^-1", "species": species,
                                       "reference_mrna": REFERENCES[species]["mrna"],
                                       "reference_protein": REFERENCES[species]["protein"]}

@@ -146,7 +146,7 @@ def test_schedule(project, n_stimuli, times=None, inference_times=None):
     inference overrides. With times (test) and inference_times, the inference schedule (default rows, overrides
     without time) is carried from the inference times to the test ones as a step function.
     """
-    from .config import find_stimulus_schedule
+    from .config import find_stimulus_schedule, inference_schedule_times
     from .inputs import input_dir
     d = input_dir(project)
     over = load_overrides(project, 'test', n_stimuli)
@@ -157,13 +157,18 @@ def test_schedule(project, n_stimuli, times=None, inference_times=None):
             print(f"[CardamomOT] Warning: stimulus_test_schedule has {default.shape[1]} column(s) instead of "
                   f"{n_stimuli}: inference schedule used")
         else:
+            ref = inference_schedule_times(d, 'test')  # rows matched to the test times by their time if given
+            if ref is not None and times is not None:
+                default = step_rows(default, ref, np.sort(np.unique(times)))
             return default, over
     inf = find_stimulus_schedule(d)
     default = np.loadtxt(inf, ndmin=2) if inf is not None else None
     inf_over = load_overrides(project, 'inference', n_stimuli)
     if times is not None and inference_times is not None:
         if default is not None:
-            default = step_rows(default, inference_times, np.sort(np.unique(times)))
+            # Rows at their own times when the workbook gives them, else on the inference times
+            ref = inference_schedule_times(d)
+            default = step_rows(default, inference_times if ref is None else ref, np.sort(np.unique(times)))
         inf_over = {s: (np.sort(np.asarray(inference_times, dtype=float)) if t is None else t, v)
                     for s, (t, v) in inf_over.items()}
     return default, {**inf_over, **over}

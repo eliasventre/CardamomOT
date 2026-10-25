@@ -29,7 +29,7 @@ from CardamomOT.inputs import input_dir
 from CardamomOT import check_stationary, STATIONARY_EXIT_CODE, STATIONARY_MESSAGE
 from CardamomOT import read_stimulus_targets, stimulus_target_mask
 from CardamomOT.run_options import parse_step_options, settings, configure
-from CardamomOT.config import find_stimulus_schedule
+from CardamomOT.config import inference_schedule
 import anndata as ad
 import pandas as pd
 import os
@@ -67,11 +67,10 @@ def main(argv):
     print(f"[infer_network_structure] Starting network inference ({adata.shape[1]} genes)...")
 
     # ─── LOAD STIMULUS SCHEDULE (optional) ──────────────────────────────
-    stim_sched = None
-    sched_path = (find_stimulus_schedule(input_dir(p))
-                  or os.path.join(input_dir(p), 'stimulus_schedule_inference.txt'))
-    if os.path.exists(sched_path):
-        stim_sched = np.loadtxt(sched_path)
+    # Rows on the timepoints of the data, by their time when the workbook gives it
+    sched_path = os.path.join(input_dir(p), 'stimulus_schedule_inference.txt')
+    stim_sched = inference_schedule(input_dir(p), adata.obs['time'].values)
+    if stim_sched is not None:
         print(f"[infer_network_structure] Loaded stimulus schedule from {sched_path}")
 
     # ─── DETECT n_stimuli FROM SCHEDULE ─────────────────────────────────

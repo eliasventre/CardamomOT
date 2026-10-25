@@ -37,7 +37,7 @@ PARAMETER_GROUPS = [
         'depth_model']),
     ('NB mixture and samples', [
         'mean_forcing_em', 'batch_size_mixture', 'max_iter_softEM', 'min_mixture_components', 'max_grid_levels',
-        'mixture_selection_criterion', 'integrate_samples', 'ref_sample_integration']),
+        'dispersion_max', 'mixture_selection_criterion', 'integrate_samples', 'ref_sample_integration']),
     ('Network inference', [
         'force_basins', 'temporal_basins', 'min_n_loops', 'max_iter', 'batch_size_traj', 'n_network_fits',
         'constrain_basal_uniform', 'network_condition_pen', 'weight_flow_matching', 'flow_matching_nodes',
@@ -109,7 +109,7 @@ SHEETS = {
         'to the simulated intervals ending at or after its time, so switching times should be simulated times.'),
     'perturbation_inference': (
         [('sample_id', 'dataset_id of a measured sample carrying genetic perturbations (KO / OV), or "all" '
-                       'for the row describing the inference stimuli (STIMk / RATEk)'),
+                       '(or empty) for the row describing the inference stimuli (STIMk / RATEk)'),
          ('KO', 'Genes knocked-out in this sample, comma-separated'),
          ('OV', 'Genes over-expressed in this sample, comma-separated'),
          ('remove_from_inference', 'True / 1: every cell of this sample is held out (data_test, not split), '
@@ -386,6 +386,14 @@ def _schedule(df, cols):
     return df[cols].astype(float).to_numpy()
 
 
+def _schedule_times(df, cols, path):
+    """Times of the rows of a schedule (sorted, as _schedule) written to path when every row has one: the rows are then
+    matched to the timepoints of each step by their time, not by their position."""
+    df = df.dropna(subset=cols, how='all')
+    if 'time' in df and len(df) and df['time'].notna().all():
+        np.savetxt(path, np.sort(df['time'].astype(float).to_numpy()), fmt='%g')
+
+
 def _split_samples(df):
     """(default rows, {sample_id: rows}) of a schedule sheet (sample_id empty or "all" = default)."""
     if 'sample_id' not in df or not len(df):
@@ -486,6 +494,7 @@ def export(wb, out_dir):
     st, st_over = _split_samples(st_all)
     if inf_cols and len(st.dropna(subset=inf_cols, how='all')):
         np.savetxt(os.path.join(out_dir, 'stimulus_schedule_inference.txt'), _schedule(st, inf_cols), fmt='%g')
+        _schedule_times(st, inf_cols, os.path.join(out_dir, 'stimulus_schedule_inference_times.txt'))
     n_inf = max(1, len(inf_cols))
     _add_overrides(overrides, 'inference', st_over, inf_cols)
 
@@ -495,11 +504,14 @@ def export(wb, out_dir):
     te, te_over = _split_samples(te_all)
     if te_cols and len(te.dropna(subset=te_cols, how='all')):
         np.savetxt(os.path.join(out_dir, 'stimulus_schedule_test.txt'), _schedule(te, te_cols), fmt='%g')
+        _schedule_times(te, te_cols, os.path.join(out_dir, 'stimulus_schedule_test_times.txt'))
     _add_overrides(overrides, 'test', te_over, te_cols)
 
     # Inference stimuli (row all of perturbation_inference): targets STIMk and rate effects RATEk
     pi = read_sheet(wb, 'perturbation_inference')
-    is_all = (pi['sample_id'].astype(str).str.strip().str.lower() == 'all') if 'sample_id' in pi else pd.Series([], dtype=bool)
+    # Row of the inference stimuli: sample_id 'all' or empty (the rows of a sample carry its KO / OV, removal)
+    is_all = (pi['sample_id'].isna() | pi['sample_id'].astype(str).str.strip().str.lower().isin(['', 'all', 'nan', 'none'])
+              if 'sample_id' in pi else pd.Series(True, index=pi.index))
     lists, rates = {}, {}
     for _, r in pi[is_all].iterrows():
         for c in pi.columns:

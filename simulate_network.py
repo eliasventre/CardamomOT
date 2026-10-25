@@ -28,8 +28,7 @@ import torch
 
 def attach_proliferation(model, p, tag='[simulate_network]', branching=True):
     """Proliferation MLP (prolif_network.pt, one or two heads) attached to model: birth rate of the dilution
-    (protein_dilution) and, with branching, branching simulation with the effects of the inference stimuli on the
-    net rate, as in simulate_network."""
+    (protein_dilution) and, with branching, branching simulation at the net rate of the MLP (stimulus as input)."""
     from CardamomOT.inference.proliferations import load_proliferation
     # One MLP (one or two heads), or one per network condition (ProliferationMLP_per_condition)
     prolif = load_proliferation(os.path.join(p, 'cardamomOT'))
@@ -45,12 +44,6 @@ def attach_proliferation(model, p, tag='[simulate_network]', branching=True):
     if not branching:
         print(f"{tag} Loaded proliferation network — birth rate of the dilution (no branching)")
         return True
-    stim_pkl = os.path.join(p, 'cardamomOT', 'stimulus_rates.pkl')
-    if os.path.exists(stim_pkl):
-        import pickle
-        model.stimulus_rate_model = pickle.load(open(stim_pkl, 'rb'))
-        print(f"{tag} Effects of the inference stimuli on the net rate (perturbation_inference) "
-              "applied with the simulated schedule")
     print(f"{tag} Loaded proliferation network — branching simulation enabled")
     return True
 

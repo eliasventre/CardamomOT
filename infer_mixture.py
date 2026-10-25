@@ -7,8 +7,9 @@ This script infers the burst kinetics parameters (mixture model) from temporal
 scRNA-seq data.
 
 Usage:
-    python infer_mixture.py -i <project_path> [--mean-forcing <float>]
-(split, max_iter_softEM, integrate_samples, ref_sample_integration: model_parameters sheet)
+    python infer_mixture.py -i <project_path> [--mean-forcing <float>] [--force-basins <float>] [--temporal-basins <0|1>]
+(split, max_iter_softEM, integrate_samples, ref_sample_integration: model_parameters sheet; force_basins and
+temporal_basins: the initial basins, EMD under the mode masses, as the basin updates of the network inference)
 
 Several samples (obs['dataset_id'] with >= 2 samples): the mixture is fitted per sample and kept per
 sample (mixture_parameters.npy (S, M+1, G)); with integrate_samples, the counts of each sample are
@@ -28,7 +29,7 @@ from CardamomOT import NetworkModel as NetworkModel_beta, check_stationary
 from CardamomOT.inputs import input_dir
 import anndata as ad
 from CardamomOT.run_options import parse_step_options, settings, configure
-from CardamomOT.config import find_stimulus_schedule
+from CardamomOT.config import inference_schedule
 import os
 import pickle
 
@@ -74,7 +75,7 @@ def main(argv):
     Main function to run the mixture model inference pipeline.
 
     Args:
-        argv: Command-line arguments (-i <project>, --mean-forcing).
+        argv: Command-line arguments (-i <project>, --mean-forcing, --force-basins, --temporal-basins).
     """
     opts = parse_step_options(argv, 'infer_mixture', __doc__)
     p = opts.p
@@ -87,8 +88,11 @@ def main(argv):
             print(f"[infer_mixture] Loaded data from {data_path}")
         # Depth factors of data_<split> must be those of Data/data.h5ad (estimate_cell_depth rerun after select_genes?)
         full_path = os.path.join(p, 'Data', 'data.h5ad')
-        if 'depth_factor' in adata.obs and os.path.exists(full_path):
-            obs_full = ad.read_h5ad(full_path, backed='r').obs
+        obs_full = ad.read_h5ad(full_path, backed='r').obs if os.path.exists(full_path) else None
+        if obs_full is not None and 'depth_factor' not in adata.obs and 'depth_factor' in obs_full:
+            print(f"[infer_mixture] Warning: obs['depth_factor'] in Data/data.h5ad but not in data_{split}: the mixture is "
+                  "fitted without depth factors; rerun select_genes (data files written before estimate_cell_depth)")
+        if 'depth_factor' in adata.obs and obs_full is not None:
             if 'depth_factor' not in obs_full:
                 print("[infer_mixture] Warning: obs['depth_factor'] in data_{split} but no longer in Data/data.h5ad: "
                       "rerun select_genes (data files written before estimate_cell_depth)".format(split=split))
@@ -116,11 +120,10 @@ def main(argv):
               "fitting mixture without temporal constraints")
 
     # ─── LOAD STIMULUS SCHEDULE (optional) ──────────────────────────────
-    stim_sched = None
-    sched_path = (find_stimulus_schedule(input_dir(p))
-                  or os.path.join(input_dir(p), 'stimulus_schedule_inference.txt'))
-    if os.path.exists(sched_path):
-        stim_sched = np.loadtxt(sched_path)
+    # Rows on the timepoints of the data, by their time when the workbook gives it
+    sched_path = os.path.join(input_dir(p), 'stimulus_schedule_inference.txt')
+    stim_sched = inference_schedule(input_dir(p), adata.obs['time'].values)
+    if stim_sched is not None:
         if verb:
             print(f"[infer_mixture] Loaded stimulus schedule from {sched_path}")
 

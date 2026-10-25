@@ -23,6 +23,8 @@ reference (groups = 'sample|time[|cell type]' labels, sample = part before the f
   1 = full correction of the depth differences between the groups.
 Groups (or samples) of fewer than 50 cells keep c = 1.
 """
+import zlib
+
 import numpy as np
 import scipy.sparse
 
@@ -119,21 +121,23 @@ def compute(X, lib, groups, reference='sample_pairwise', alpha=1.0, min_mean=0.1
             max_genes_cov=500, max_iter=5, seed=0):
     if reference not in REFERENCES:
         raise ValueError(f"poissonian depth: reference '{reference}' (use one of {REFERENCES})")
-    rng = np.random.default_rng(seed)
+    # One generator per group (or sample) from its label: its depths do not depend on the other samples of the data
+    rng_of = lambda label: np.random.default_rng([int(seed or 0), zlib.crc32(str(label).encode())])
     X = X.tocsr() if scipy.sparse.issparse(X) else scipy.sparse.csr_matrix(X)
     groups = np.asarray(groups)
     smp = np.array([str(g).split('|')[0] for g in groups])
     c = np.ones(X.shape[0])
-    args = (rng, min_mean, n_boot, max_genes_cov, max_iter)
+    args = (min_mean, n_boot, max_genes_cov, max_iter)
     if reference == 'sample_all':
         # One population per sample: at most n_cells per group of the sample, pooled
         for s_ in np.unique(smp):
             m = np.flatnonzero(smp == s_)
             if len(m) < 50:
                 continue
+            rng = rng_of(s_)
             sub = np.concatenate([rng.choice(np.flatnonzero(groups == g), min(n_cells, int(np.sum(groups == g))),
                                              replace=False) for g in np.unique(groups[m])])
-            s_s, P = _group_poisson(X[sub].toarray().astype(float), *args)
+            s_s, P = _group_poisson(X[sub].toarray().astype(float), rng, *args)
             print(f"[poissonian depth] sample {s_} (sample_all): extrinsic noise s = {s_s:.2f}, {len(P)} Poisson genes")
             if len(P) >= 10:
                 c[m] = _size(X, m, P)
@@ -144,8 +148,9 @@ def compute(X, lib, groups, reference='sample_pairwise', alpha=1.0, min_mean=0.1
         m = np.flatnonzero(groups == g)
         if len(m) < 50:
             continue
+        rng = rng_of(g)
         sub = rng.choice(m, min(n_cells, len(m)), replace=False)
-        s_g, P = _group_poisson(X[sub].toarray().astype(float), *args)
+        s_g, P = _group_poisson(X[sub].toarray().astype(float), rng, *args)
         if len(P) < 10:
             continue
         genes[g] = P

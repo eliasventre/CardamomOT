@@ -331,6 +331,10 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
     # inferred OT couplings) and recomputes kon_theta with the simul network.
     # No network inference, MLP training, or degradation update is performed.
     print(f"[infer_test] Running restricted post-processing (estimate_trajectories + kon_theta)...")
+    # Net growth of the test states as in the training (use_recomputed_proliferation): the growth pass, else the prior
+    # rates of their real cells (birth / death of the dilution, fit_birth_death_to_growth)
+    if not model.use_recomputed_proliferation and getattr(model, 'R_prior', None) is not None:
+        model.R_opt = model.R_prior
     try:
         model.refine_network_degradations(test=True, stimulus_schedule=stim_sched)
         print(f"[infer_test] Restricted post-processing completed")
@@ -494,6 +498,8 @@ def load_train_arrays(p, cardamom_dir, train_ids):
         print("[infer_test] Error: training basins do not match data_train.h5ad (rerun infer_network_structure)")
         sys.exit(1)
     train['sample_ids'] = list(np.sort(obs['dataset_id'].unique())) if 'dataset_id' in obs and train_ids is not None else [0]
+    # Sample of each training cell: calibration of the test basins on the training cells of the same sample
+    train['cell_samples'] = obs['dataset_id'].astype(str).to_numpy() if 'dataset_id' in obs else None
     return train
 
 
@@ -501,8 +507,8 @@ def _restrict_slots(model, keep):
     """Model trajectories restricted to the slots `keep` (bool (N,)), every timepoint."""
     T = len(np.unique(model.times_data))
     n = len(model.times_data)  # length before any restriction (times_data itself is restricted in the loop)
-    for attr in ('prot', 'rna', 'kon_beta', 'kon_theta', 'traj_real_idx', 'R_opt', 'R_stim_offset', 'samples_data',
-                 'state_birth', 'state_death', 'state_birth_base', 'state_death_base', 'times_data'):
+    for attr in ('prot', 'rna', 'kon_beta', 'kon_theta', 'traj_real_idx', 'R_opt', 'samples_data',
+                 'state_birth', 'state_death', 'times_data'):
         arr = getattr(model, attr, None)
         if arr is not None and np.ndim(arr) >= 1 and len(arr) == n:
             arr = np.asarray(arr)
@@ -567,7 +573,13 @@ def validation_pass(p, opts, adata_rem, removed, refs, cardamom_dir):
         k1c, cc = nb_cell_parameters(m.a, np.full(n_sim, ref_idx))
         depth = None
         if m.use_depth_factor and 'depth_factor' in cells.obs:
-            depth = np.random.choice(cells.obs['depth_factor'].to_numpy(dtype=float), n_sim)
+            # Per simulated time, depths of the cells of r at that time (nearest observed time of r otherwise)
+            s_obs, t_cells = cells.obs['depth_factor'].to_numpy(dtype=float), cells.obs['time'].to_numpy(dtype=float)
+            t_sim = np.asarray(m.times_simul, dtype=float)
+            depth = np.empty(n_sim)
+            for t in np.unique(t_sim):
+                rows = t_sim == t
+                depth[rows] = np.random.choice(s_obs[t_cells == t_obs[np.argmin(np.abs(t_obs - t))]], int(rows.sum()))
         sd_ = 1.0 if depth is None else depth[:, None]
         n_param, p_param = nb_numpy_params((k1c + 1e-6) * kon, cc, sd_, m.depth_model)
         n_param = np.maximum(n_param[:, ns:], 1e-6)

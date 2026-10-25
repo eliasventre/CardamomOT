@@ -52,7 +52,7 @@ from CardamomOT.inference.gene_selection import select_genes
 from CardamomOT import check_stationary, read_gene_list, resolve_cell_type_obs, ensure_raw_counts, harmonize_obs, read_stimulus_targets
 import anndata as ad
 from CardamomOT.run_options import parse_step_options, settings, configure
-from CardamomOT.config import find_stimulus_schedule, n_inference_stimuli
+from CardamomOT.config import inference_schedule, n_inference_stimuli
 import pandas as pd
 
 
@@ -107,8 +107,9 @@ def perturbed_genes(p, names=None):
 
 def proliferation_markers(p, model, ad_sel, exclude=()):
     """Proliferation markers always selected when the proliferation is modelled (protein_dilution or
-    simulate_with_proliferation): the n_proliferation_markers genes that best predict the prior net rate of the cells
-    of ad_sel (gene_selection.proliferation_markers), so that the proliferation MLP R(P) reads informative proteins."""
+    simulate_with_proliferation): n_proliferation_markers genes of ad_sel, half separating the labels of
+    obs['cell_type_proliferation'], half predicting the prior net rate (gene_selection.proliferation_markers), so that
+    the proliferation MLP R(P) reads informative proteins."""
     n = int(model.n_proliferation_markers or 0)
     if n <= 0 or not (model.protein_dilution or model.simulate_with_proliferation):
         return []
@@ -193,9 +194,7 @@ def main(argv):
 
         # Stimulus schedule per sorted timepoint (default: 0 at the first time, 1 after)
         tu = np.sort(np.unique(times))
-        sched_path = (find_stimulus_schedule(input_dir(p))
-                      or os.path.join(input_dir(p), 'stimulus_schedule_inference.txt'))
-        stim = np.loadtxt(sched_path) if os.path.exists(sched_path) else None
+        stim = inference_schedule(input_dir(p), tu)  # by their time when the workbook gives it
         model._stim_schedule = model._build_stimulus_schedule(tu, stim)
         # Per-sample schedules (sample_id rows of stimulus_inference_schedule): one schedule per sample
         from CardamomOT.schedules import sample_names
@@ -211,15 +210,24 @@ def main(argv):
 
         stim = stim_at(tu)
 
-        # Fate drivers of the classical OT (module representatives, round robin over the fates)
-        drivers = []
+        # Fate drivers of the classical OT (module representatives, round robin over the fates); those of a network
+        # condition for its own selection (column 'condition', classical OT of each condition apart)
+        drv_table = None
         drv_path = os.path.join(p, 'cardamomOT', 'classical_OT', 'fate_drivers.csv')
         if model.n_driver_genes and os.path.exists(drv_path):
             from CardamomOT.tools.classical_ot import driver_order
-            drivers = driver_order(pd.read_csv(drv_path))
-            print(f"[select_genes] {len(drivers)} fate drivers (q <= 0.05, module representatives) from {drv_path}")
+            drv_table = pd.read_csv(drv_path)
+            print(f"[select_genes] {len(driver_order(drv_table))} fate drivers (q <= 0.05, module representatives) "
+                  f"from {drv_path}")
         elif model.n_driver_genes:
             print("[select_genes] No cardamomOT/classical_OT/fate_drivers.csv (run_classical_OT): no fate drivers")
+
+        def drivers_of(c=None):
+            if drv_table is None:
+                return []
+            if c is not None and 'condition' in drv_table:
+                return driver_order(drv_table[drv_table['condition'].astype(str) == str(c)])
+            return driver_order(drv_table)
 
         from CardamomOT.inference.depth_model import set_depth_model
         set_depth_model(model.depth_model)  # NB of the depth factors in the separation of the modes
@@ -228,8 +236,8 @@ def main(argv):
         # proliferation is modelled
         perturbed = perturbed_genes(p, list(adata.var_names))
 
-        def run(ad_sel, combo):
-            """select_genes on the cells ad_sel (sample_combination combo)."""
+        def run(ad_sel, combo, drivers):
+            """select_genes on the cells ad_sel (sample_combination combo, fate drivers)."""
             return select_genes(
                 ad_sel, queries, model.num_max_genes, n_query=model.n_query_genes, n_entropy=model.n_entropy_genes,
                 stim=stim_at(np.sort(np.unique(ad_sel.obs['time'].values))), cell_type_key=resolve_cell_type_obs(ad_sel, 'selection'),
@@ -242,6 +250,7 @@ def main(argv):
                 literature_resources=model.literature_resources, max_free_params=max_free,
                 min_entropy_change=model.min_entropy_change, min_nb_separation=model.min_nb_separation,
                 n_cells_mixture=model.batch_size_mixture, seuil_mixture=model.seuil,
+                dispersion_max=model.dispersion_max,  # rate cap of the mixture whose basins the selection predicts
                 n_cells_network=model.batch_size_mixture or 1000,  # cost of the network: capped without batch_size_mixture
                 forced_genes=list(dict.fromkeys(perturbed + proliferation_markers(p, model, ad_sel, perturbed))),
                 stimulus_targets=read_stimulus_targets(input_dir(p)),
@@ -262,7 +271,8 @@ def main(argv):
             nc = ad_fit.obs['network_condition'].astype(str).values
             for c in conds:
                 print(f"[select_genes] Condition {c}: selection on its {int(np.sum(nc == c))} cells")
-                sel_c, rep_c, net_c, _ = run(ad_fit[nc == c].copy(), 'consensus' if combo_set == 'auto' else combo_set)
+                sel_c, rep_c, net_c, _ = run(ad_fit[nc == c].copy(), 'consensus' if combo_set == 'auto' else combo_set,
+                                             drivers_of(c))
                 condition_sets[str(c)] = sorted(sel_c)
                 reports.append(rep_c.assign(condition=str(c)))
                 if net_c is not None:
@@ -285,7 +295,7 @@ def main(argv):
             combo = combo_set
             if combo == 'auto':
                 combo = 'any' if (len(conds) >= 2 and float(model.network_condition_pen) == 0) else 'consensus'
-            selected, df_report, net, prior = run(ad_fit, combo)
+            selected, df_report, net, prior = run(ad_fit, combo, drivers_of())
 
         df_report.to_csv(os.path.join(out_dir, 'gene_selection_report.csv'), index=False)
         if net is not None:

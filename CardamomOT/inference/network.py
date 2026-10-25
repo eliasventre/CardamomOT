@@ -1330,9 +1330,10 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
     sample_conditions : (n_samples,) int array or None
         Network condition of each sample (index). With >= 2 conditions, each condition has its
         own network theta_c = theta_shared + delta_c, with a fused L1 penalty on delta_c of
-        condition_pen times the sparsity penalty (0: independent networks); inter is then
-        returned per sample, (n_samples, G, G). inter_init / inter_ref may be
-        (G, G) (common) or per sample.
+        condition_pen times the sparsity penalty; condition_pen = 0: independent networks, each condition
+        fitted alone on its rows, samples and genes (single-network fit, as if inferred alone; NaN for a
+        condition without rows in a subset); inter is then returned per sample, (n_samples, G, G).
+        inter_init / inter_ref may be (G, G) (common) or per sample.
     gene_mask : (n_samples, G) bool or None: genes selected in each sample's condition (select_genes_per_condition);
         a gene outside a condition is neither a target nor a regulator there (its interactions are 0) and the fused
         penalty only acts on the edges shared by conditions. Without conditions, the mask of the (single) gene set.
@@ -1436,11 +1437,20 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
     if act_c is not None and cond is None:
         # One gene set: regulators outside it are dropped from every target
         active_cols = [c[act_c[0][c]] for c in active_cols]
+    # Independent networks (condition_pen = 0): one single-network fit per condition, on its samples and genes, as if
+    # the condition were inferred alone (its own sparsity level, ridge and refinement)
+    apart = cond is not None and condition_pen == 0
+    rows_of = None if not apart else [np.isin(y_samples, np.flatnonzero(cond == c)) for c in range(C)]
 
-    def gene_args(rows, g_tgt):
-        # Only the rows and regulators target g_tgt needs are sent to the worker (built lazily)
+    def gene_args(rows, g_tgt, c=None):
+        # Only the rows and regulators target g_tgt needs are sent to the worker (built lazily); c: condition fitted
+        # apart (its rows and regulators, its block of theta, no condition structure)
+        if c is not None:
+            rows = np.flatnonzero(rows_of[c]) if rows is None else rows[rows_of[c][rows]]
         rows = slice(None) if rows is None else rows
         active_src = active_cols[g_tgt]
+        if c is not None and act_c is not None:
+            active_src = active_src[act_c[c][active_src]]
         dense = len(active_src) == G
         yp = y_prot[rows] if dense else y_prot[rows][:, active_src]
         ypm = prev_prot(g_tgt, active_src)
@@ -1466,25 +1476,31 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
             yp = np.where(mem[1][:, :1] > 0.5, yp, mem[0][:, 0])
         elif mem is not None:  # end-state term on sigma averaged on the target's mRNA memory
             yp = MemStates(yp, mem[0], mem[1])
+        theta_rows = slice(None) if c is None else np.r_[c * G:(c + 1) * G, C * G:C * G + n_samples]
+        cond_g = None if c is not None else cond
         return (g_tgt, G, active_src, y_samples[rows], yp, ypm,
-                y_kon[rows, g_tgt], theta_init_mat[:, g_tgt], theta_ref_mat[:, g_tgt],
+                y_kon[rows, g_tgt], theta_init_mat[theta_rows, g_tgt], theta_ref_mat[theta_rows, g_tgt],
                 ks[:, g_tgt] if ks.ndim == 3 else ks[g_tgt], n_samples,
                 ref_network[:, g_tgt] if dense else ref_network[active_src, g_tgt],
-                free_mask_2d[:, g_tgt], gene_kw, cond,
-                None if act_c is None or cond is None else act_c[:, active_src].astype(float),
-                None if act_c is None or cond is None else act_c[:, g_tgt],
+                free_mask_2d[:, g_tgt], gene_kw, cond_g,
+                None if act_c is None or cond_g is None else act_c[:, active_src].astype(float),
+                None if act_c is None or cond_g is None else act_c[:, g_tgt],
                 None if dist_targets is None else dist_term(dist_targets[2][rows], dist_targets[0][rows, g_tgt],
                                                             dist_targets[1][rows, g_tgt], dist_targets[3]))
 
     # Targets outside every condition's genes (single gene set: outside it) are not fitted
     genes = [g for g in range(n_stimuli, G) if act_c is None or act_c[:, g].any()]
-    tasks = [(k, g) for k in range(len(subsets)) for g in genes]
+    # Conditions fitted apart: those of each subset where the target is selected (a condition may be absent from a
+    # subset when its sub-samples are drawn alone: NaN there, left out of the mean over the subsets)
+    present = [[apart and (rows_of[c] if sub is None else rows_of[c][sub]).any() for c in range(C)] for sub in subsets]
+    tasks = [(k, g, c) for k in range(len(subsets)) for g in genes
+             for c in ([None] if not apart else [c for c in range(C) if present[k][c] and (act_c is None or act_c[c, g])])]
     if Parallel is not None:
         results = Parallel(n_jobs=-1)(
-            delayed(_infer_gene)(*gene_args(subsets[k], g)) for k, g in tasks
+            delayed(_infer_gene)(*gene_args(subsets[k], g, c)) for k, g, c in tasks
         )
     else:
-        results = [_infer_gene(*gene_args(subsets[k], g)) for k, g in tasks]
+        results = [_infer_gene(*gene_args(subsets[k], g, c)) for k, g, c in tasks]
 
     fits = []
     shape = (G, G) if cond is None else (C, G, G)
@@ -1493,8 +1509,21 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
         inter, inter_tmp = np.zeros(shape), np.zeros(shape)
         if act_c is not None and basal_init is not None:  # targets outside every gene set keep their initial basal
             basal[:, n_stimuli:], basal_tmp[:, n_stimuli:] = (basal_rows(basal_init)[:, n_stimuli:],) * 2
-        for idx, g in enumerate(genes):
-            basal[:, g], inter[..., g], basal_tmp[:, g], inter_tmp[..., g] = results[k * len(genes) + idx]
+        for (k_, g, c), res in zip(tasks, results):
+            if k_ != k:
+                continue
+            if c is None:
+                basal[:, g], inter[..., g], basal_tmp[:, g], inter_tmp[..., g] = res
+                continue
+            # Condition fitted apart: its network and the basals of its samples
+            in_c = cond == c
+            basal[in_c, g], inter[c, :, g], basal_tmp[in_c, g], inter_tmp[c, :, g] = \
+                res[0][in_c], res[1], res[2][in_c], res[3]
+        for c in range(C):
+            if apart and not present[k][c]:
+                for arr in (basal, basal_tmp):
+                    arr[cond == c] = np.nan
+                inter[c], inter_tmp[c] = np.nan, np.nan
         if cond is not None:
             # Per sample: each sample takes the network of its condition
             inter, inter_tmp = inter[cond], inter_tmp[cond]

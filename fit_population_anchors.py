@@ -60,7 +60,7 @@ from CardamomOT.inputs import (input_dir, proliferation_sample_anchors, load_tra
                                read_proliferation_rates)
 from CardamomOT.tools.estimate_proliferation import split_net_change
 from CardamomOT.run_options import parse_step_options, settings
-from CardamomOT.stimulus_rates import load_effects, cell_values, split_effects
+from CardamomOT.stimulus_rates import load_effects, cell_values, split_effects, signature_scores, MIN_GENES_SCORING
 
 TAG = "[fit_population_anchors]"
 log = lambda *a: print(TAG, *a, flush=True)
@@ -119,15 +119,38 @@ def sizes_at(sizes, times, sid):
     return out if np.isfinite(out).sum() >= 2 else None
 
 
-def stimulus_inputs(p, effects, types, times, sid, tu, all_samples):
-    """(effects (K, S), u (T - 1, S)): RATEk deltas on the cell types and the schedule of the sample over each interval."""
+def signature_cell_scores(p, A, effects, types):
+    """{target: (n_cells,) score} of the signature targets of the RATE effects (those that are not cell types), on the
+    mRNA of the cells of A scored as by get_proliferation_rates (Data/data_complete.h5ad if present; library-size
+    normalisation with the whole transcriptome); {} without signature target."""
+    targets = [t for _, sig in split_effects(effects, types).values() for t, _ in sig]
+    if not targets:
+        return {}
+    complete = os.path.join(p, 'Data', 'data_complete.h5ad')
+    src = ad.read_h5ad(complete if os.path.exists(complete) else os.path.join(p, 'Data', 'data.h5ad'))
+    src = src[A.obs_names]
+    log(f"Signature targets of the stimulus rate effects {targets}: scored on {src.n_vars} genes")
+    return signature_scores(src.X, list(src.var_names), targets, p, normalize=src.n_vars >= MIN_GENES_SCORING)
+
+
+def stimulus_inputs(p, effects, types, times, sid, tu, all_samples, cells=None, scores=None):
+    """(effects (K, S), u (T - 1, S)): RATEk deltas on the cell types and the schedule of the sample over each interval.
+    Signature targets (scores of signature_cell_scores; cells = (sample, cell type) of each cell): delta x the mean score
+    of the cells of each type of the sample, as the rates of get_proliferation_rates add them cell by cell."""
     if not effects:
         return np.zeros((len(types), 0)), None
     S = max(effects)
     E = np.zeros((len(types), S))
-    for k, (ct, _) in split_effects(effects, types).items():
+    for k, (ct, sig) in split_effects(effects, types).items():
         for c, d in ct.items():
             E[types.index(c), k - 1] += d
+        for target, d in sig:
+            if not scores or target not in scores or cells is None:
+                continue
+            for i, c in enumerate(types):
+                m = (cells[0] == sid) & (cells[1] == c)
+                if m.any():
+                    E[i, k - 1] += d * float(np.mean(scores[target][m]))
     u = (cell_values(p, times[1:], np.array([sid] * (len(times) - 1)), tu, S, names=sorted(all_samples))
          if len(times) > 1 else np.zeros((0, S)))
     return E, u
@@ -194,6 +217,9 @@ def main(argv):
         log("Warning: obs has none of the cell type columns of the proliferation grouping: proliferation rates not fitted")
     else:
         types = sorted(obs[col].astype(str).unique())
+        # Signature targets of the RATE effects: mean score of the cells of each type of a sample
+        sig_scores = signature_cell_scores(p, A, effects, types)
+        sig_cells = (obs['_sid'].to_numpy(), obs[col].astype(str).to_numpy())
         default = default_rates(prolif_path, types)
         spec = {sid: (match_types(own_rates[sid], types, f'proliferation_rates of {sid}') if sid in own_rates else default)
                 for sid in samples}
@@ -205,7 +231,7 @@ def main(argv):
             times, f, n = proportions(obs, sid, col, types)
             if len(times) < 2:
                 return None
-            E, u = stimulus_inputs(p, effects, types, times, sid, tu, samples)
+            E, u = stimulus_inputs(p, effects, types, times, sid, tu, samples, sig_cells, sig_scores)
             return fit_population(f, n, times, E, u, r_prior=prior, sizes=sizes_at(size_of[sid], times, sid), r_sd=r_sd)
 
         # 1. samples with prescribed rates: corrected
@@ -299,7 +325,7 @@ def main(argv):
             t = obs[obs['_sid'] == sid]
             comp = pd.crosstab(t[tcol].astype(str), t[col].astype(str)).reindex(index=ttypes, columns=pt, fill_value=0)
             P = comp.div(comp.sum(axis=1).replace(0, 1), axis=0).values
-            E, _ = stimulus_inputs(p, effects, pt, np.array([0.0]), sid, tu, samples)
+            E, _ = stimulus_inputs(p, effects, pt, np.array([0.0]), sid, tu, samples, sig_cells, sig_scores)
             return P @ corrected[sid]['rates'], P @ E
 
         def fit_T(sid, Q0):

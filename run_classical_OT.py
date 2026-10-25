@@ -11,7 +11,9 @@ Usage:
 
 Cells: log1p(counts / obs['depth_factor'] with use_depth_factor, else normalize_total), genes expressed in >= 10
 train cells, PCA (50 components) fitted on the train cells. Couplings between consecutive timepoints of each
-sample (growth: obs['proliferation_net_rate'] if present). The report draws the velocities on the embedding
+sample (growth: obs['proliferation_net_rate'] if present). With >= 2 network conditions (obs['network_condition']),
+each condition is analysed apart, as if run alone (its genes, PCA, couplings, fate genes and drivers; column
+'condition' of fate_genes.csv and fate_drivers.csv). The report draws the velocities on the embedding
 of Data/data.h5ad: barycentric (descendants, else ancestors) in its PCA space, extended to the other cells
 (test, unused, beyond classical_ot_max_cells) by Gaussian-kernel regression in the PCA space of the transport
 (velocity.npz), within their sample and timepoint.
@@ -88,12 +90,28 @@ def main(argv):
           f"sample(s); growth from obs['proliferation_net_rate']: {growth is not None}; depth factor: "
           f"{bool(model.use_depth_factor and 'depth_factor' in A.obs)} (use_depth_factor)")
 
+    # Network conditions (>= 2 values of obs['network_condition']): each one apart, as if run alone (its PCA, genes,
+    # couplings, fate genes and drivers); otherwise every cell together
+    conds = A.obs['network_condition'].astype(str).values if 'network_condition' in A.obs else np.full(A.n_obs, '')
+    names_c = list(np.unique(conds[fit]))
+    groups = [(c, np.flatnonzero(conds == c)) for c in names_c] if len(names_c) >= 2 else [(None, np.arange(A.n_obs))]
     # log1p(normalised counts) of the genes expressed in >= 10 transported cells, PCA fitted on those cells,
     # couplings (indices: rows of data.h5ad)
-    X, genes, Z, blocks = classical_couplings(A, fit, bool(model.use_depth_factor),
-                                              int(model.classical_ot_max_cells), seed)
+    parts, blocks, Z_parts = [], [], []
+    for c, rows in groups:
+        X_c, genes_c, Z_c, blocks_c = classical_couplings(A if c is None else A[rows], fit[rows],
+                                                          bool(model.use_depth_factor), int(model.classical_ot_max_cells),
+                                                          seed)
+        print(f"[run_classical_OT] {'' if c is None else f'Condition {c}: '}{len(genes_c)} genes, PCA "
+              f"{Z_c.shape[1]} components")
+        parts.append((c, rows, X_c, genes_c, blocks_c))
+        blocks += [dict(b, src=rows[b['src']], tgt=rows[b['tgt']]) for b in blocks_c]
+        Z_parts.append(Z_c)
     del A
-    print(f"[run_classical_OT] {len(genes)} genes, PCA {Z.shape[1]} components")
+    # PCA coordinates of each cell in the space of its condition (kernel regression within sample and time)
+    Z = np.zeros((len(obs_names), max(z.shape[1] for z in Z_parts)))
+    for (_, rows, *_), Z_c in zip(parts, Z_parts):
+        Z[rows, :Z_c.shape[1]] = Z_c
 
     # Space of the kernel regression of the velocities (cells outside the couplings), drawn by the report
     np.savez_compressed(os.path.join(out_dir, 'velocity.npz'), obs_names=obs_names, Z=Z.astype(np.float32),
@@ -117,22 +135,31 @@ def main(argv):
         tr = transitions(blocks, labels)
         tr = pd.concat([tr, pooled_transitions(tr)], ignore_index=True)
         tr.to_csv(os.path.join(out_dir, 'transitions.csv'), index=False)
-        fg = fate_genes(X, genes, blocks, labels, fit)
-        fg.to_csv(os.path.join(out_dir, 'fate_genes.csv'), index=False)
         # Fate drivers: genes whose expression predicts the fate (last time) within each earlier timepoint
         F, cats = fate_probabilities(blocks, labels, len(times))
         last = np.zeros(len(times), bool)
         for s in np.unique(samples[fit]):
             m = fit & (samples == s)
             last |= m & (times == times[m].max())
-        dr = mark_redundant(fate_drivers(X, genes, F, cats, labels, times, last), X, genes, np.flatnonzero(fit))
+        # Fate genes and drivers of each condition on its own genes (column 'condition' with network conditions)
+        fg, dr = [], []
+        for c, rows, X_c, genes_c, blocks_c in parts:
+            fg_c = fate_genes(X_c, genes_c, blocks_c, labels[rows], fit[rows])
+            dr_c = mark_redundant(fate_drivers(X_c, genes_c, F[rows], cats, labels[rows], times[rows], last[rows]),
+                                  X_c, genes_c, np.flatnonzero(fit[rows]))
+            fg.append(fg_c if c is None else fg_c.assign(condition=c))
+            dr.append(dr_c if c is None else dr_c.assign(condition=c))
+        fg, dr = pd.concat(fg, ignore_index=True), pd.concat(dr, ignore_index=True)
+        fg.to_csv(os.path.join(out_dir, 'fate_genes.csv'), index=False)
         dr.to_csv(os.path.join(out_dir, 'fate_drivers.csv'), index=False)
         np.savez_compressed(os.path.join(out_dir, 'fate.npz'), obs_names=obs_names, F=F, cell_types=np.array(cats))
-        for c, df in dr.groupby('cell_type'):
+        key = ['condition', 'cell_type'] if 'condition' in dr else ['cell_type']
+        for c, df in dr.groupby(key):
             rep = df[df['representative'].astype(bool)]
-            print(f"[run_classical_OT] Drivers of fate {c}: {int((df['qval'] <= 0.05).sum())} (q <= 0.05), top "
-                  f"{list(df['gene'][:4])}; module representatives {list(rep['gene'][:6])}")
-        for c, df in fg.groupby('cell_type'):
+            print(f"[run_classical_OT] Drivers of fate {'/'.join(map(str, c))}: {int((df['qval'] <= 0.05).sum())} "
+                  f"(q <= 0.05), top {list(df['gene'][:4])}; module representatives {list(rep['gene'][:6])}")
+        for c, df in fg.groupby(['condition', 'cell_type'] if 'condition' in fg else ['cell_type']):
+            c = '/'.join(map(str, c))
             top_a = list(df.nsmallest(10, 'ancestors_rank')['gene'])
             top_c = list(df.nsmallest(10, 'cell_type_rank')['gene'])
             print(f"[run_classical_OT] {c}: ancestors {top_a[:5]}..., cell type {top_c[:5]}..., "

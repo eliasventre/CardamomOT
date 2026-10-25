@@ -32,7 +32,7 @@ class ProliferationMLP(nn.Module):
         self.register_buffer('r_mean', torch.tensor(0.0))
         self.register_buffer('r_scale', torch.tensor(1.0))
         self.register_buffer('two_heads', torch.tensor(int(two_heads)))
-        self.register_buffer('split_scale', torch.tensor(1.0))  # prior rates = split_scale * softplus(z)
+        self.register_buffer('split_scale', torch.ones(2))  # (birth, death) = split_scale * softplus(z), one scale per head
         self.net = nn.Sequential(
             nn.Linear(n_inputs, hidden_size),
             nn.Tanh(),
@@ -204,7 +204,7 @@ def birth_heads(net):
         layers = [(l.weight.detach().double().numpy(), l.bias.detach().double().numpy())
                   for l in seq if isinstance(l, nn.Linear)]
         return dict(x_mean=m.x_mean.double().numpy(), x_std=m.x_std.double().numpy(), n_stim=int(m.n_stim),
-                    cols=cols, layers=layers, two=two, split_scale=float(m.split_scale),
+                    cols=cols, layers=layers, two=two, split_scale=m.split_scale.double().numpy(),
                     r_mean=float(m.r_mean), r_scale=float(m.r_scale))
     if isinstance(net, ConditionProliferation):
         return [one(m, c) for m, c in zip(net.nets, net.cols)], net.sample_cond
@@ -358,7 +358,10 @@ def train_proliferation_mlp(
             sel = g if (not sample or len(g) <= n_mass) else rng.choice(g, n_mass, replace=False)
             integ = integral(torch.as_tensor(sel))
             lme.append(torch.logsumexp(integ, 0) - np.log(len(sel)))
-        return (((torch.stack(lme) - mass_target) / dt_groups) ** 2).mean()
+        return (((torch.stack(lme) - mass_target) / (dt_groups * r_unit)) ** 2).mean()
+
+    def path_loss(idx):
+        return (((integral(idx) - Y_all[idx]) / (D_all[idx] * r_unit)) ** 2).mean()
 
     model = ProliferationMLP(G, hidden_size=hidden_size, n_stim=n_stim, two_heads=two_heads)
     flat = X[tr].reshape(-1, G)
@@ -368,6 +371,9 @@ def train_proliferation_mlp(
     rates = Y[tr] / D[tr]
     model.r_mean.fill_(float(rates.mean()))
     model.r_scale.fill_(float(max(rates.std(), 1e-8)))
+    # Residuals in units of the spread of the target rates: weight_decay independent of the units (h^-1 rates
+    # ~1e-2 would make the squared residuals negligible against it)
+    r_unit = float(model.r_scale)
     with torch.no_grad():
         # Stimulus inputs start with no effect; constant ones get no gradient and keep none
         model.net[0].weight[:, :n_stim] = 0.0
@@ -380,7 +386,7 @@ def train_proliferation_mlp(
         if len(va) == 0:
             return np.nan
         with torch.no_grad():
-            loss = (((integral(torch.as_tensor(va)) - Y_all[va]) / D_all[va]) ** 2).mean()
+            loss = path_loss(torch.as_tensor(va))
             if lambda_mass > 0 and groups_va:
                 loss = loss + lambda_mass * mass_loss(groups_va, mass_va, dt_va, sample=False)
         return float(loss)
@@ -390,7 +396,7 @@ def train_proliferation_mlp(
         model.train()
         epoch_loss = 0.0
         for (ib,) in loader:
-            loss = (((integral(ib) - Y_all[ib]) / D_all[ib]) ** 2).mean()
+            loss = path_loss(ib)
             if lambda_mass > 0:
                 loss = loss + lambda_mass * mass_loss(groups_tr, mass_tr, dt_tr)
             optimizer.zero_grad()
@@ -462,13 +468,14 @@ def _fit_split(model, prot, times_data, ns, with_stim, birth_prior, death_prior,
     val_traj = rng.choice(N, n_val, replace=False) if n_val else np.array([], dtype=int)
     is_val = np.isin(np.tile(np.arange(N), T), val_traj)
     Xt, Bt, Dt = torch.tensor(X), torch.tensor(B), torch.tensor(D)
-    s = float(max(B.mean(), D.mean(), 1e-6))
-    model.split_scale.fill_(s)
+    # One scale per head: the death (often ~10x below the birth) weighs as much as the birth in the loss
+    sb, sd = (float(max(v.mean(), 1e-6)) for v in (B, D))
+    model.split_scale.copy_(torch.tensor([sb, sd]))
     opt = torch.optim.Adam(model.split_net.parameters(), lr=lr)
 
-    def loss(idx):  # relative to the scale of the rates
+    def loss(idx):  # relative to the scale of each rate
         b, d = model.prior_rates(Xt[idx])
-        return (((b - Bt[idx]) / s) ** 2 + ((d - Dt[idx]) / s) ** 2).mean()
+        return (((b - Bt[idx]) / sb) ** 2 + ((d - Dt[idx]) / sd) ** 2).mean()
 
     tr, va = torch.as_tensor(np.flatnonzero(~is_val)), torch.as_tensor(np.flatnonzero(is_val))
     best, best_state, wait = np.inf, None, 0

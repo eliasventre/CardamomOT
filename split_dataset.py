@@ -25,6 +25,7 @@ Output:
 """
 import sys; sys.path += ['../']
 import os
+import zlib
 import numpy as np
 import anndata as ad
 from CardamomOT import NetworkModel, harmonize_obs
@@ -38,13 +39,14 @@ def split_labels(times, samples, split, rate, max_time=None, removed=None, seed=
     labels = np.full(len(times), 'full' if split == 'full' else 'unused', dtype=object)
     removed = np.zeros(len(times), bool) if removed is None else removed
     if split == 'train':
-        rng = np.random.default_rng(seed)
         kept = ~removed & (times <= max_time if max_time is not None else True)
         tested = kept if test_times is None else ~removed & np.isin(times, test_times)
         sel = kept | tested
         for t in np.unique(times[sel]):
             for s in np.unique(samples[sel]):
                 idx = np.flatnonzero(sel & (times == t) & (samples == s))
+                # Draw of each (sample, time) from its own seed: the same cells whatever the other samples of the data
+                rng = np.random.default_rng([int(seed or 0), zlib.crc32(f'{s}|{float(t):g}'.encode())])
                 rng.shuffle(idx)
                 n_train = max(min(100, len(idx)), int(len(idx) * float(rate)))
                 if kept[idx].any():
