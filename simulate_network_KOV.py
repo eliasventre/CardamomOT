@@ -126,6 +126,8 @@ def main(argv):
         model.rna = np.load(os.path.join(p, 'cardamomOT', 'data_rna.npy'))
         model.ratios = prm['ratios']
         model.load_state_rates(os.path.join(p, 'cardamomOT'))  # birth / death of the states (dilution)
+        valid_path = os.path.join(p, 'cardamomOT', 'data_traj_valid.npy')  # observed trajectory states
+        model.traj_valid = np.load(valid_path) if os.path.exists(valid_path) else None
         model.load_chromatin(os.path.join(p, 'cardamomOT'))  # chromatin regions, if any
         samples_path = os.path.join(p, 'cardamomOT', 'data_samples.npy')
         if os.path.exists(samples_path):

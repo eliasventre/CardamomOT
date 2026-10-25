@@ -508,7 +508,7 @@ def _restrict_slots(model, keep):
     T = len(np.unique(model.times_data))
     n = len(model.times_data)  # length before any restriction (times_data itself is restricted in the loop)
     for attr in ('prot', 'rna', 'kon_beta', 'kon_theta', 'traj_real_idx', 'R_opt', 'samples_data',
-                 'state_birth', 'state_death', 'times_data'):
+                 'state_birth', 'state_death', 'traj_valid', 'times_data'):
         arr = getattr(model, attr, None)
         if arr is not None and np.ndim(arr) >= 1 and len(arr) == n:
             arr = np.asarray(arr)

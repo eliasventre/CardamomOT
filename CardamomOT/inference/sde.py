@@ -54,10 +54,10 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         kinetics (network condition, 0 .. n_cond - 1: d1, eps and scale per condition),
         'start_ok' (T,) bool times observed for the sample (windows start only there, virtual states being copies),
         'birth' f(P (n, G), kon (n, G), t, slots) -> (n,) birth rates of the dilution or None, re-evaluated at every
-        integration step ('birth_every_step' True, default) or at the start of each interval only (False),
-        'rate' f(P (n, G), t) -> (n,) or None: net rate of the branching weights, integrated along the steps, or
-        'rate_start' f(P, kon, t, slots) -> (n,) or None: net rate evaluated at the start of each interval only and
-        kept over it (rates of the nearest trajectory states),
+        integration step (proliferation MLP),
+        'rate' f(P (n, G), t) -> (n,) or None: net rate of the branching weights, integrated along the steps (MLP),
+        'nearest' f(P, kon, t, slots) -> (birth (n,) or None, net rate (n,) or None) or None: rates evaluated at the
+        start of each interval only and kept over it (rates of the nearest trajectory states, without the MLP),
         'lag' (optional, (T - 1, K) hours per interval and class of targets) and 'lag_w' ((K, G) one-hot class of
         each gene): the observed modes of a target are compared with its kon at the proteins the lag of its class
         before each reached time (integration step nearest to it, the start of the interval at most).
@@ -181,10 +181,13 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
             (lambda X: np.stack([np.asarray(g['rate'](X[w], tw[w]), float) for w in range(W)]))
         R_prev = None if rate_of is None else rate_of(P.detach().numpy())
         dlogw = np.zeros(P.shape[:2])
-        if g.get('rate_start') is not None:  # constant over the interval: rate at its start times its length
+        if g.get('nearest') is not None:  # rates of the nearest trajectory states, constant over the interval
             Pn, kn = P.detach().numpy(), kon_of(P, gi, s).detach().numpy()
-            dlogw = np.stack([np.asarray(g['rate_start'](Pn[w], kn[w], tw[w], sl[w]), float)
-                              for w in range(W)]) * (times[tw + 1] - times[tw])[:, None]
+            out = [g['nearest'](Pn[w], kn[w], tw[w], sl[w]) for w in range(W)]
+            if out[0][0] is not None:
+                b = torch.tensor(np.stack([np.asarray(o[0], float) for o in out]), dtype=f64)
+            if out[0][1] is not None:
+                dlogw = np.stack([np.asarray(o[1], float) for o in out]) * (times[tw + 1] - times[tw])[:, None]
         keep = gmask.bool()
         lag = g.get('lag') if Kb is None else None
         hist = [P] if lag is not None else None  # states at the steps, for the lagged comparison
@@ -192,7 +195,7 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
             kon = kon_of(P, gi, s)
             if Kb is not None:  # mean mRNA (kon units) given the kon path: memory kernel of the model's d0
                 Kb = kon + (Kb - kon) * torch.exp(-(d / e) * h)
-            if g['birth'] is not None and (k == 0 or g.get('birth_every_step', True)):
+            if g['birth'] is not None:
                 Pn, kn = P.detach().numpy(), kon.detach().numpy()
                 b = torch.tensor(np.stack([np.asarray(g['birth'](Pn[w], kn[w], tw[w], sl[w]), float)
                                            for w in range(W)]), dtype=f64)
