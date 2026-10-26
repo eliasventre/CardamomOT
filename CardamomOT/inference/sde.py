@@ -57,7 +57,8 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         integration step (proliferation MLP),
         'rate' f(P (n, G), t) -> (n,) or None: net rate of the branching weights, integrated along the steps (MLP),
         'nearest' f(P, kon, t, slots) -> (birth (n,) or None, net rate (n,) or None) or None: rates evaluated at the
-        start of each interval only and kept over it (rates of the nearest trajectory states, without the MLP),
+        start of each interval only and kept over it, added to those of 'birth' and 'rate' (rates of the nearest
+        trajectory states without the MLP; effects of the stimulus with an MLP of the natural rates),
         'lag' (optional, (T - 1, K) hours per interval and class of targets) and 'lag_w' ((K, G) one-hot class of
         each gene): the observed modes of a target are compared with its kon at the proteins the lag of its class
         before each reached time (integration step nearest to it, the start of the interval at most).
@@ -185,20 +186,21 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
             Pn, kn = P.detach().numpy(), kon_of(P, gi, s).detach().numpy()
             out = [g['nearest'](Pn[w], kn[w], tw[w], sl[w]) for w in range(W)]
             if out[0][0] is not None:
-                b = torch.tensor(np.stack([np.asarray(o[0], float) for o in out]), dtype=f64)
+                b = torch.clamp(torch.tensor(np.stack([np.asarray(o[0], float) for o in out]), dtype=f64), min=0.0)
             if out[0][1] is not None:
                 dlogw = np.stack([np.asarray(o[1], float) for o in out]) * (times[tw + 1] - times[tw])[:, None]
         keep = gmask.bool()
+        b_const = b.clone()
         lag = g.get('lag') if Kb is None else None
         hist = [P] if lag is not None else None  # states at the steps, for the lagged comparison
         for k in range(n_sub):
             kon = kon_of(P, gi, s)
             if Kb is not None:  # mean mRNA (kon units) given the kon path: memory kernel of the model's d0
                 Kb = kon + (Kb - kon) * torch.exp(-(d / e) * h)
-            if g['birth'] is not None:
+            if g['birth'] is not None:  # MLP birth at the current states (+ the constant part of 'nearest')
                 Pn, kn = P.detach().numpy(), kon.detach().numpy()
-                b = torch.tensor(np.stack([np.asarray(g['birth'](Pn[w], kn[w], tw[w], sl[w]), float)
-                                           for w in range(W)]), dtype=f64)
+                b = torch.clamp(b_const + torch.tensor(np.stack([np.asarray(g['birth'](Pn[w], kn[w], tw[w], sl[w]), float)
+                                                               for w in range(W)]), dtype=f64), min=0.0)
             dp = d + b[..., None]                     # protein decay with dilution
             decay_p = torch.exp(-dp * h)
             if mode == 'sde2':

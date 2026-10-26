@@ -41,7 +41,7 @@ PARAMETER_GROUPS = [
     ('Network inference', [
         'force_basins', 'temporal_basins', 'min_n_loops', 'max_iter', 'batch_size_traj', 'n_network_fits',
         'constrain_basal_uniform', 'network_condition_pen', 'weight_flow_matching', 'flow_matching_nodes',
-        'qut_level', 'network_ridge', 'one_hot_probas', 'weight_network_distribution']),
+        'qut_level', 'network_ridge', 'one_hot_probas', 'weight_network_distribution', 'match_kon_weight']),
     ('mRNA memory and trajectories', [
         'inference_mrnas_direct', 'mrna_bridge', 'targets_accounting_late_mrna', 'late_mrna_nodes',
         'late_mrna_classes', 'min_ratio']),

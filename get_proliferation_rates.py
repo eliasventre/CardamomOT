@@ -248,14 +248,19 @@ def add_stimulus_effects(adata_target, adata_score, p):
     u_k(t) * delta for its cell type (cell_type_proliferation) and for the signatures (score on its mRNA:
     log1p counts, normalised by the library size if the transcriptome is scored). The rate without
     stimulus is kept in obs['proliferation_net_rate_base'] (and birth / death in obs['proliferation_*_rate_base']).
-    The change of the net rate is shared between birth and death by split_net_change.
+    A positive delta is a pure birth effect (it also dilutes the proteins), a negative one a pure death effect. The
+    effect of each stimulus k per unit of its value is kept per cell in obs['proliferation_stimulus_birth_<k>'] and
+    obs['proliferation_stimulus_death_<k>'] (simulations: effects of the nearest trajectory state).
     """
     from CardamomOT.stimulus_rates import load_effects, cell_values, split_effects, signature_scores
     prefix = "[get_proliferation_rates]"
+    obs = adata_target.obs
+    stale = [c for c in obs.columns if c.startswith('proliferation_stimulus_')]
+    if stale:
+        obs.drop(columns=stale, inplace=True)
     effects = load_effects(p)
     if not effects or 'proliferation_net_rate' not in adata_target.obs:
         return
-    obs = adata_target.obs
     base = obs['proliferation_net_rate'].to_numpy(dtype=float)
     times = obs['time'].to_numpy(dtype=float) if 'time' in obs else np.zeros(len(obs))
     tu = np.sort(np.unique(times))
@@ -265,7 +270,6 @@ def add_stimulus_effects(adata_target, adata_score, p):
     U = cell_values(p, t_next, samples, tu, max(effects))
     ct_key = resolve_cell_type_obs(adata_target, 'proliferation')
     labels = obs[ct_key].astype(str).to_numpy() if ct_key else np.array([''] * len(obs))
-    add = np.zeros(len(obs))
     parts = split_effects(effects, np.unique(labels) if ct_key else [])
     targets = [target for _, sig in parts.values() for target, _ in sig]
     scores = {}
@@ -273,18 +277,28 @@ def add_stimulus_effects(adata_target, adata_score, p):
         score_cells = adata_score[adata_target.obs_names]
         scores = signature_scores(score_cells.X, list(adata_score.var_names), targets, p,
                                   normalize=score_cells.n_vars >= MIN_GENES_SCORING)
+    # Effect of each stimulus per unit of its value on each cell: birth part (positive deltas) and death part
+    # (negative deltas, pure death)
+    n_k = max(effects)
+    eb, ed = np.zeros((len(obs), n_k)), np.zeros((len(obs), n_k))
+    kind = lambda d: 'birth' if d > 0 else 'death' if d < 0 else 'no effect'
     for k, (ct, sig) in parts.items():
         for c, d in ct.items():
-            add += U[:, k - 1] * d * (labels == c)
-            print(f"{prefix} Stimulus {k}: {d:+g} h^-1 on '{c}' ({ct_key}), scaled by its schedule")
+            (eb if d > 0 else ed)[:, k - 1] += abs(d) * (labels == c)
+            print(f"{prefix} Stimulus {k}: {d:+g} h^-1 on '{c}' ({ct_key}), scaled by its schedule ({kind(d)})")
         for target, d in sig:
-            add += U[:, k - 1] * d * scores[target]
-            print(f"{prefix} Stimulus {k}: {target} {d:+g} h^-1 at maximal mRNA score")
+            (eb if d > 0 else ed)[:, k - 1] += abs(d) * scores[target]
+            print(f"{prefix} Stimulus {k}: {target} {d:+g} h^-1 at maximal mRNA score ({kind(d)})")
+    for k in range(n_k):
+        obs[f'proliferation_stimulus_birth_{k + 1}'] = eb[:, k]
+        obs[f'proliferation_stimulus_death_{k + 1}'] = ed[:, k]
+    add_b, add_d = (U[:, :n_k] * eb).sum(axis=1), (U[:, :n_k] * ed).sum(axis=1)
+    add = add_b - add_d
     if 'proliferation_birth_rate' not in obs:  # no signatures: birth = max(net, 0) (negligible death)
         set_rates(obs, np.maximum(base, 0.0), np.maximum(-base, 0.0))
     b0, d0 = obs['proliferation_birth_rate'].to_numpy(dtype=float), obs['proliferation_death_rate'].to_numpy(dtype=float)
     set_rates(obs, b0, d0, suffix='_base')
-    set_rates(obs, *split_net_change(b0, d0, add))
+    set_rates(obs, b0 + add_b, d0 + add_d)
     if ct_key:
         for c in np.unique(labels):
             m = labels == c

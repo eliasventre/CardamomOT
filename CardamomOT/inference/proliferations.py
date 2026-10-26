@@ -33,6 +33,7 @@ class ProliferationMLP(nn.Module):
         self.register_buffer('r_scale', torch.tensor(1.0))
         self.register_buffer('two_heads', torch.tensor(int(two_heads)))
         self.register_buffer('split_scale', torch.ones(2))  # (birth, death) = split_scale * softplus(z), one scale per head
+        self.register_buffer('natural', torch.tensor(0))  # 1: natural rates (inference stimuli constant), effects added outside
         self.net = nn.Sequential(
             nn.Linear(n_inputs, hidden_size),
             nn.Tanh(),
@@ -149,6 +150,13 @@ class ConditionProliferation:
             json.dump({'names': self.names, 'cols': [c.tolist() for c in self.cols],
                        'sample_cond': self.sample_cond.tolist(),
                        'n_inputs': [None if n is None else int(n.net[0].in_features) for n in self.nets]}, fh)
+
+
+def mlp_natural(prolif):
+    """True if the proliferation model learned the natural rates (inference stimuli constant: their effects are added by
+    the refine SDE and the simulations through the nearest trajectory states)."""
+    nets = prolif.nets if isinstance(prolif, ConditionProliferation) else [prolif]
+    return any(n is not None and int(getattr(n, 'natural', 0)) for n in nets)
 
 
 def load_proliferation(cardamom_dir):
