@@ -1,0 +1,21 @@
+network,run,targets,penalty,family_acc,herbach_m_acc,true_family,selected,candidates
+FN4,1,true,default,0.75,1.0,B4 H S H,B4 H B2 H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,2,true,default,0.75,nan,S H H H,B2 H H H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,3,true,default,1.0,1.0,B2 B2 B4 H,B2 B2 B4 H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,4,true,default,0.75,1.0,S B4 B4 H,B2 B4 B4 H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,5,true,default,0.75,1.0,B4 B4 S S,B4 B4 B1 S,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,6,true,default,0.5,nan,H H S H,B1 H B2 H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,7,true,default,0.75,1.0,B4 S S H,B4 B2 S H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,8,true,default,0.5,nan,H S B1 H,H B2 H H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,9,true,default,1.0,1.0,H B2 H S,H B2 H S,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,10,true,default,0.5,nan,S H B1 H,B2 H H H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,1,true,weak,1.0,1.0,B4 H S H,B4 H S H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,2,true,weak,1.0,nan,S H H H,S H H H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,3,true,weak,1.0,1.0,B2 B2 B4 H,B2 B2 B4 H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,4,true,weak,1.0,1.0,S B4 B4 H,S B4 B4 H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,5,true,weak,0.75,1.0,B4 B4 S S,B4 B4 B2 S,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,6,true,weak,0.75,nan,H H S H,H H B2 H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,7,true,weak,0.75,1.0,B4 S S H,B4 B2 S H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,8,true,weak,0.5,nan,H S B1 H,H B2 H H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,9,true,weak,1.0,1.0,H B2 H S,H B2 H S,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic
+FN4,10,true,weak,0.75,nan,S H B1 H,S H H H,identity/logistic logarithm/logistic herbach1/logistic herbach2/logistic herbach4/logistic

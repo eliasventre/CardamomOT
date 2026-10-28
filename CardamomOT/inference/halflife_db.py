@@ -67,6 +67,19 @@ REFERENCES = {
                    "hepatocytes, monocytes",
     },
 }
+# Doubling times (h) of the cell lines behind the mRNA tables. Metabolic labelling in growing cells measures
+# decay + dilution (no growth term in Schwanhäusser eq. S7 nor in EZbakR), unlike the protein tables (Schwanhäusser
+# eq. S4 subtracts ln 2 / 27.5 h; Mathieson: non-dividing primary cells). Mouse: NIH3T3, measured by Schwanhäusser
+# (SI); human: the 11 RNADecayCafe lines, median of the values reported by Cellosaurus (ranges at their midpoint).
+MRNA_SOURCE_DOUBLING_TIMES = {
+    "mouse": {"NIH3T3": 27.5},
+    "human": {"HEK293T": 27.0, "U2OS": 31.75, "K-562": 19.6, "MCF-7": 31.2, "MV4-11": 48.0, "Calu-3": 40.1,
+              "MOLM-14": 67.0, "HeLa": 39.0, "CH22": 44.1, "MDA-MB-231": 31.43, "NALM-6": 30.5},
+}
+for _sp, _dt in MRNA_SOURCE_DOUBLING_TIMES.items():
+    # Growth rate (h^-1) included in the mRNA rates of the table: mean of ln 2 / T over its lines (equal weights,
+    # as the recentred lines in build_resources)
+    REFERENCES[_sp]["mrna_growth_rate"] = float(np.mean([np.log(2) / t for t in _dt.values()]))
 QUANTITIES = {"mrna": "mrna_half_life_h", "protein": "prot_half_life_h"}
 NEIGHBOR_SOURCES = ("paralog_high", "paralog_mid", "paralog_low", "family", "function")
 SOURCES = ("ortholog",) + NEIGHBOR_SOURCES

@@ -14,22 +14,74 @@ spec (G, N_SPEC) (model_learning_grn; None = every gene logistic of a linear inp
                      sigma = A prod_g (1 + P_g / kappa_g)^(c_g theta_gj) / (1 + A prod_g (...)) (Hill type,
                      exponents c_g theta_gj, c_g = Pbar_g / log(1 + Pbar_g / kappa_g)); phi(0) = 0 and
                      phi(Pbar) = Pbar, so that theta is the change of the logit between 0 and Pbar in both families;
+        PHI_HERBACH_APPROX (3): Herbach type, approximate form linear in theta (model_learning_herbach_form =
+                     'approximate'): phi(P) = Pbar h(P / s) / h(Pbar / s), h(x) = x^m / (1 + x^m), i.e. the
+                     contribution psi of Herbach et al. to first order in theta, theta times a Hill step of threshold s_g
+                     (regulator) and coefficient m_j (target); phi(0) = 0, phi(Pbar) = Pbar;
+        PHI_HERBACH (2): Herbach type, exact form ('exact'): the thermodynamic model of Herbach et al., each regulator
+                     entering the logit through psi(theta_gj, P_g / s_g) = log((1 + e^theta x^m) / (1 + x^m)) instead
+                     of theta_gj phi(P_g): saturating, 0 at P = 0, theta when P -> infinity, Hill transition of
+                     coefficient m_j around s_g; nonlinear in theta (network.HerbachArray);
     spec[j, SPEC_LINK]: link of target j, LINK_LOGISTIC (0) only for now;
     spec[g, SPEC_KAPPA], spec[g, SPEC_PBAR]: scale kappa_g and protein level Pbar_g of the high mode of gene g as a
-        regulator (PHI_LOG targets only).
+        regulator (PHI_LOG, PHI_HERBACH targets);
+    spec[g, SPEC_THRESH]: threshold s_g of gene g as a regulator (PHI_HERBACH), halfway between its low and high
+        protein levels;
+    spec[j, SPEC_M]: Hill coefficient m_j of target j (PHI_HERBACH).
 The torch version (sigma_torch, free-running SDE fit) mirrors feature / logistic for autograd.
 """
 import numpy as np
 from numba import njit, prange
 
-SPEC_PHI, SPEC_LINK, SPEC_KAPPA, SPEC_PBAR = 0, 1, 2, 3
-N_SPEC = 4
-PHI_IDENTITY, PHI_LOG = 0, 1
+SPEC_PHI, SPEC_LINK, SPEC_KAPPA, SPEC_PBAR, SPEC_THRESH, SPEC_M = 0, 1, 2, 3, 4, 5
+N_SPEC = 6
+PHI_IDENTITY, PHI_LOG, PHI_HERBACH, PHI_HERBACH_APPROX = 0, 1, 2, 3
+HERBACH_TYPES = (PHI_HERBACH, PHI_HERBACH_APPROX)  # both forms of the Herbach type
 LINK_LOGISTIC = 0
-PHI_CODES = {'identity': PHI_IDENTITY, 'logarithm': PHI_LOG, 'log': PHI_LOG}
+PHI_CODES = {'identity': PHI_IDENTITY, 'logarithm': PHI_LOG, 'log': PHI_LOG, 'herbach': PHI_HERBACH_APPROX,
+             'herbach_exact': PHI_HERBACH}
 LINK_CODES = {'logistic': LINK_LOGISTIC}
-PHI_NAMES = {PHI_IDENTITY: 'identity', PHI_LOG: 'logarithm'}
+PHI_NAMES = {PHI_IDENTITY: 'identity', PHI_LOG: 'logarithm', PHI_HERBACH: 'herbach_exact', PHI_HERBACH_APPROX: 'herbach'}
 LINK_NAMES = {LINK_LOGISTIC: 'logistic'}
+
+
+def herbach_code(form):
+    """phi code of the Herbach type of form 'approximate' (linear in theta, default) or 'exact'."""
+    key = str(form).strip().lower()
+    if key not in ('approximate', 'exact'):
+        raise ValueError(f"model_learning_herbach_form: 'approximate' or 'exact', not {form!r}")
+    return PHI_HERBACH if key == 'exact' else PHI_HERBACH_APPROX
+
+
+def is_herbach(phi):
+    """True for both forms of the Herbach type."""
+    return int(phi) in HERBACH_TYPES
+START_M = 2.0  # Hill coefficient of the Herbach type when none is given
+
+
+def family_name(fam):
+    """Name of a candidate family (phi, link, m), e.g. 'herbach2/logistic'."""
+    phi, link, m = fam
+    return f"{PHI_NAMES[int(phi)]}{'%g' % m if is_herbach(phi) else ''}/{LINK_NAMES[int(link)]}"
+
+
+def set_family(spec, rows, fam):
+    """Family (phi, link, m) of the targets rows of spec, in place."""
+    phi, link, m = fam
+    spec[rows, SPEC_PHI], spec[rows, SPEC_LINK] = phi, link
+    if is_herbach(phi):
+        spec[rows, SPEC_M] = m
+
+
+def family_index(spec, cands):
+    """Index (G,) of the candidate family of each target of spec (0 if none matches)."""
+    out = np.zeros(spec.shape[0], dtype=int)
+    for f, (phi, link, m) in enumerate(cands):
+        hit = (spec[:, SPEC_PHI] == phi) & (spec[:, SPEC_LINK] == link)
+        if is_herbach(phi):
+            hit &= np.isclose(spec[:, SPEC_M], m)
+        out[hit] = f
+    return out
 
 
 SIGMA_SPEC_FILE = 'sigma_spec_grn.npy'  # in cardamomOT/: present only for a run with model_learning_grn
@@ -68,14 +120,16 @@ def link_code(name):
     return LINK_CODES[key]
 
 
-def default_spec(G, kappa=0.1, pbar=1.0, phi=PHI_IDENTITY, link=LINK_LOGISTIC):
-    """Spec of G genes, all of the family (phi, link), regulator scales kappa and high-mode levels pbar (scalars or
-    (G,))."""
+def default_spec(G, kappa=0.1, pbar=1.0, phi=PHI_IDENTITY, link=LINK_LOGISTIC, thresh=None, m=START_M):
+    """Spec of G genes, all of the family (phi, link), regulator scales kappa, high-mode levels pbar, thresholds thresh
+    (None: pbar / 2) and Hill coefficients m (scalars or (G,))."""
     spec = np.zeros((G, N_SPEC))
     spec[:, SPEC_PHI] = phi
     spec[:, SPEC_LINK] = link
     spec[:, SPEC_KAPPA] = kappa
     spec[:, SPEC_PBAR] = pbar
+    spec[:, SPEC_THRESH] = np.asarray(pbar, dtype=float) / 2 if thresh is None else thresh
+    spec[:, SPEC_M] = m
     return spec
 
 
@@ -115,23 +169,44 @@ def link_pair(z, link):
 
 
 @njit(cache=True)
-def feature(p, phi, kappa, pbar):
-    """phi(p) of a regulator of level p for the phi family phi (kappa, pbar: scale and high-mode level of the
-    regulator)."""
+def hill_ratio(x, m):
+    """x^m / (1 + x^m) for x >= 0."""
+    xm = max(x, 0.0) ** m
+    return xm / (1.0 + xm)
+
+
+@njit(cache=True)
+def feature(p, phi, kappa, pbar, thresh, m):
+    """phi(p) of a regulator of level p for the phi family phi (kappa, pbar, thresh: scale, high-mode level and
+    threshold of the regulator; m: Hill coefficient of the target); the families linear in theta only (exact
+    Herbach: herbach_psi)."""
     if phi == PHI_LOG:
         return pbar * np.log1p(max(p, 0.0) / kappa) / np.log1p(pbar / kappa)
+    if phi == PHI_HERBACH_APPROX:
+        return pbar * hill_ratio(p / thresh, m) / hill_ratio(pbar / thresh, m)
     return p
 
 
 @njit(cache=True)
-def features(Y, phi, kappa, pbar):
-    """phi of the regulator levels Y (N, K) for the phi family phi; kappa, pbar (K,) of the regulators."""
+def herbach_psi(theta, p, thresh, m):
+    """Contribution psi(theta, x) = log((1 + e^theta x^m) / (1 + x^m)) of a regulator of level p to the logit of a
+    Herbach target (x = p / thresh, m its Hill coefficient); 0 at p = 0."""
+    if p <= 0.0:
+        return 0.0
+    lx = m * np.log(p / thresh)
+    return np.logaddexp(0.0, theta + lx) - np.logaddexp(0.0, lx)
+
+
+@njit(cache=True)
+def features(Y, phi, kappa, pbar, thresh, m):
+    """phi of the regulator levels Y (N, K) for the phi family phi; kappa, pbar, thresh (K,) of the regulators, m the
+    Hill coefficient of the target."""
     if phi == PHI_IDENTITY:
         return Y
     out = np.empty(Y.shape)
     for i in range(Y.shape[0]):
         for k in range(Y.shape[1]):
-            out[i, k] = feature(Y[i, k], phi, kappa[k], pbar[k])
+            out[i, k] = feature(Y[i, k], phi, kappa[k], pbar[k], thresh[k], m)
     return out
 
 
@@ -139,11 +214,17 @@ def features(Y, phi, kappa, pbar):
 def sigma_input(theta_basal, theta_inter, prot, j, spec=None):
     """Input z_j of sigma for target j at the protein state prot (G,)."""
     z = theta_basal[j]
+    if spec is not None and spec[j, SPEC_PHI] == PHI_HERBACH:
+        for g in range(prot.shape[0]):
+            if theta_inter[g, j] != 0.0:
+                z += herbach_psi(theta_inter[g, j], prot[g], spec[g, SPEC_THRESH], spec[j, SPEC_M])
+        return z
     if spec is not None and spec[j, SPEC_PHI] != PHI_IDENTITY:
         phi = spec[j, SPEC_PHI]
         for g in range(prot.shape[0]):
             if theta_inter[g, j] != 0.0:
-                z += feature(prot[g], phi, spec[g, SPEC_KAPPA], spec[g, SPEC_PBAR]) * theta_inter[g, j]
+                z += feature(prot[g], phi, spec[g, SPEC_KAPPA], spec[g, SPEC_PBAR], spec[g, SPEC_THRESH],
+                             spec[j, SPEC_M]) * theta_inter[g, j]
         return z
     for g in range(prot.shape[0]):
         z += prot[g] * theta_inter[g, j]
@@ -225,8 +306,13 @@ def kon_upper_bound(pmax, ks, inter, basal, ns=1, spec=None):
         z = basal[j]
         for g in range(G):
             if inter[g, j] > 0:
-                z += feature(pmax[g], phi, 1.0 if spec is None else spec[g, SPEC_KAPPA],
-                             1.0 if spec is None else spec[g, SPEC_PBAR]) * inter[g, j]
+                if phi == PHI_HERBACH:  # psi increasing in the regulator for theta > 0
+                    z += herbach_psi(inter[g, j], pmax[g], 0.5 if spec is None else spec[g, SPEC_THRESH],
+                                     START_M if spec is None else spec[j, SPEC_M])
+                else:
+                    z += feature(pmax[g], phi, 1.0 if spec is None else spec[g, SPEC_KAPPA],
+                                 1.0 if spec is None else spec[g, SPEC_PBAR], 0.5 if spec is None else spec[g, SPEC_THRESH],
+                                 START_M if spec is None else spec[j, SPEC_M]) * inter[g, j]
         sig = logistic_pair(z)[1] if spec is None else link_pair(z, spec[j, SPEC_LINK])[1]
         tot += (1 - sig) * ks[j, 0] + sig * k_high(ks, j) + 1e-10  # precision margin
     return tot
@@ -242,11 +328,32 @@ def sigma_torch(P, theta, basal, s, spec=None):
     spec = np.asarray(spec)
     if np.any(spec[:, SPEC_LINK] != LINK_LOGISTIC):
         raise ValueError("sigma_torch: logistic link only")
-    log_t = torch.tensor(spec[:, SPEC_PHI] == PHI_LOG, dtype=P.dtype)
+    fam = spec[:, SPEC_PHI]
     kappa = torch.tensor(spec[:, SPEC_KAPPA], dtype=P.dtype)
     pbar = torch.tensor(spec[:, SPEC_PBAR], dtype=P.dtype)
-    phi = pbar * torch.log1p(torch.relu(P) / kappa) / torch.log1p(pbar / kappa)
-    z = torch.einsum('wng,gj->wnj', P, theta * (1 - log_t)) + torch.einsum('wng,gj->wnj', phi, theta * log_t)
+    col = lambda mask: torch.tensor(mask, dtype=P.dtype)  # targets of a family (columns of theta)
+    z = torch.einsum('wng,gj->wnj', P, theta * col(fam == PHI_IDENTITY))  # (W, n, G)
+    if np.any(fam == PHI_LOG):
+        phi = pbar * torch.log1p(torch.relu(P) / kappa) / torch.log1p(pbar / kappa)
+        z = z + torch.einsum('wng,gj->wnj', phi, theta * col(fam == PHI_LOG))
+    if np.any(fam == PHI_HERBACH_APPROX):
+        thresh = torch.tensor(spec[:, SPEC_THRESH], dtype=P.dtype)
+        h = lambda x, m: x ** m / (1 + x ** m)
+        for m in np.unique(spec[fam == PHI_HERBACH_APPROX, SPEC_M]):  # one feature map per Hill coefficient
+            phi = pbar * h(torch.relu(P) / thresh, float(m)) / h(pbar / thresh, float(m))
+            z = z + torch.einsum('wng,gj->wnj', phi, theta * col((fam == PHI_HERBACH_APPROX) & (spec[:, SPEC_M] == m)))
+    if np.any(fam == PHI_HERBACH):
+        # Exact Herbach contributions psi(theta_gj, P_g / s_g) on the edges of the Herbach targets (support of theta)
+        F = torch.nn.functional.softplus
+        thresh = torch.tensor(spec[:, SPEC_THRESH], dtype=P.dtype)
+        lp = torch.log(torch.clamp(P / thresh, min=1e-12))  # (W, n, G)
+        herb = torch.tensor(fam == PHI_HERBACH)
+        g_idx, j_idx = torch.nonzero((theta.detach() != 0) & herb[None, :], as_tuple=True)
+        if len(g_idx):
+            m_e = torch.tensor(spec[:, SPEC_M], dtype=P.dtype)[j_idx]
+            lx = lp[..., g_idx] * m_e                                 # (W, n, E)
+            psi = F(theta[g_idx, j_idx] + lx) - F(lx)
+            z = z + torch.zeros_like(z).index_add(-1, j_idx, psi)
     return torch.sigmoid(z * s[:, None, :] + (basal * s)[:, None, :])
 
 

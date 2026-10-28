@@ -36,7 +36,7 @@ PARAMETER_GROUPS = [
         'use_depth_factor', 'compute_depth_factor', 'allow_depth_correction', 'depth_method', 'depth_by_cell_type',
         'depth_model']),
     ('NB mixture and samples', [
-        'mean_forcing_em', 'batch_size_mixture', 'max_iter_softEM', 'min_mixture_components', 'max_grid_levels',
+        'mean_forcing_em', 'batch_size_mixture', 'max_iter_softEM', 'min_mixture_components', 'mixture_min_percentage', 'max_grid_levels',
         'dispersion_max', 'mixture_selection_criterion', 'integrate_samples', 'ref_sample_integration']),
     ('Network inference', [
         'force_basins', 'temporal_basins', 'min_n_loops', 'max_iter', 'batch_size_traj', 'n_network_fits',
@@ -49,13 +49,14 @@ PARAMETER_GROUPS = [
         'refine_theta_with_sde', 'fit_scale_theta', 'degradation_rates_per_condition', 'use_temporal_degradations',
         'sde_epochs', 'refine_in_loop']),
     ('Model learning of the regulation function', [
-        'model_learning_grn', 'model_learning_phi', 'model_learning_link', 'model_learning_kappa',
-        'model_learning_start', 'model_learning_freeze', 'model_learning_margin']),
+        'model_learning_grn', 'model_learning_phi', 'model_learning_herbach_form', 'model_learning_herbach_m', 'model_learning_link', 'model_learning_kappa',
+        'model_learning_start', 'model_learning_freeze', 'model_learning_period', 'model_learning_margin',
+        'model_learning_score', 'network_relaxed']),
     ('Proliferation and simulation', [
         'growth_reg_source', 'proliferation_mlp', 'prolif_uses_stimulus', 'n_proliferation_markers', 'ProliferationMLP_per_condition',
         'simulation_stochastic',
         'simulation_mrnas_direct',
-        'protein_dilution']),
+        'protein_dilution', 'mrna_dilution']),
     ('Report', ['classifier_method', 'embedding_method_visualization', 'cell_depth_for_representation',
                 'report_normalize', 'report_log1p', 'report_n_umap']),
     ('Reproducibility', ['seed']),

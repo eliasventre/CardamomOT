@@ -599,11 +599,13 @@ class BurstyPDMPmRNA:
 
     ks (G, n_modes): burst rates (per hour, kz d0; extreme modes used); c_nb (G,): inverse mRNA burst size;
     d0, d1 (G,): mRNA and protein degradation; scale: protein level of the highest mode, s1 = scale d0 d1 c / k_high;
-    dilution (G,): birth rate b added to the protein decay (d1 + b in the flow, s1 unchanged);
+    dilution (G,): birth rate b added to the protein decay (d1 + b in the flow, s1 unchanged); mrna_dilution: also to
+    the mRNA decay (d0 + b), the burst rates scaled by (d0 + b) / d0 (same mRNA levels, s1 unchanged);
     stimulus dimensions 0..ns-1 constant, without bursts; chrom: ChromatinModel (state updated in place).
     Adaptive thinning as Harissa (bound of kon along the flow), plus the bound of the chromatin jumps.
     """
-    def __init__(self, ks, c_nb, d0, d1, basal, inter, scale=1.0, ns=1, chrom=None, dilution=None, spec=None) -> None:
+    def __init__(self, ks, c_nb, d0, d1, basal, inter, scale=1.0, ns=1, chrom=None, dilution=None, spec=None,
+                 mrna_dilution=False) -> None:
         G = basal.shape[0]
         self.ks = np.ascontiguousarray(ks, dtype=np.float64)
         self.c_nb = np.asarray(c_nb, dtype=np.float64)
@@ -613,6 +615,10 @@ class BurstyPDMPmRNA:
         k_high = np.max(self.ks, axis=1)
         self.s1 = np.zeros(G)
         self.s1[ns:] = scale * self.d0[ns:] * d1[ns:] * self.c_nb[ns:] / np.maximum(k_high[ns:], 1e-300)
+        if mrna_dilution and dilution is not None:
+            dil = np.asarray(dilution, dtype=np.float64)
+            self.ks = np.ascontiguousarray(self.ks * ((self.d0 + dil) / np.maximum(self.d0, 1e-300))[:, None])
+            self.d0 = self.d0 + dil
         self.basal = np.asarray(basal, dtype=np.float64)
         self.inter = np.ascontiguousarray(inter, dtype=np.float64)
         self.spec = spec  # families of sigma, None = logistic
@@ -695,8 +701,8 @@ def simulate_next_mrna_pdmp(d0, d1, ks, c_nb, basal, inter, t, scale, **kwargs) 
     Perform simulation of the network model (bursty PDMP with explicit mRNA).
 
     kwargs: P0, M0 (G,) initial states; ns; stim_vals (ns,) stimulus values (authoritative over P0);
-    chrom (ChromatinModel, updated in place); dilution (G,) birth rates added to the protein decay; spec (families
-    of sigma, None = logistic); verb.
+    chrom (ChromatinModel, updated in place); dilution (G,) birth rates added to the protein decay (and to the mRNA
+    decay with mrna_dilution); spec (families of sigma, None = logistic); verb.
     Returns Simulation with p and m (dimensions 1..G-1 at the time points) and the chromatin if any.
     """
     p0, m0 = kwargs.get('P0'), kwargs.get('M0')
@@ -706,7 +712,8 @@ def simulate_next_mrna_pdmp(d0, d1, ks, c_nb, basal, inter, t, scale, **kwargs) 
     if np.any(t != np.sort(t)):
         raise ValueError('Time points must appear in increasing order')
     network = BurstyPDMPmRNA(ks, c_nb, d0, d1, basal, inter, scale=scale, ns=ns, chrom=kwargs.get('chrom'),
-                             dilution=kwargs.get('dilution'), spec=kwargs.get('spec'))
+                             dilution=kwargs.get('dilution'), spec=kwargs.get('spec'),
+                             mrna_dilution=kwargs.get('mrna_dilution', False))
     if p0 is not None:
         network.P[ns:] = p0[ns:]
     if m0 is not None:

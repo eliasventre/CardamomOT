@@ -1,11 +1,11 @@
 """
 Benchmark networks of CardamomOT (results_article/figures/simulate_data_{FN4,CN5,BN8,FN8}.py, Harissa defaults:
-k_low = 0, k_high = 2, mRNA burst size 50) in which each gene follows either the sigmoid of a linear input or the
-Hill-type function of inference/sigma.py, drawn per run.
+k_low = 0, k_high = 2, mRNA burst size 50) in which each gene is, with probability 1/4, a sigmoid of a linear input or a
+Herbach-type target (approximate form, saturating Hill steps of threshold 1/2) of coefficient m = 1, 2 or 4
+(HERBACH_M), the candidate families of inference/sigma.py, drawn per run.
 
-A Hill target keeps the interactions of the sigmoid network: phi = log is normalised (phi(0) = 0, phi(1) = 1 at the
-high mode), so that both families switch between the same burst frequencies, with different shapes (the Hill one is
-concave in P and switches earlier).
+The Herbach steps are normalised (phi(0) = 0, phi(1) = 1 at the high mode), so that every family keeps the interactions
+of the network and switches between the same burst frequencies, with different shapes.
 """
 import os
 import sys
@@ -14,8 +14,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
-KAPPA = 0.1           # scale of the regulators of the Hill targets, relative to the protein level of the high mode
-P_HILL = 0.5          # probability of a gene to be a Hill target
+KAPPA = 0.1           # scale of the regulators of the Hill type, relative to the protein level of the high mode
+HERBACH_M = (1.0, 2.0, 4.0)  # Hill coefficients of the Herbach targets
 
 # name: (d0, d1, basal of the genes, {(regulator, target): interaction}), gene 0 = stimulus
 NETWORKS = {
@@ -39,7 +39,7 @@ class Network:
     rate kz d0), c_nb (G+1,), d0, d1 (G+1,), basal, inter, spec (families of sigma, inference/sigma.py)."""
 
     def __init__(self, name, run, seed=0):
-        from CardamomOT.inference.sigma import default_spec, SPEC_PHI, PHI_LOG
+        from CardamomOT.inference.sigma import default_spec, set_family, SPEC_PHI, PHI_HERBACH_APPROX
         d0, d1, basal, edges = NETWORKS[name]
         self.name, self.run = name, run
         G = len(basal)
@@ -51,13 +51,16 @@ class Network:
         self.inter = np.zeros((G + 1, G + 1))
         for (i, j), v in edges.items():
             self.inter[i, j] = v
-        # Family of each gene, drawn per run
+        # Family of each gene (0 sigmoid, k > 0 Herbach of coefficient HERBACH_M[k - 1]), drawn per run; threshold of the
+        # Herbach regulators 1/2
         rng = np.random.default_rng([seed, list(NETWORKS).index(name), run])
-        self.hill = np.concatenate([[False], rng.random(G) < P_HILL])
+        fam = np.concatenate([[0], rng.integers(0, 1 + len(HERBACH_M), G)])
         self.spec = default_spec(G + 1, kappa=KAPPA, pbar=1.0)
-        self.spec[self.hill, SPEC_PHI] = PHI_LOG
+        for g in np.flatnonzero(fam > 0):
+            set_family(self.spec, g, (PHI_HERBACH_APPROX, 0, HERBACH_M[fam[g] - 1]))
+        self.family = self.spec[:, SPEC_PHI].astype(int)
         self.ks = self.kz * self.d0[:, None]
 
     def truth(self):
-        return dict(inter=self.inter, basal=self.basal, spec=self.spec, hill=self.hill, kz=self.kz, c_nb=self.c_nb,
-                    d0=self.d0, d1=self.d1, kappa=np.array(KAPPA))
+        return dict(inter=self.inter, basal=self.basal, spec=self.spec, family=self.family, kz=self.kz,
+                    c_nb=self.c_nb, d0=self.d0, d1=self.d1, kappa=np.array(KAPPA))

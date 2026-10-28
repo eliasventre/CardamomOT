@@ -22,7 +22,9 @@ Required input files:
     - Data/data_full.h5ad: full count matrix
 
 Output files:
-    - Data/data_full.h5ad: updated with d0 (mRNA) and d1 (protein) degradation rates (h⁻¹)
+    - Data/data_full.h5ad: updated with d0 (mRNA) and d1 (protein) degradation rates (h⁻¹); d1 is a pure
+      degradation rate, d0 the mRNA turnover of the source cell lines, which includes their growth
+      (uns['degradation_rates']['mrna_growth_rate'], subtracted by the inference with mrna_dilution)
     - Data/data_train.h5ad, data_test.h5ad: updated with degradation rates (if split = 'train')
     - cardamomOT/degradation_rates_report.csv: per-gene match, half-lives, source and neighbours used
 """
@@ -58,9 +60,16 @@ def assign_rates(adata, details, species, overwrite=False):
         print(f"[get_degradation_rates] Assigned {quantity} degradation rates ({col}), median of the genes "
               f"{np.median(adata.var[col]):.4f} h^-1, clipped within x10 of the reference median {med:.4f} h^-1 "
               f"(half-life {np.log(2) / med:.1f} h): {int(np.sum((rates < med / 10) | (rates > 10 * med)))} genes")
+    # mrna_growth_rate: growth of the source cell lines included in d0 (subtracted with mrna_dilution); 0 for rates
+    # supplied by the user (d0 without d0_source), taken as pure decay
+    from_tables = "d0_source" in adata.var.columns
     adata.uns["degradation_rates"] = {"units": "hour^-1", "species": species,
                                       "reference_mrna": REFERENCES[species]["mrna"],
-                                      "reference_protein": REFERENCES[species]["protein"]}
+                                      "reference_protein": REFERENCES[species]["protein"],
+                                      "mrna_growth_rate": REFERENCES[species]["mrna_growth_rate"] if from_tables else 0.0}
+    if not from_tables:
+        print("[get_degradation_rates] d0 supplied in adata.var (no d0_source): taken as pure mRNA decay "
+              "(mrna_growth_rate = 0)")
 
 
 def main(argv):

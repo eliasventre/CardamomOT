@@ -20,6 +20,8 @@ Half-lives, in hours:
   SLAM-seq / TimeLapse-seq data from 11 human cell lines. Per gene, the
   geometric mean over cell lines of the dropout-normalised half-life, each cell
   line first recentred on a common median.
+  The mRNA rates of both species are turnover of growing cell lines (decay + their
+  dilution); their doubling times are in ``halflife_db.MRNA_SOURCE_DOUBLING_TIMES``.
 * Human, protein — Mathieson et al., "Systematic analysis of protein turnover in
   primary cells", Nat Commun 9:689 (2018), Supplementary Data 2 ("high qual"):
   B cells, NK cells, hepatocytes, monocytes. Per gene, the geometric mean over

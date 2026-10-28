@@ -12,13 +12,15 @@ from typing import Any
 import multiprocessing as mp
 import numpy as np
 from scipy.optimize import minimize
+from scipy.special import expit
 from scipy.optimize import check_grad
 from numba import njit
 from functools import partial
 import logging
 
 from CardamomOT.logging import get_logger
-from .sigma import SPEC_PHI, SPEC_LINK, SPEC_KAPPA, SPEC_PBAR, PHI_IDENTITY, LINK_LOGISTIC, logistic, logistic_pair, features
+from .sigma import (SPEC_PHI, SPEC_LINK, SPEC_KAPPA, SPEC_PBAR, SPEC_THRESH, SPEC_M, PHI_IDENTITY, PHI_HERBACH,
+                    LINK_LOGISTIC, logistic, logistic_pair, features)
 
 # module-level logger
 logger = get_logger(__name__)
@@ -129,6 +131,46 @@ def base_kon(theta_basal, theta_inter, y_prot) -> np.ndarray:
     return result
 
 
+class HerbachArray(np.ndarray):
+    """Inputs m log(P_k / s_k) (..., K) of the regulators of a target of Herbach type (sigma.py): its logit is
+    basal + sum_k psi(theta_k, P_k / s_k), psi(theta, x) = log((1 + e^theta x^m) / (1 + x^m)), nonlinear in theta
+    (d psi / d theta = expit(theta + m log x)); the fits use _logit / _logit_grad on these arrays."""
+
+
+def herbach_inputs(Y, thresh, m):
+    """HerbachArray m log(max(Y / thresh, tiny)) of the regulator levels Y (..., K), thresholds thresh (K,)."""
+    x = np.maximum(np.asarray(Y, dtype=float) / np.asarray(thresh, dtype=float), 1e-12)
+    return (float(m) * np.log(x)).view(HerbachArray)
+
+
+def _logit(Y, th):
+    """Logit without basal (n,) of the inputs Y (n, K): Y @ th, or sum_k psi(th_k, .) for a Herbach target."""
+    if isinstance(Y, HerbachArray):
+        L = np.asarray(Y)
+        return np.sum(np.logaddexp(0.0, L + th) - np.logaddexp(0.0, L), axis=-1)
+    return Y @ th
+
+
+def _logit_grad(Y, th, r):
+    """sum_i r_i d logit_i / d th (K,) of the inputs Y (n, K): Y.T @ r, or expit(th + L).T @ r (Herbach)."""
+    if isinstance(Y, HerbachArray):
+        return expit(np.asarray(Y) + th).T @ r
+    return Y.T @ r
+
+
+def _sigma_of(basal, th, Y):
+    """sigma (n,) of one target at the inputs Y (n, K), scalar basal, interactions th (K,)."""
+    if isinstance(Y, HerbachArray):
+        return logistic(basal + _logit(Y, th))
+    return base_kon(basal, th, Y)
+
+
+def _input_features(Y):
+    """Linear-equivalent features of the inputs (the gradient of the logit at theta = 0): Y, or the Hill ratios
+    x^m / (1 + x^m) = expit(m log x) of a Herbach target (ridge, null model)."""
+    return expit(np.asarray(Y)) if isinstance(Y, HerbachArray) else np.asarray(Y, dtype=float)
+
+
 def sigmoid_amplitudes(ks):
     """Sigmoid bounds (..., 2) = (lowest mode, highest mode) of mixture amplitudes ks (..., n_modes):
     kon = k_low + (k_high - k_low) * sigmoid(Z), intermediate modes lie on the slope (unstable)."""
@@ -168,7 +210,7 @@ def _compute_sigma_per_sample(theta_inter, theta_basal_all, ref_network, yp, ys,
         s_idx = int(s)
         mask = (ys == s)
         if np.any(mask):
-            sigma[mask] = base_kon(theta_basal_all[s_idx], inter_ref, yp[mask])
+            sigma[mask] = _sigma_of(theta_basal_all[s_idx], inter_ref, yp[mask])
     return sigma
 
 
@@ -301,7 +343,7 @@ def _mem_terms(basal_s, th, Y):
     terms = [(Y.weights[:, 0], Y.end)] + [(Y.weights[:, q + 1], Y.nodes[:, q]) for q in range(Y.nodes.shape[1])]
     out, sig_bar = [], np.zeros(len(Y))
     for w, Yq in terms:
-        sq = logistic(basal_s + Yq @ th)
+        sq = logistic(basal_s + _logit(Yq, th))
         sig_bar += w * sq
         out.append((w, sq, Yq))
     return np.clip(sig_bar, 0.0, 1.0), out
@@ -319,7 +361,7 @@ def _mem_loss_grad(basal_s, th, Y, yt, grad=True, dist=None):
     g_th, g_b = np.zeros(len(th)), 0.0
     for w, sq, Yq in terms:
         tmp = dl * w * sq * (1 - sq)
-        g_th = g_th + Yq.T @ tmp
+        g_th = g_th + _logit_grad(Yq, th, tmp)
         g_b += float(np.sum(tmp))
     return loss, g_th, g_b
 
@@ -357,11 +399,11 @@ def _path_fit(theta_of, basal, ys, us, terms, yt, weights_samples, grad=True):
             if not np.any(w_s > 0):
                 continue
             t_s = yt_s if tq is None else tq[mask]
-            sig = logistic(basal[s_idx] + Y_s @ th)
+            sig = logistic(basal[s_idx] + _logit(Y_s, th))
             Q += ws * np.sum(w_s * cross_entropy(sig, t_s, eps_CE))
             if grad:
                 tmp = grad_main_loss(sig, t_s, 1) * w_s * sig * (1 - sig)
-                g_th += Y_s.T @ tmp
+                g_th += _logit_grad(Y_s, th, tmp)
                 g_b += float(np.sum(tmp))
         if grad:
             out.append((s_idx, ws, g_th, g_b))
@@ -472,7 +514,7 @@ def grad_theta(X, weights_samples, ys, yp, ypm, yt, G, g, n_samples,
             weight_s = np.sum(weights_samples) / weights_samples[cnt]
             mask = (ys == s)
             tmp = _end_grad_terms(sigma[mask], yt[mask], _sl(dist, mask))
-            res = (Y[mask].T @ tmp[:, None]).reshape(-1)
+            res = _logit_grad(Y[mask], theta_inter * ref_network, tmp)
             dq[:G] += pass_w * ref_network * res * weight_s / ns_unique
             dq[G + s_idx] += pass_w * np.sum(tmp) * weight_s / ns_unique
 
@@ -501,12 +543,12 @@ def _sigma_refinement(theta_basal, inter_with_diag, cond, Y, ys, us):
         s_idx = int(s)
         mask = (ys == s)
         if np.any(mask):
-            sigma[mask] = base_kon(theta_basal[s_idx], _of_cond(inter_with_diag, cond, s_idx), Y[mask])
+            sigma[mask] = _sigma_of(theta_basal[s_idx], _of_cond(inter_with_diag, cond, s_idx), Y[mask])
     return sigma
 
 
 def objective_refinement(X, inter, weights_samples, ys, yp, ypm, yt,
-                          diag, G, g, n_samples, l_pen, weight_flow_matching, cond=None, dist=None):
+                          diag, G, g, n_samples, l_pen, weight_flow_matching, cond=None, dist=None, ridge=None):
     """
     Loss for the refinement step with per-sample basal.
 
@@ -545,11 +587,13 @@ def objective_refinement(X, inter, weights_samples, ys, yp, ypm, yt,
     # l_pen: (G,) per-edge penalty (1/w times the base one, see refine_inference)
     Q += theta_penalization(X[:g], l_pen[:g])
     Q += theta_penalization(X[g + 1:G], l_pen[g + 1:G])
+    if ridge is not None:  # Gaussian prior on the effects c_e theta_e (relaxed refinement)
+        Q += 0.5 * np.sum(ridge * theta_inter ** 2)
     return Q
 
 
 def grad_correc(X, inter, weights_samples, ys, yp, ypm, yt,
-                diag, G, g, n_samples, l_pen, weight_flow_matching, cond=None, dist=None):
+                diag, G, g, n_samples, l_pen, weight_flow_matching, cond=None, dist=None, ridge=None):
     """Gradient of objective_refinement w.r.t. X (interaction corrections, basals)."""
     theta_inter = inter.copy() * X[:G]
     theta_basal = X[G:]  # (n_samples,)
@@ -582,12 +626,14 @@ def grad_correc(X, inter, weights_samples, ys, yp, ypm, yt,
             weight_s = np.sum(weights_samples) / weights_samples[cnt]
             mask = (ys == s)
             tmp = _end_grad_terms(sigma[mask], yt[mask], _sl(dist, mask))
-            res = (Y[mask].T @ tmp[:, None]).reshape(-1)
+            res = _logit_grad(Y[mask], _of_cond(inter_with_diag, cond, s_idx), tmp)
             dq[:G] += pass_w * _of_cond(inter, cond, s_idx) * res * weight_s / ns_unique
             dq[G + s_idx] += pass_w * np.sum(tmp) * weight_s / ns_unique
 
     dq[:g] += grad_theta_penalization(X[:g], l_pen[:g])
     dq[g + 1:G] += grad_theta_penalization(X[g + 1:G], l_pen[g + 1:G])
+    if ridge is not None:
+        dq[:G] += (ridge * theta_inter * inter).reshape(-1, G).sum(axis=0)
     return dq
 
 
@@ -733,10 +779,10 @@ def _loss_grad_conditions(X, weights_samples, ys, yp, ypm, yt, G, n_samples,
                 g_eff[c] += ws * gt
                 g_basal[s_idx] += ws * gb
                 continue
-            sig = base_kon(basal[s_idx], eff[c], Y[mask])
+            sig = _sigma_of(basal[s_idx], eff[c], Y[mask])
             Q += ws * _end_loss(sig, yt[mask], _sl(dist, mask))
             tmp = _end_grad_terms(sig, yt[mask], _sl(dist, mask))
-            g_eff[c] += ws * (Y[mask].T @ tmp)
+            g_eff[c] += ws * _logit_grad(Y[mask], eff[c], tmp)
             g_basal[s_idx] += ws * np.sum(tmp)
 
     g_theta = g_eff * wa
@@ -873,7 +919,7 @@ def refine_inference(y_samples, y_prot, y_prot_mod, y_target, inter, basal, thet
                      G, g, n_samples,
                      l_pen, weight_flow_matching=.5, final=0,
                      hard_forcing_ref=False, ref_constraint_pct=0.1, ref_network=None, seuil_min_network_intensity=1e-2,
-                     cond=None, dist=None):
+                     cond=None, dist=None, ridge=None):
     """
     Refinement step: optimise multiplicative correction factors over inter, per-sample basals refitted freely
     (additive, any sign). Refined values stay within max_inter and _basal_bound(G);
@@ -883,7 +929,8 @@ def refine_inference(y_samples, y_prot, y_prot_mod, y_target, inter, basal, thet
     theta_e = c_e theta_tmp_e with c_e >= 0, so l_pen |c_e| = l_pen |theta_e| / |theta_tmp_e|
     (l_pen: quantile universal threshold of the garrote itself, qut_garrote),
     within the support and signs of theta_tmp (self-regulation and basals unpenalized). final: no bounds around the
-    reference (signed priors only), as in core_inference.
+    reference (signed priors only), as in core_inference. ridge (G,) or None: Gaussian prior on the effects
+    c_e theta_tmp_e (ridge_coefficients), with l_pen = 0 in the relaxed refinement (network_relaxed).
 
     basal : (n_samples,)
     inter : (G,), or (C, G) per condition (cond[s] = condition of sample s):
@@ -902,7 +949,7 @@ def refine_inference(y_samples, y_prot, y_prot_mod, y_target, inter, basal, thet
     X_flat = np.r_[np.ones(G), np.clip(basal, -_basal_bound(G), _basal_bound(G))]
 
     # Corrections: interactions in [0, 2] (selection, little expansion); basals free within their capacity
-    max_bounds = 10
+    max_bounds = 100
     bounds = [(0, max_bounds)] * G
     if not final and hard_forcing_ref:
         r_plus = min(max_bounds, 1 + ref_constraint_pct / max(EPS, (1 - ref_constraint_pct)))
@@ -934,7 +981,7 @@ def refine_inference(y_samples, y_prot, y_prot_mod, y_target, inter, basal, thet
     kw = dict(inter=inter,
               weights_samples=weights_samples, ys=y_samples, yp=y_prot, ypm=y_prot_mod, yt=y_target,
               diag=diag, G=G, g=g, n_samples=n_samples,
-              l_pen=l_pen, weight_flow_matching=weight_flow_matching, cond=cond, dist=dist)
+              l_pen=l_pen, weight_flow_matching=weight_flow_matching, cond=cond, dist=dist, ridge=ridge)
     loss_fn = partial(objective_refinement, **kw)
     grad_fn = partial(grad_correc, **kw)
 
@@ -965,7 +1012,7 @@ def ridge_coefficients(y_prot, ref_network, network_ridge):
     """
     eps = 1.0 / max(network_ridge, 2.0 + EPS)
     span = 2.0 * np.log((1.0 - eps) / eps)
-    sd = np.std(np.asarray(y_prot, dtype=float), axis=0)
+    sd = np.std(_input_features(y_prot), axis=0)  # Herbach target: of its Hill ratios (effect of theta at 0)
     return (prior_weight(ref_network) * sd / span) ** 2
 
 
@@ -1059,7 +1106,7 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
                         constrain_basal_uniform=0.0, basal_free_mask=None,
                         hard_forcing_ref=False, ref_constraint_pct=0.1, seuil_min_network_intensity=1e-2,
                         cond=None, condition_pen=1.0, act=None, act_tgt=None,
-                        qut_level=0.5, qut_n_perm=20, network_ridge=20.0, dist=None):
+                        qut_level=0.5, qut_n_perm=20, network_ridge=20.0, network_relaxed=False, dist=None):
     """
     Joint inference (inter + per-sample basal) for a single gene g.
     dist: DistTerm of the end-state term (weight_network_distribution) or None; the sparsity levels (QUT) are those of
@@ -1067,6 +1114,9 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
     Sparsity levels: quantile universal thresholds at qut_level, of the first fit (qut_penalty) and of the
     refinement (qut_garrote, theta of the first fit fixed);
     network_ridge: Gaussian prior on the effects of the edges in the first fit (ridge_coefficients).
+    network_relaxed: refinement without L1 penalty (relaxed lasso: the first fit sets the support and signs, the
+    refinement re-estimates the effects without the shrinkage of the L1, within the bounds), keeping the ridge of the
+    first fit, which bounds the edges of nearly separable targets.
     final : L2 towards theta_ref added to the L1, no bounds around the reference (signed priors only).
     act (C, G), act_tgt (C,) or None: regulators and target selected in each condition (select_genes_per_condition);
     the samples of a condition without the target are left out (as single-mode ones) and its interactions are 0.
@@ -1152,11 +1202,13 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
     inter, basal = refine_inference(
         y_samples, y_prot, y_prot_mod, y_target, inter_tmp.copy(), basal_tmp.copy(), ref_refine,
         G, g, n_samples,
+        0.0 if network_relaxed else
         qut_garrote(y_samples, y_prot, y_prot_mod, y_target, inter_tmp, basal_tmp, G, g, n_samples,
                     weight_flow_matching * (1 - final), ref_network, cond, qut_level, qut_n_perm),
         weight_flow_matching=weight_flow_matching * (1 - final),  # adaptive lasso, weights 1 / |theta_tmp|
         final=final, hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
         ref_network=ref_network, seuil_min_network_intensity=seuil_min_network_intensity, cond=cond, dist=dist,
+        ridge=common['ridge'] if network_relaxed else None,
     )
     if act is not None and cond is not None:
         inter = inter * act  # entries of regulators / targets outside each condition stay 0
@@ -1179,7 +1231,7 @@ def _fit_flat_basals(basal, inter, flat, ys, Y, yt, g, cond, bound):
         yt_s = np.clip(yt[mask], FLAT_TARGET_TOL, 1 - FLAT_TARGET_TOL)
         def loss(b):
             # Cross-entropy written on the logit x (convex, not flat where the clipped sigmoid saturates)
-            x = b + Y[mask] @ th
+            x = b + _logit(Y[mask], th)
             return float(np.sum(np.logaddexp(0.0, x) - yt_s * x))
         res = minimize_scalar(loss, bounds=(-bound, bound), method='bounded')
         basal[s] = res.x
@@ -1309,7 +1361,7 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
                       hard_forcing_ref=False, ref_constraint_pct=0.1,
                       seuil_min_network_intensity=1e-2,
                       sample_conditions=None, condition_pen=1.0, gene_mask=None,
-                      sigma_spec_grn=None, qut_level=0.5, qut_n_perm=20, y_prot_mem=None,
+                      sigma_spec_grn=None, qut_level=0.5, qut_n_perm=20, network_relaxed=False, y_prot_mem=None,
                       dist_targets=None) -> list:
     """
     Joint network inference: interactions shared across samples, basal per sample.
@@ -1338,8 +1390,8 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
         a gene outside a condition is neither a target nor a regulator there (its interactions are 0) and the fused
         penalty only acts on the edges shared by conditions. Without conditions, the mask of the (single) gene set.
     sigma_spec_grn : (G, N_SPEC) or None: families of the GRN sigma (sigma.py, model_learning_grn); a target with a
-        non-identity phi is fitted on the features phi of its regulators (same fit, theta then acting on phi; logistic
-        link only). None: every target logistic of a linear input.
+        non-identity phi (Hill or Herbach type) is fitted on the features phi of its regulators (same fit, theta then
+        acting on phi; logistic link only). None: every target logistic of a linear input.
     y_prot_mem : PathProt or None (targets_accounting_late_mrna): states of every gene at nodes along the interval
         ending at each row (nodes (N, Q, G)) and weights (N, Q + 1, G) of each target's mRNA memory (column 0 = the row);
         the end-state term then compares sigma averaged on the memory of the target to its target (MemStates).
@@ -1429,7 +1481,8 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
                    constrain_basal_uniform=constrain_basal_uniform,
                    hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
                    seuil_min_network_intensity=seuil_min_network_intensity, condition_pen=condition_pen,
-                   qut_level=qut_level, qut_n_perm=qut_n_perm, network_ridge=network_ridge)
+                   qut_level=qut_level, qut_n_perm=qut_n_perm, network_ridge=network_ridge,
+                   network_relaxed=network_relaxed)
 
     # Genes of each condition (rows of the first sample of each condition); a single set without conditions
     gm = None if gene_mask is None else np.asarray(gene_mask, dtype=bool)
@@ -1463,7 +1516,12 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
             fam = int(sigma_spec_grn[g_tgt, SPEC_PHI])
             kappa = np.ascontiguousarray(sigma_spec_grn[active_src, SPEC_KAPPA], dtype=float)
             pbar = np.ascontiguousarray(sigma_spec_grn[active_src, SPEC_PBAR], dtype=float)
-            phi = lambda Y: features(np.ascontiguousarray(Y, dtype=float), fam, kappa, pbar)
+            thresh = np.ascontiguousarray(sigma_spec_grn[active_src, SPEC_THRESH], dtype=float)
+            m_tgt = float(sigma_spec_grn[g_tgt, SPEC_M])
+            if fam == PHI_HERBACH:  # exact Herbach contributions: inputs m log(P / s), logit nonlinear in theta
+                phi = lambda Y: herbach_inputs(Y, thresh, m_tgt)
+            else:
+                phi = lambda Y: features(np.ascontiguousarray(Y, dtype=float), fam, kappa, pbar, thresh, m_tgt)
             yp = phi(yp)
             if mem is not None:
                 n, Q, K = mem[0].shape
@@ -1473,7 +1531,8 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
                 ypm = PathNodes(phi(ypm.nodes.reshape(n * Q, K)).reshape(n, Q, K), ypm.weights, ypm.kon, ypm.targets)
         if mem is not None and mem[0].shape[1] == 1 and np.all((mem[1] == 0) | (mem[1] == 1)):
             # Single node of weight 1 (late_mrna_nodes = 1): the end-state term at the lagged states, without cost
-            yp = np.where(mem[1][:, :1] > 0.5, yp, mem[0][:, 0])
+            lagged = np.where(mem[1][:, :1] > 0.5, yp, mem[0][:, 0])
+            yp = lagged.view(HerbachArray) if isinstance(yp, HerbachArray) else lagged
         elif mem is not None:  # end-state term on sigma averaged on the target's mRNA memory
             yp = MemStates(yp, mem[0], mem[1])
         theta_rows = slice(None) if c is None else np.r_[c * G:(c + 1) * G, C * G:C * G + n_samples]

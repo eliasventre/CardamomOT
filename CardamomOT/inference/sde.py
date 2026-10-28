@@ -16,7 +16,8 @@ Gamma increments with the mean and variance of the bursts, or their diffusion li
           dP = (d1 (kon(P) - P) - b P) dt + sqrt(2 kon d1 eps / k1) dW, eps = d1 / d0
 - 'sde2': explicit mRNA (normalised m = M c / k1), mRNA bursts of rate kon k1 d0 and mean size 1 / c:
           dm = d0 (kon(P) - m) dt + sqrt(2 kon d0 / k1) dW,  dP = (d1 m - (d1 + b) P) dt, eps = d1 / d0;
-          the observed mRNA (normalised as m) are then compared too, the modes alone not setting the mRNA speed d0
+          the observed mRNA (normalised as m) are then compared too, the modes alone not setting the mRNA speed d0;
+          with mrna_dilution, d0 + b in place of d0 in the mRNA equation (same levels kon, d0 a pure decay rate)
 Bursty PDMP and its diffusion limit: Herbach et al. 2017 (BMC Syst. Biol.); free-running training of a neural
 SDE: Kidger et al. 2021 (ICML), with Sinkhorn divergences (Feydy et al. 2019, AISTATS; geomloss).
 """
@@ -29,6 +30,12 @@ from geomloss import SamplesLoss
 
 from .sigma import sigma_torch
 
+try:  # geomloss 'auto' switches to the KeOps 'online' backend above 5000² pairs: needs pykeops
+    import pykeops.torch  # noqa: F401
+    SINKHORN_BACKEND = 'auto'
+except Exception:
+    SINKHORN_BACKEND = 'tensorized'
+
 SCALE_BOUNDS = (0.2, 5.0)  # scale of theta per target gene: within [1/5, 5] (network neither erased nor blown up)
 
 
@@ -37,7 +44,7 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                      eps_bounds=(1 / 50, 1 / 1.5), epochs=30, lr=1e-2, n_sub=20, batch_size=256, n_rep=2,
                      max_horizon=9, n_windows=10, n_cond=1, d1_ref=None, eps_ref=None, only_max_horizon=False,
                      blur=0.05, noise='gamma', scale_p=1.0, seed=0, verb=False, spec=None, support_tol=0.0,
-                     memory_filter=False, ce_weight=0.0):
+                     memory_filter=False, ce_weight=0.0, mrna_dilution=False):
     """
     groups: one dict per sample s with
         'X' (T, n, G) trajectory states (starts of the windows; mode 'sde2' also 'M' (T, n, G) normalised mRNA
@@ -52,7 +59,8 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         sigma (probability of the high mode) between k_lo and k_hi,
         'stim' (T - 1, ns) stimulus of each interval, 'idx' index of its basal / network rows, 'cond' index of its
         kinetics (network condition, 0 .. n_cond - 1: d1, eps and scale per condition),
-        'start_ok' (T,) bool times observed for the sample (windows start only there, virtual states being copies),
+        'start_ok' (T,) bool times observed for the sample (windows start only there and span its observed intervals,
+        virtual states being copies),
         'birth' f(P (n, G), kon (n, G), t, slots) -> (n,) birth rates of the dilution or None, re-evaluated at every
         integration step (proliferation MLP),
         'rate' f(P (n, G), t) -> (n,) or None: net rate of the branching weights, integrated along the steps (MLP),
@@ -66,14 +74,16 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
     the other entries set to 0; rappel lam_theta on the support);
     d1, eps, scale (T - 1, G): starting rates (rappel lam_rates on the logs towards d1_ref, eps_ref, default the
     starting values, and towards a scale of 1); only_max_horizon: no curriculum, windows of max_horizon only (with
-    T - 1 <= max_horizon, the whole time course from the first timepoint only); temporal: one value per interval,
-    else shared; max_horizon: longest window (intervals) of the curriculum; n_windows: window starts drawn at each
+    fewer observed intervals, the whole time course from the first observed time only); temporal: one value per
+    interval, else shared; max_horizon: longest window of the curriculum, in observed intervals of each group (a group
+    with fewer takes its whole time course); n_windows: window starts drawn at each
     step (None: all; the cost of a step grows as n_windows x horizon instead of T^2), integrated together in one
     batch; scale_p: protein level of a kon of 1 (scale_proteins, also for the normalised mRNA); spec: families of the
     GRN sigma (sigma.py, model_learning_grn), None = logistic. memory_filter: the observed modes are compared with
     the kon read on the mRNA, Kb' = d0 (kon - Kb) at the d0 = d1 / eps of the model, carried along the windows from
-    the kon of the start states (groups 'K0' (T, n, G)), instead of the lagged proteins. Returns
-    (theta, basal, d1, eps, scale (n_cond, T - 1, G), history).
+    the kon of the start states (groups 'K0' (T, n, G)), instead of the lagged proteins. mrna_dilution: the mRNA
+    ('sde2' and the memory filter) relaxes at d0 + b, the bursts at rate kon k1 (d0 + b) (same levels), d0 = d1 / eps
+    staying a pure decay rate. Returns (theta, basal, d1, eps, scale (n_cond, T - 1, G), history).
     """
     seed = 0 if seed is None else int(seed)  # no model seed: fixed draws
     torch.manual_seed(seed)
@@ -124,7 +134,7 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
     if mode == 'sde2':
         allm = np.concatenate([tg[:, ns:] for g in groups for tg in g['M_targets'] if tg is not None and len(tg)])
         sdm = torch.tensor(np.maximum(allm.std(axis=0), 0.05), dtype=f64)
-    sink = SamplesLoss('sinkhorn', p=2, blur=blur, scaling=0.5, debias=True)  # geomloss default annealing
+    sink = SamplesLoss('sinkhorn', p=2, blur=blur, scaling=0.5, debias=True, backend=SINKHORN_BACKEND)  # geomloss default annealing
     tens = [dict(k_lo=torch.tensor(g['k_lo'], dtype=f64), k_hi=torch.tensor(g['k_hi'], dtype=f64),
                  k1=torch.tensor(np.maximum(g['k1'], 1e-8), dtype=f64),
                  binary=None if g.get('binary') is None or not np.any(g['binary'][ns:]) else
@@ -195,16 +205,18 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         hist = [P] if lag is not None else None  # states at the steps, for the lagged comparison
         for k in range(n_sub):
             kon = kon_of(P, gi, s)
-            if Kb is not None:  # mean mRNA (kon units) given the kon path: memory kernel of the model's d0
+            if Kb is not None and not mrna_dilution:  # mean mRNA (kon units) given the kon path: memory kernel of d0
                 Kb = kon + (Kb - kon) * torch.exp(-(d / e) * h)
             if g['birth'] is not None:  # MLP birth at the current states (+ the constant part of 'nearest')
                 Pn, kn = P.detach().numpy(), kon.detach().numpy()
                 b = torch.clamp(b_const + torch.tensor(np.stack([np.asarray(g['birth'](Pn[w], kn[w], tw[w], sl[w]), float)
                                                                for w in range(W)]), dtype=f64), min=0.0)
+            if Kb is not None and mrna_dilution:  # memory kernel of d0 + b (current birth rate)
+                Kb = kon + (Kb - kon) * torch.exp(-(d / e + b[..., None]) * h)
             dp = d + b[..., None]                     # protein decay with dilution
             decay_p = torch.exp(-dp * h)
             if mode == 'sde2':
-                d0 = d / e
+                d0 = d / e + b[..., None] if mrna_dilution else d / e  # mRNA relaxation (mrna_dilution: d0 + b)
                 # mRNA bursts of rate kon k1 d0 and mean size 1 / k1 (normalised), proteins translated from them
                 Mn = torch.relu(Mn * torch.exp(-d0 * h) + bursts(kon * k1 * d0, scale_p / k1, h)) * gmask
                 P_new = P * decay_p + d * Mn * (1 - decay_p) / dp
@@ -247,15 +259,19 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         k = (np.cumsum(P, axis=-1) < r.random(P.shape[:2])[..., None]).sum(-1).clip(max=P.shape[-1] - 1)
         return np.take_along_axis(lev, k[..., None], axis=-1)[..., 0]
 
-    def windows_loss(a_sel, H, full=False):
-        """Mean loss of the windows starting at a_sel (H intervals each), all windows of a group in one batch: one
-        batched Sinkhorn per interval (targets resampled to a common size; full: fixed draws of the targets)."""
+    def windows_loss(p_sel, H, full=False):
+        """Mean loss of the windows starting at the observed times of rank p_sel of each group and spanning H of its
+        observed intervals (all of them if fewer), all windows of a group in one batch: one batched Sinkhorn per
+        interval (targets resampled to a common size; full: fixed draws of the targets)."""
         loss, n_terms = 0.0, 0
         r_tg = np.random.default_rng(seed + 2) if full else rng
         for gi, g in enumerate(groups):
-            a_ok = np.array([a for a in a_sel if g['start_ok'][a]], dtype=int)  # virtual states are no start
-            if not len(a_ok):
+            ob = obs_t[gi]
+            Hg = min(H, len(ob) - 1)
+            p_ok = np.array([p for p in p_sel if p + Hg < len(ob)], dtype=int) if Hg >= 1 else np.zeros(0, int)
+            if not len(p_ok):
                 continue
+            a_ok, L = ob[p_ok], ob[p_ok + Hg] - ob[p_ok]  # starts and lengths (intervals of the time grid)
             W, n = len(a_ok), g['X'].shape[1]
             slots = np.stack([np.arange(n) if full or n <= batch_size else rng.choice(n, batch_size, replace=False)
                               for _ in range(W)])
@@ -266,7 +282,14 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
             Kb = torch.tensor(g['K0'][a_ok[:, None], slots], dtype=f64) if memory_filter else None
             logw = np.zeros(slots.shape)
             stim = torch.tensor(g['stim'], dtype=f64)
-            for k in range(H):
+            for k in range(int(L.max())):
+                if np.any(L <= k):  # finished windows leave the batch
+                    keep = L > k
+                    kt = torch.from_numpy(keep)
+                    P, slots, logw, a_ok, L = P[kt], slots[keep], logw[keep], a_ok[keep], L[keep]
+                    Mn = None if Mn is None else Mn[kt]
+                    Kb = None if Kb is None else Kb[kt]
+                    W = len(a_ok)
                 tw = a_ok + k
                 P = P.clone()
                 P[..., :ns] = stim[tw][:, None, :]
@@ -333,14 +356,17 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         torch.set_rng_state(st)
         return v
 
+    # Observed times of each group: windows start there and count their observed intervals (virtual states are copies)
+    obs_t = [np.flatnonzero(g['start_ok']) for g in groups]
+    n_obs = max(len(ob) for ob in obs_t)
     params = [p for p in (th, ba, ld, le, ls) if p.requires_grad]
     hist = {'before': full_loss()}
     if params:
         opt = torch.optim.Adam(params, lr=lr)
-        H_max = T1 if max_horizon is None else max(1, min(int(max_horizon), T1))
+        H_max = max(1, n_obs - 1 if max_horizon is None else min(int(max_horizon), n_obs - 1))
         t_start = time.time()
         for H in ([H_max] if only_max_horizon else range(1, H_max + 1)):
-            starts = np.arange(T - H)
+            starts = np.arange(n_obs - H)  # ranks of the starts among the observed times
             for _ in range(int(epochs)):
                 a_sel = starts if n_windows is None or len(starts) <= n_windows else \
                     np.sort(rng.choice(starts, int(n_windows), replace=False))

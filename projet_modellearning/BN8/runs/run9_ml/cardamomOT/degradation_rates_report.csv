@@ -1,9 +1,0 @@
-gene,species,match,matched_symbol,ortholog,mrna_half_life_h,mrna_source,mrna_neighbors,protein_half_life_h,protein_source,protein_neighbors,d0,d1,d0_assigned,d1_assigned
-G1,human,unresolved,,,2.515491007231412,global_median,,81.26396469242688,global_median,,0.2755514444564975,0.00852957621724972,0.25,0.05
-G2,human,unresolved,,,2.515491007231412,global_median,,81.26396469242688,global_median,,0.2755514444564975,0.00852957621724972,0.25,0.05
-G3,human,synonym,BAG6,Bag6,7.0920740619128475,measured,,45.65627425170715,measured,,0.09773546842698823,0.015181860366848212,0.25,0.05
-G4,human,synonym,C6orf47,D17H6S53E,0.8427293299402594,measured,,83.58244781403123,measured,,0.8225027371588954,0.008292975363705305,0.25,0.05
-G5,human,synonym,GPANK1,Gpank1,0.8546432974253896,measured,,59.53311007873668,estimated:family+function,"family: G-patch domain containing: SON,ZGPAT,CHERP,RBM17,TFIP11,SUGP2,SUGP1,NKRF | function: TTC14 (0.87), C11orf68 (0.46), CMSS1 (0.46), RSRC2 (0.46), FLYWCH2 (0.40), LSM12 (0.39), MTHFSD (0.34), FNDC3B (0.28)",0.811036818106512,0.011643053414196067,0.25,0.05
-G6,human,synonym,CLIC1,Clic1,6.323752381043107,measured,,238.12818739814708,measured,,0.10961010785903198,0.0029108153391392204,0.25,0.05
-G7,human,synonym,MSH5,Msh5,3.9576310707351325,measured,,164.66601210919353,estimated:family+function,"family: MutS homologs: MSH2,MSH3,MSH6 | function: BRIP1 (0.35)",0.1751419392488226,0.004209412565965979,0.25,0.05
-G8,human,synonym,SNHG32,,3.032187939007136,measured,,81.26396469242688,global_median,,0.22859637809485858,0.00852957621724972,0.25,0.05

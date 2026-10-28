@@ -1,0 +1,5 @@
+network,run,mode,aupr,aupr_random,sign_ok,theta_mae,basal_mae,family_acc,hill_recall,sigmoid_recall,herbach_recall,herbach_m_acc,true_family,selected
+CN5,1,obs_ml,1.0,0.24,1.0,0.6469828508240113,1.266110471059379,0.8,nan,0.0,1.0,0.25,B1 B2 B4 S B4,B2 B4 B4 B1 B2
+CN5,1,obs_base,1.0,0.24,1.0,0.5401192451988938,1.1264368074966182,,,,,,,
+CN5,1,hid_ml,0.9761904761904763,0.24,1.0,1.8605384626149377,2.9869813868457222,0.2,nan,0.0,0.25,0.0,B1 B2 B4 S B4,B4 S H H H
+CN5,1,hid_base,0.9055555555555554,0.24,1.0,1.999441137239255,3.4259106314837644,,,,,,,

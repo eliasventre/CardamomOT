@@ -91,6 +91,7 @@ def main(argv):
                               depth_embeddings=bool(model.cell_depth_for_representation),
                               embedding_method_visualization=str(model.embedding_method_visualization),
                               protein_dilution=bool(model.protein_dilution),
+                              mrna_dilution=model.mrna_dilution_on(),
                               classifier_method=str(model.classifier_method),
                               select_genes=bool(model.select_genes),
                               use_recomputed_proliferation=bool(model.use_recomputed_proliferation),

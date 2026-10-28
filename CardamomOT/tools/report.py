@@ -2671,10 +2671,15 @@ def _dilution_page(pdf, R, D):
     hl_lit, hl_eff = np.log(2) / d1_lit, np.log(2) / (d1_fit + b_mean)
     share = b_mean / (d1_fit + b_mean)
 
+    # mRNA (mrna_dilution): relaxing at d0 + b, d0 = literature turnover minus the growth of its source cell lines
+    mrna = bool(getattr(R, 'mrna_dilution', False)) and 'd0' in var and D.d is not None
+    mrna_txt = ' mRNA too (mrna_dilution): relaxation at d0 + b, same levels.' if mrna else ''
+
     fig = plt.figure(figsize=A4_LANDSCAPE)
     _page_title(fig, '4. Proliferation — protein dilution',
                 f'Proteins diluted at the birth rate b of each cell: dP/dt = d1 u − (d1 + b) P (d1 pure degradation, '
-                f'refitted with the dilution). b of the simulations: {D.birth_sim_label}, mean {b_mean:.4f} h^-1.')
+                f'refitted with the dilution). b of the simulations: {D.birth_sim_label}, mean {b_mean:.4f} h^-1.'
+                + mrna_txt)
     gs = gridspec.GridSpec(2, 3, figure=fig, left=0.07, right=0.97, top=0.86, bottom=0.1, hspace=0.45, wspace=0.35)
 
     # A: effective vs literature half-lives per gene
@@ -2747,6 +2752,14 @@ def _dilution_page(pdf, R, D):
     if D.birth_mlp is not None:
         rows += [['mean birth, MLP (h^-1)', f'{np.mean(D.birth_mlp):.4f}'],
                  ['mean death, MLP (h^-1)', f'{np.mean(D.death_mlp):.4f}']]
+    if mrna:
+        d0_tab, d0_pure = var['d0'].to_numpy(dtype=float), np.maximum(D.d[0, ns:], 1e-12)
+        mu = R.adata_data.uns.get('degradation_rates', {}).get('mrna_growth_rate')
+        rows += [['median mRNA half-life, literature (h)', f'{np.log(2) / np.median(d0_tab):.2f}'],
+                 ['growth of its source cell lines (h^-1)', '—' if mu is None else f'{float(mu):.4f}'],
+                 ['median mRNA half-life, pure decay d0 (h)', f'{np.log(2) / np.median(d0_pure):.2f}'],
+                 ['median effective mRNA half-life (h)', f'{np.log(2) / np.median(d0_pure + b_mean):.2f}'],
+                 ['median share of dilution, mRNA', f'{np.median(b_mean / (d0_pure + b_mean)):.2f}']]
     tab = ax.table(cellText=rows, loc='upper center', cellLoc='left', colWidths=[0.75, 0.25])
     tab.auto_set_font_size(False); tab.set_fontsize(7.5); tab.scale(1, 1.4)
     for cell in tab.get_celld().values():
@@ -2902,7 +2915,7 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
                     normtransform=False, logtransform=True, n_umap=4000, top_regulators=20,
                     top_targets=10, seed=0, depth_embeddings=True, embedding_method_visualization='umap',
                     protein_dilution=True, classifier_method='random_forest', select_genes=False,
-                    use_recomputed_proliferation=True, simulation_model='ode'):
+                    use_recomputed_proliferation=True, simulation_model='ode', mrna_dilution=False):
     """Write the final multi-page PDF report of a CardamomOT run.
 
     Parameters
@@ -2932,6 +2945,8 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
         Genes of the model chosen by the gene selection: the UMAP of all the cells is also drawn on these genes.
     simulation_model : str
         Model of the refined rates: 'ode' or 'sde1' (protein rate d1_eff = d0 d1 / (d0 + d1)), 'sde2' (explicit mRNA, d1).
+    mrna_dilution : bool
+        mRNA diluted at the birth rate too (with protein_dilution): mRNA half-lives on the dilution page.
     n_umap : int or None
         Max cells per dataset used in UMAPs (stratified by time); None = all.
     top_regulators, top_targets : int
@@ -2951,6 +2966,7 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
     R = _ReportData(p, split, stim, prior, normtransform, logtransform, list(perturbations), n_umap, seed,
                     depth_embeddings, embedding_method_visualization, classifier_method)
     R.protein_dilution = bool(protein_dilution)
+    R.mrna_dilution = bool(mrna_dilution) and R.protein_dilution
     R.simulation_model = str(simulation_model)
     R.use_recomputed_proliferation = bool(use_recomputed_proliferation)
 

@@ -14,6 +14,9 @@ Usage:
 Required input files:
     - Data/data_<split>.h5ad: count matrix with degradation rates
     - cardamom/modes.npy, basins.npy, mixture_parameters.npy: from infer_mixture.py
+    - Data/data_prot.h5ad (optional): proteins of the cells (same cell and gene names, any unit per gene): the network is
+      then fitted by an EM on the real cells, without trajectories (fit_observed_proteins); scale of each gene saved in
+      cardamomOT/protein_scale.npy
 
 Output files:
     - cardamom/inter.npy: gene interaction matrix (G×G)
@@ -34,6 +37,20 @@ import anndata as ad
 import pandas as pd
 import os
 import pickle
+
+def load_observed_proteins(path, adata, ns):
+    """(N_cells, ns + G) proteins of the cells of adata (stimuli columns zero), matched by cell and gene names, in the
+    units of the file (rescaled by fit_observed_proteins)."""
+    prot = ad.read_h5ad(path)
+    missing_c = adata.obs_names.difference(prot.obs_names)
+    missing_g = adata.var_names.difference(prot.var_names)
+    if len(missing_c) or len(missing_g):
+        raise ValueError(f"{path}: {len(missing_c)} cells and {len(missing_g)} genes of the data are missing "
+                         f"(e.g. {list(missing_c[:3]) + list(missing_g[:3])})")
+    X = prot[adata.obs_names, adata.var_names].X
+    X = X.toarray() if hasattr(X, 'toarray') else np.asarray(X, dtype=float)
+    return np.hstack([np.zeros((adata.n_obs, ns)), X])
+
 
 def main(argv):
     """
@@ -177,6 +194,22 @@ def main(argv):
     # Infer network
     model.d = np.ones((2, G_tot))
     model.d[1, model.n_stimuli:], model.d[0, model.n_stimuli:] = adata.var['d1'].values, adata.var['d0'].values
+    if model.mrna_dilution and not model.protein_dilution:
+        print("[infer_network_structure] Warning: mrna_dilution needs protein_dilution (same birth rates): ignored")
+    if model.mrna_dilution_on():
+        # mRNA turnover of the literature minus the growth of its source cell lines: pure decay, the dilution of
+        # each cell being added at its birth rate (floored at min_ratio x d1 at the start of fit_network)
+        dr = adata.uns.get('degradation_rates')
+        if dr is not None and 'mrna_growth_rate' not in dr:
+            raise SystemExit("[infer_network_structure] mrna_dilution: growth rate of the source cell lines of d0 "
+                             "missing (uns['degradation_rates']['mrna_growth_rate']): rerun get_degradation_rates")
+        mu = 0.0 if dr is None else dr['mrna_growth_rate']  # no uns: rates of the user, pure decay
+        d0_lit = model.d[0, ns:].copy()
+        model.d[0, ns:] = np.maximum(d0_lit - float(mu), 0.0)
+        print(f"[infer_network_structure] mrna_dilution: d0 minus the growth of the source cell lines "
+              f"({float(mu):.4f} h^-1): median half-life {np.log(2) / np.median(d0_lit):.2f} -> "
+              f"{np.log(2) / max(np.median(model.d[0, ns:]), 1e-12):.2f} h, "
+              f"{int(np.sum(model.d[0, ns:] <= 0))} gene(s) at 0")
 
     # ─── LOAD OPTIONAL INIT / REF ARRAYS ────────────────────────────────
     def _load_gene_vec(fname):
@@ -357,6 +390,13 @@ def main(argv):
               "default " + ('yes' if _m.get('default') is not None else 'no') + ", own matrix for " +
               (', '.join(k for k in _m if k != 'default') or 'no sample')))
 
+    # ─── OBSERVED PROTEINS (optional) ───────────────────────────────────────
+    # Data/data_prot.h5ad: observed proteins of the cells (EM without trajectories)
+    prot_path = os.path.join(p, 'Data', 'data_prot.h5ad')
+    if os.path.exists(prot_path):
+        model.observed_prot = load_observed_proteins(prot_path, adata, ns)
+        print(f"[infer_network_structure] Observed proteins loaded from {prot_path}")
+
     model.fit_network(adata, verb=1, stimulus_schedule=stim_sched,
                       basal_init=basal_init, inter_init=inter_init,
                       basal_ref=basal_ref, inter_ref=inter_ref,
@@ -379,11 +419,11 @@ def main(argv):
     hist = getattr(model, 'model_learning_history', None) if model.model_learning_grn else None
     sel_path = os.path.join(cardamom_dir, 'sigma_selection.npz')
     if hist:  # held-out cross-entropy (selections, families, genes) and family of each gene at each selection
-        from CardamomOT.inference.sigma import PHI_NAMES, LINK_NAMES
+        from CardamomOT.inference.sigma import family_name
         cands = model._model_learning_candidates()
         np.savez(sel_path, n_iter=np.array([h['n_iter'] for h in hist]), scores=np.stack([h['scores'] for h in hist]),
                  family=np.stack([h['family'] for h in hist]),
-                 candidates=np.array([f'{PHI_NAMES[p]}/{LINK_NAMES[l]}' for p, l in cands]))
+                 candidates=np.array([family_name(fam) for fam in cands]))
     elif os.path.exists(sel_path):
         os.remove(sel_path)
     # Network conditions: condition of each sample, shared network and edges that differ
@@ -403,6 +443,8 @@ def main(argv):
     np.save(os.path.join(cardamom_dir, 'n_iter_inference'),
             np.array([ctx['n_iter_reg'], ctx['weight_init'], ctx['weight_prob'], ctx['reg_factor']], dtype=float))
     np.save(os.path.join(cardamom_dir, 'degradations'), model.d)
+    if model.observed_prot is not None:
+        np.save(os.path.join(cardamom_dir, 'protein_scale'), model.protein_scale)
     if model.R_opt is not None:
         np.save(os.path.join(cardamom_dir, 'data_R_opt'), model.R_opt)
     if model.R_prior is not None:  # prior rates of the states (use_recomputed_proliferation = False downstream)

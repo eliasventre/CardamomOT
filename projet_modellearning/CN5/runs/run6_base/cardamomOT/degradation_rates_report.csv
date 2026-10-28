@@ -1,6 +1,0 @@
-gene,species,match,matched_symbol,ortholog,mrna_half_life_h,mrna_source,mrna_neighbors,protein_half_life_h,protein_source,protein_neighbors,d0,d1,d0_assigned,d1_assigned
-G1,human,unresolved,,,2.515491007231412,global_median,,81.26396469242688,global_median,,0.2755514444564975,0.00852957621724972,0.5,0.1
-G2,human,unresolved,,,2.515491007231412,global_median,,81.26396469242688,global_median,,0.2755514444564975,0.00852957621724972,0.5,0.1
-G3,human,synonym,BAG6,Bag6,7.0920740619128475,measured,,45.65627425170715,measured,,0.09773546842698823,0.015181860366848212,0.5,0.1
-G4,human,synonym,C6orf47,D17H6S53E,0.8427293299402594,measured,,83.58244781403123,measured,,0.8225027371588954,0.008292975363705305,0.5,0.1
-G5,human,synonym,GPANK1,Gpank1,0.8546432974253896,measured,,59.53311007873668,estimated:family+function,"family: G-patch domain containing: SON,ZGPAT,CHERP,RBM17,TFIP11,SUGP2,SUGP1,NKRF | function: TTC14 (0.87), C11orf68 (0.46), CMSS1 (0.46), RSRC2 (0.46), FLYWCH2 (0.40), LSM12 (0.39), MTHFSD (0.34), FNDC3B (0.28)",0.811036818106512,0.011643053414196067,0.5,0.1

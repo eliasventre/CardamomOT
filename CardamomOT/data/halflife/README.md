@@ -25,6 +25,22 @@ cell types and methods (human NR-seq mRNA half-lives are ~4× shorter than
 Schwanhäusser's; human primary-cell protein half-lives ~1.7× longer). Each
 dataset is therefore put on the scale of its own species' table.
 
+## mRNA turnover and growth of the source cell lines
+
+The protein tables are pure degradation rates (Schwanhäusser SI eq. S4 subtracts the dilution
+ln 2 / t_cc, t_cc = 27.5 h; Mathieson: non-dividing primary cells). The mRNA tables are the
+**turnover of growing cell lines**: in a growing population the fraction of pre-existing RNA after a
+labelling time t is e^{−(kdeg + μ) t}, and neither Schwanhäusser (eq. S7) nor EZbakR
+(θ = 1 − e^{−t·kdeg}, RNADecayCafe) has a growth term, so their rates include the dilution μ of the
+lines. `halflife_db.MRNA_SOURCE_DOUBLING_TIMES` gives the doubling times of these lines and
+`REFERENCES[species]['mrna_growth_rate']` the mean of ln 2 / T over them (written by
+`get_degradation_rates.py` in `adata.uns['degradation_rates']`, subtracted with `mrna_dilution`):
+
+| Species | Lines (doubling time, h) | μ (h⁻¹) |
+|---|---|---|
+| mouse | NIH3T3 27.5 (measured by Schwanhäusser) | 0.0252 |
+| human | HEK293T 27, U2OS 31.75, K-562 19.6, MCF-7 31.2, MV4-11 48, Calu-3 40.1, MOLM-14 67, HeLa 39, CH22 44.1, MDA-MB-231 31.43, NALM-6 30.5 (median of the values reported by [Cellosaurus](https://www.cellosaurus.org), ranges at their midpoint) | 0.0205 |
+
 ## Files
 
 | File | Content | Source |
