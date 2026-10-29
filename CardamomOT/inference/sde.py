@@ -44,7 +44,7 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                      eps_bounds=(1 / 50, 1 / 1.5), epochs=30, lr=1e-2, n_sub=20, batch_size=256, n_rep=2,
                      max_horizon=9, n_windows=10, n_cond=1, d1_ref=None, eps_ref=None, only_max_horizon=False,
                      blur=0.05, noise='gamma', scale_p=1.0, seed=0, verb=False, spec=None, support_tol=0.0,
-                     memory_filter=False, ce_weight=0.0, mrna_dilution=False):
+                     memory_filter=False, ce_weight=0.0, mrna_dilution=False, prot_weight=0.0):
     """
     groups: one dict per sample s with
         'X' (T, n, G) trajectory states (starts of the windows; mode 'sde2' also 'M' (T, n, G) normalised mRNA
@@ -83,7 +83,10 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
     the kon read on the mRNA, Kb' = d0 (kon - Kb) at the d0 = d1 / eps of the model, carried along the windows from
     the kon of the start states (groups 'K0' (T, n, G)), instead of the lagged proteins. mrna_dilution: the mRNA
     ('sde2' and the memory filter) relaxes at d0 + b, the bursts at rate kon k1 (d0 + b) (same levels), d0 = d1 / eps
-    staying a pure decay rate. Returns (theta, basal, d1, eps, scale (n_cond, T - 1, G), history).
+    staying a pure decay rate. prot_weight > 0: + prot_weight x debiased Sinkhorn, at the last time of each window,
+    between the simulated proteins and the trajectory states 'X' of that time (reference proteins: reconstructed by
+    fit_network, unitary for the ODE, or observed), per gene in units of their standard deviation.
+    Returns (theta, basal, d1, eps, scale (n_cond, T - 1, G), history).
     """
     seed = 0 if seed is None else int(seed)  # no model seed: fixed draws
     torch.manual_seed(seed)
@@ -134,6 +137,9 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
     if mode == 'sde2':
         allm = np.concatenate([tg[:, ns:] for g in groups for tg in g['M_targets'] if tg is not None and len(tg)])
         sdm = torch.tensor(np.maximum(allm.std(axis=0), 0.05), dtype=f64)
+    if prot_weight > 0:  # per-gene units of the protein distances (reference states at the observed times)
+        allp = np.concatenate([g['X'][t][:, ns:] for g in groups for t in np.flatnonzero(g['start_ok'])])
+        sdp = torch.tensor(np.maximum(allp.std(axis=0), 0.05 * scale_p), dtype=f64)
     sink = SamplesLoss('sinkhorn', p=2, blur=blur, scaling=0.5, debias=True, backend=SINKHORN_BACKEND)  # geomloss default annealing
     tens = [dict(k_lo=torch.tensor(g['k_lo'], dtype=f64), k_hi=torch.tensor(g['k_hi'], dtype=f64),
                  k1=torch.tensor(np.maximum(g['k1'], 1e-8), dtype=f64),
@@ -329,6 +335,14 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                 # Genes of the group's condition only (select_genes_per_condition): the others are not compared
                 gk = sdk if g.get('gmask') is None else sdk / torch.tensor(g['gmask'][ns:], dtype=f64).clamp(min=1e-12)
                 loss = loss + sink(wts, kon / gk, u, Y / gk).sum()
+                fin = [j for j, w in enumerate(obs) if L[w] == k + 1]  # windows ending at this time
+                if prot_weight > 0 and fin:  # proximity to the reference proteins at the end of the window
+                    nX, wf = g['X'].shape[1], [obs[j] for j in fin]
+                    sel_p = [rng.choice(nX, M, replace=nX < M) if not full else np.arange(nX) for _ in wf]
+                    Yp = torch.tensor(np.stack([g['X'][tw[w] + 1][i][:, ns:] for w, i in zip(wf, sel_p)]), dtype=f64)
+                    up = torch.full(Yp.shape[:2], 1.0 / Yp.shape[1], dtype=f64)
+                    gp = sdp if g.get('gmask') is None else sdp / torch.tensor(g['gmask'][ns:], dtype=f64).clamp(min=1e-12)
+                    loss = loss + prot_weight * sink(wts[fin], P[wf][..., ns:] / gp, up, Yp / gp).sum()
                 if mode == 'sde2':  # observed mRNA (same cells)
                     Ym = torch.tensor(np.stack([g['M_targets'][tw[w] + 1][i][:, ns:] for w, i in zip(obs, sel)]),
                                       dtype=f64)

@@ -47,7 +47,7 @@ PARAMETER_GROUPS = [
         'late_mrna_classes', 'min_ratio']),
     ('Refine: kinetic rates by the free-running fit', [
         'refine_theta_with_sde', 'fit_scale_theta', 'degradation_rates_per_condition', 'use_temporal_degradations',
-        'sde_epochs', 'refine_in_loop']),
+        'sde_epochs', 'sde_protein_weight', 'refine_in_loop']),
     ('Model learning of the regulation function', [
         'model_learning_grn', 'model_learning_phi', 'model_learning_herbach_form', 'herbach_threshold_sd', 'model_learning_threshold_bic', 'model_learning_form_neighbours', 'model_learning_herbach_m', 'model_learning_link', 'model_learning_kappa',
         'model_learning_start', 'model_learning_freeze', 'model_learning_period', 'model_learning_margin',

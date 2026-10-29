@@ -90,6 +90,8 @@ def main(argv):
         model.a = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
         model.modes = np.load(os.path.join(p, 'cardamomOT', 'modes.npy'))
         model.prot = np.load(os.path.join(p, 'cardamomOT', 'data_prot.npy'))
+        # Observed proteins (rescaled by infer_network_structure): references of the free-running fit, also for the ODE
+        model.proteins_observed = os.path.exists(os.path.join(p, 'Data', 'data_prot.h5ad'))
         model.rna = np.load(os.path.join(p, 'cardamomOT', 'data_rna.npy'))
         model.times_data = np.load(os.path.join(p, 'cardamomOT', 'data_times.npy'))
         model.samples_data = np.load(os.path.join(p, 'cardamomOT', 'data_samples.npy'))

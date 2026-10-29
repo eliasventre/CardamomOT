@@ -298,6 +298,7 @@ class NetworkModel:
         self._stim_overrides = {}   # per-sample stimulus schedules {dataset_id: (times or None, values)}
         self.traj_valid = None      # (T * N,) bool: trajectory state at a time observed for its sample (None = all)
         self.couplings = None       # final soft couplings of the trajectories (list of sparse blocks, growth pass)
+        self.proteins_observed = False  # Data/data_prot.h5ad given (set by the steps after infer_network_structure): the rescaled observed proteins are the references of the free-running fit, also for the ODE
         self.observed_prot = None   # (N_cells, G_tot) observed proteins of the real cells (Data/data_prot.h5ad, any unit per gene): EM without trajectories (fit_observed_proteins); None = latent
         self.protein_scale = None   # (G,) value of the deterministic high mode of each observed protein in its units (_protein_scale)
         self._sample_names = None   # sorted dataset_id of the run (index of a sample -> its label)
@@ -436,7 +437,7 @@ class NetworkModel:
         self.use_temporal_degradations = 1 # If so, compute temporal degradation rates for simulations ?
         self.degradation_rates_per_condition = True # with network conditions: network, d1, d0 / d1 and the scale of theta refined separately per condition (its samples and genes, its network as rappel; stored per sample); False: one shared fit from the mean network (forced True with select_genes_per_condition)
         self.fit_scale_theta = True # refine: scale of theta per target gene (and interval with use_temporal_degradations) learned in the free-running fit (within [1/5, 5]); False: scale 1
-        self.refine_theta_with_sde = True # refine: True = network of fit_network refined (support and signs kept) with d1, d0 / d1 and the scale of theta by the free-running fit of the simulation model (ODE / SDE) on the observed modes; False = network refitted (final = 1) on the trajectories on the modes, then fixed in that fit
+        self.refine_theta_with_sde = True # refine: True = network of fit_network refined (support and signs kept) with d1, d0 / d1 and the scale of theta by the free-running fit of the simulation model (ODE / SDE) on the observed modes; False = network refitted (final = 1) on the unitary trajectories on the modes, then fixed in that fit (ODE only: the stochastic models keep the network and proteins of fit_network)
         self.min_ratio = 1.01 # lower bound of d0 / d1: bursting regime, imposed on the literature rates at the start of fit_network / infer_test (with a warning), then kept by the refine
         self.max_ratio = 50.0 # upper bound of d0 / d1 in the refine and the simulations: beyond, the simulations are nearly deterministic and only slower
         # Free-running fit (ODE / SDE)
@@ -449,6 +450,7 @@ class NetworkModel:
         self.sde_windows = 10 # free-running fit: window starts drawn at each step (None = all; bounds the cost with many timepoints)
         self.sde_batch_size = 256 # free-running fit: trajectories per sample and window at each step (and observed cells per time)
         self.sde_memory_filter = False # free-running fit: observed modes compared with the kon read on the simulated mRNA, Kb' = d0 (kon - Kb) at the learned d0 = d1 / eps, carried along the windows from the kon of the start states (exact memory kernel), instead of the lagged nodes of targets_accounting_late_mrna; always on with simulation_mrnas_direct without targets_accounting_late_mrna
+        self.sde_protein_weight = 0.1 # free-running fit: weight of the debiased Sinkhorn between the simulated proteins and the reference proteins at each reached observed time (trajectories of fit_network, unitary proteins for the ODE, or observed proteins), per gene in units of their standard deviation, relative to the term on kon; 0: kon (and mRNA) only
         self.ode_ce_weight = 0.1 # free-running fit of the ODE (simulation_stochastic = False): weight of the cross-entropy of each trajectory against the mode of its state (pairing of the OT), added to the Sinkhorn between distributions (which alone sets the bimodality of the deterministic cells); 0 = Sinkhorn only
         # Within the inference loop (refine_in_loop)
         self.refine_in_loop = False # True: in fit_network, between the network fit and alpha, refine_in_loop_epochs steps of the free-running fit of refine_network_degradations on its longest windows (model of the simulations: ODE, protein-only PDMP with simulation_stochastic, explicit mRNA with simulation_mrnas_direct): constant d1 (d1_eff) and d0 / d1 (rappel sde_lambda_rates towards the literature), no scale, the network too with refine_theta_with_sde; the rates (converted to the full d0, d1) then drive the trajectories
@@ -3128,6 +3130,40 @@ class NetworkModel:
                 log_w[ib] -= logsumexp(log_w[ib]) - np.log(len(ib))
         return log_w
 
+    def _rescale_trajectory_proteins(self, y_prot, times, valid, samples_id, verb=True):
+        """
+        Proteins of fit_network (reconstructed with the mRNA) in the units of the protein-only model, one factor per
+        gene (_protein_scale, exact first moment, as for observed proteins): means weighted towards the distribution
+        without branching by exp(-int R_opt) along each trajectory (the trajectories are the lineages: no ancestor
+        kernel), dilution at the birth rates of the states, kbar the forcing modes. The proteins keep their
+        distribution (not the deterministic unitary ones). Returns y_prot with the genes rescaled.
+        """
+        ns = self.n_stimuli
+        T, N = len(times), int(np.sum(self.times_data == times[0]))
+        log_w = np.zeros(T * N)
+        R = getattr(self, 'R_opt', None)
+        if R is not None:  # cumulative net growth of each trajectory up to each time
+            Rm = np.nan_to_num(np.asarray(R, dtype=float)).reshape(T, N)
+            cum = np.zeros(N)
+            for t in range(1, T):
+                cum = cum - Rm[t - 1] * (times[t] - times[t - 1])
+                log_w[t * N:(t + 1) * N] = cum
+        b = self._state_birth()
+        b = np.zeros(T * N) if b is None else np.asarray(b, dtype=float)
+        rows = np.asarray(valid, dtype=bool)
+        P = np.asarray(y_prot, dtype=float)
+        lam, r2 = self._protein_scale(P[rows, ns:], np.asarray(self.kon_beta, dtype=float)[rows, ns:], b[rows],
+                                      np.exp(log_w[rows] - log_w[rows].max()), self.times_data[rows],
+                                      self.samples_data[rows], times, samples_id)
+        out = P.copy()
+        out[:, ns:] = self.scale_proteins * P[:, ns:] / lam
+        if verb:
+            print(f"[refine_network_degradations] proteins of fit_network rescaled to the protein-only model: factor "
+                  f"(high mode in their units / scale_proteins) median {np.median(lam / self.scale_proteins):.3g}, range "
+                  f"[{lam.min() / self.scale_proteins:.3g}, {lam.max() / self.scale_proteins:.3g}]; R² of the means: "
+                  f"median {np.median(r2):.3f}")
+        return out
+
     def _scale_observed_proteins(self, P_raw, vect_t, vect_samples_id, times, samples_id, ks, verb=True):
         """
         Observed proteins P_raw (N, G) in the units of the model (deterministic high mode at scale_proteins: a pure
@@ -4623,11 +4659,14 @@ class NetworkModel:
         (d1_eff = d0 d1 / (d0 + d1) and d0 / d1_eff = 1 + r for the ODE and the protein-only PDMP, d1 and r = d0 / d1
         with explicit mRNA) of the rates of fit_network (start and rappel), with the birth rates of the states (protein
         dilution) and the branching. The trajectories and kon_theta of fit_network are kept (never replaced).
-        Windows start from the unitary proteins (modes, literature d1_eff) for the ODE and the protein-only PDMP, from
-        the proteins of fit_network with explicit mRNA.
+        Reference proteins (starts of the windows, and proximity term sde_protein_weight at the end of each window):
+        the unitary proteins (modes, literature d1_eff) for the ODE (simulation_stochastic = False) without observed
+        proteins; else the proteins of fit_network (reconstructed with the mRNA, or the rescaled observed proteins,
+        proteins_observed), whose network is then that of fit_network.
         - refine_theta_with_sde = True: network of fit_network, refined in that fit (support and signs kept, rappel
           sde_lambda_theta).
-        - refine_theta_with_sde = False: network refitted (final = 1) on these proteins, then fixed.
+        - refine_theta_with_sde = False: ODE, network refitted (final = 1) on the unitary proteins, then fixed;
+          stochastic models, network of fit_network, fixed.
         With network conditions and degradation_rates_per_condition, one fit per condition (stored per sample).
         d1_eff kept in d1_eff_t.
 
@@ -4721,17 +4760,28 @@ class NetworkModel:
         # Start and rappel: the rates of fit_network (learned with refine_in_loop, else the literature)
         # Window starts: unitary proteins (modes, literature d1_eff) for the ODE and the protein-only PDMP, the
         # proteins of fit_network (mRNA-driven) with explicit mRNA
-        unitary = mode != 'sde2'
-        if self.refine_theta_with_sde:
+        # Unitary proteins for the ODE only, without observed proteins: else the proteins and network of fit_network
+        # (mRNA-driven, or the rescaled observed proteins) are the references
+        unitary = mode == 'ode' and not (self.proteins_observed or self.observed_prot is not None)
+        if verb:
+            print(f"[refine_network_degradations] reference proteins of the {mode} fit: "
+                  + ('unitary (modes)' if unitary else 'those of fit_network'
+                     + (' (observed, rescaled)' if self.proteins_observed or self.observed_prot is not None else '')))
+        observed = self.proteins_observed or self.observed_prot is not None
+        if self.refine_theta_with_sde or not unitary:
             # Network of fit_network, refined in the free-running fit (no refit here)
-            y_prot = self.estimate_trajectories(self.prot, times, d1_unit[ns:], N=N_tot, kon_beta=self.kon_beta,
-                                                s=self.scale_proteins, birth=self._state_birth()) \
-                if unitary else self.prot
+            if unitary:
+                y_prot = self.estimate_trajectories(self.prot, times, d1_unit[ns:], N=N_tot, kon_beta=self.kon_beta,
+                                                    s=self.scale_proteins, birth=self._state_birth())
+            elif mode == 'sde1' and not observed and (self.inference_mrnas_direct or self.mrna_bridge):
+                # proteins reconstructed with the mRNA, to the scale of the protein-only model
+                y_prot = self._rescale_trajectory_proteins(self.prot, times, valid, samples_id, verb=verb)
+            else:
+                y_prot = self.prot
         else:
-            # Network refitted (final = 1) on these proteins, then fixed in the free-running fit
+            # ODE: network refitted (final = 1) on the unitary proteins, then fixed in the free-running fit
             y_prot, basal, inter = self._refine_trajectories_network(
-                self.kon_beta, d1_unit[ns:], times, N_tot, ks, valid, samples_id, verb=verb,
-                y_prot_given=None if unitary else self.prot)
+                self.kon_beta, d1_unit[ns:], times, N_tot, ks, valid, samples_id, verb=verb)
         # These proteins only start the windows of the fit: self.prot and self.kon_theta stay those of fit_network
         # Proliferation MLP first (on the trajectories of fit_network): dilution and branching of the fit
         self._train_proliferation_mlp(verb=verb)
@@ -5044,6 +5094,8 @@ class NetworkModel:
                 seed=task_seed(self.seed, *key), verb=verb > 1 if tag == 'fit_network' else verb,
                 spec=self._spec_grn(), support_tol=self.seuil_min_network_intensity,
                 memory_filter=self._memory_filter(), ce_weight=float(self.ode_ce_weight) if mode == 'ode' else 0.0,
+                prot_weight=0.0 if mode == 'ode' and (self.proteins_observed or self.observed_prot is not None)
+                else float(self.sde_protein_weight or 0.0),  # ODE on observed proteins: no proximity term
                 mrna_dilution=self.mrna_dilution_on())
 
         try:
