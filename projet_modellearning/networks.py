@@ -1,11 +1,13 @@
 """
 Benchmark networks of CardamomOT (results_article/figures/simulate_data_{FN4,CN5,BN8,FN8}.py, Harissa defaults:
-k_low = 0, k_high = 2, mRNA burst size 50) in which each gene is, with probability 1/4, a sigmoid of a linear input or a
-Herbach-type target (approximate form, saturating Hill steps of threshold 1/2) of coefficient m = 1, 2 or 4
-(HERBACH_M), the candidate families of inference/sigma.py, drawn per run.
+k_low = 0, k_high = 2, mRNA burst size 50) in which each gene is a Herbach-type target of coefficient m = 1, 2 or 4
+(HERBACH_M, probability 1/3 each), in the approximate form (saturating Hill steps of threshold 1/2) or the exact one
+(thermodynamic model of Herbach et al., same thresholds), probability 1/2 each: the candidate families of
+inference/sigma.py, drawn per run (the stimulus stays linear).
 
-The Herbach steps are normalised (phi(0) = 0, phi(1) = 1 at the high mode), so that every family keeps the interactions
-of the network and switches between the same burst frequencies, with different shapes.
+Both forms are parametrised by the effect of each edge at the high mode (phi(0) = 0, theta at P = 1), so that every
+family keeps the interactions of the network and switches between the same burst frequencies, with different shapes;
+in the exact form, a repression beyond -log(1 + 2^m) is at its bound (full repressor of threshold 1/2).
 """
 import os
 import sys
@@ -39,7 +41,7 @@ class Network:
     rate kz d0), c_nb (G+1,), d0, d1 (G+1,), basal, inter, spec (families of sigma, inference/sigma.py)."""
 
     def __init__(self, name, run, seed=0):
-        from CardamomOT.inference.sigma import default_spec, set_family, SPEC_PHI, PHI_HERBACH_APPROX
+        from CardamomOT.inference.sigma import default_spec, set_family, SPEC_PHI, PHI_HERBACH_APPROX, PHI_HERBACH
         d0, d1, basal, edges = NETWORKS[name]
         self.name, self.run = name, run
         G = len(basal)
@@ -51,13 +53,14 @@ class Network:
         self.inter = np.zeros((G + 1, G + 1))
         for (i, j), v in edges.items():
             self.inter[i, j] = v
-        # Family of each gene (0 sigmoid, k > 0 Herbach of coefficient HERBACH_M[k - 1]), drawn per run; threshold of the
-        # Herbach regulators 1/2
+        # Family of each gene (k > 0 Herbach of coefficient HERBACH_M[k - 1], 0 = stimulus) and its form (exact or
+        # approximate), drawn per run; threshold of the Herbach regulators 1/2
         rng = np.random.default_rng([seed, list(NETWORKS).index(name), run])
-        fam = np.concatenate([[0], rng.integers(0, 1 + len(HERBACH_M), G)])
+        fam = np.concatenate([[0], rng.integers(1, 1 + len(HERBACH_M), G)])
+        exact = np.concatenate([[False], rng.random(G) < 0.5])
         self.spec = default_spec(G + 1, kappa=KAPPA, pbar=1.0)
         for g in np.flatnonzero(fam > 0):
-            set_family(self.spec, g, (PHI_HERBACH_APPROX, 0, HERBACH_M[fam[g] - 1]))
+            set_family(self.spec, g, (PHI_HERBACH if exact[g] else PHI_HERBACH_APPROX, 0, HERBACH_M[fam[g] - 1]))
         self.family = self.spec[:, SPEC_PHI].astype(int)
         self.ks = self.kz * self.d0[:, None]
 

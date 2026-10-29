@@ -271,6 +271,9 @@ def main(argv):
         model.save_network_conditions(cardamom_dir, gene_names=stim_names + list(adata.var_names), suffix='_simul')
         np.save(os.path.join(cardamom_dir, 'ratios'), model.ratios)
         np.save(os.path.join(cardamom_dir, 'degradations_temporal.npy'), model.d_t)
+        if model._spec_grn() is not None:  # edge thresholds of the exact Herbach targets, learned again by a refit
+            from CardamomOT.inference.sigma import save_sigma_spec_grn
+            save_sigma_spec_grn(cardamom_dir, model._spec_grn())
         model.save_state_rates(cardamom_dir)  # birth / death of the states (consistent with R_opt): dilution of the simulations
         # Proliferation model of an earlier run (single or per condition) removed before saving the new one
         import glob

@@ -33,7 +33,7 @@ from CardamomOT.model.base import NetworkModel  # noqa: E402
 from CardamomOT.inference import inference_network_multi  # noqa: E402
 from CardamomOT.inference.network import sigmoid_amplitudes, sigmoid_target, cross_entropy  # noqa: E402
 from CardamomOT.inference.sigma import (sigma_pairs, default_spec, set_family, family_name, is_herbach, family_index,  # noqa: E402
-                                        SPEC_PHI, SPEC_M)
+                                        SPEC_PHI, SPEC_M, N_SPEC)
 
 
 def subsamples(time, K, rng):
@@ -46,12 +46,21 @@ def subsamples(time, K, rng):
     return [np.concatenate(s) for s in sels]
 
 
+def fit_spec(spec, edges):
+    """spec with the edge thresholds learned by one fit (exact Herbach targets)."""
+    if edges is None:
+        return spec
+    out = spec.copy()
+    out[:, N_SPEC:] = edges
+    return out
+
+
 def held_out_ce(fits, sels, spec, P, tau):
     """Cross-entropy (G+1,) of each target, of the fit of each sub-sample on the cells of the other ones."""
     acc = np.zeros(P.shape[1])
-    for k, (basal, inter, _, _) in enumerate(fits):
+    for k, (basal, inter, _, _, edges) in enumerate(fits):
         held = np.concatenate([s for m, s in enumerate(sels) if m != k])
-        sig = sigma_pairs(np.asarray(basal[0], float), np.asarray(inter, float), P[held], spec)[:, :, 1]
+        sig = sigma_pairs(np.asarray(basal[0], float), np.asarray(inter, float), P[held], fit_spec(spec, edges))[:, :, 1]
         ce = cross_entropy(np.ascontiguousarray(sig).ravel(), np.ascontiguousarray(tau[held]).ravel())
         acc += ce.reshape(sig.shape).mean(axis=0)
     return acc / len(fits)
@@ -136,8 +145,9 @@ def oracle_run(name, run, targets, K=5, seed=0, weak_penalty=False, relaxed=Fals
 
 def em_run(name, run, scores, iters=10, K=5, seed=0, start='sigmoid', levels='grid', n_quad=51, prior='kl', hard=False):
     """Family selection along an EM on the true proteins, for each score (see the module docstring). start: family of
-    every target at the first iteration, 'sigmoid' (as fit_network) or 'hill' (needs 'logarithm' among the
-    candidates). levels: 'grid', the levels of the mixture, or 'quad', n_quad points of sigma in [0, 1] with the exact
+    every target at the first iteration, 'identity' (fitted and scored as the current family, never selected unless a
+    candidate), 'hill' (needs 'logarithm' among the candidates) or 'b<m>' (Herbach of coefficient m, as fit_network
+    with 'b2'). levels: 'grid', the levels of the mixture, or 'quad', n_quad points of sigma in [0, 1] with the exact
     NB likelihood of the counts (the network alone places the mass). prior: network prior on the levels, 'kl'
     (exp(-kappa KL(tau_l || sigma)), mean pulled towards 1/2 with more than two levels) or 'beta' (Beta(kappa sigma,
     kappa (1 - sigma)) at the levels, mean sigma). hard: the network is fitted on basins (one_hot_probas = True), the
@@ -174,13 +184,16 @@ def em_run(name, run, scores, iters=10, K=5, seed=0, start='sigmoid', levels='gr
     ref = np.ones((G1, G1))
     cands = model._model_learning_candidates()
     fam_true = true_tokens(truth['spec'], cands)
+    n_c = len(cands)
+    if start in ('identity', 'sigmoid') and not any(int(f[0]) == 0 for f in cands):
+        cands = cands + [(0, 0, 0.0)]                             # starting family only
     pen = model._penalty_kw()
     rng = np.random.default_rng([seed, run])
     kind = lambda s: s[0]
     out = []
     for score in scores:
         cur = np.full(G1, start_index(cands, start))
-        cur[0] = 0
+        cur[0] = 0  # stimulus: unused column
         pending, q_tau, kappa = {}, (hard_levels(tau0, pi, tau_l, time) if hard else tau0.copy()), np.ones(pi.shape[:2])
         for it in range(iters):
             sels = subsamples(time, K, rng)
@@ -195,9 +208,10 @@ def em_run(name, run, scores, iters=10, K=5, seed=0, start='sigmoid', levels='gr
                     weight_flow_matching=0.0, final=0, seuil_min_network_intensity=model.seuil_min_network_intensity,
                     sigma_spec_grn=spec, **pen)
                 acc = np.zeros(G1)
-                for k, (basal, inter, _, _) in enumerate(fits):
+                for k, (basal, inter, _, _, edges) in enumerate(fits):
                     held = np.concatenate([x for m, x in enumerate(sels) if m != k])
-                    sig = sigma_pairs(np.asarray(basal[0], float), np.asarray(inter, float), P[held], spec)[:, :, 1]
+                    sig = sigma_pairs(np.asarray(basal[0], float), np.asarray(inter, float), P[held],
+                                      fit_spec(spec, edges))[:, :, 1]
                     if score == 'marginal':
                         lp_h = loglik[held] + _log_prior(sig, tau_l[held], kappa[held], loglik[held], prior)
                         acc += -logsumexp(lp_h, axis=2).mean(axis=0)
@@ -210,9 +224,9 @@ def em_run(name, run, scores, iters=10, K=5, seed=0, start='sigmoid', levels='gr
                 inter = np.mean([fi[1] for fi in fits], axis=0)
                 sig_f[f] = sigma_pairs(np.asarray(basal[0], float), np.asarray(inter, float), P, spec)[:, :, 1]
             # Switches: margin model_learning_margin, two consecutive selections
-            best = np.argmin(sc, axis=0)
+            best = np.argmin(sc[:n_c], axis=0)
             for g in range(1, G1):
-                gain = (sc[cur[g], g] - sc[best[g], g]) / max(sc[cur[g], g], 1e-12)
+                gain = (sc[cur[g], g] - sc[best[g], g]) / max(abs(sc[cur[g], g]), 1e-12)
                 if best[g] != cur[g] and gain > model.model_learning_margin:
                     prev = pending.get(g)
                     pending[g] = (best[g], prev[1] + 1 if prev is not None and prev[0] == best[g] else 1)
@@ -279,11 +293,13 @@ def hard_levels(order, pi, tau_l, time):
 
 
 def start_index(cands, start):
-    """Starting candidate (G1,) of every target, 'sigmoid' or 'hill'; the stimulus stays a sigmoid."""
+    """Starting candidate of every target, 'identity' ('sigmoid'), 'hill' or 'b<m>'; the stimulus stays a sigmoid."""
     from CardamomOT.inference.sigma import PHI_LOG
-    if start == 'sigmoid':
-        return 0
-    return next(f for f, fam in enumerate(cands) if int(fam[0]) == PHI_LOG)
+    if start in ('identity', 'sigmoid'):
+        return next(f for f, fam in enumerate(cands) if int(fam[0]) == 0)
+    if start == 'hill':
+        return next(f for f, fam in enumerate(cands) if int(fam[0]) == PHI_LOG)
+    return next(f for f, fam in enumerate(cands) if is_herbach(int(fam[0])) and fam[2] == float(start[1:]))
 
 
 def _log_prior(sig, tau_l, kappa, loglik, prior='kl'):
@@ -332,7 +348,7 @@ if __name__ == '__main__':
     for r in runs:
         if a.em:
             append(a.network, em_run(a.network, r, a.scores.split(','), iters=a.iters, K=a.fits, start=a.start,
-                                         levels=a.levels, prior=a.prior, hard=a.hard), 'oracle_em5_summary.csv')
+                                         levels=a.levels, prior=a.prior, hard=a.hard), 'oracle_em6_summary.csv')
             continue
         append(a.network, oracle_run(a.network, r, a.targets.split(','), K=a.fits, weak_penalty=a.weak_penalty,
-                                     relaxed=a.relaxed), 'oracle_theta_summary.csv')
+                                     relaxed=a.relaxed), 'oracle_theta6_summary.csv')

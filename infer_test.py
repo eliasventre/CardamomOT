@@ -29,7 +29,7 @@ Usage:
 
 Required input files (from training pipeline):
     - Data/data_test.h5ad: test count matrix with temporal information
-    - cardamomOT/mixture_parameters.npy: mixture model parameters
+    - cardamomOT/mixture_parameters.npy, mixture_middle_shape.npy: mixture model parameters
     - cardamomOT/inter.npy, basal.npy: core inferred network (used for infer_test)
     - cardamomOT/basins_final.npy, proba_init.npy, alpha.npy, data_prot.npy, data_kon_beta.npy, data_times.npy,
       data_samples.npy, data_traj_valid.npy: training basins and trajectories
@@ -132,6 +132,7 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
 
     try:
         model.a = np.load(os.path.join(cardamom_dir, 'mixture_parameters.npy'))
+        model.middle_shape = np.load(os.path.join(cardamom_dir, 'mixture_middle_shape.npy'))
         model.d = np.load(os.path.join(cardamom_dir, 'degradations.npy'))
         pi_init_path = os.path.join(cardamom_dir, 'pi_init.pkl')
         if os.path.exists(pi_init_path):
@@ -168,6 +169,7 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
 
     if model.a.ndim == 3:
         model.a = _sample_rows(model.a)
+        model.middle_shape = _sample_rows(model.middle_shape)
 
     # ─── LOAD CORE NETWORK (raw CardamomOT infer_network output) ────────────
     # inter.npy / basal.npy are the main result of CardamomOT inference and

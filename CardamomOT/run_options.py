@@ -107,10 +107,15 @@ def parse_step_options(argv, step, doc=None, output=False):
     return StepOptions(p=os.path.join(inputfile, ''), values=values, output=out, step=step)
 
 
-def configure(model, opts, verb=True):
-    """Workbook values, then the command-line options (which dominate), on a NetworkModel; returns it."""
+def configure(model, opts, verb=True, load_spec=True):
+    """Workbook values, then the command-line options (which dominate), on a NetworkModel; returns it. load_spec: the
+    families of the GRN sigma of the run (False: parameters only, see settings)."""
     model.apply_project_parameters(opts.p, verb=verb)
-    if getattr(model, 'model_learning_grn', False):  # families of the GRN sigma of the run (inference/sigma.py)
+    # Families of the GRN sigma of the run (inference/sigma.py), for the steps after infer_network_structure (which
+    # learns them); unknown step: loaded
+    steps = list(STEP_OPTIONS)
+    after = opts.step not in steps or steps.index(opts.step) > steps.index('infer_network_structure')
+    if load_spec and after and getattr(model, 'model_learning_grn', False):
         from .inference.sigma import load_sigma_spec_grn
         model.sigma_spec_grn = load_sigma_spec_grn(os.path.join(opts.p, 'cardamomOT'))
     # Per-sample schedules of the inference stimuli (stimulus_inference_schedule, sample_id rows)
@@ -150,7 +155,7 @@ def configure_simulation(model, opts, adata):
 def settings(opts):
     """NetworkModel(1) configured as the run (to read the pipeline parameters before the model of a step)."""
     from .model.base import NetworkModel
-    return configure(NetworkModel(1), opts, verb=False)
+    return configure(NetworkModel(1), opts, verb=False, load_spec=False)
 
 
 def step_arguments(step, p, values):

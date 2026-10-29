@@ -190,6 +190,7 @@ def main(argv):
     np.save(os.path.join(out_dir, 'proba_init'),         model.proba_init)
     np.save(os.path.join(out_dir, 'weights'),            model.weights)
     np.save(os.path.join(out_dir, 'mixture_parameters'), model.a)
+    np.save(os.path.join(out_dir, 'mixture_middle_shape'), model.middle_shape)  # logit-normal middles (NaN: none)
     # Depth settings of the fit: every later step uses them (the NB parameters depend on them)
     import json
     with open(os.path.join(out_dir, 'mixture_depth.json'), 'w') as fh:

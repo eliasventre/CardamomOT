@@ -37,7 +37,7 @@ PARAMETER_GROUPS = [
         'depth_model']),
     ('NB mixture and samples', [
         'mean_forcing_em', 'batch_size_mixture', 'max_iter_softEM', 'min_mixture_components', 'mixture_min_percentage', 'max_grid_levels',
-        'dispersion_max', 'mixture_selection_criterion', 'integrate_samples', 'ref_sample_integration']),
+        'mixture_middle_nodes', 'dispersion_max', 'mixture_selection_criterion', 'integrate_samples', 'ref_sample_integration']),
     ('Network inference', [
         'force_basins', 'temporal_basins', 'min_n_loops', 'max_iter', 'batch_size_traj', 'n_network_fits',
         'constrain_basal_uniform', 'network_condition_pen', 'weight_flow_matching', 'flow_matching_nodes',
@@ -49,7 +49,7 @@ PARAMETER_GROUPS = [
         'refine_theta_with_sde', 'fit_scale_theta', 'degradation_rates_per_condition', 'use_temporal_degradations',
         'sde_epochs', 'refine_in_loop']),
     ('Model learning of the regulation function', [
-        'model_learning_grn', 'model_learning_phi', 'model_learning_herbach_form', 'model_learning_herbach_m', 'model_learning_link', 'model_learning_kappa',
+        'model_learning_grn', 'model_learning_phi', 'model_learning_herbach_form', 'herbach_threshold_sd', 'model_learning_threshold_bic', 'model_learning_herbach_m', 'model_learning_link', 'model_learning_kappa',
         'model_learning_start', 'model_learning_freeze', 'model_learning_period', 'model_learning_margin',
         'model_learning_score', 'network_relaxed']),
     ('Proliferation and simulation', [

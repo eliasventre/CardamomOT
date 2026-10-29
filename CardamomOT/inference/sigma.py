@@ -7,7 +7,7 @@ and the simulators:
   (mirror), independent of the GRN sigma (chrom_open_pair, used by chrom_open_close of the simulators).
 
 GRN: sigma_j = link_j(z_j), z_j = basal_j + sum_g theta_gj phi_j(P_g), link and phi given by the family of the target j.
-spec (G, N_SPEC) (model_learning_grn; None = every gene logistic of a linear input, the default model):
+spec (G, N_SPEC + G) (model_learning_grn; None = every gene logistic of a linear input, the default model):
     spec[j, SPEC_PHI]: transformation of the regulators of target j,
         PHI_IDENTITY (0): phi(P) = P,
         PHI_LOG (1): phi(P) = Pbar log(1 + P / kappa) / log(1 + Pbar / kappa), i.e. with the logistic link
@@ -19,15 +19,20 @@ spec (G, N_SPEC) (model_learning_grn; None = every gene logistic of a linear inp
                      contribution psi of Herbach et al. to first order in theta, theta times a Hill step of threshold s_g
                      (regulator) and coefficient m_j (target); phi(0) = 0, phi(Pbar) = Pbar;
         PHI_HERBACH (2): Herbach type, exact form ('exact'): the thermodynamic model of Herbach et al., each regulator
-                     entering the logit through psi(theta_gj, P_g / s_g) = log((1 + e^theta x^m) / (1 + x^m)) instead
-                     of theta_gj phi(P_g): saturating, 0 at P = 0, theta when P -> infinity, Hill transition of
-                     coefficient m_j around s_g; nonlinear in theta (network.HerbachArray);
+                     entering the logit through psi(t, x) = log((1 + e^t x^m) / (1 + x^m)), x = P_g / s_gj, instead
+                     of theta_gj phi(P_g): saturating, 0 at P = 0, Hill transition of coefficient m_j around s_gj;
+                     parametrised by its effect at the high mode, psi(t, Pbar / s) = theta_gj Pbar (units and
+                     derivative at theta = 0 of the approximate form), t = herbach_theta(theta Pbar, m log(Pbar / s)),
+                     theta_gj > -log(1 + (Pbar / s_gj)^m) / Pbar (repression bound, lifted by a lower threshold);
+                     nonlinear in theta (network.HerbachArray); thresholds s_gj per edge (herbach_threshold_sd);
     spec[j, SPEC_LINK]: link of target j, LINK_LOGISTIC (0) only for now;
     spec[g, SPEC_KAPPA], spec[g, SPEC_PBAR]: scale kappa_g and protein level Pbar_g of the high mode of gene g as a
         regulator (PHI_LOG, PHI_HERBACH targets);
-    spec[g, SPEC_THRESH]: threshold s_g of gene g as a regulator (PHI_HERBACH), halfway between its low and high
-        protein levels;
-    spec[j, SPEC_M]: Hill coefficient m_j of target j (PHI_HERBACH).
+    spec[g, SPEC_THRESH]: threshold s_g of gene g as a regulator (PHI_HERBACH_APPROX, and prior centre of the
+        thresholds of its edges in the exact form), halfway between its low and high protein levels;
+    spec[j, SPEC_M]: Hill coefficient m_j of target j (Herbach types);
+    spec[j, N_SPEC + g]: threshold s_gj of the edge g -> j of an exact Herbach target j (default s_g, learned in the
+        network fit, see edge_thresholds).
 The torch version (sigma_torch, free-running SDE fit) mirrors feature / logistic for autograd.
 """
 import numpy as np
@@ -91,7 +96,13 @@ def load_sigma_spec_grn(cardamom_dir):
     """sigma_spec_grn of a run (None if absent: every gene logistic)."""
     import os
     path = os.path.join(cardamom_dir, SIGMA_SPEC_FILE)
-    return np.load(path) if os.path.exists(path) else None
+    if not os.path.exists(path):
+        return None
+    spec = np.load(path)
+    if spec.ndim != 2 or spec.shape[1] != N_SPEC + spec.shape[0]:
+        raise ValueError(f"{path}: spec of shape {spec.shape}, expected (G, {N_SPEC} + G) (thresholds per edge): "
+                         "rerun infer_network_structure")
+    return spec
 
 
 def save_sigma_spec_grn(cardamom_dir, spec):
@@ -122,15 +133,27 @@ def link_code(name):
 
 def default_spec(G, kappa=0.1, pbar=1.0, phi=PHI_IDENTITY, link=LINK_LOGISTIC, thresh=None, m=START_M):
     """Spec of G genes, all of the family (phi, link), regulator scales kappa, high-mode levels pbar, thresholds thresh
-    (None: pbar / 2) and Hill coefficients m (scalars or (G,))."""
-    spec = np.zeros((G, N_SPEC))
+    (None: pbar / 2) and Hill coefficients m (scalars or (G,)); the thresholds of the edges at those of their
+    regulators."""
+    spec = np.zeros((G, N_SPEC + G))
     spec[:, SPEC_PHI] = phi
     spec[:, SPEC_LINK] = link
     spec[:, SPEC_KAPPA] = kappa
     spec[:, SPEC_PBAR] = pbar
     spec[:, SPEC_THRESH] = np.asarray(pbar, dtype=float) / 2 if thresh is None else thresh
     spec[:, SPEC_M] = m
+    reset_edge_thresholds(spec)
     return spec
+
+
+def reset_edge_thresholds(spec, rows=slice(None)):
+    """Thresholds of the edges of the targets rows at those of their regulators (spec[:, SPEC_THRESH]), in place."""
+    spec[rows, N_SPEC:] = spec[:, SPEC_THRESH][None, :]
+
+
+def edge_thresholds(spec):
+    """View (G, G) of the thresholds of the edges, [target, regulator]."""
+    return spec[:, N_SPEC:]
 
 
 def uses_spec(spec):
@@ -187,14 +210,27 @@ def feature(p, phi, kappa, pbar, thresh, m):
     return p
 
 
+HERBACH_U_MIN = 1e-6  # floor of delta + log(1 + xbar^m) (exact Herbach): repression bound of the parametrisation
+
+
 @njit(cache=True)
-def herbach_psi(theta, p, thresh, m):
-    """Contribution psi(theta, x) = log((1 + e^theta x^m) / (1 + x^m)) of a regulator of level p to the logit of a
-    Herbach target (x = p / thresh, m its Hill coefficient); 0 at p = 0."""
+def herbach_theta(delta, lbar):
+    """Fold-change exponent t of an exact Herbach edge of effect delta at the high mode (lbar = m log(Pbar / s)):
+    psi(t, Pbar / s) = delta, i.e. t = log((1 + xbar^m) e^delta - 1) - lbar (floored at the repression bound)."""
+    u = max(delta + np.logaddexp(0.0, lbar), HERBACH_U_MIN)
+    return u + np.log(-np.expm1(-u)) - lbar
+
+
+@njit(cache=True)
+def herbach_psi(theta, p, thresh, pbar, m):
+    """Contribution psi(t, x) = log((1 + e^t x^m) / (1 + x^m)) of a regulator of level p to the logit of a Herbach
+    target (x = p / thresh, m its Hill coefficient), t = herbach_theta(theta pbar, .): theta pbar at p = pbar, 0 at
+    p = 0."""
     if p <= 0.0:
         return 0.0
     lx = m * np.log(p / thresh)
-    return np.logaddexp(0.0, theta + lx) - np.logaddexp(0.0, lx)
+    t = herbach_theta(theta * pbar, m * np.log(pbar / thresh))
+    return np.logaddexp(0.0, t + lx) - np.logaddexp(0.0, lx)
 
 
 @njit(cache=True)
@@ -210,22 +246,59 @@ def features(Y, phi, kappa, pbar, thresh, m):
     return out
 
 
+SIGMA_EDGE_MIN = 1e-3  # edges of effect |theta Pbar| below are skipped when sigma is evaluated (Herbach targets)
+
+
 @njit(cache=True)
-def sigma_input(theta_basal, theta_inter, prot, j, spec=None):
-    """Input z_j of sigma for target j at the protein state prot (G,)."""
-    z = theta_basal[j]
-    if spec is not None and spec[j, SPEC_PHI] == PHI_HERBACH:
-        for g in range(prot.shape[0]):
-            if theta_inter[g, j] != 0.0:
-                z += herbach_psi(theta_inter[g, j], prot[g], spec[g, SPEC_THRESH], spec[j, SPEC_M])
-        return z
-    if spec is not None and spec[j, SPEC_PHI] != PHI_IDENTITY:
+def edge_constants(theta_inter, spec):
+    """Constants (G, Gm1) of the edges, independent of the cells: exact Herbach targets, e^t - 1 (t the fold-change
+    exponent, herbach_theta) and log-threshold of each edge; approximate Herbach targets, theta Pbar / h(Pbar / s) and
+    log-threshold of the regulator. c1 = 0 marks the edges skipped by sigma_input: theta = 0, or |theta Pbar| <
+    SIGMA_EDGE_MIN (shift of the logit below that per edge; the fits keep every edge, and the post-inference filter
+    removes those below seuil_min_network_intensity)."""
+    G, Gm1 = theta_inter.shape
+    c1, c2 = np.zeros((G, Gm1)), np.zeros((G, Gm1))
+    for j in range(Gm1):
         phi = spec[j, SPEC_PHI]
-        for g in range(prot.shape[0]):
-            if theta_inter[g, j] != 0.0:
-                z += feature(prot[g], phi, spec[g, SPEC_KAPPA], spec[g, SPEC_PBAR], spec[g, SPEC_THRESH],
-                             spec[j, SPEC_M]) * theta_inter[g, j]
-        return z
+        for g in range(G):
+            th = theta_inter[g, j]
+            if abs(th * spec[g, SPEC_PBAR]) < SIGMA_EDGE_MIN:
+                continue
+            if phi == PHI_HERBACH:
+                s = spec[j, N_SPEC + g]
+                c1[g, j] = np.expm1(herbach_theta(th * spec[g, SPEC_PBAR], spec[j, SPEC_M] * np.log(spec[g, SPEC_PBAR] / s)))
+                c2[g, j] = np.log(s)
+            elif phi == PHI_HERBACH_APPROX:
+                c1[g, j] = th * spec[g, SPEC_PBAR] / hill_ratio(spec[g, SPEC_PBAR] / spec[g, SPEC_THRESH], spec[j, SPEC_M])
+                c2[g, j] = np.log(spec[g, SPEC_THRESH])
+    return c1, c2
+
+
+@njit(cache=True)
+def sigma_input(theta_basal, theta_inter, prot, logp, j, spec, c1, c2):
+    """Input z_j of sigma for target j at the protein state prot (G,), logp = log(prot) where positive, c1 / c2 the
+    constants of the edges (edge_constants)."""
+    z = theta_basal[j]
+    if spec is not None:
+        phi = spec[j, SPEC_PHI]
+        if phi == PHI_HERBACH:  # psi(t, x) = log((1 + e^t x^m) / (1 + x^m)) = log1p((e^t - 1) h), h = x^m / (1 + x^m)
+            m = spec[j, SPEC_M]
+            for g in range(prot.shape[0]):
+                if c1[g, j] != 0.0 and prot[g] > 0.0:
+                    z += np.log1p(c1[g, j] / (1.0 + np.exp(-m * (logp[g] - c2[g, j]))))
+            return z
+        if phi == PHI_HERBACH_APPROX:  # theta Pbar h(x) / h(xbar), h(x) = x^m / (1 + x^m)
+            m = spec[j, SPEC_M]
+            for g in range(prot.shape[0]):
+                if c1[g, j] != 0.0 and prot[g] > 0.0:
+                    z += c1[g, j] / (1.0 + np.exp(-m * (logp[g] - c2[g, j])))
+            return z
+        if phi != PHI_IDENTITY:
+            for g in range(prot.shape[0]):
+                if theta_inter[g, j] != 0.0:
+                    z += feature(prot[g], phi, spec[g, SPEC_KAPPA], spec[g, SPEC_PBAR], spec[g, SPEC_THRESH],
+                                 spec[j, SPEC_M]) * theta_inter[g, j]
+            return z
     for g in range(prot.shape[0]):
         z += prot[g] * theta_inter[g, j]
     return z
@@ -236,10 +309,18 @@ def sigma_pairs(theta_basal, theta_inter, y_prot, spec=None):
     """(1 - sigma, sigma) (n_cells, Gm1, 2) per cell and gene (basal (Gm1,), inter (G, Gm1), y_prot (n_cells, G))."""
     n_cells = y_prot.shape[0]
     Gm1 = theta_basal.shape[0]
+    G = y_prot.shape[1]
     result = np.empty((n_cells, Gm1, 2))
+    if spec is None:
+        c1, c2 = np.zeros((1, 1)), np.zeros((1, 1))
+    else:
+        c1, c2 = edge_constants(theta_inter, spec)
+    logp = np.zeros(G)
     for i in range(n_cells):
+        for g in range(G):
+            logp[g] = np.log(y_prot[i, g]) if y_prot[i, g] > 0.0 else 0.0
         for j in range(Gm1):
-            z = sigma_input(theta_basal, theta_inter, y_prot[i], j, spec)
+            z = sigma_input(theta_basal, theta_inter, y_prot[i], logp, j, spec, c1, c2)
             if spec is None:
                 s0, s1 = logistic_pair(z)
             else:
@@ -307,8 +388,8 @@ def kon_upper_bound(pmax, ks, inter, basal, ns=1, spec=None):
         for g in range(G):
             if inter[g, j] > 0:
                 if phi == PHI_HERBACH:  # psi increasing in the regulator for theta > 0
-                    z += herbach_psi(inter[g, j], pmax[g], 0.5 if spec is None else spec[g, SPEC_THRESH],
-                                     START_M if spec is None else spec[j, SPEC_M])
+                    z += herbach_psi(inter[g, j], pmax[g], 0.5 if spec is None else spec[j, N_SPEC + g],
+                                     1.0 if spec is None else spec[g, SPEC_PBAR], START_M if spec is None else spec[j, SPEC_M])
                 else:
                     z += feature(pmax[g], phi, 1.0 if spec is None else spec[g, SPEC_KAPPA],
                                  1.0 if spec is None else spec[g, SPEC_PBAR], 0.5 if spec is None else spec[g, SPEC_THRESH],
@@ -342,19 +423,24 @@ def sigma_torch(P, theta, basal, s, spec=None):
         for m in np.unique(spec[fam == PHI_HERBACH_APPROX, SPEC_M]):  # one feature map per Hill coefficient
             phi = pbar * h(torch.relu(P) / thresh, float(m)) / h(pbar / thresh, float(m))
             z = z + torch.einsum('wng,gj->wnj', phi, theta * col((fam == PHI_HERBACH_APPROX) & (spec[:, SPEC_M] == m)))
+    z = z * s[:, None, :] + (basal * s)[:, None, :]
     if np.any(fam == PHI_HERBACH):
-        # Exact Herbach contributions psi(theta_gj, P_g / s_g) on the edges of the Herbach targets (support of theta)
+        # Exact Herbach contributions psi(s_j theta_gj, P_g / s_g) on the edges of the Herbach targets (support of
+        # theta): the scale acts on theta, as inter * scale in the simulators
         F = torch.nn.functional.softplus
-        thresh = torch.tensor(spec[:, SPEC_THRESH], dtype=P.dtype)
-        lp = torch.log(torch.clamp(P / thresh, min=1e-12))  # (W, n, G)
         herb = torch.tensor(fam == PHI_HERBACH)
         g_idx, j_idx = torch.nonzero((theta.detach() != 0) & herb[None, :], as_tuple=True)
         if len(g_idx):
             m_e = torch.tensor(spec[:, SPEC_M], dtype=P.dtype)[j_idx]
-            lx = lp[..., g_idx] * m_e                                 # (W, n, E)
-            psi = F(theta[g_idx, j_idx] + lx) - F(lx)
+            thr = torch.tensor(spec[:, N_SPEC:], dtype=P.dtype)[j_idx, g_idx]  # threshold of each edge (E,)
+            lx = torch.log(torch.clamp(P[..., g_idx] / thr, min=1e-12)) * m_e   # (W, n, E)
+            lbar = m_e * torch.log(pbar[g_idx] / thr)
+            # Fold-change exponent of the effect theta Pbar at the high mode (herbach_theta)
+            u = torch.clamp(theta[g_idx, j_idx] * s[:, j_idx][:, None, :] * pbar[g_idx] + F(lbar), min=HERBACH_U_MIN)
+            t = u + torch.log(-torch.expm1(-u)) - lbar
+            psi = F(t + lx) - F(lx)
             z = z + torch.zeros_like(z).index_add(-1, j_idx, psi)
-    return torch.sigmoid(z * s[:, None, :] + (basal * s)[:, None, :])
+    return torch.sigmoid(z)
 
 
 # --- Chromatin opening function sigma_c (independent of the GRN sigma) ---

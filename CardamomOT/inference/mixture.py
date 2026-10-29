@@ -820,23 +820,59 @@ def grid_weights_update(counts, alpha=GRID_ALPHA, alpha_ext=GRID_ALPHA_EXT):
     return w / w.sum(axis=-1, keepdims=True)
 
 
+def middle_log_weights(mu, log_s, n_middle):
+    """Log-weights (n_middle,) of the inner levels q / (n_middle + 1) of a logit-normal middle (mu, s) on the logit of
+    sigma (density times the width of the level)."""
+    u = np.arange(1, n_middle + 1) / (n_middle + 1)
+    z = np.log(u / (1 - u))
+    lw = -0.5 * ((z - mu) / np.exp(log_s)) ** 2 - np.log(u * (1 - u))
+    return lw - logsumexp(lw)
+
+
+def middle_weights(masses, mu, log_s, n_middle):
+    """Weights (..., n_middle + 2) of the levels: masses (..., 3) of the low, middle and high modes, the middle spread
+    on its inner levels by middle_log_weights."""
+    m = np.asarray(masses, dtype=float)
+    return np.concatenate([m[..., :1], m[..., 1:2] * np.exp(middle_log_weights(mu, log_s, n_middle)), m[..., 2:]],
+                          axis=-1)
+
+
+# Bounds of the logit-normal middle: centre on the logit of sigma, log of its spread
+MIDDLE_MU_BOUNDS, MIDDLE_LOG_S_BOUNDS = (-6.0, 6.0), (np.log(0.1), np.log(10.0))
+
+
+def fit_middle_shape(r_mid, mu, log_s):
+    """M-step of the logit-normal middle: (mu, log s) maximising sum_q r_mid[q] log w_q (expected counts r_mid of the
+    inner levels, all times pooled)."""
+    if r_mid.sum() <= 0:
+        return mu, log_s
+    f = lambda th: -np.sum(r_mid * middle_log_weights(th[0], th[1], len(r_mid)))
+    th = minimize(f, [mu, log_s], method='L-BFGS-B', bounds=[MIDDLE_MU_BOUNDS, MIDDLE_LOG_S_BOUNDS]).x
+    return float(th[0]), float(th[1])
+
+
 def grid_levels(k_low, k_high, n_grid=GRID_LEVELS):
     """Burst frequencies (n_grid,) of the levels of the continuous model."""
     return k_low + (k_high - k_low) * np.linspace(0.0, 1.0, n_grid)
 
 
-def grid_weights_fixed(x, vect_t, levels, c, s=None, n_em=500, tol=1e-7):
-    """Posteriors (N, L) and MAP weights per time {t: (L,)} of cells under fixed levels (continuous model)."""
+def grid_weights_fixed(x, vect_t, levels, c, s=None, n_em=500, tol=1e-7, shape=None):
+    """Posteriors (N, L) and MAP weights per time {t: (L,)} of cells under fixed levels (continuous model). shape
+    (mu, log s): logit-normal middle of the training (fit_grid_mixture with n_middle), only the masses of the three
+    modes re-estimated."""
     lp = nb_logpmf_vectorized(x, levels, c, s)
     resp, W = np.zeros_like(lp), {}
     for t in np.unique(vect_t):
         rows = np.asarray(vect_t) == t
         L = np.exp(lp[rows] - lp[rows].max(axis=1, keepdims=True))
-        w = np.full(lp.shape[1], 1.0 / lp.shape[1])
+        w = np.full(lp.shape[1], 1.0 / lp.shape[1]) if shape is None else middle_weights(
+            np.full(3, 1.0 / 3), shape[0], shape[1], lp.shape[1] - 2)
         for _ in range(n_em):
             post = L * w
             post /= post.sum(axis=1, keepdims=True)
-            w_new = grid_weights_update(post.sum(axis=0))
+            r = post.sum(axis=0)
+            w_new = grid_weights_update(r) if shape is None else middle_weights(
+                grid_weights_update(np.array([r[0], r[1:-1].sum(), r[-1]])), shape[0], shape[1], len(r) - 2)
             done = np.max(np.abs(w_new - w)) < tol
             w = w_new
             if done:
@@ -847,14 +883,16 @@ def grid_weights_fixed(x, vect_t, levels, c, s=None, n_em=500, tol=1e-7):
     return resp, W
 
 
-def mixture_criterion(x, vect_t, levels, c, weights, s=None, criterion='icl', weights_per_time=False):
+def mixture_criterion(x, vect_t, levels, c, weights, s=None, criterion='icl', weights_per_time=False,
+                      middle_shape=False):
     """
     Selection criterion of a NB mixture of burst frequencies levels (K,), rate c, weights per time {t: (K,)} (or
     common): BIC = -2 loglik + p log n, p = min(K, 2) + 1 + (K - 1) (two shapes or k_low, k_high, and c; the weights,
     counted once since the weights of the times are pulled together by their Dirichlet prior, or once per time with
     weights_per_time); ICL (Biernacki, Celeux and Govaert 2000) = BIC + 2 entropy of the posteriors, which
     penalises overlapping levels, so that a gene that switches keeps two modes and levels are added only when the
-    counts separate them. Returns (criterion, posteriors).
+    counts separate them. middle_shape: logit-normal middle (fit_grid_mixture with n_middle), 2 mode masses + (mu, s)
+    instead of K - 1 weights, entropy of the three modes (inner levels grouped). Returns (criterion, posteriors).
     """
     x = np.asarray(x).astype(int)
     vt = np.asarray(vect_t)
@@ -864,29 +902,37 @@ def mixture_criterion(x, vect_t, levels, c, weights, s=None, criterion='icl', we
     lj = nb_logpmf_vectorized(x, levels, c, s) + np.log(np.maximum(W, 1e-300))
     le = logsumexp(lj, axis=1, keepdims=True)
     post = np.exp(lj - le)
-    ent = -np.sum(post * np.log(np.maximum(post, 1e-300)))
-    p = min(K, 2) + 1 + (K - 1) * (len(np.unique(vt)) if weights_per_time else 1)
+    n_w = len(np.unique(vt)) if weights_per_time else 1
+    grouped = np.stack([post[:, 0], post[:, 1:-1].sum(axis=1), post[:, -1]], axis=1) if middle_shape else post
+    ent = -np.sum(grouped * np.log(np.maximum(grouped, 1e-300)))
+    p = min(K, 2) + 1 + (2 * n_w + 2 if middle_shape else (K - 1) * n_w)
     bic = float(-2 * np.sum(le) + p * np.log(len(x)))
     return (bic + 2 * ent if criterion == 'icl' else bic), post
 
 
 def fit_grid_mixture(x, vect_t, k_low, k_high, c, s=None, seuil=0.01, n_grid=GRID_LEVELS, n_em=300, tol=1e-8,
-                     depth_model=None, c_max=None):
+                     depth_model=None, c_max=None, n_middle=0):
     """
-    Continuous model of the counts of one gene (max_grid_levels levels at most), started from the extreme modes of the CEM (+ soft
+    Continuous model of the counts of one gene (n_grid levels, n_middle + 2 with a logit-normal middle), started from the extreme modes of the CEM (+ soft
     EM): x ~ NB(k_low + (k_high - k_low) sigma_l, c) at the depth s of the cell (depth_model), sigma_l on n_grid levels
     with weights per time (grid_weights_update), by EM on the weights and on (k_low, k_high, c) (M-step by L-BFGS on
     their logarithms, k_low floored at min(c / 2, k_high / 100) as in the CEM), on the distinct (time, count, depth)
     triples. Two modes read the cells in a transient as part of
     the extremes, which pulls them inwards; here they sit on intermediate levels. Returns (levels (n_grid,), c, weights
-    {t: (n_grid,)}, posteriors (N, n_grid)), or None for a constant gene. depth_model: set in the process that runs the
+    {t: (n_grid,)}, posteriors (N, n_grid), shape (mu, log s) of the logit-normal middle or None), or None for a
+    constant gene. depth_model: set in the process that runs the
     fit (parallel workers), None: current setting. c_max: cap of the rate c (dispersion_max), None: 1 / seuil.
+    n_middle > 0: logit-normal middle, n_grid = n_middle + 2 levels whose weights per time are the masses of the low,
+    middle and high modes (Dirichlet prior of grid_weights_update), the middle spread on the inner levels by a shape
+    (mu, s) common to the times (middle_weights).
     """
     if depth_model is not None:
         set_depth_model(depth_model)
     x = np.asarray(x).astype(int)
     if x.size == 0 or x.min() == x.max() or not k_high > k_low:
         return None
+    if n_middle:
+        n_grid = int(n_middle) + 2
     sig = np.linspace(0.0, 1.0, n_grid)
     times, t_cell = np.unique(np.asarray(vect_t), return_inverse=True)
     sd = np.ones(len(x)) if s is None else np.round(np.asarray(s, dtype=float), 3)
@@ -912,13 +958,22 @@ def fit_grid_mixture(x, vect_t, k_low, k_high, c, s=None, seuil=0.01, n_grid=GRI
     th = np.log([max(k_low, 1e-8), max(k_high - k_low, 1e-8), np.clip(c, seuil, c_hi)])
     bounds = [(np.log(1e-8), np.log(1e5))] * 2 + [(np.log(seuil), np.log(c_hi))]
     W = np.full((len(times), n_grid), 1.0 / n_grid)
+    shape = (0.0, np.log(1.5))  # (mu, log s) of the logit-normal middle
+    if n_middle:
+        W = middle_weights(np.full((len(times), 3), 1.0 / 3), *shape, n_middle)
     prev = -np.inf
     for _ in range(n_em):
-        lj = terms(th)[0] + np.log(W[ti])
+        lj = terms(th)[0] + np.log(np.maximum(W[ti], 1e-300))
         le = logsumexp(lj, axis=1, keepdims=True)
         R = np.exp(lj - le) * mult[:, None]
         ll = float(np.sum(le[:, 0] * mult))
-        W = grid_weights_update(np.stack([R[ti == j].sum(axis=0) for j in range(len(times))]))
+        Rt = np.stack([R[ti == j].sum(axis=0) for j in range(len(times))])
+        if n_middle:
+            shape = fit_middle_shape(Rt[:, 1:-1].sum(axis=0), *shape)
+            masses = grid_weights_update(np.stack([Rt[:, 0], Rt[:, 1:-1].sum(axis=1), Rt[:, -1]], axis=1))
+            W = middle_weights(masses, *shape, n_middle)
+        else:
+            W = grid_weights_update(Rt)
         th = minimize(neg_ll, th, args=(R,), jac=True, method='L-BFGS-B', bounds=bounds).x
         # Floor of the low level, as in the CEM: k_low >= min(c / 2, k_high / 100), k_high kept
         kl, dk, cc = np.exp(th)
@@ -935,7 +990,7 @@ def fit_grid_mixture(x, vect_t, k_low, k_high, c, s=None, seuil=0.01, n_grid=GRI
     weights = {t: W[j] for j, t in enumerate(times)}
     lj = nb_logpmf_vectorized(x, levels, cc, s) + np.stack([np.log(weights[t]) for t in np.asarray(vect_t)])
     resp = np.exp(lj - logsumexp(lj, axis=1, keepdims=True))
-    return levels, float(cc), weights, resp
+    return levels, float(cc), weights, resp, (np.array(shape) if n_middle else None)
 
 
 # ---------------------------

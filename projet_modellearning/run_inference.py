@@ -1,11 +1,12 @@
 """
 CardamomOT on the runs of the benchmark networks (bench/, generate.py), with observed or hidden proteins, with and
 without model learning of the GRN sigma, then evaluation: family of each target (model learning), network (AUPR,
-sign of the true edges) and error on theta.
+sign of the true edges) and error on theta; family of each target: form (approximate / exact) and m, jointly
+(family_acc) and apart (herbach_m_acc, form_acc, exact_recall, approx_recall).
 
 Usage: python run_inference.py <network> [runs] [--modes obs_ml,obs_base,hid_ml,hid_base] [--compare-only]
        (e.g. python run_inference.py FN4 1-3; runs '1-3' or '1,4,7', default 1)
-Projects: bench/<network>/runs/run<r>_<mode>/; summary appended to bench/<network>/summary.csv.
+Projects: bench/<network>/runs/run<r>_<mode>/; summary appended to bench/<network>/summary_forms.csv.
 """
 import argparse
 import csv
@@ -83,34 +84,38 @@ def evaluate(name, run, mode, proj):
     basal = np.atleast_2d(np.load(os.path.join(proj, 'cardamomOT', 'basal.npy')))[0]
     res['theta_mae'] = float(np.mean(np.abs(inter - truth['inter'])[:, 1:]))
     res['basal_mae'] = float(np.mean(np.abs(basal[1:] - truth['basal'][1:])))
-    # True family of each gene (phi: 0 sigmoid, 1 Hill type, 2 Herbach type) and Hill coefficient of the Herbach ones
-    fam = truth['family'].astype(int)
-    fam = np.where([is_herbach(f) for f in fam], PHI_HERBACH, fam)  # both forms of the Herbach type compared alike
-    m_true = truth['spec'][:, SPEC_M] if truth['spec'].shape[1] > SPEC_M else np.zeros(len(fam))
+    # True family of each gene (phi: 0 sigmoid, 1 Hill type, 2 / 3 Herbach type exact / approximate) and Hill
+    # coefficient of the Herbach ones; tokens S, H, A<m> (approximate), E<m> (exact)
+    fam_full = truth['family'].astype(int)
+    m_true = truth['spec'][:, SPEC_M]
     spec_path = os.path.join(proj, 'cardamomOT', 'sigma_spec_grn.npy')
     if os.path.exists(spec_path):
         spec = np.load(spec_path)
-        sel = spec[:, SPEC_PHI].astype(int)
-        sel = np.where([is_herbach(f) for f in sel], PHI_HERBACH, sel)
-        recall = lambda f: float(np.mean(sel[1:][fam[1:] == f] == f)) if (fam[1:] == f).any() else np.nan
-        token = lambda f, m: {0: 'S', PHI_LOG: 'H'}.get(int(f), f'B{m:g}')
-        both = (fam[1:] == PHI_HERBACH) & (sel[1:] == PHI_HERBACH)
-        res.update(family_acc=float(np.mean(sel[1:] == fam[1:])), hill_recall=recall(PHI_LOG), sigmoid_recall=recall(0),
-                   herbach_recall=recall(PHI_HERBACH),
-                   herbach_m_acc=float(np.mean(np.isclose(spec[1:, SPEC_M][both], m_true[1:][both]))) if both.any() else np.nan,
-                   true_family=' '.join(token(f, m) for f, m in zip(fam[1:], m_true[1:])),
-                   selected=' '.join(token(f, m) for f, m in zip(sel[1:], spec[1:, SPEC_M])))
-        res['exact_acc'] = float(np.mean([a == b for a, b in zip(res['true_family'].split(), res['selected'].split())]))
+        sel_full = spec[:, SPEC_PHI].astype(int)
+        token = lambda f, m: {0: 'S', PHI_LOG: 'H', PHI_HERBACH: f'E{m:g}'}.get(int(f), f'A{m:g}')
+        t_tok = [token(f, m) for f, m in zip(fam_full[1:], m_true[1:])]
+        s_tok = [token(f, m) for f, m in zip(sel_full[1:], spec[1:, SPEC_M])]
+        herb = np.array([is_herbach(f) for f in fam_full[1:]]) & np.array([is_herbach(f) for f in sel_full[1:]])
+        ex_t, ex_s = fam_full[1:] == PHI_HERBACH, sel_full[1:] == PHI_HERBACH
+        res.update(herbach_m_acc=float(np.mean(np.isclose(spec[1:, SPEC_M][herb], m_true[1:][herb]))) if herb.any() else np.nan,
+                   form_acc=float(np.mean(ex_t[herb] == ex_s[herb])) if herb.any() else np.nan,
+                   exact_recall=float(np.mean(ex_s[ex_t])) if ex_t.any() else np.nan,
+                   approx_recall=float(np.mean(~ex_s[~ex_t])) if (~ex_t).any() else np.nan,
+                   family_acc=float(np.mean([a == b for a, b in zip(t_tok, s_tok)])),
+                   true_family=' '.join(t_tok), selected=' '.join(s_tok))
     np.set_printoptions(precision=2, suppress=True, linewidth=150)
     print(f'\n{name} run {run} [{mode}]: inferred inter (rows = regulators, 0 = stimulus)\n{inter}')
     print(', '.join(f'{k} {v:.2f}' if isinstance(v, float) else f'{k} {v}' for k, v in res.items()))
     return res
 
 
+SUMMARY = 'summary_forms.csv'  # benchmark of the forms (approximate / exact) and of m
+
+
 def append_summary(name, res):
-    path = os.path.join(BENCH, name, 'summary.csv')
+    path = os.path.join(BENCH, name, SUMMARY)
     keys = ['network', 'run', 'mode', 'aupr', 'aupr_random', 'sign_ok', 'theta_mae', 'basal_mae', 'family_acc',
-            'hill_recall', 'sigmoid_recall', 'herbach_recall', 'herbach_m_acc', 'true_family', 'selected']
+            'herbach_m_acc', 'form_acc', 'exact_recall', 'approx_recall', 'true_family', 'selected']
     new = not os.path.exists(path)
     with open(path, 'a', newline='') as f:
         w = csv.DictWriter(f, fieldnames=keys, extrasaction='ignore')
