@@ -35,7 +35,7 @@ from ..inference.sigma import (SPEC_PHI, SPEC_LINK, PHI_IDENTITY, LINK_LOGISTIC,
                                edge_thresholds, reset_edge_thresholds)
 from ..inference.simulations import simulate_next_mrna_pdmp, ChromatinModel, chrom_gate, chrom_values, Simulation
 from ..inference import (inference_network_multi, active_regulators, PathProt, signed_floor, sigmoid_amplitudes,
-                        sigmoid_target, gene_weights, filter_network,
+                        sigmoid_target, gene_weights,
                         minimal_repetition_choice, find_next_prot, find_next_prot_dilution, my_otdistance, count_errors,
                         kon_ref_vector, inference_alpha, inference_alpha_1thread,
                         NegativeBinomialMixtureEM, predict_resp,
@@ -56,6 +56,8 @@ RENAMED_PARAMETERS = {'max_iter_kinetics': 'max_iter_softEM', 'cell_depth_for_em
                       'grid_levels': 'max_grid_levels'}
 
 REMOVED_PARAMETERS = {
+    'filter_network': 'the edges below seuil_min_network_intensity are set to 0 after every network fit (the QUT sets the sparsity)',
+    'seuil_min_network_variations': 'the edges below seuil_min_network_intensity are set to 0 after every network fit (the QUT sets the sparsity)',
     'model_learning_form_selection': 'the forms of model_learning_herbach_form are candidates of the same selection as m (form and m selected together)',
     'model_learning_prior_start': 'every target starts as a sigmoid of a linear input, the family selected from model_learning_start on',
     'model_learning_prior_weight': 'the families are selected by their scores alone',
@@ -406,9 +408,7 @@ class NetworkModel:
         self.hard_forcing_ref = False # if True, constrain all network params to ±ref_constraint_pct around inter_ref
         self.ref_constraint_pct = 0.01 # fractional tolerance around inter_ref values for bounds (used when hard_forcing_ref=True)
         # Filtering
-        self.filter_network = 1 # Do we filter the network ? It also builds a temporal network using the filter criterium
-        self.seuil_min_network_intensity = 1e-2 # |effective theta| below = absent edge: post-inference filter, support of the free-running fit, references (inter_ref) below are ignored; min |theta| of the kept signs (inter_ref above it, ref_network < -1 or > 1)
-        self.seuil_min_network_variations = 0 # post-inference filter: min kon variation when removing an edge (0 = intensity threshold only)
+        self.seuil_min_network_intensity = 1e-2 # |effective theta| below = absent edge: set to 0 after every network fit (every use of the network, sigma skipping the zero edges; the only filter of the network, its sparsity being set by the QUT), support of the free-running fit, references (inter_ref) below are ignored; min |theta| of the kept signs (inter_ref above it, ref_network < -1 or > 1)
 
         ## Model learning of the regulation functions (inference/sigma.py)
         # GRN: regulation function sigma of the burst frequency
@@ -416,11 +416,12 @@ class NetworkModel:
         self.model_learning_link = ['logistic'] # with model_learning_grn: candidate links of sigma (logistic only for now)
         self.model_learning_phi = ['herbach'] # with model_learning_grn: candidate transformations of the regulators, phi(P) = P ('identity', sigmoid of a linear input, not a default candidate: within 0.09-0.14 of the Herbach type of m = 2 on [0, Pbar], and unbounded beyond Pbar), log(1 + P / kappa) (Hill type, graded) or the Herbach type (saturating, 0 at P = 0, theta at saturation, Hill transition of coefficient m around the threshold s halfway between its low and high protein levels; form set by model_learning_herbach_form; one candidate per m of model_learning_herbach_m); a single link and phi (and m): that family is forced for every gene and the whole pipeline (no selection, no extra cost), e.g. ['logarithm'] for Hill functions; 'logarithm' is not a default candidate, as it matches the Herbach type of m = 1 on [0, Pbar] within 0.04-0.08
         self.herbach_threshold_sd = 1.0 # exact Herbach targets: the threshold s_ij of each edge is learned in the refinement of the network fits (Gaussian prior of this sd on log s_ij around the threshold s_j of the regulator, s_ij within [0.01, 2] x Pbar), a lower threshold lifting the repression bound -log(1 + (Pbar / s_ij)^m) of a fixed one; self-regulations keep theirs; None / 0: thresholds fixed at s_j. The approximate form keeps s_j (linear in theta, its threshold would mimic m)
-        self.model_learning_herbach_form = ['approximate', 'exact'] # with model_learning_grn: forms of the Herbach candidates, 'approximate' = linear in theta, phi(P) = Pbar h(P / s) / h(Pbar / s), h(x) = x^m / (1 + x^m) (theta times a Hill step: the contribution of Herbach et al. to first order in theta), or 'exact' = psi(t, P / s) = log((1 + e^t (P/s)^m) / (1 + (P/s)^m)), nonlinear in theta (theta Pbar = its effect at the high mode); each form of the list is a branch whose targets select their m (margin, two consecutive wins); the first form (approximate) drives the trajectories and basins during the window, and at its last selection each target takes the branch of lowest score (the other forms are thus judged on its trajectories)
+        self.model_learning_herbach_form = ['approximate', 'exact'] # with model_learning_grn: forms of the Herbach candidates, 'approximate' = linear in theta, phi(P) = Pbar h(P / s) / h(Pbar / s), h(x) = x^m / (1 + x^m) (theta times a Hill step: the contribution of Herbach et al. to first order in theta), or 'exact' = psi(t, P / s) = log((1 + e^t (P/s)^m) / (1 + (P/s)^m)), nonlinear in theta (theta Pbar = its effect at the high mode); the first form is the base form, with which m is selected in [model_learning_start, model_learning_freeze); with a second form, a form window of the same length follows, in which each target compares its base family (m*) with the second form at m* (and its neighbours with model_learning_form_neighbours) (BIC of the learned thresholds, model_learning_threshold_bic); the current family of each target sets sigma everywhere
+        self.model_learning_form_neighbours = False # with model_learning_grn, form window: the second Herbach form is tried at the m* of the target only (False) or also at the neighbours of m* in model_learning_herbach_m (True: up to two more fits per update)
         self.model_learning_herbach_m = [1, 2, 4] # with model_learning_grn: Hill coefficients m of the Herbach candidates (one candidate family each, m of the target selected with its family)
         self.model_learning_kappa = 0.1 # with model_learning_grn: kappa of every regulator (phi = log) relative to the protein level Pbar of its highest mode (scale_proteins); phi is normalised so that phi(Pbar) = Pbar
         self.model_learning_start = None # with model_learning_grn: first iteration of the selection (None = min_n_loops), before it every target is of the Herbach type of the m of model_learning_herbach_m closest to 2 (the first candidate if no Herbach one), while the targets ramp from the EMD basins to the posteriors
-        self.model_learning_freeze = None # with model_learning_grn: end of the selection (None = model_learning_start + 5), after which the families are fixed and the loop converges with them (it stops only after the window)
+        self.model_learning_freeze = None # with model_learning_grn: end of the window of the base form (None = model_learning_start + 3), followed by the form window of the same length when model_learning_herbach_form has a second form; the families are then fixed and the loop converges with them (it stops only after the windows)
         self.model_learning_period = 1 # with model_learning_grn: iterations between two selections from model_learning_start (> 1: the network is refitted with the current families in between; the last cycle is completed before stopping)
         self.model_learning_margin = 0.01 # with model_learning_grn: a target changes family when the score of another one is lower by this relative margin at two consecutive selections
         self.model_learning_threshold_bic = True # with model_learning_grn and herbach_threshold_sd: the score of an exact Herbach family is penalised by (k / 2) log N / N per state (BIC of its k learned edge thresholds, N states scored), since the families are scored on all the data (validation on the test set); False: no penalty
@@ -2538,11 +2539,14 @@ class NetworkModel:
         sels = self._network_subsamples(times_vec, samples_vec, labels, n_fits, n_params, valid=valid)
         return self._mean_fit(fit_fn(sels))
 
-    @staticmethod
-    def _mean_fit(fits):
+    def _mean_fit(self, fits):
         """(basal, inter, basal_tmp, inter_tmp): mean of the fits on the sub-samples (NaN: condition absent from a
-        sub-sample, see _network_subsamples)."""
-        return tuple(np.nanmean([f[i] for f in fits], axis=0) for i in range(4))
+        sub-sample, see _network_subsamples); in inter (after the core fit and the refinement), the edges with |theta| <
+        seuil_min_network_intensity set to 0 (absent edges for every use of the network; the next fit may bring them
+        back); inter_tmp (core fit, diagnostics) left as fitted."""
+        out = [np.nanmean([f[i] for f in fits], axis=0) for i in range(4)]
+        out[1] = np.where(np.abs(out[1]) < self.seuil_min_network_intensity, 0.0, out[1])  # NaN kept
+        return tuple(out)
 
     def _network_subsamples(self, times_vec, samples_vec, labels, n_fits, n_params, valid=None):
         """Disjoint sub-samples (index arrays) of the network fits, see _fit_theta_averaged. n_params {condition:
@@ -2606,11 +2610,19 @@ class NetworkModel:
         return th
 
     def _model_learning_window(self, min_n_loops):
-        """(first, last + 1) iterations of the family selection of model_learning_grn (freeze None: first + 5)."""
+        """(first, last + 1) iterations of the family selection of model_learning_grn: window of the base Herbach form
+        [start, freeze) (freeze None: start + 3), then, with a second form in model_learning_herbach_form, the form
+        window [freeze, 2 freeze - start) (_ml_window = (start, freeze, end))."""
         start = min_n_loops if self.model_learning_start is None else int(self.model_learning_start)
-        freeze = start + 5 if self.model_learning_freeze is None else int(self.model_learning_freeze)
-        self._ml_window = (start, freeze)
-        return start, freeze
+        freeze = start + 3 if self.model_learning_freeze is None else int(self.model_learning_freeze)
+        end = 2 * freeze - start if len(self._herbach_forms()) > 1 else freeze
+        self._ml_window = (start, freeze, end)
+        return start, end
+
+    def _herbach_forms(self):
+        """phi codes of the forms of model_learning_herbach_form (base form first)."""
+        forms = self.model_learning_herbach_form
+        return [herbach_code(f) for f in ([forms] if isinstance(forms, str) else forms)]
 
     def _ml_windows_done(self, n_iter, freeze, last_ml):
         """True when the loop may stop: the selection windows are over (families fixed from freeze on) and the last
@@ -2638,10 +2650,9 @@ class NetworkModel:
         set_family(self.sigma_spec_grn, slice(None), start)
         self.sigma_spec_grn[:self.n_stimuli, SPEC_PHI] = PHI_IDENTITY
         self.sigma_spec_grn[:self.n_stimuli, SPEC_LINK] = LINK_LOGISTIC
-        self._ml_theta, self._ml_thresh = {}, {}  # warm start of each candidate: theta and edge thresholds (exact)
-        self._ml_start_phi = int(start[0])  # phi of the pilot branch (_ml_branches)
-        self._ml_branch_cur = None          # current family of each branch (set at the first selection)
-        self._ml_pending = {}  # per branch: candidate family and count of consecutive wins of each target
+        self._ml_theta, self._ml_thresh = {}, {}  # warm start of each fitted configuration: theta, edge thresholds
+        self._ml_pending = {}  # candidate family and count of consecutive wins of each target
+        self._ml_first = None  # family of each target at the end of the window of the base form
         self.model_learning_history = []
 
     def _sigma_bar(self, y_prot, mem, ks, inter, basal, samples_id, samples_data, sigma_spec=None):
@@ -2751,91 +2762,101 @@ class NetworkModel:
     def _select_sigma_families(self, fit_on_spec, sels, basal_start, inter_start, y_prot, y_samples, y_real,
                                ks, sample_idx, n_iter, verb=True, mem=None):
         """
-        Model learning of the GRN sigma at one network update: the network is fitted with every candidate family for
-        every target (same sub-samples, warm start from the last fit of the family), each target is scored on all the
-        data by its mean fit against the mixture alone (_family_score, BIC of the learned edge thresholds). The candidates are grouped in
-        branches by phi (_ml_branches: the approximate and the exact Herbach forms, each with its m): in each branch,
-        a target changes family (m) when another one is better by model_learning_margin at two consecutive
-        selections. The pilot branch (that of the starting family) sets sigma for the trajectories and the basins
-        during the window; at its last selection, each target takes the branch whose current family has the lowest
-        score. Returns (basal, inter, basal_tmp, inter_tmp) assembled per target from the fits of its family; updates
-        sigma_spec_grn.
+        Model learning of the GRN sigma at one network update, in two windows (_model_learning_window). Window of the
+        base form [start, freeze): the candidates of the base Herbach form (first of model_learning_herbach_form, one
+        per m) and the other phi families. Form window [freeze, end): each target compares its family at the end of
+        the first window (base form, m*) with the other form at m* (and at the neighbours of m* in
+        model_learning_herbach_m with model_learning_form_neighbours). The network is fitted with each configuration (same sub-samples, warm start from its
+        last fit), each target is scored on all the data by its mean fit against the mixture alone (_family_score,
+        with the BIC of the learned edge thresholds of the exact form), and changes family when an allowed one is
+        better by model_learning_margin at two consecutive selections; the current family of each target sets sigma
+        everywhere (trajectories, basins, simulations). Returns (basal, inter, basal_tmp, inter_tmp) assembled per
+        target from the fit of its family; updates sigma_spec_grn.
         """
         from ..inference.sigma import set_family, family_index, family_name
         ns = self.n_stimuli
         cands = self._model_learning_candidates()
         spec = self.sigma_spec_grn
-        G = spec.shape[0]
+        G, F = spec.shape[0], len(cands)
         cur = family_index(spec, cands)
         movable = np.zeros(G, dtype=bool)
         movable[ns:] = True
-        branches = self._ml_branches(cands)
-        if self._ml_branch_cur is None:
-            self._ml_branch_cur = [self._branch_start(cands, b, cur) for b in branches]
-        fams = list(range(len(cands)))
-        # Warm start of a family fitted for the first time: theta of the current fit (same units for every phi: change
-        # of the logit between 0 and the high-mode level)
-        means, scores = {}, np.full((len(cands), G), np.inf)
-        specs = {}
-        for f in fams:
-            spec_f = self._candidate_spec(spec, movable & (cur != f), self._ml_thresh.get(f))
-            set_family(spec_f, np.flatnonzero(movable), cands[f])
-            b0, i0 = self._ml_theta.get(f, (basal_start, inter_start))
-            fits = fit_on_spec(spec_f, b0, i0)(sels)  # learns the edge thresholds of the exact targets in spec_f
-            means[f] = self._mean_fit(fits)
-            self._ml_theta[f], self._ml_thresh[f], specs[f] = means[f][:2], edge_thresholds(spec_f).copy(), spec_f
-            scores[f] = self._family_score(means[f], sels, spec_f, y_prot, y_samples, y_real, ks, sample_idx,
-                                           mem=mem)
-        # Choice of m in each branch, then (last selection of the window) of the branch of each target
-        for k, b in enumerate(branches):
-            local = np.searchsorted(b, self._ml_branch_cur[k])
-            self._switch_families(local, scores[b], movable, self._ml_pending.setdefault(k, {}))
-            self._ml_branch_cur[k] = b[local]
-        period = max(int(self.model_learning_period or 1), 1)
-        last = n_iter + period >= getattr(self, '_ml_window', (0, n_iter + period))[1]
-        cur = self._ml_branch_cur[0].copy()
-        if last and len(branches) > 1:
-            sc = np.stack([scores[bc, np.arange(G)] for bc in self._ml_branch_cur])  # (branches, G)
-            cur = np.stack(self._ml_branch_cur)[np.argmin(sc, axis=0), np.arange(G)]
+        start, freeze, end = getattr(self, '_ml_window', (0, n_iter + 1, n_iter + 1))
+        forms = self._herbach_forms()
+        second = n_iter >= freeze and len(forms) > 1
+        if second and self._ml_first is None:  # start of the form window
+            self._ml_first, self._ml_pending = cur.copy(), {}
+        allowed = self._ml_allowed(cands, forms, second, G)
+        # Configurations fitted: one family for every target, or (form window) the family of each target at the end of
+        # the first window
+        configs = [(f, np.full(G, f)) for f in range(F) if allowed[f, movable].any() and not (second and
+                                                                                             int(cands[f][0]) == forms[0])]
+        if second:
+            if not self.model_learning_form_neighbours:  # each target at the second form of its own m*: two fits
+                other = self._ml_first.copy()
+                for g in range(G):
+                    hit = np.flatnonzero(allowed[:, g] & (np.arange(F) != self._ml_first[g]))
+                    other[g] = hit[0] if len(hit) else self._ml_first[g]
+                configs = [('second', other)]
+            configs.insert(0, ('first', self._ml_first.copy()))
+        means, specs, scores, src = {}, {}, np.full((F, G), np.inf), {}
+        for key, fam in configs:
+            spec_c = self._candidate_spec(spec, movable & (cur != fam), self._ml_thresh.get(key))
+            for g in np.flatnonzero(movable):
+                set_family(spec_c, g, cands[fam[g]])
+            b0, i0 = self._ml_theta.get(key, (basal_start, inter_start))
+            fits = fit_on_spec(spec_c, b0, i0)(sels)  # learns the edge thresholds of the exact targets in spec_c
+            means[key] = self._mean_fit(fits)
+            self._ml_theta[key], self._ml_thresh[key], specs[key] = means[key][:2], edge_thresholds(spec_c).copy(), spec_c
+            sc = self._family_score(means[key], sels, spec_c, y_prot, y_samples, y_real, ks, sample_idx, mem=mem)
+            for g in np.flatnonzero(movable):
+                if allowed[fam[g], g]:
+                    scores[fam[g], g], src[(fam[g], g)] = sc[g], key
+        self._switch_families(cur, scores, movable, self._ml_pending)
         for g in np.flatnonzero(movable):
             set_family(spec, g, cands[cur[g]])
-            edge_thresholds(spec)[g] = edge_thresholds(specs[cur[g]])[g]
+            edge_thresholds(spec)[g] = edge_thresholds(specs[src[(cur[g], g)]])[g]
         self.model_learning_history.append(dict(n_iter=n_iter, scores=scores.copy(), family=cur.copy(),
-                                                branch_family=np.stack(self._ml_branch_cur)))
+                                                window=int(second)))
         if verb:
             counts = ', '.join(f"{family_name(fam)}: {int(np.sum(cur[ns:] == f))}" for f, fam in enumerate(cands))
-            per_branch = '; '.join(', '.join(f"{family_name(cands[f])} {int(np.sum(bc[ns:] == f))}" for f in b)
-                                   for b, bc in zip(branches, self._ml_branch_cur))
-            print(f"[model_learning] iteration {n_iter}: families of the targets {counts}"
-                  + (f" (branches: {per_branch}; best branch of each target)" if last and len(branches) > 1
-                     else f" (branches: {per_branch})" if len(branches) > 1 else ""))
-            if last:  # model selected for the rest of the inference
-                print(f"[model_learning] selected at the end of the window (iteration {n_iter}): "
+            print(f"[model_learning] iteration {n_iter} ({'form' if second else 'base form'} window): "
+                  f"families of the targets {counts}")
+            period = max(int(self.model_learning_period or 1), 1)
+            if n_iter + period >= end:  # end of the last window: model of the rest of the inference
+                print(f"[model_learning] selected at the end of the model learning (iteration {n_iter}): "
                       + ', '.join(f"gene {g} {family_name(cands[cur[g]])}" for g in np.flatnonzero(movable)))
-        # Parameters of each target from the fit of its family (the others: their own family, in every fit)
-        out = [np.array(m, dtype=float, copy=True) for m in means[fams[0]]]
+        # Parameters of each target from the fit of its family
+        out = [np.array(m, dtype=float, copy=True) for m in means[configs[0][0]]]
         for g in np.flatnonzero(movable):
             for i in range(4):
-                out[i][..., g] = means[cur[g]][i][..., g]
+                out[i][..., g] = means[src[(cur[g], g)]][i][..., g]
         return tuple(out)
 
-    def _ml_branches(self, cands):
-        """Index arrays of the candidates of each branch (same phi: a form of the Herbach type with its m), the pilot
-        branch (phi of the starting family) first."""
-        phis = list(dict.fromkeys(int(c[0]) for c in cands))
-        pilot = getattr(self, '_ml_start_phi', phis[0])
-        phis.sort(key=lambda p: p != pilot)
-        return [np.array([i for i, c in enumerate(cands) if int(c[0]) == p]) for p in phis]
-
-    @staticmethod
-    def _branch_start(cands, branch, cur):
-        """Starting family (G,) of a branch: the current family when it belongs to the branch, else its member of the
-        same m (its first one if none)."""
-        out = np.full(len(cur), branch[0])
-        for g, f in enumerate(cur):
-            same = [i for i in branch if i == f or np.isclose(cands[i][2], cands[f][2])]
-            out[g] = f if f in branch else (same[0] if same else branch[0])
-        return out
+    def _ml_allowed(self, cands, forms, second, G):
+        """Families allowed (F, G) for each target: window of the base form, every candidate but those of the other
+        Herbach forms; form window, the family of the target at the end of the first window and the other forms at
+        its m (and at the neighbours of its m in model_learning_herbach_m with model_learning_form_neighbours; none for
+        a target of another phi)."""
+        F = len(cands)
+        allowed = np.zeros((F, G), dtype=bool)
+        if not second:
+            for f, (phi, _, _) in enumerate(cands):
+                allowed[f] = not (is_herbach(phi) and int(phi) != forms[0])
+            return allowed
+        grid = sorted({float(m) for phi, _, m in cands if int(phi) == forms[0]})
+        for g in range(G):
+            f0 = self._ml_first[g]
+            allowed[f0, g] = True
+            phi0, _, m0 = cands[f0]
+            if int(phi0) != forms[0] or not grid:
+                continue
+            i = int(np.argmin(np.abs(np.asarray(grid) - m0)))
+            near = grid[max(0, i - 1):i + 2] if self.model_learning_form_neighbours else grid[i:i + 1]
+            for f, (phi, _, m) in enumerate(cands):
+                if int(phi) in forms[1:] and any(np.isclose(m, mm) for mm in near):
+                    allowed[f, g] = True
+        return allowed
 
     @staticmethod
     def _candidate_spec(spec, rows, thresh):
@@ -4883,7 +4904,8 @@ class NetworkModel:
         (refine_in_loop): trajectory arrays (samples_rows, kon_targets, real_idx, rna), prolif (None: no MLP), temporal / learn_scale / learn_theta /
         epochs, per_condition, rappel targets d1_ref / eps_ref (default the starting values) and strength lam_rates
         (default sde_lambda_rates), only_max_horizon.
-        Returns (basal, inter, d1, eps, scale (C, T-1, G), condition of each sample position (S,)).
+        Returns (basal, inter, d1, eps, scale (C, T-1, G), condition of each sample position (S,)); the edges of inter
+        below seuil_min_network_intensity set to 0.
         """
         import torch
         from ..inference.sde import fit_free_running
@@ -5051,6 +5073,7 @@ class NetworkModel:
         if verb:
             print(f"[{tag}] free-running {mode} loss " + '; '.join(f"{h['before']:.4f} -> {h['after']:.4f}" for h in hists)
                   + (" (one fit per condition)" if separate else ""))
+        theta = np.where(np.abs(theta) < self.seuil_min_network_intensity, 0.0, theta)  # absent edges, as after every fit
         return basal_new, theta, d1_t, eps_t, scale_t, cond
 
     def _refine_trajectories_network(self, kon_targets, d1, times, N_tot, ks, valid, samples_id, verb=True,
@@ -5105,14 +5128,6 @@ class NetworkModel:
             self._n_params_per_target(prev_cols, len(samples_id), apart=self.per_condition_fits()[0]), valid=valid)
         if common and n_rows is not None and np.ndim(inter) == 2:  # kept per sample (one network for every condition)
             inter = np.repeat(np.asarray(inter)[None], n_rows, axis=0)
-
-        ### filter_edges
-        if self.filter_network:
-            seuil_intensity = self.seuil_min_network_intensity
-            inter, _ = filter_network(len(times), N_tot, y_prot, ks, basal, inter,
-                                      samples_data=self.samples_data, spec=self._spec_grn(),
-                                      seuil_intensity=seuil_intensity, seuil_variations=self.seuil_min_network_variations,
-                                      seed=task_seed(self.seed, 2))
 
         error_corrected = self._count_errors_per_sample(y_prot[valid], self.kon_beta[valid], ks, inter, basal,
                                                         samples_id=samples_id, samples_data=self.samples_data[valid])

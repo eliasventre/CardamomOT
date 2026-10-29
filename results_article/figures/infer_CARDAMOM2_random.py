@@ -98,7 +98,7 @@ for r in range(0, N):
 
 # print("We are at trees")
 # Inference for tree-like networks
-for n in [5, 10, 20]:
+for n in [5, 10, 20, 50]:
     runtime = np.zeros(N)
     for r in range(N):
         fname = 'Trees{}/Data/data_{}.txt'.format(n,r+1)

@@ -15,7 +15,7 @@ def file_name(algo): return algo_file.get(algo, algo)
 
 benchmarks = ['FN4', 'CN5', 'BN8', 'FN8',
     'Trees5', 'Trees10', 'Trees20', 'Trees50', 'Trees100']
-N = 3
+N = 10
 
 cmap = plt.get_cmap('tab20')
 c = {

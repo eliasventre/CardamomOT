@@ -246,23 +246,19 @@ def features(Y, phi, kappa, pbar, thresh, m):
     return out
 
 
-SIGMA_EDGE_MIN = 1e-3  # edges of effect |theta Pbar| below are skipped when sigma is evaluated (Herbach targets)
-
-
 @njit(cache=True)
 def edge_constants(theta_inter, spec):
     """Constants (G, Gm1) of the edges, independent of the cells: exact Herbach targets, e^t - 1 (t the fold-change
     exponent, herbach_theta) and log-threshold of each edge; approximate Herbach targets, theta Pbar / h(Pbar / s) and
-    log-threshold of the regulator. c1 = 0 marks the edges skipped by sigma_input: theta = 0, or |theta Pbar| <
-    SIGMA_EDGE_MIN (shift of the logit below that per edge; the fits keep every edge, and the post-inference filter
-    removes those below seuil_min_network_intensity)."""
+    log-threshold of the regulator. c1 = 0 marks the absent edges (theta = 0, skipped by sigma_input; the network fits
+    set the edges below seuil_min_network_intensity to 0)."""
     G, Gm1 = theta_inter.shape
     c1, c2 = np.zeros((G, Gm1)), np.zeros((G, Gm1))
     for j in range(Gm1):
         phi = spec[j, SPEC_PHI]
         for g in range(G):
             th = theta_inter[g, j]
-            if abs(th * spec[g, SPEC_PBAR]) < SIGMA_EDGE_MIN:
+            if th == 0.0:
                 continue
             if phi == PHI_HERBACH:
                 s = spec[j, N_SPEC + g]
@@ -300,7 +296,8 @@ def sigma_input(theta_basal, theta_inter, prot, logp, j, spec, c1, c2):
                                  spec[j, SPEC_M]) * theta_inter[g, j]
             return z
     for g in range(prot.shape[0]):
-        z += prot[g] * theta_inter[g, j]
+        if theta_inter[g, j] != 0.0:
+            z += prot[g] * theta_inter[g, j]
     return z
 
 

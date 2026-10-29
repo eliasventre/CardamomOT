@@ -424,7 +424,7 @@ def main(argv):
         np.savez(sel_path, n_iter=np.array([h['n_iter'] for h in hist]), scores=np.stack([h['scores'] for h in hist]),
                  family=np.stack([h['family'] for h in hist]),
                  candidates=np.array([family_name(fam) for fam in cands]),
-                 branch_family=np.stack([h['branch_family'] for h in hist]))  # (selections, branches, genes)
+                 window=np.array([h['window'] for h in hist]))  # 0: window of the base form, 1: form window
     elif os.path.exists(sel_path):
         os.remove(sel_path)
     # Network conditions: condition of each sample, shared network and edges that differ
