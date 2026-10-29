@@ -148,19 +148,29 @@ class HerbachArray(np.ndarray):
     m log(Pbar_k / s_k), pbar (K,) of the columns and m the Hill coefficient of the target: its logit is basal +
     sum_k psi(t_k, P_k / s_k), t_k = herbach_theta(theta_k Pbar_k, lbar_k) (effect theta_k Pbar_k at the high mode),
     nonlinear in theta; the fits use _logit / _logit_grad on these arrays. learn: _logit_grad also returns the
-    gradient w.r.t. the log-thresholds of the columns (_shift_thresholds)."""
+    gradient w.r.t. the log-thresholds of the columns (_shift_thresholds). h: occupancies expit(L) = x^m / (1 + x^m),
+    independent of theta, computed once (_as_herbach) and carried by the slices and reshapes of the array."""
 
     def __array_finalize__(self, obj):
         self.lbar, self.pbar = getattr(obj, 'lbar', None), getattr(obj, 'pbar', None)
         self.m, self.learn = getattr(obj, 'm', None), getattr(obj, 'learn', False)
+        h = getattr(obj, 'h', None)  # reshapes keep it; slices set it in __getitem__
+        self.h = h.reshape(self.shape) if h is not None and h.size == self.size else None
+
+    def __getitem__(self, idx):
+        out = super().__getitem__(idx)
+        if isinstance(out, HerbachArray):
+            h = getattr(self, 'h', None)
+            out.h = None if h is None else h[idx]
+        return out
 
     def __reduce__(self):  # keep the attributes through pickling (joblib workers)
         rec, args, state = super().__reduce__()
-        return rec, args, state + (self.lbar, self.pbar, self.m, self.learn)
+        return rec, args, state + (self.lbar, self.pbar, self.m, self.learn, getattr(self, 'h', None))
 
     def __setstate__(self, state):
-        self.lbar, self.pbar, self.m, self.learn = state[-4:]
-        super().__setstate__(state[:-4])
+        self.lbar, self.pbar, self.m, self.learn, self.h = state[-5:]
+        super().__setstate__(state[:-5])
 
 
 THRESH_BOUNDS = (0.01, 2.0)  # learned thresholds of the edges of the exact Herbach targets, x Pbar of the regulator
@@ -174,17 +184,27 @@ def herbach_inputs(Y, thresh, pbar, m):
     return _as_herbach(float(m) * np.log(x), float(m) * np.log(pbar / thresh), pbar, float(m))
 
 
-def _as_herbach(L, lbar, pbar, m=None, learn=False):
+def _as_herbach(L, lbar, pbar, m=None, learn=False, h=None):
     out = np.asarray(L).view(HerbachArray)
     out.lbar, out.pbar, out.m, out.learn = lbar, pbar, m, learn
+    out.h = expit(np.asarray(L)) if h is None else h
     return out
+
+
+def _hill(Y):
+    """Occupancies expit(L) (..., K) of the inputs Y (HerbachArray), computed once."""
+    return Y.h if getattr(Y, 'h', None) is not None else expit(np.asarray(Y))
 
 
 def _shift_thresholds(Y, d):
     """Inputs Y (HerbachArray, MemStates, PathNodes or None) with the log-thresholds of the columns shifted by d (K,),
     L - m d and lbar - m d, the gradients w.r.t. d returned by _logit_grad (learn); other inputs unchanged."""
     if isinstance(Y, HerbachArray):
-        return _as_herbach(np.asarray(Y) - Y.m * d, Y.lbar - Y.m * d, Y.pbar, Y.m, True)
+        L = np.asarray(Y) - Y.m * d
+        h = _hill(Y).copy()
+        moved = np.asarray(d) != 0  # occupancies recomputed on the shifted columns only
+        h[..., moved] = expit(L[..., moved])
+        return _as_herbach(L, Y.lbar - Y.m * d, Y.pbar, Y.m, True, h)
     if isinstance(Y, MemStates):
         return MemStates(_shift_thresholds(Y.end, d), _shift_thresholds(Y.nodes, d), Y.weights)
     if isinstance(Y, PathNodes):
@@ -202,12 +222,40 @@ def _herbach_theta(Y, th):
     return uc + np.log(-np.expm1(-uc)) - Y.lbar, np.where(on, Y.pbar * inv, 0.0), np.where(on, inv * expit(Y.lbar), 0.0)
 
 
+@njit(cache=True)
+def _psi_sum(h, c, act):
+    """sum_k log1p(c_k h_ik) (n,) over the columns act of h (n, K) (exact Herbach logit, single pass)."""
+    out = np.zeros(h.shape[0])
+    for i in range(h.shape[0]):
+        s = 0.0
+        for k in act:
+            s += np.log1p(c[k] * h[i, k])
+        out[i] = s
+    return out
+
+
+@njit(cache=True)
+def _psi_grad(h, c, act, r, e):
+    """e[k] = sum_i r_i (1 + c_k) h_ik / (1 + c_k h_ik) for the columns act, in place (expit(L + t).T @ r)."""
+    for k in act:
+        e[k] = 0.0
+    for i in range(h.shape[0]):
+        for k in act:
+            e[k] += r[i] * (1.0 + c[k]) * h[i, k] / (1.0 + c[k] * h[i, k])
+
+
 def _logit(Y, th):
-    """Logit without basal (n,) of the inputs Y (n, K): Y @ th, or sum_k psi(t_k, .) for a Herbach target."""
+    """Logit without basal (n,) of the inputs Y (n, K): Y @ th, or sum_k psi(t_k, .) for a Herbach target, psi =
+    log((1 + e^t x^m) / (1 + x^m)) = log1p((e^t - 1) h), on the edges with theta != 0 only (psi = 0 at theta = 0)."""
     if isinstance(Y, HerbachArray):
-        L = np.asarray(Y)
-        t = _herbach_theta(Y, th)[0]
-        return np.sum(np.logaddexp(0.0, L + t) - np.logaddexp(0.0, L), axis=-1)
+        act = np.flatnonzero(np.asarray(th) != 0)
+        if not len(act):
+            return np.zeros(Y.shape[:-1])
+        c = np.expm1(_herbach_theta(Y, th)[0])
+        h = _hill(Y)
+        if h.ndim == 2:
+            return _psi_sum(np.ascontiguousarray(h), c, act)
+        return np.log1p(h[..., act] * c[act]).sum(axis=-1)
     return Y @ th
 
 
@@ -217,10 +265,15 @@ def _logit_grad(Y, th, r):
     (1 + dt / d lbar) - expit(L).T @ r)."""
     if isinstance(Y, HerbachArray):
         t, dt, c1 = _herbach_theta(Y, th)
-        e = expit(np.asarray(Y) + t).T @ r
+        h = _hill(Y)
+        hr = h.T @ r  # expit(L + t) = h at theta = 0 (t = 0)
+        e = hr.copy()
+        act = np.flatnonzero(np.asarray(th) != 0)
+        if len(act):  # expit(L + t) = e^t h / (1 + (e^t - 1) h)
+            _psi_grad(np.ascontiguousarray(h), np.expm1(t), act, np.ascontiguousarray(r, dtype=float), e)
         if not Y.learn:
             return e * dt
-        return np.r_[e * dt, -Y.m * (e * c1 - expit(np.asarray(Y)).T @ r)]
+        return np.r_[e * dt, -Y.m * (e * c1 - hr)]
     return Y.T @ r
 
 
@@ -241,7 +294,7 @@ def _input_features(Y):
     """Linear-equivalent features of the inputs (the gradient of the logit at theta = 0): Y, or the normalised Hill
     ratios Pbar h(x) / h(xbar) of a Herbach target, those of the approximate form (ridge, null model)."""
     if isinstance(Y, HerbachArray):
-        return Y.pbar * expit(np.asarray(Y)) / expit(Y.lbar)
+        return Y.pbar * _hill(Y) / expit(Y.lbar)
     return np.asarray(Y, dtype=float)
 
 
@@ -283,7 +336,9 @@ def _compute_sigma_per_sample(theta_inter, theta_basal_all, ref_network, yp, ys,
     for s in us:
         s_idx = int(s)
         mask = (ys == s)
-        if np.any(mask):
+        if mask.all():  # single sample: no copy of the inputs
+            sigma[:] = _sigma_of(theta_basal_all[s_idx], inter_ref, yp)
+        elif np.any(mask):
             sigma[mask] = _sigma_of(theta_basal_all[s_idx], inter_ref, yp[mask])
     return sigma
 
