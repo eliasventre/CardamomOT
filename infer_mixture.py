@@ -137,7 +137,7 @@ def main(argv):
     model = NetworkModel_beta(adata.shape[1], n_stimuli=n_stimuli)
     configure(model, opts)
     if verb:
-        print(f"[infer_mixture] mean_forcing_em={model.mean_forcing_em}, "
+        print(f"[infer_mixture] hard_em={model.hard_em}, mean_forcing_em={model.mean_forcing_em} (hard_em only), "
               f"max_iter_softEM={model.max_iter_softEM}, integrate_samples={model.integrate_samples}")
 
     if verb:
@@ -190,7 +190,7 @@ def main(argv):
     np.save(os.path.join(out_dir, 'proba_init'),         model.proba_init)
     np.save(os.path.join(out_dir, 'weights'),            model.weights)
     np.save(os.path.join(out_dir, 'mixture_parameters'), model.a)
-    np.save(os.path.join(out_dir, 'mixture_middle_shape'), model.middle_shape)  # logit-normal middles (NaN: none)
+    np.save(os.path.join(out_dir, 'mixture_transit_nodes'), model.transit_nodes)  # transition levels per interval (0: none)
     # Depth settings of the fit: every later step uses them (the NB parameters depend on them)
     import json
     with open(os.path.join(out_dir, 'mixture_depth.json'), 'w') as fh:

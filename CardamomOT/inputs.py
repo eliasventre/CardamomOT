@@ -1,7 +1,7 @@
 """
 Optional run inputs of a project: one Excel workbook, Data/CardamomOT_inputs.xlsx, filled by the user
-(empty template: CardamomOT_inputs.xlsx at the root of the repository; without workbook, every default
-applies). Each sheet holds one kind of information (gene lists, stimulus schedules and targets,
+(template: CardamomOT_inputs.xlsx at the root of the repository, with the defaults of base.py; without
+workbook, every default applies). Each sheet holds one kind of information (gene lists, stimulus schedules and targets,
 perturbations, timepoints, proliferation and transition rates...); empty cells mean "not given".
 The first call of input_dir(project) in a process exports the workbook to cardamomOT/inputs/ as the
 files the pipeline reads (never written by hand). Large numeric arrays (reference_network.csv,
@@ -19,6 +19,8 @@ CACHE = os.path.join('cardamomOT', 'inputs')
 
 # Parameters listed in the model_parameters sheet, grouped by use (empty value = default of base.py;
 # other attributes of NetworkModel can be added as rows)
+# Left empty in the template: filled, they would fix the tag of report_results instead of the latest run
+TEMPLATE_EMPTY = ('stimulus', 'prior_network_pen')
 PARAMETER_GROUPS = [
     ('Pipeline: steps and data', [
         'CardamomOT_method', 'estimate_proliferation_rates', 'simulate_with_proliferation', 'select_genes', 'build_prior_network',
@@ -37,17 +39,21 @@ PARAMETER_GROUPS = [
         'depth_model']),
     ('NB mixture and samples', [
         'mean_forcing_em', 'batch_size_mixture', 'max_iter_softEM', 'min_mixture_components', 'mixture_min_percentage', 'max_grid_levels',
-        'mixture_middle_nodes', 'dispersion_max', 'mixture_selection_criterion', 'integrate_samples', 'ref_sample_integration']),
+        'mixture_transit_nodes', 'mixture_central_position', 'mixture_transit_selection', 'dispersion_max', 'mixture_selection_criterion', 'integrate_samples', 'ref_sample_integration']),
     ('Network inference', [
         'force_basins', 'temporal_basins', 'min_n_loops', 'max_iter', 'batch_size_traj', 'n_network_fits',
-        'constrain_basal_uniform', 'network_condition_pen', 'weight_flow_matching', 'flow_matching_nodes',
+        'constrain_basal_uniform', 'network_condition_pen', 'mixed_effect_model_conditions',
+        'weight_flow_matching',
+        'flow_matching_nodes',
         'qut_level', 'network_ridge', 'one_hot_probas', 'weight_network_distribution', 'match_kon_weight']),
     ('mRNA memory and trajectories', [
         'inference_mrnas_direct', 'mrna_bridge', 'targets_accounting_late_mrna', 'late_mrna_nodes',
         'late_mrna_classes', 'min_ratio']),
     ('Refine: kinetic rates by the free-running fit', [
-        'refine_theta_with_sde', 'fit_scale_theta', 'degradation_rates_per_condition', 'use_temporal_degradations',
-        'sde_epochs', 'sde_protein_weight', 'refine_in_loop']),
+        'refine_theta_with_sde', 'sde_free_theta', 'sde_adaptive_lasso', 'fit_scale_theta', 'degradation_rates_per_condition', 'use_temporal_degradations',
+        'sde_epochs', 'sde_lr', 'sde_lr_rates', 'sde_lr_decay', 'sde_lr_min_frac', 'sde_mode_cost',
+        'sde_kon_weight', 'sde_mrna_weight', 'sde_bptt', 'sde_protein_weight', 'sde_qut', 'sde_max_horizon',
+        'sde_horizon_growth', 'sde_windows', 'refine_in_loop']),
     ('Model learning of the regulation function', [
         'model_learning_grn', 'model_learning_phi', 'model_learning_herbach_form', 'herbach_threshold_sd', 'model_learning_threshold_bic', 'model_learning_form_neighbours', 'model_learning_herbach_m', 'model_learning_link', 'model_learning_kappa',
         'model_learning_start', 'model_learning_freeze', 'model_learning_period', 'model_learning_margin',
@@ -247,8 +253,9 @@ def _fill_readme(ws):
 
 
 def create_workbook(path):
-    """Empty workbook with the documented structure (readme sheet + one sheet per input): the template of the
-    repository root (python -c "from CardamomOT.inputs import create_workbook; create_workbook('CardamomOT_inputs.xlsx')")."""
+    """Workbook with the documented structure (readme sheet + one sheet per input) and the defaults of base.py in
+    model_parameters: the template of the repository root, to regenerate when these defaults change
+    (python -c "from CardamomOT.inputs import create_workbook; create_workbook('CardamomOT_inputs.xlsx')")."""
     from openpyxl import Workbook
     wb = Workbook()
     ws = wb.active
@@ -256,7 +263,9 @@ def create_workbook(path):
     _fill_readme(ws)
     for name, (columns, purpose) in SHEETS.items():
         _style_header(wb.create_sheet(name), columns)
-    _fill_parameter_rows(wb['model_parameters'])
+    defaults = {name: repr(d) if isinstance(d, (list, tuple, dict)) else d for name, (d, _) in parameter_docs().items()
+                if d is not None and name not in TEMPLATE_EMPTY}
+    _fill_parameter_rows(wb['model_parameters'], defaults)
     wb.save(path)
 
 
@@ -342,7 +351,7 @@ def _fill_parameter_rows(ws, values=None, extra=()):
                                                                                                vertical='top')
             r += 1
     ws.column_dimensions['A'].width = 30
-    ws.column_dimensions['B'].width = 14
+    ws.column_dimensions['B'].width = 26
     ws.column_dimensions['C'].width = 120
 
 
@@ -853,7 +862,7 @@ def input_dir(project):
         if os.path.isdir(out):
             shutil.rmtree(out)
         os.makedirs(out)
-        print(f"[CardamomOT] No Data/{WORKBOOK}: defaults for every optional input (empty template: "
+        print(f"[CardamomOT] No Data/{WORKBOOK}: defaults for every optional input (template: "
               f"{WORKBOOK} at the root of the repository)")
     _SYNCED[project] = out
     return out

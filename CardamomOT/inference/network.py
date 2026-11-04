@@ -12,10 +12,11 @@ from typing import Any
 import multiprocessing as mp
 import numpy as np
 from scipy.optimize import minimize
-from scipy.special import expit
+from scipy.special import expit, ndtri
 from scipy.optimize import check_grad
 from numba import njit
 from functools import partial
+from collections import namedtuple
 import logging
 
 from CardamomOT.logging import get_logger
@@ -879,23 +880,48 @@ def _interaction_bounds(theta_ref_flat, ref_network_flat, G, final,
     return bounds
 
 
-### NETWORK CONDITIONS: theta_c = theta_shared + delta_c (fused penalty on delta - delta_ref)
+### NETWORK CONDITIONS: theta_c = theta_shared + delta_c (L1 on the shared network and on delta - delta_ref)
+
+# Penalty levels of the fit with network conditions (qut_conditions)
+ConditionLevels = namedtuple('ConditionLevels', 'l_pen l_shared l_cond l_fuse omega ridge_w')
+# Gaussian priors of the mixed model: precision of the deviations (G,) and of the patient means of the basals, ridge of
+# the mean network (G,), patient of each sample (mixed_effect_model_conditions)
+MixedPrior = namedtuple('MixedPrior', 'prec prec_basal ridge patient')
+
+
+def _patient_mean_term(basal, free_mask, patient, prec):
+    """Random effect on the patient means of the basals: 0.5 prec sum_p (mean_p - mean of the means)^2, the contrasts
+    between the samples of a patient being free. Returns (value, gradient (n_samples,))."""
+    g = np.zeros(len(basal))
+    free = np.flatnonzero(free_mask)
+    pats = np.unique(patient[free])
+    if len(pats) < 2 or prec <= 0:
+        return 0.0, g
+    means = np.array([basal[free[patient[free] == p]].mean() for p in pats])
+    dev = means - means.mean()
+    for p, d in zip(pats, dev):
+        idx = free[patient[free] == p]
+        g[idx] += prec * d / len(idx)  # the derivative of the mean of the means vanishes (sum of dev = 0)
+    return 0.5 * prec * float(np.sum(dev ** 2)), g
+
 
 def _loss_grad_conditions(X, weights_samples, ys, yp, ypm, yt, G, n_samples,
-                          cond, omega, theta_ref, delta_ref, w, l_pen, l_fuse, weight_flow_matching, final,
-                          constrain_basal_uniform=0.0, basal_free_mask=None, act=None, ridge=None, dist=None):
+                          cond, levels, theta_ref, ref_shared, delta_ref, w, weight_flow_matching, final,
+                          constrain_basal_uniform=0.0, basal_free_mask=None, act=None, ridge=None, dist=None, mixed=None):
     """
     Loss and gradient for one gene with one network per condition.
 
     X = [shared (G,), delta (C, G), basal (n_samples,)] in theta units; the network of
     condition c is theta_c = shared + delta_c (effective = w * theta_c); sample s uses cond[s].
-    Penalties: sparsity sum_c omega_c pen(theta_c - theta_ref_c) (omega_c = share of the samples,
-    so a common network costs as now) + l_fuse * L1(w * (delta_c - delta_ref_c)) (0 = independent
-    networks); delta_ref_c = theta_ref_c - mean_c theta_ref_c (0 without reference: common network).
+    Penalties (levels: ConditionLevels, see qut_conditions): l_shared L1(shared - ref_shared)
+    + sum_c l_cond_c L1(theta_c - theta_ref_c) + sum_c l_fuse_c L1(w * (delta_c - delta_ref_c));
+    delta_ref_c = theta_ref_c - mean_c theta_ref_c (0 without reference: common network).
     act (C, G) or None: 1 for the regulators selected in each condition (select_genes_per_condition), 0 for the
     others (no effect, no sparsity, no fused penalty: only the edges shared by conditions are fused).
+    mixed: MixedPrior of the mixed model, adding its Gaussian terms on delta, on shared and on the patient means of the
+    basals (see core_inference_mixed).
     """
-    C = len(omega)
+    C = len(levels.l_cond)
     shared = X[:G]
     delta = X[G:(C + 1) * G].reshape(C, G)
     basal = X[(C + 1) * G:]
@@ -934,26 +960,27 @@ def _loss_grad_conditions(X, weights_samples, ys, yp, ypm, yt, G, n_samples,
 
     g_theta = g_eff * wa
     for c in range(C):
-        if omega[c] == 0:
+        if levels.omega[c] == 0:  # condition absent from the fit
             continue
         on = (w > 0) if act is None else (w > 0) & (act[c] > 0)
         d = theta_c[c] - theta_ref[c]
-        Q += omega[c] * theta_penalization(d * on, l_pen)
-        g_theta[c] += omega[c] * grad_theta_penalization(d, l_pen) * on
+        Q += theta_penalization(d * on, levels.l_cond[c])
+        g_theta[c] += grad_theta_penalization(d, levels.l_cond[c]) * on
         if final:
             w_c = w if act is None else w * act[c]
-            Q += omega[c] * r_elasticnet * l2_penalization(np.sqrt(w_c) * d, l_pen)
-            g_theta[c] += omega[c] * r_elasticnet * grad_l2_penalization(d, l_pen) * w_c
+            Q += levels.omega[c] * r_elasticnet * l2_penalization(np.sqrt(w_c) * d, levels.l_pen)
+            g_theta[c] += levels.omega[c] * r_elasticnet * grad_l2_penalization(d, levels.l_pen) * w_c
         if ridge is not None:
-            Q += omega[c] * 0.5 * np.sum(ridge * d ** 2)
-            g_theta[c] += omega[c] * ridge * d
+            Q += levels.ridge_w[c] * 0.5 * np.sum(ridge * d ** 2)
+            g_theta[c] += levels.ridge_w[c] * ridge * d
 
-    # Fused penalty: effective deviations from the shared network pulled towards the reference ones
+    # Effective deviations from the shared network pulled towards the reference ones
     g_delta = g_theta.copy()
-    if l_fuse > 0:
-        dd = (delta - delta_ref) * wa
-        Q += smoothed_l1_penalization(dd, l_fuse)
-        g_delta += grad_smoothed_l1_penalization(dd, l_fuse) * wa
+    dd = (delta - delta_ref) * wa
+    for c in range(C):
+        if levels.l_fuse[c] > 0:
+            Q += smoothed_l1_penalization(dd[c], levels.l_fuse[c])
+            g_delta[c] += grad_smoothed_l1_penalization(dd[c], levels.l_fuse[c]) * wa[min(c, len(wa) - 1)]
 
     if constrain_basal_uniform > 0.0 and basal_free_mask is not None:
         free_idx = np.where(basal_free_mask)[0]
@@ -963,7 +990,23 @@ def _loss_grad_conditions(X, weights_samples, ys, yp, ypm, yt, G, n_samples,
             Q += constrain_basal_uniform * np.sum((theta_free - mean_free) ** 2)
             g_basal[free_idx] += 2.0 * constrain_basal_uniform * (theta_free - mean_free)
 
-    grad = np.concatenate([g_theta.sum(axis=0), g_delta.ravel(), g_basal])
+    d_shared = shared - ref_shared
+    on_shared = (w > 0) if act is None else (w > 0) & np.any(act > 0, axis=0)
+    Q += theta_penalization(d_shared * on_shared, levels.l_shared)
+    g_shared = g_theta.sum(axis=0) + grad_theta_penalization(d_shared, levels.l_shared) * on_shared
+
+    if mixed is not None:
+        d_delta = delta - delta_ref
+        Q += 0.5 * np.sum(mixed.prec * d_delta ** 2)
+        g_delta += mixed.prec * d_delta
+        Q += 0.5 * np.sum(mixed.ridge * d_shared ** 2)
+        g_shared += mixed.ridge * d_shared
+        q_b, g_b = _patient_mean_term(basal, np.ones(n_samples, bool) if basal_free_mask is None else basal_free_mask,
+                                      mixed.patient, mixed.prec_basal)
+        Q += q_b
+        g_basal += g_b
+
+    grad = np.concatenate([g_shared, g_delta.ravel(), g_basal])
     return Q, grad
 
 
@@ -986,7 +1029,7 @@ def _masked_median(x, on):
 
 def core_inference_conditions(y_samples, y_prot, y_prot_mod, y_target, theta_init, theta_ref,
                               ref_network, G, g, n_samples, cond,
-                              l_pen, l_fuse, weight_flow_matching=.5, final=0,
+                              levels, weight_flow_matching=.5, final=0,
                               constrain_basal_uniform=0.0, basal_free_mask=None,
                               hard_forcing_ref=False, ref_constraint_pct=0.1, seuil_min_network_intensity=1e-2, act=None,
                               ridge=None, dist=None):
@@ -994,18 +1037,17 @@ def core_inference_conditions(y_samples, y_prot, y_prot_mod, y_target, theta_ini
     core_inference with one network per condition (cond[s] = condition of sample s). act (C, G) or None: regulators
     selected in each condition (select_genes_per_condition); the shared network, the reference deviations and the
     fusion are then taken over the conditions where each regulator exists, and its other entries are 0.
+    levels: penalty levels (ConditionLevels, see qut_conditions).
 
     theta_init / theta_ref : (C * G + n_samples,), condition c in c*G..(c+1)*G-1
     (theta units). The reference / sign bounds apply to the shared network (mean of the references), the
-    fused penalty pulls the deviations towards those of the references (theta_ref_c - mean); with
+    penalty on the deviations pulls them towards those of the references (theta_ref_c - mean); with
     hard_forcing_ref the deviations are pinned to the reference ones. Returns the effective (C * G + n_samples,).
     """
     C = int(np.max(cond)) + 1
     w = prior_weight(np.asarray(ref_network, dtype=float))
     us = np.unique(y_samples)
     weights_samples = [np.sum(y_samples == s) ** alpha for s in us]
-    # Sparsity weight of each condition: its share of the samples of the fit
-    omega = np.bincount(cond[us.astype(int)], minlength=C) / len(us)
 
     init_c = np.asarray(theta_init[:C * G], dtype=float).reshape(C, G)
     ref_c = np.asarray(theta_ref[:C * G], dtype=float).reshape(C, G)
@@ -1033,18 +1075,18 @@ def core_inference_conditions(y_samples, y_prot, y_prot_mod, y_target, theta_ini
 
     fn = partial(_loss_grad_conditions, weights_samples=weights_samples, ys=y_samples,
                  yp=y_prot, ypm=y_prot_mod, yt=y_target, G=G,
-                 n_samples=n_samples, cond=cond, omega=omega, theta_ref=ref_c, delta_ref=delta_ref, w=w,
-                 l_pen=l_pen, l_fuse=l_fuse, weight_flow_matching=weight_flow_matching, final=final,
+                 n_samples=n_samples, cond=cond, levels=levels, theta_ref=ref_c, ref_shared=ref_flat,
+                 delta_ref=delta_ref, w=w, weight_flow_matching=weight_flow_matching, final=final,
                  constrain_basal_uniform=constrain_basal_uniform, basal_free_mask=basal_free_mask,
                  act=None if act is None else np.asarray(act, dtype=float), ridge=ridge, dist=dist)
     # Stage 1: deviations pinned to the reference ones (0 without reference), well conditioned; stage 2:
-    # free deviations, started from stage 1 or the initial deviations (the stiff fused term alone stalls L-BFGS-B)
+    # free deviations, started from stage 1 or the initial deviations (the stiff term on delta alone stalls L-BFGS-B)
     d_sl = slice(G, (C + 1) * G)
     X_common = X_flat.copy()
     X_common[d_sl] = delta_ref.ravel()
     bounds_common = bounds[:G] + pinned + bounds[(C + 1) * G:]
     res = minimize(fn, X_common, jac=True, method="L-BFGS-B", bounds=bounds_common, options=_lbfgs_options(G))
-    if l_fuse < np.inf and not (hard_forcing_ref and not final):
+    if np.all(np.isfinite(levels.l_fuse)) and not (hard_forcing_ref and not final):
         starts = [res.x, np.concatenate([res.x[:G], X_flat[d_sl], res.x[(C + 1) * G:]])]
         x0 = min(starts, key=lambda x: fn(x)[0])
         res = minimize(fn, x0, jac=True, method="L-BFGS-B", bounds=bounds, options=_lbfgs_options(C * G))
@@ -1061,11 +1103,305 @@ def core_inference_conditions(y_samples, y_prot, y_prot_mod, y_target, theta_ini
     return np.concatenate([theta_c.ravel(), res.x[(C + 1) * G:]])
 
 
+### MIXED MODEL: psi_p = theta_mean + eps_p, eps_p ~ N(delta_ref_p, tau2 / (sd w)^2), one patient = one network condition
+
+def _mixed_weights(y_samples):
+    """Weights of the samples of a fit (weights_samples) and scale m of the data term: the cells of a sample count once,
+    up to n_ref = median of the sizes of the samples (no sample is inflated, cells beyond n_ref bring no information).
+    The loss weighs sample s by m c_s, with c_s = min(1, n_ref / n_s) and m = mean(1 / c_s)."""
+    n_s = np.array([np.sum(y_samples == s) for s in np.unique(y_samples)], dtype=float)
+    c_s = np.minimum(1.0, np.median(n_s) / n_s)
+    return list(1.0 / c_s), float(np.mean(1.0 / c_s))
+
+
+def _logit_jacobian(Y, th):
+    """d logit / d th (n, K) of the inputs Y (n, K) at th (see _logit_grad)."""
+    if isinstance(Y, HerbachArray):
+        t, dt, _ = _herbach_theta(Y, th)
+        c, h = np.expm1(t), _hill(Y)
+        return (1.0 + c) * h / (1.0 + c * h) * dt
+    return np.asarray(Y, dtype=float)
+
+
+def _gn_blocks(basal_s, th, Y, weights=None):
+    """Gauss-Newton blocks (Hxx (K, K), hbx (K,), hbb) of the cross-entropy of one sample at (basal_s, th), rows weighted
+    by weights; Y MemStates: of sigma averaged on the memory of the target."""
+    if isinstance(Y, MemStates):
+        sig_bar, terms = _mem_terms(basal_s, th, Y)
+        D, Db = 0.0, 0.0
+        for w_q, s_q, Y_q in terms:
+            v = w_q * s_q * (1 - s_q)
+            D = D + v[:, None] * _logit_jacobian(Y_q, th)
+            Db = Db + v
+        inv = 1.0 / np.maximum(sig_bar * (1 - sig_bar), EPS)
+        if weights is not None:
+            inv = inv * weights
+        return (D * inv[:, None]).T @ D, D.T @ (Db * inv), float(np.sum(Db ** 2 * inv))
+    s = logistic(basal_s + _logit(Y, th))
+    v = s * (1 - s) if weights is None else weights * s * (1 - s)
+    J = _logit_jacobian(Y, th)
+    return (J * v[:, None]).T @ J, J.T @ v, float(np.sum(v))
+
+
+def _sample_blocks(basal_s, eff, Y, ypm, w_fm, ws, w):
+    """Gauss-Newton blocks of the loss of one sample in theta units (effective = w theta): end-state and path terms."""
+    a, b, d = _gn_blocks(basal_s, eff, Y)
+    hxx, hbx, hbb = (1 - w_fm) * ws * a, (1 - w_fm) * ws * b, (1 - w_fm) * ws * d
+    if w_fm:
+        for wq, Yq, _ in _path_terms(Y, ypm):
+            if np.any(wq > 0):
+                a, b, d = _gn_blocks(basal_s, eff, Yq, wq)
+                hxx, hbx, hbb = hxx + w_fm * ws * a, hbx + w_fm * ws * b, hbb + w_fm * ws * d
+    return hxx * np.outer(w, w), hbx * w, hbb
+
+
+def qut_mixed(y_samples, y_prot, y_prot_mod, y_target, ref_network, G, g, n_samples, weight_flow_matching, cond, prec,
+              weights, m, level=0.5, n_perm=20):
+    """
+    Quantile universal threshold of the L1 on the mean network of the mixed model. At theta_mean_j = 0 with the
+    deviations fitted, the gradient of the objective is sum_p R_p s_p, with R_p = (I + H_p P^-1)^-1 (H_p: Gauss-Newton
+    matrix of patient p at the null, basals eliminated, P = diag(prec)); level-quantile of its max norm under the null
+    of the model: no edge on average, s_p the score of the target permuted within each sample + H_p e_p, e_p ~ N(0,
+    m / prec) the deviations of the patient. tau2 -> 0 gives the common network QUT.
+    """
+    C = int(np.max(cond)) + 1
+    w = prior_weight(ref_network)
+    on = (w > 0) & (prec > 0)
+    if not on.any():
+        return 0.0
+    ys = np.asarray(y_samples).astype(int)
+    us = np.unique(ys)
+    kw = dict(G=G, g=g, n_samples=n_samples, theta_ref=np.zeros(G + n_samples), ref_network=w, l_pen=0.0,
+              weight_flow_matching=weight_flow_matching, final=0)
+    null = dict(kw, ys=y_samples, yp=y_prot, ypm=y_prot_mod, yt=y_target, weights_samples=weights)
+    bounds = [(0.0, 0.0)] * G + [(-_basal_bound(G), _basal_bound(G))] * n_samples
+    X0 = minimize(partial(objective, **null), np.zeros(G + n_samples), jac=partial(grad_theta, **null),
+                  method="L-BFGS-B", bounds=bounds, options=_lbfgs_options(G)).x
+    w_fm = _fm_weight(weight_flow_matching, y_prot_mod)
+    ws_of = {s: np.mean(weights) / weights[i] for i, s in enumerate(us)}
+    H = np.zeros((C, G, G))
+    for s in us:
+        r = ys == s
+        hxx, hbx, hbb = _sample_blocks(X0[G + s], np.zeros(G), y_prot[r], None if y_prot_mod is None else y_prot_mod[r],
+                                       w_fm, ws_of[s], w)
+        H[cond[s]] += hxx - np.outer(hbx, hbx) / max(hbb, EPS)
+    idx = np.flatnonzero(on)
+    H = H[:, idx][:, :, idx]
+    P_inv = 1.0 / prec[idx]
+    R = np.linalg.inv(np.eye(len(idx))[None] + H * P_inv[None, :])  # (C, K, K)
+    groups = [np.flatnonzero(ys == s) for s in us]
+    conds = [c for c in range(C) if np.any(cond[us] == c)]
+    rows_c = {c: np.isin(ys, us[cond[us] == c]) for c in conds}
+    w_c = {c: [weights[i] for i, s in enumerate(us) if cond[s] == c] for c in conds}
+    scale = {c: np.mean(weights) / np.mean(w_c[c]) for c in conds}
+    rng = np.random.default_rng(1000 * g + len(y_target))
+    stats = np.empty(n_perm)
+    for k in range(n_perm):
+        p = np.arange(len(y_target))
+        for ind in groups:
+            p[ind] = rng.permutation(ind)
+        ypm = y_prot_mod
+        if ypm is not None:
+            ypm = PathNodes(ypm.nodes, ypm.weights, None if ypm.kon is None else ypm.kon[p],
+                            None if ypm.targets is None else ypm.targets[p])
+        yt = y_target[p]
+        tot = np.zeros(len(idx))
+        for c in conds:
+            r = rows_c[c]
+            s_c = scale[c] * grad_theta(X0, ys=y_samples[r], yp=y_prot[r], ypm=None if ypm is None else ypm[r], yt=yt[r],
+                                        weights_samples=w_c[c], **kw)[:G][idx]
+            e_c = rng.normal(0.0, np.sqrt(m * P_inv))
+            tot += R[c] @ (s_c + H[c] @ e_c)
+        stats[k] = np.max(np.abs(tot))
+    return float(np.quantile(stats, level))
+
+
+def core_inference_mixed(y_samples, y_prot, y_prot_mod, y_target, theta_init, theta_ref, ref_network, G, g, n_samples,
+                         cond, tau2, tau2_basal, weights, m, weight_flow_matching=.5, basal_free_mask=None,
+                         ref_constraint_pct=0.1, seuil_min_network_intensity=1e-2, ridge=None, dist=None,
+                         level=0.5, n_perm=20):
+    """
+    Mixed model of one target, one patient per network condition: psi_p = theta_mean + eps_p, with eps_p (effective
+    units) ~ N(delta_ref_p, tau2) and a random effect of variance tau2_basal on the patient means of the basals.
+    L1 on theta_mean at its QUT (qut_mixed), Gaussian priors otherwise. Edges out of the support of theta_mean: eps = 0,
+    except those of a patient whose posterior z exceeds the universal threshold at level. Returns the effective
+    networks and basals (C * G + n_samples,) and (s_theta, n_theta, s_basal, n_basal, z): statistics of the Laplace-EM
+    of the variances (sum of E[eps^2] and their count on the support of theta_mean, REML; sum over the patients
+    of E[(mean_p - mean)^2] and P - 1) and posterior z (C, G) of the deviations.
+    """
+    C = int(np.max(cond)) + 1
+    w = prior_weight(np.asarray(ref_network, dtype=float))
+    us = np.unique(y_samples).astype(int)
+    prec = m * w ** 2 / tau2
+    free_mask = np.ones(n_samples, bool) if basal_free_mask is None else np.asarray(basal_free_mask, dtype=bool)
+    free_mask = free_mask & np.isin(np.arange(n_samples), us)
+    mixed = MixedPrior(prec, m / tau2_basal, (m * ridge) if ridge is not None else np.zeros(G), np.asarray(cond))
+
+    init_c = np.asarray(theta_init[:C * G], dtype=float).reshape(C, G)
+    ref_c = np.asarray(theta_ref[:C * G], dtype=float).reshape(C, G)
+    ref_flat = ref_c.mean(axis=0)
+    delta_ref = ref_c - ref_flat[None]
+    shared0 = init_c.mean(axis=0)
+
+    wfm = weight_flow_matching
+    lam = qut_mixed(y_samples, y_prot, y_prot_mod, y_target, ref_network, G, g, n_samples, wfm, cond, prec, weights, m,
+                    level, n_perm)
+    omega = np.bincount(cond[us], minlength=C) / len(us)
+    levels = ConditionLevels(lam, lam, np.zeros(C), np.zeros(C), omega, np.zeros(C))
+    fn = partial(_loss_grad_conditions, weights_samples=weights, ys=y_samples, yp=y_prot, ypm=y_prot_mod, yt=y_target,
+                 G=G, n_samples=n_samples, cond=cond, levels=levels, theta_ref=ref_c, ref_shared=ref_flat,
+                 delta_ref=delta_ref, w=w, weight_flow_matching=wfm, final=0, basal_free_mask=free_mask, dist=dist,
+                 mixed=mixed)
+    bounds_s = _interaction_bounds(ref_flat, np.ascontiguousarray(ref_network, dtype=float), G, 0, False,
+                                   ref_constraint_pct, seuil_min_network_intensity)
+    bounds_d = [(min(-2 * max(-lo, hi), dr), max(2 * max(-lo, hi), dr))
+                for dr_c in delta_ref for (lo, hi), dr in zip(bounds_s, dr_c)]
+    bounds_b = [(-_basal_bound(G), _basal_bound(G))] * n_samples
+    pinned = [(v, v) for v in delta_ref.ravel()]
+    b0 = np.asarray(theta_init[C * G:], dtype=float)
+    # Stage 1: deviations at the reference ones, well conditioned; stage 2: deviations free on every candidate edge
+    res = minimize(fn, np.concatenate([shared0, delta_ref.ravel(), b0]), jac=True, method="L-BFGS-B",
+                   bounds=bounds_s + pinned + bounds_b, options=_lbfgs_options(G))
+    x1 = res.x
+    res = minimize(fn, x1, jac=True, method="L-BFGS-B", bounds=bounds_s + bounds_d + bounds_b,
+                   options=_lbfgs_options(C * G))
+    _log_failure(res, fn(x1)[0], 'inference (mixed model)')
+
+    def blocks(x):
+        # Gauss-Newton blocks per sample at x, theta units
+        sh, de, ba = x[:G], x[G:(C + 1) * G].reshape(C, G), x[(C + 1) * G:]
+        w_fm = _fm_weight(wfm, y_prot_mod)
+        out = {}
+        for i, s in enumerate(us):
+            r = y_samples == s
+            out[s] = _sample_blocks(ba[s], (sh + de[cond[s]]) * w, y_prot[r],
+                                    None if y_prot_mod is None else y_prot_mod[r], w_fm, np.mean(weights) / weights[i], w)
+        return out
+
+    candidates = (w > 0) & (prec > 0)
+    support = (np.abs(res.x[:G] * w) >= seuil_min_network_intensity) & candidates
+    # Patient-specific edges: posterior z of the deviations, given theta_mean and the basals
+    blk = blocks(res.x)
+    delta = res.x[G:(C + 1) * G].reshape(C, G) - delta_ref
+    idx = np.flatnonzero(candidates)
+    z = np.zeros((C, G))
+    for c in range(C):
+        ss = [s for s in us if cond[s] == c]
+        if not ss or not len(idx):
+            continue
+        hc = sum(blk[s][0] - np.outer(blk[s][1], blk[s][1]) / max(blk[s][2], EPS) for s in ss)
+        var = m * np.diag(np.linalg.inv(hc[np.ix_(idx, idx)] + np.diag(prec[idx])))
+        z[c, idx] = delta[c, idx] / np.sqrt(np.maximum(var, EPS))
+    n_tests = max(len(idx) * int(np.sum(omega > 0)), 1)
+    z_star = ndtri(1.0 - (1.0 - level ** (1.0 / n_tests)) / 2.0)
+    keep = support[None] | (np.abs(z) > z_star)
+
+    # Stage 3: kept entries only, the network returned
+    lo_hi_s = [b if on else (r, r) for b, on, r in zip(bounds_s, support, ref_flat)]
+    lo_hi_d = [b if k else (dr, dr) for b, k, dr in zip(bounds_d, keep.ravel(), delta_ref.ravel())]
+    x0 = np.clip(res.x, [b[0] for b in lo_hi_s + lo_hi_d + bounds_b], [b[1] for b in lo_hi_s + lo_hi_d + bounds_b])
+    res = minimize(fn, x0, jac=True, method="L-BFGS-B", bounds=lo_hi_s + lo_hi_d + bounds_b, options=_lbfgs_options(C * G))
+    _log_failure(res, fn(x0)[0], 'inference (mixed model, kept entries)')
+    x_net = res.x
+    # Statistics of the variances only: L1 relaxed on the support, as it pulls the mean network towards 0 and the
+    # deviations of all the patients the other way, inflating tau2 (relaxed in the network, it misleads the refinement)
+    fn = partial(fn.func, **{**fn.keywords, 'levels': levels._replace(l_shared=0.0)})
+    res = minimize(fn, x_net, jac=True, method="L-BFGS-B", bounds=lo_hi_s + lo_hi_d + bounds_b, options=_lbfgs_options(C * G))
+    _log_failure(res, fn(x_net)[0], 'inference (mixed model, statistics)')
+
+    # Laplace-EM statistics of tau2 and tau2_basal, REML: joint Gauss-Newton matrix of the kept entries
+    blk = blocks(res.x)
+    delta = res.x[G:(C + 1) * G].reshape(C, G) - delta_ref
+    basal = res.x[(C + 1) * G:]
+    s_idx = np.flatnonzero(support)
+    d_idx = [np.flatnonzero(keep[c] & candidates) for c in range(C)]
+    pos_s = np.arange(len(s_idx))
+    pos_b = len(s_idx) + np.arange(len(us))
+    dim, pos_d = pos_b[-1] + 1, []
+    for c in range(C):
+        pos_d.append(dim + np.arange(len(d_idx[c])))
+        dim += len(d_idx[c])
+    H = np.eye(dim) * 1e-8
+    H[pos_s, pos_s] += mixed.ridge[s_idx]
+    for c in range(C):
+        H[pos_d[c], pos_d[c]] += prec[d_idx[c]]
+    for i, s in enumerate(us):
+        hxx, hbx, hbb = blk[s]
+        c = cond[s]
+        ps, js = np.r_[pos_s, pos_d[c]], np.r_[s_idx, d_idx[c]]
+        H[np.ix_(ps, ps)] += hxx[np.ix_(js, js)]
+        H[pos_b[i], ps] += hbx[js]
+        H[ps, pos_b[i]] += hbx[js]
+        H[pos_b[i], pos_b[i]] += hbb
+    free = np.flatnonzero(free_mask)
+    pats = np.unique(cond[free]) if len(free) else np.array([], dtype=int)
+    contrasts = None
+    if len(pats) >= 2:
+        contrasts = np.zeros((len(pats), len(us)))
+        mean_row = np.zeros(len(us))
+        for k, p in enumerate(pats):
+            mem = free[cond[free] == p]
+            for s in mem:
+                contrasts[k, np.searchsorted(us, s)] = 1.0 / len(mem)
+            mean_row += contrasts[k] / len(pats)
+        contrasts = contrasts - mean_row[None]
+        H[np.ix_(pos_b, pos_b)] += mixed.prec_basal * contrasts.T @ contrasts
+    V = m * np.linalg.inv(H)
+    s_theta, n_theta = 0.0, 0
+    for c in range(C):
+        if omega[c] == 0:
+            continue
+        on = np.isin(d_idx[c], s_idx)
+        js, ps = d_idx[c][on], pos_d[c][on]
+        s_theta += float(np.sum(w[js] ** 2 * (delta[c, js] ** 2 + V[ps, ps])))
+        n_theta += len(js)
+    s_basal, n_basal = 0.0, 0
+    if contrasts is not None:
+        vb = V[np.ix_(pos_b, pos_b)]
+        means = contrasts @ basal[us]
+        s_basal = float(np.sum(means ** 2) + np.trace(contrasts @ vb @ contrasts.T))
+        n_basal = len(pats) - 1
+
+    shared, delta_full = x_net[:G], x_net[G:(C + 1) * G].reshape(C, G)
+    theta_c = (shared[None] + delta_full) * w[None]
+    return np.concatenate([theta_c.ravel(), x_net[(C + 1) * G:]]), (s_theta, n_theta, s_basal, n_basal, z)
+
+
+def learn_mixed_variances(fit_stats, G, d0, n_steps=7, bracket=(1e-4, 100.0)):
+    """
+    Variances of the mixed model on frozen trajectories. fit_stats(tau2, tau2_b): (G, 4) statistics of a network fit
+    (s_theta, n_theta, s_basal, n_basal per target). Their REML score equations tau2 = s / n are solved by bisection on
+    log tau2, EM steps being too slow near 0: tau2_0 and tau2_b pooled over the targets, then tau2 of each target with
+    the inverse-gamma prior of d0 entries centred on tau2_0, tau2 = (s + d0 tau2_0) / (n + d0) (a target without edge
+    gets tau2_0). Returns (tau2 (G,), tau2_b, tau2_0).
+    """
+    def bisect(above, x0):
+        # above(x): fixed-point map of x is above x; no root in the bracket: its end
+        lo, hi = np.full_like(x0, bracket[0], dtype=float), np.full_like(x0, bracket[1], dtype=float)
+        for _ in range(n_steps):
+            mid = np.sqrt(lo * hi)
+            up = above(mid)
+            lo, hi = np.where(up, mid, lo), np.where(up, hi, mid)
+        return np.sqrt(lo * hi)
+
+    def pooled(x):
+        s = np.sum(fit_stats(x[0], x[1]), axis=0)
+        return np.array([s[0] > x[0] * s[1] and s[1] > 0, s[2] > x[1] * s[3] and s[3] > 0])
+
+    tau2_0, tau2_b = bisect(pooled, np.ones(2))
+
+    def per_target(x):
+        s = fit_stats(x, tau2_b)
+        return s[:, 0] + d0 * tau2_0 > x * (s[:, 1] + d0)
+
+    return bisect(per_target, np.ones(G)), float(tau2_b), float(tau2_0)
+
+
 def refine_inference(y_samples, y_prot, y_prot_mod, y_target, inter, basal, theta_ref,
                      G, g, n_samples,
                      l_pen, weight_flow_matching=.5, final=0,
                      hard_forcing_ref=False, ref_constraint_pct=0.1, ref_network=None, seuil_min_network_intensity=1e-2,
-                     cond=None, dist=None, ridge=None, thresh_prior=None):
+                     cond=None, dist=None, ridge=None, thresh_prior=None, sample_weights=None):
     """
     Refinement step: optimise multiplicative correction factors over inter, per-sample basals refitted freely
     (additive, any sign); for an exact Herbach target with thresh_prior = (log s_0 (G,), tau), the log-thresholds of
@@ -1094,7 +1430,8 @@ def refine_inference(y_samples, y_prot, y_prot_mod, y_target, inter, basal, thet
     inter -= diag
     basal = basal.copy()  # (n_samples,)
 
-    weights_samples = [np.sum(y_samples == s) ** alpha for s in np.unique(y_samples)]
+    weights_samples = sample_weights if sample_weights is not None else \
+        [np.sum(y_samples == s) ** alpha for s in np.unique(y_samples)]
 
     X_flat = np.r_[np.ones(G), np.clip(basal, -_basal_bound(G), _basal_bound(G))]
 
@@ -1180,7 +1517,7 @@ def ridge_coefficients(y_prot, ref_network, network_ridge):
 
 
 def qut_garrote(y_samples, y_prot, y_prot_mod, y_target, inter, basal, G, g, n_samples, weight_flow_matching, ref_network,
-                cond=None, level=0.5, n_perm=20):
+                cond=None, level=0.5, n_perm=20, sample_weights=None):
     """
     Quantile universal threshold of the refinement step (non-negative garrote theta_e = c_e theta_tmp_e, c_e >= 0),
     theta_tmp = inter held fixed (conditional QUT): level-quantile of max_e w_e (-dL/dc_e)_+ at the null model
@@ -1198,7 +1535,8 @@ def qut_garrote(y_samples, y_prot, y_prot_mod, y_target, inter, basal, G, g, n_s
     if not on.any():
         return 0.0
     kw = dict(inter=inter,
-              weights_samples=[np.sum(y_samples == s) ** alpha for s in np.unique(y_samples)],
+              weights_samples=sample_weights if sample_weights is not None else
+              [np.sum(y_samples == s) ** alpha for s in np.unique(y_samples)],
               ys=y_samples, yp=y_prot, diag=diag, G=G, g=g, n_samples=n_samples, l_pen=np.zeros(G),
               weight_flow_matching=weight_flow_matching, cond=cond)
     # Null basals: invariant under within-sample permutations of the target
@@ -1263,6 +1601,80 @@ def qut_penalty(y_samples, y_prot, y_prot_mod, y_target, ref_network, G, g, n_sa
     return float(np.quantile(stats, level))
 
 
+def qut_conditions(y_samples, y_prot, y_prot_mod, y_target, ref_network, G, g, n_samples, weight_flow_matching, cond, pen,
+                   level=0.5, n_perm=20, constrain_basal_uniform=0.0, basal_free_mask=None, act=None):
+    """
+    Penalty levels of the fit with network conditions, generalising qut_penalty (same null model and permutations).
+    lam: QUT of the gradient summed over the conditions (that of a common network); lam_c: QUT of the gradient of the
+    rows of condition c, in the scale of the joint objective. With rho = min(pen, 1):
+    l_shared = kappa rho lam, l_cond_c = kappa (1 - rho) lam_c, l_fuse_c = kappa pen lam_c (effective units for delta).
+    pen = 0: each condition at its own QUT; pen = 1: shared network and deviations each at their QUT; pen -> inf: common
+    network at lam. An edge can enter through the shared network or one condition only: kappa >= 1 scales the levels so
+    that the network of a condition stays at 0 with probability ~ level under the null, as with one network.
+    Returns ConditionLevels; ridge_w: weights of the ridge per condition, omega_c (share of the samples of the fit) at
+    pen >= 1, the scale of its data term in the joint objective at pen = 0.
+    """
+    C = int(np.max(cond)) + 1
+    w = prior_weight(ref_network)
+    ys = np.asarray(y_samples).astype(int)
+    us = np.unique(ys)
+    weights = [np.sum(ys == s) ** alpha for s in us]
+    omega = np.bincount(cond[us], minlength=C) / len(us)
+    rows_c = [np.isin(ys, us[cond[us] == c]) for c in range(C)]
+    w_c = [[np.sum(ys == s) ** alpha for s in us[cond[us] == c]] for c in range(C)]
+    # Scale of the data term of each condition in the joint objective, relative to fitting it alone
+    scale = np.array([np.mean(weights) / np.mean(w_c[c]) if len(w_c[c]) else 0.0 for c in range(C)])
+    rho = min(pen, 1.0)
+    ridge_w = (1 - rho) * scale + rho * omega
+    empty = ConditionLevels(0.0, 0.0, np.zeros(C), np.zeros(C), omega, ridge_w)
+    on = np.tile(w > 0, (C, 1)) if act is None else (w > 0) & (np.asarray(act, dtype=float) > 0)
+    if not on.any():
+        return empty
+    kw = dict(G=G, g=g, n_samples=n_samples, theta_ref=np.zeros(G + n_samples), ref_network=w, l_pen=0.0,
+              weight_flow_matching=weight_flow_matching, final=0)
+    # Null basals: invariant under within-sample permutations of the target
+    null = dict(kw, ys=y_samples, yp=y_prot, ypm=y_prot_mod, yt=y_target, weights_samples=weights,
+                constrain_basal_uniform=constrain_basal_uniform, basal_free_mask=basal_free_mask)
+    bounds = [(0.0, 0.0)] * G + [(-_basal_bound(G), _basal_bound(G))] * n_samples
+    X0 = minimize(partial(objective, **null), np.zeros(G + n_samples), jac=partial(grad_theta, **null),
+                  method="L-BFGS-B", bounds=bounds, options=_lbfgs_options(G)).x
+    groups = [np.flatnonzero(ys == s) for s in us]
+    rng = np.random.default_rng(1000 * g + len(y_target))
+    grads = np.zeros((n_perm, C, G))  # d loss / d theta_c at the null, theta units
+    for k in range(n_perm):
+        p = np.arange(len(y_target))
+        for idx in groups:
+            p[idx] = rng.permutation(idx)
+        ypm = y_prot_mod
+        if ypm is not None:
+            ypm = PathNodes(ypm.nodes, ypm.weights, None if ypm.kon is None else ypm.kon[p],
+                            None if ypm.targets is None else ypm.targets[p])
+        yt = y_target[p]
+        for c in np.flatnonzero(omega > 0):
+            r = rows_c[c]
+            grads[k, c] = scale[c] * grad_theta(X0, ys=y_samples[r], yp=y_prot[r], ypm=None if ypm is None else ypm[r],
+                                                yt=yt[r], weights_samples=w_c[c], **kw)[:G] * on[c]
+    pool = np.max(np.abs(grads.sum(axis=1)), axis=1)  # shared network
+    wmax = np.where(w > 0, w, 1.0)
+    per_c = np.array([[np.max(np.abs(grads[k, c])[on[c]]) if on[c].any() else 0.0 for c in range(C)]
+                      for k in range(n_perm)])
+    per_c_eff = np.array([[np.max((np.abs(grads[k, c]) / wmax)[on[c]]) if on[c].any() else 0.0 for c in range(C)]
+                          for k in range(n_perm)])
+    lam = float(np.quantile(pool, level))
+    lam_c, lam_e = np.quantile(per_c, level, axis=0), np.quantile(per_c_eff, level, axis=0)
+    l_shared, l_cond, l_fuse = rho * lam, (1 - rho) * lam_c, pen * lam_e
+    # Scale of the levels that keeps each condition at 0 through the shared network or its own deviations
+    door_shared = max(l_shared + float(np.sum(l_cond)), EPS)
+    active = np.flatnonzero((omega > 0) & on.any(axis=1))
+    kappa = np.empty(len(active))
+    for i, c in enumerate(active):
+        door_c = np.maximum((l_cond[c] + l_fuse[c] * w)[on[c]], EPS)
+        ratio = np.array([np.max(np.abs(grads[k, c])[on[c]] / door_c) for k in range(n_perm)])
+        kappa[i] = np.quantile(np.maximum(pool / door_shared, ratio), level)
+    kappa = float(np.mean(kappa)) if len(kappa) else 1.0
+    return ConditionLevels(lam, kappa * l_shared, kappa * l_cond, kappa * l_fuse, omega, ridge_w)
+
+
 def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, theta_ref,
                         ks, G, n_samples, ref_network,
                         weight_flow_matching=.5, final=0,
@@ -1270,9 +1682,11 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
                         hard_forcing_ref=False, ref_constraint_pct=0.1, seuil_min_network_intensity=1e-2,
                         cond=None, condition_pen=1.0, act=None, act_tgt=None,
                         qut_level=0.5, qut_n_perm=20, network_ridge=20.0, network_relaxed=False, dist=None,
-                        thresh_prior=None):
+                        thresh_prior=None, mixed=None):
     """
     Joint inference (inter + per-sample basal) for a single gene g.
+    mixed: (tau2, tau2_basal) of the mixed model (core_inference_mixed), with cond = patient of each sample; replaces
+    condition_pen, constrain_basal_uniform and alpha, and adds the statistics of its variances as a sixth element.
     dist: DistTerm of the end-state term (weight_network_distribution) or None; the sparsity levels (QUT) are those of
     the cross-entropy alone (at the null model the sigmas are tied and the distribution term is not defined).
     Sparsity levels: quantile universal thresholds at qut_level, of the first fit (qut_penalty) and of the
@@ -1292,7 +1706,7 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
     ks         : mixture amplitudes of g, (n_modes,) or (n_samples, n_modes): only the lowest
                  and highest modes are used (sigmoid bounds)
     basal_free_mask : (n_samples,) bool — True for samples NOT pinned by basal_ref for gene g
-    condition_pen : fused penalty on the deviations between conditions, relative to the sparsity one
+    condition_pen : penalty on the deviations between conditions, relative to their QUT (qut_conditions)
     Returns (basal, inter, basal_tmp, inter_tmp): basal (n_samples,), inter (G,) or (C, G);
     *_tmp are the values before the refinement step.
     thresh_prior: (log s_0 (G,), tau) of an exact Herbach target, its log-thresholds learned in the refinement
@@ -1344,20 +1758,32 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
     theta_init[:n_rows] = np.where(w_rows > 0, theta_init[:n_rows] / np.maximum(w_rows, EPS), 0.0)
     theta_ref[:n_rows] = np.where(w_rows > 0, theta_ref[:n_rows] / np.maximum(w_rows, EPS), 0.0)
 
-    l_pen = qut_penalty(y_samples, y_prot, y_prot_mod, y_target, ref_network, G, g, n_samples,
-                        weight_flow_matching * (1 - final), qut_level, qut_n_perm, constrain_basal_uniform, basal_free_mask)
-
     common = dict(weight_flow_matching=weight_flow_matching * (1 - final), final=final,
                   constrain_basal_uniform=constrain_basal_uniform, basal_free_mask=basal_free_mask,
                   hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
                   seuil_min_network_intensity=seuil_min_network_intensity,
                   ridge=ridge_coefficients(_end(y_prot), ref_network, network_ridge), dist=dist)
-    if cond is None:
+    sample_weights, mixed_stats = None, None
+    if mixed is not None:
+        sample_weights, m = _mixed_weights(y_samples)
+        theta, mixed_stats = core_inference_mixed(
+            y_samples, y_prot, y_prot_mod, y_target, theta_init, theta_ref, ref_network, G, g, n_samples, cond,
+            mixed[0], mixed[1], sample_weights, m, weight_flow_matching=common['weight_flow_matching'],
+            basal_free_mask=basal_free_mask, ref_constraint_pct=ref_constraint_pct,
+            seuil_min_network_intensity=seuil_min_network_intensity, ridge=common['ridge'], dist=dist,
+            level=qut_level, n_perm=qut_n_perm)
+    elif cond is None:
+        l_pen = qut_penalty(y_samples, y_prot, y_prot_mod, y_target, ref_network, G, g, n_samples,
+                            weight_flow_matching * (1 - final), qut_level, qut_n_perm, constrain_basal_uniform,
+                            basal_free_mask)
         theta = core_inference(y_samples, y_prot, y_prot_mod, y_target, theta_init, theta_ref, ref_network,
                                G, g, n_samples, l_pen, **common)
     else:
+        levels = qut_conditions(y_samples, y_prot, y_prot_mod, y_target, ref_network, G, g, n_samples,
+                                weight_flow_matching * (1 - final), cond, condition_pen, qut_level, qut_n_perm,
+                                constrain_basal_uniform, basal_free_mask, act)
         theta = core_inference_conditions(y_samples, y_prot, y_prot_mod, y_target, theta_init, theta_ref, ref_network,
-                                          G, g, n_samples, cond, l_pen, condition_pen * l_pen, act=act, **common)
+                                          G, g, n_samples, cond, levels, act=act, **common)
     inter_tmp = theta[:n_rows].reshape((G,) if cond is None else (C, G))
     basal_tmp = theta[n_rows:n_rows + n_samples].copy()
 
@@ -1370,11 +1796,11 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
         G, g, n_samples,
         0.0 if network_relaxed else
         qut_garrote(y_samples, y_prot, y_prot_mod, y_target, inter_tmp, basal_tmp, G, g, n_samples,
-                    weight_flow_matching * (1 - final), ref_network, cond, qut_level, qut_n_perm),
+                    weight_flow_matching * (1 - final), ref_network, cond, qut_level, qut_n_perm, sample_weights),
         weight_flow_matching=weight_flow_matching * (1 - final),  # adaptive lasso, weights 1 / |theta_tmp|
         final=final, hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
         ref_network=ref_network, seuil_min_network_intensity=seuil_min_network_intensity, cond=cond, dist=dist,
-        ridge=common['ridge'] if network_relaxed else None, thresh_prior=thresh_prior,
+        ridge=common['ridge'] if network_relaxed else None, thresh_prior=thresh_prior, sample_weights=sample_weights,
     )
     if act is not None and cond is not None:
         inter = inter * act  # entries of regulators / targets outside each condition stay 0
@@ -1382,6 +1808,8 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
         basal = _fit_flat_basals(basal, inter, flat, *full, g, cond, _basal_bound(G))
         basal_tmp[flat] = basal[flat]
 
+    if mixed is not None:
+        return basal, inter, basal_tmp, inter_tmp, log_thresh, mixed_stats
     return basal, inter, basal_tmp, inter_tmp, log_thresh
 
 
@@ -1481,6 +1909,9 @@ def _infer_gene(g_tgt, G, active_src, y_samples, yp, ypm, y_kon_g, ti_g, tr_g,
     (full when every regulator is active). With cond (condition of each sample), ti_g / tr_g hold
     one block of G interactions per condition and the interactions returned are (C, G).
     """
+    if gene_kw.get('mixed') is not None:  # tau2 of this target
+        tau2, tau2_b = gene_kw['mixed']
+        gene_kw = dict(gene_kw, mixed=(float(np.broadcast_to(tau2, (G,))[g_tgt]), tau2_b))
     K_g = len(active_src)
     C = 1 if cond is None else int(np.max(cond)) + 1
     mask_kw = {} if act is None else dict(act=act, act_tgt=act_tgt)
@@ -1502,11 +1933,12 @@ def _infer_gene(g_tgt, G, active_src, y_samples, yp, ypm, y_kon_g, ti_g, tr_g,
     g_sub_matches = np.where(active_src == g_tgt)[0]
     g_sub = int(g_sub_matches[0]) if len(g_sub_matches) > 0 else K_g
 
-    basal_r, inter_sub_r, basal_tmp_r, inter_tmp_sub_r, thr_sub = main_loop_inference(
+    out = main_loop_inference(
         g_sub, y_samples, yp, ypm, y_kon_g, theta_init_sub, theta_ref_sub,
         ks_g, K_g, n_samples, rn,
         basal_free_mask=free_mask_g, cond=cond, dist=dist, thresh_prior=thresh_prior, **mask_kw, **gene_kw,
     )
+    basal_r, inter_sub_r, basal_tmp_r, inter_tmp_sub_r, thr_sub = out[:5]
 
     # Expand interaction results back to full G-dimensional space
     shape = (G,) if cond is None else (C, G)
@@ -1518,7 +1950,12 @@ def _infer_gene(g_tgt, G, active_src, y_samples, yp, ypm, y_kon_g, ti_g, tr_g,
     if thr_sub is not None:  # log-thresholds of the active regulators, NaN elsewhere
         thr_full = np.full(G, np.nan)
         thr_full[active_src] = thr_sub
-    return basal_r, inter_full, basal_tmp_r, inter_tmp_full, thr_full
+    extra = out[5:]
+    if extra:  # mixed model: statistics of the variances, posterior z of the deviations
+        z_full = np.zeros(shape)
+        z_full[..., active_src] = extra[0][4]
+        extra = (tuple(extra[0][:4]) + (z_full,),)
+    return (basal_r, inter_full, basal_tmp_r, inter_tmp_full, thr_full) + extra
 
 
 def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n_stimuli=1,
@@ -1532,7 +1969,7 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
                       seuil_min_network_intensity=1e-2,
                       sample_conditions=None, condition_pen=1.0, gene_mask=None,
                       sigma_spec_grn=None, qut_level=0.5, qut_n_perm=20, network_relaxed=False, y_prot_mem=None,
-                      dist_targets=None, herbach_threshold_sd=None) -> list:
+                      dist_targets=None, herbach_threshold_sd=None, mixed=None) -> list:
     """
     Joint network inference: interactions shared across samples, basal per sample.
     One independent fit per row subset in subsets (index arrays, None = all rows);
@@ -1552,9 +1989,9 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
         (KO/OV priors) are excluded from the penalty for that gene.
     sample_conditions : (n_samples,) int array or None
         Network condition of each sample (index). With >= 2 conditions, each condition has its
-        own network theta_c = theta_shared + delta_c, with a fused L1 penalty on delta_c of
-        condition_pen times the sparsity penalty; condition_pen = 0: independent networks, each condition
-        fitted alone on its rows, samples and genes (single-network fit, as if inferred alone; NaN for a
+        own network theta_c = theta_shared + delta_c, with L1 penalties on theta_shared and delta_c at their
+        quantile universal thresholds (qut_conditions, condition_pen scales that of delta_c); condition_pen = 0:
+        independent networks, each condition fitted alone on its rows, samples and genes (single-network fit, as if inferred alone; NaN for a
         condition without rows in a subset); inter is then returned per sample, (n_samples, G, G).
         inter_init / inter_ref may be (G, G) (common) or per sample.
     gene_mask : (n_samples, G) bool or None: genes selected in each sample's condition (select_genes_per_condition);
@@ -1572,6 +2009,10 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
     herbach_threshold_sd : prior sd of the log-thresholds of the edges of the exact Herbach targets around those of
         their regulators (spec[:, SPEC_THRESH]), learned in the refinement; their geometric mean over the subsets is
         written into sigma_spec_grn[:, N_SPEC:] (in place). None / 0: thresholds of sigma_spec_grn fixed.
+    mixed : (tau2, tau2_basal) or None: mixed model with one patient per network condition (core_inference_mixed), tau2
+        a value or one per target (G,); condition_pen and constrain_basal_uniform are then ignored, and each fit has a
+        sixth element: statistics of the variances (G, 4) (s_theta, n_theta, s_basal, n_basal per target) and posterior
+        z (C, G, G).
     """
     if ref_constraint_pct < 0:
         raise ValueError(f"ref_constraint_pct must be >= 0, got {ref_constraint_pct}")
@@ -1593,6 +2034,10 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
         if len(cond) != n_samples:
             raise ValueError(f"sample_conditions has {len(cond)} entries for {n_samples} samples")
     C = 1 if cond is None else int(cond.max()) + 1
+    if mixed is not None and cond is None:
+        mixed = None  # a single patient: no random effect
+    if mixed is not None and (gene_mask is not None or hard_forcing_ref):
+        raise ValueError("the mixed model does not support select_genes_per_condition nor hard_forcing_ref yet")
     # First sample of each condition (its slice of per-sample init / ref)
     first_of = np.arange(1) if cond is None else np.array([np.flatnonzero(cond == c)[0] for c in range(C)])
 
@@ -1656,7 +2101,7 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
                    hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
                    seuil_min_network_intensity=seuil_min_network_intensity, condition_pen=condition_pen,
                    qut_level=qut_level, qut_n_perm=qut_n_perm, network_ridge=network_ridge,
-                   network_relaxed=network_relaxed)
+                   network_relaxed=network_relaxed, mixed=mixed)
 
     # Genes of each condition (rows of the first sample of each condition); a single set without conditions
     gm = None if gene_mask is None else np.asarray(gene_mask, dtype=bool)
@@ -1666,7 +2111,7 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
         active_cols = [c[act_c[0][c]] for c in active_cols]
     # Independent networks (condition_pen = 0): one single-network fit per condition, on its samples and genes, as if
     # the condition were inferred alone (its own sparsity level, ridge and refinement)
-    apart = cond is not None and condition_pen == 0
+    apart = cond is not None and condition_pen == 0 and mixed is None
     rows_of = None if not apart else [np.isin(y_samples, np.flatnonzero(cond == c)) for c in range(C)]
 
     def gene_args(rows, g_tgt, c=None):
@@ -1782,7 +2227,15 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
         if cond is not None:
             # Per sample: each sample takes the network of its condition
             inter, inter_tmp = inter[cond], inter_tmp[cond]
-        fits.append((basal, inter, basal_tmp, inter_tmp, None if edge_fit is None else edge_fit[k]))
+        stats_k = None
+        if mixed is not None:
+            s_k, z_k = np.zeros((G, 4)), np.zeros((C, G, G))
+            for (k_, g, _), res in zip(tasks, results):
+                if k_ == k and len(res) > 5:
+                    s_k[g] = res[5][:4]
+                    z_k[:, :, g] = res[5][4]
+            stats_k = (s_k, z_k)
+        fits.append((basal, inter, basal_tmp, inter_tmp, None if edge_fit is None else edge_fit[k], stats_k))
     return fits
 
 

@@ -1942,7 +1942,7 @@ def _network_similarity_page(pdf, R, nets, ns, show_stim):
     pdf.savefig(fig); plt.close(fig)
 
 
-def _condition_differences_page(pdf, R, diff, pen=None, n_max=40):
+def _condition_differences_page(pdf, R, diff, pen=None, n_max=40, tau=None):
     """Edges whose value differs between network conditions (network_differences_simul.csv), largest spread first."""
     conds = [c for c in diff.columns if c not in ('regulator', 'target', 'network', 'sign_change')]
     diff = diff[diff['regulator'].astype(str) != diff['target'].astype(str)]  # no self-regulation
@@ -1951,8 +1951,11 @@ def _condition_differences_page(pdf, R, diff, pen=None, n_max=40):
         diff = diff.assign(spread=diff[conds].max(axis=1) - diff[conds].min(axis=1)).sort_values('spread', ascending=False)
     _page_title(fig, '2. Gene regulatory network — differences between network conditions',
                 f'{len(diff)} edges differ between the conditions ({int(diff["sign_change"].sum()) if len(diff) else 0} '
-                f'change sign); the {min(n_max, len(diff))} largest differences. Each condition network = shared network '
-                f'+ deviations penalised by network_condition_pen = {pen}.')
+                f'change sign); the {min(n_max, len(diff))} largest differences. '
+                + (f'Each patient network = mean network + random deviations of learned sd {tau:.3g} (mixed model).'
+                   if tau is not None else
+                   f'Each condition network = shared network + deviations penalised at network_condition_pen = {pen} '
+                   'times their quantile universal threshold.'))
     if len(diff):
         top = diff.head(n_max)
         ax = fig.add_axes([0.25, 0.08, 0.7, 0.76])
@@ -2972,12 +2975,13 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
 
     inter = load_network_array(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))
     # Network conditions: one network per condition (inter per sample, condition of each sample in network_conditions.json)
-    cond_networks, cond_pen = {'': inter}, None
+    cond_networks, cond_pen, cond_tau = {'': inter}, None, None
     cond_json = os.path.join(p, 'cardamomOT', 'network_conditions.json')
     if inter.ndim == 3 and os.path.exists(cond_json):
         import json
         info_c = json.load(open(cond_json))
         sc, cond_pen = np.asarray(info_c['sample_conditions']), info_c.get('network_condition_pen')
+        cond_tau = info_c.get('tau_network')
         cond_networks = {f' — condition {c}': inter[int(np.flatnonzero(sc == k)[0])]
                          for k, c in enumerate(info_c['conditions'])}
     elif inter.ndim == 3:
@@ -3040,7 +3044,7 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
         diff_csv = os.path.join(p, 'cardamomOT', 'network_differences_simul.csv')
         if len(cond_networks) > 1 and os.path.exists(diff_csv):
             sections.append(('2. Differences between network conditions',
-                             lambda: _condition_differences_page(pdf, R, pd.read_csv(diff_csv), cond_pen), None))
+                             lambda: _condition_differences_page(pdf, R, pd.read_csv(diff_csv), cond_pen, tau=cond_tau), None))
         # Perturbations, proliferation, dilution, velocity fields, test and validation: per condition
         dyn_of = lambda V: dyn() if V.parent is None else dyn().for_condition(V)
         sections += per_condition('3. In-silico perturbations', lambda V: _perturbation_pages(pdf, V))

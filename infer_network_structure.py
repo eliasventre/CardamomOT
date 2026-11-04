@@ -13,7 +13,7 @@ Usage:
 
 Required input files:
     - Data/data_<split>.h5ad: count matrix with degradation rates
-    - cardamom/modes.npy, basins.npy, mixture_parameters.npy: from infer_mixture.py
+    - cardamom/modes.npy, basins.npy, mixture_parameters.npy, mixture_transit_nodes.npy: from infer_mixture.py
     - Data/data_prot.h5ad (optional): proteins of the cells (same cell and gene names, any unit per gene): the network is
       then fitted by an EM on the real cells, without trajectories (fit_observed_proteins); scale of each gene saved in
       cardamomOT/protein_scale.npy
@@ -107,6 +107,7 @@ def main(argv):
         model.basins = np.load(os.path.join(p, 'cardamomOT', 'basins.npy'))
         model.proba_init = np.load(os.path.join(p, 'cardamomOT', 'proba_init.npy'))
         model.a = np.load(os.path.join(p, 'cardamomOT', 'mixture_parameters.npy'))
+        model.transit_nodes = np.load(os.path.join(p, 'cardamomOT', 'mixture_transit_nodes.npy'))
 
         print(f"[infer_network_structure] Loaded mixture parameters ({model.a.shape[-2] - 1} modes max)")
     except FileNotFoundError as e:

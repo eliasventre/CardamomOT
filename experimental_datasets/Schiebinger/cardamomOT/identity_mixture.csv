@@ -1,43 +1,43 @@
 classifier,version,cell_type,share,recall,n_cells
 ,observed,Epithelial,0.13670792536486237,,740
 random forest,data (cross-validated),Epithelial,0.11527803436172178,0.6648648648648648,740
-random forest,data permuted within modes,Epithelial,0.11527803436172178,0.4972972972972973,740
-random forest,model draws,Epithelial,0.12950304821725475,0.4337837837837838,740
+random forest,data permuted within modes,Epithelial,0.1141695917236283,0.4743243243243243,740
+random forest,model draws,Epithelial,0.11102900424903012,0.41216216216216217,740
 logistic regression,data (cross-validated),Epithelial,0.1193423240347312,0.6972972972972973,740
-logistic regression,data permuted within modes,Epithelial,0.14225013855532975,0.5918918918918918,740
-logistic regression,model draws,Epithelial,0.16515795307592832,0.522972972972973,740
+logistic regression,data permuted within modes,Epithelial,0.13837058932200258,0.5621621621621622,740
+logistic regression,model draws,Epithelial,0.15333456493626454,0.5297297297297298,740
 ,observed,MEF,0.21854794014409754,,1183
 random forest,data (cross-validated),MEF,0.24053205246628487,0.760777683854607,1183
-random forest,data permuted within modes,MEF,0.22649177905043413,0.650887573964497,1183
-random forest,model draws,MEF,0.22409015333456495,0.6035502958579881,1183
+random forest,data permuted within modes,MEF,0.22187326805837798,0.6500422654268808,1183
+random forest,model draws,MEF,0.2307408091631258,0.643279797125951,1183
 logistic regression,data (cross-validated),MEF,0.18547940144097544,0.6475063398140322,1183
-logistic regression,data permuted within modes,MEF,0.18326251616478847,0.5934065934065934,1183
-logistic regression,model draws,MEF,0.18566414188065766,0.5511411665257819,1183
+logistic regression,data permuted within modes,MEF,0.18474043968224643,0.6052409129332206,1183
+logistic regression,model draws,MEF,0.1873268058377979,0.5714285714285714,1183
 ,observed,Neural,0.2872713837058932,,1555
 random forest,data (cross-validated),Neural,0.34731202660262334,0.7697749196141479,1555
-random forest,data permuted within modes,Neural,0.39756142619619433,0.74983922829582,1555
-random forest,model draws,Neural,0.4069831886199889,0.6990353697749196,1555
+random forest,data permuted within modes,Neural,0.3968224644374654,0.7472668810289389,1555
+random forest,model draws,Neural,0.40125623498983926,0.7241157556270097,1555
 logistic regression,data (cross-validated),Neural,0.2560502493995936,0.6520900321543408,1555
-logistic regression,data permuted within modes,Neural,0.25512654720118233,0.5877813504823152,1555
-logistic regression,model draws,Neural,0.23332717531867725,0.5035369774919615,1555
+logistic regression,data permuted within modes,Neural,0.25087751708849065,0.5678456591639871,1555
+logistic regression,model draws,Neural,0.2386846480694624,0.5234726688102894,1555
 ,observed,Stromal,0.14372806207278774,,778
 random forest,data (cross-validated),Stromal,0.10197672270460004,0.41259640102827766,778
-random forest,data permuted within modes,Stromal,0.0855348235728801,0.31748071979434445,778
-random forest,model draws,Stromal,0.08054683170145945,0.2879177377892031,778
+random forest,data permuted within modes,Stromal,0.09200073896175873,0.36632390745501286,778
+random forest,model draws,Stromal,0.08719748753002032,0.32519280205655526,778
 logistic regression,data (cross-validated),Stromal,0.17033068538703122,0.602827763496144,778
-logistic regression,data permuted within modes,Stromal,0.14428228339183446,0.506426735218509,778
-logistic regression,model draws,Stromal,0.13947903196009606,0.4434447300771208,778
+logistic regression,data permuted within modes,Stromal,0.14428228339183446,0.519280205655527,778
+logistic regression,model draws,Stromal,0.15407352669499352,0.5102827763496144,778
 ,observed,Trophoblast,0.05505265102530944,,298
 random forest,data (cross-validated),Trophoblast,0.03066691298725291,0.37583892617449666,298
-random forest,data permuted within modes,Trophoblast,0.00886754110474783,0.0738255033557047,298
-random forest,model draws,Trophoblast,0.005172732311102901,0.020134228187919462,298
+random forest,data permuted within modes,Trophoblast,0.009052281544430076,0.08389261744966443,298
+random forest,model draws,Trophoblast,0.006835396268243118,0.026845637583892617,298
 logistic regression,data (cross-validated),Trophoblast,0.1065952336966562,0.7919463087248322,298
-logistic regression,data permuted within modes,Trophoblast,0.10881211897284315,0.5838926174496645,298
-logistic regression,model draws,Trophoblast,0.10992056161093663,0.5134228187919463,298
+logistic regression,data permuted within modes,Trophoblast,0.1117679660077591,0.5906040268456376,298
+logistic regression,model draws,Trophoblast,0.09994457786809532,0.4865771812080537,298
 ,observed,iPSC,0.1586920376870497,,859
 random forest,data (cross-validated),iPSC,0.16423425087751709,0.9452852153667055,859
-random forest,data permuted within modes,iPSC,0.1662663957140218,0.930151338766007,859
-random forest,model draws,iPSC,0.15370404581562905,0.8358556461001164,859
+random forest,data permuted within modes,iPSC,0.16608165527433955,0.919674039580908,859
+random forest,model draws,iPSC,0.16294106779974135,0.9010477299185099,859
 logistic regression,data (cross-validated),iPSC,0.16220210604101237,0.9383003492433062,859
-logistic regression,data permuted within modes,iPSC,0.1662663957140218,0.9208381839348079,859
-logistic regression,model draws,iPSC,0.16645113615370405,0.8707799767171129,859
+logistic regression,data permuted within modes,iPSC,0.16996120450766672,0.9231664726426076,859
+logistic regression,model draws,iPSC,0.1666358765933863,0.8975552968568102,859

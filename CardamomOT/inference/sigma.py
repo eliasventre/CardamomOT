@@ -396,9 +396,10 @@ def kon_upper_bound(pmax, ks, inter, basal, ns=1, spec=None):
     return tot
 
 
-def sigma_torch(P, theta, basal, s, spec=None):
+def sigma_torch(P, theta, basal, s, spec=None, all_edges=False):
     """Torch mirror of sigma: sigma (W, n, G) of the states P (W, n, G), theta (G, G), basal (G,), theta scale
-    s (W, G) of each window (logistic link)."""
+    s (W, G) of each window (logistic link). all_edges: exact Herbach edges evaluated on every entry, zeros included
+    (psi = 0 there, but with a gradient: network learned from scratch), else on the support of theta only."""
     import torch
     if not uses_spec(spec):
         z = torch.einsum('wng,gj->wnj', P, theta) * s[:, None, :] + (basal * s)[:, None, :]
@@ -426,7 +427,8 @@ def sigma_torch(P, theta, basal, s, spec=None):
         # theta): the scale acts on theta, as inter * scale in the simulators
         F = torch.nn.functional.softplus
         herb = torch.tensor(fam == PHI_HERBACH)
-        g_idx, j_idx = torch.nonzero((theta.detach() != 0) & herb[None, :], as_tuple=True)
+        sup = torch.ones_like(theta, dtype=torch.bool) if all_edges else theta.detach() != 0
+        g_idx, j_idx = torch.nonzero(sup & herb[None, :], as_tuple=True)
         if len(g_idx):
             m_e = torch.tensor(spec[:, SPEC_M], dtype=P.dtype)[j_idx]
             thr = torch.tensor(spec[:, N_SPEC:], dtype=P.dtype)[j_idx, g_idx]  # threshold of each edge (E,)

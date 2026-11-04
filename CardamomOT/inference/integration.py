@@ -93,7 +93,7 @@ def _group_scores(x, groups, cands, c_ref, s=None):
     return out
 
 
-def projection_targets(x, z, n_src, ks_ref, c_ref, w_ref, s=None, grid=False):
+def projection_targets(x, z, n_src, ks_ref, c_ref, w_ref, s=None, grid=False, ks_src=None):
     """
     Target mode (index in the reference mixture (ks_ref (K,), c_ref, masses w_ref (K,)), (n_src,)) of each of the
     n_src modes of a sample, from its cells (counts x, mode z of largest posterior, depth s): each mode goes to the
@@ -102,7 +102,8 @@ def projection_targets(x, z, n_src, ks_ref, c_ref, w_ref, s=None, grid=False):
     (sigma <= 1/2, > 1/2) of the sample, with the two halves of the reference (mixtures of their levels) as candidates,
     a half going to the lowest or highest level (level by level, the rule would send each level on the reference
     level of the same counts and undo the projection); the levels are carried linearly between the two targets (the
-    nearest reference level).
+    nearest reference level), by their positions between the extreme modes (ks_src (n_src,): levels of the sample,
+    None: evenly spaced).
     """
     K = len(ks_ref)
     x = np.asarray(x, dtype=float)
@@ -111,9 +112,12 @@ def projection_targets(x, z, n_src, ks_ref, c_ref, w_ref, s=None, grid=False):
         sc = _group_scores(x, [z == m for m in range(n_src)], [(k, w) for k, w in zip(ks_ref, w_ref)], c_ref, s)
         tgt = np.array([int(np.argmax(sc[m])) if np.isfinite(sc[m]).any() else min(m, K - 1) for m in range(n_src)])
         return np.maximum.accumulate(tgt)
-    low, half = z <= (n_src - 1) / 2, np.arange(K) <= (K - 1) / 2
+    pos = lambda k: (k - k[0]) / max(k[-1] - k[0], 1e-300)
+    u_src = np.linspace(0.0, 1.0, n_src) if ks_src is None else pos(np.asarray(ks_src, dtype=float))
+    u_ref = pos(ks_ref)
+    low, half = u_src[np.asarray(z, dtype=int)] <= 0.5, u_ref <= 0.5
     sc = _group_scores(x, [low, ~low], [(ks_ref[half], w_ref[half]), (ks_ref[~half], w_ref[~half])], c_ref, s)
-    t_lo = (K - 1) * int(np.argmax(sc[0])) if low.any() else 0
-    t_hi = (K - 1) * int(np.argmax(sc[1])) if (~low).any() else K - 1
-    t_hi = max(t_hi, t_lo)
-    return np.rint(t_lo + (t_hi - t_lo) * np.linspace(0.0, 1.0, n_src)).astype(int)
+    u_lo = float(np.argmax(sc[0])) if low.any() else 0.0
+    u_hi = float(np.argmax(sc[1])) if (~low).any() else 1.0
+    u_hi = max(u_hi, u_lo)
+    return np.argmin(np.abs(u_ref[None, :] - (u_lo + (u_hi - u_lo) * u_src)[:, None]), axis=1)

@@ -5,7 +5,7 @@ Infer trajectories and simulate on test set using pre-learned model parameters.
 
 Held-out validation with everything learned on the training cells kept fixed:
 1. basins of the test cells from the training mixture parameters (per sample): one EMD per gene with the
-   masses of the test cells (force_basins, mean_forcing_em), the network term of the training basin update
+   masses of the test cells (force_basins; mean_forcing_em with hard_em), the network term of the training basin update
    replaced by a logistic regression of the final training basins (basins_final.npy) on the mixture probabilities;
 2. protein trajectories in a single pass with the core network fixed (inter.npy / basal.npy): OT couplings
    with the final training regularization (n_iter_inference.npy), the alpha of each state copied from the
@@ -29,7 +29,7 @@ Usage:
 
 Required input files (from training pipeline):
     - Data/data_test.h5ad: test count matrix with temporal information
-    - cardamomOT/mixture_parameters.npy, mixture_middle_shape.npy: mixture model parameters
+    - cardamomOT/mixture_parameters.npy, mixture_transit_nodes.npy: mixture model parameters
     - cardamomOT/inter.npy, basal.npy: core inferred network (used for infer_test)
     - cardamomOT/basins_final.npy, proba_init.npy, alpha.npy, data_prot.npy, data_kon_beta.npy, data_times.npy,
       data_samples.npy, data_traj_valid.npy: training basins and trajectories
@@ -132,7 +132,7 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
 
     try:
         model.a = np.load(os.path.join(cardamom_dir, 'mixture_parameters.npy'))
-        model.middle_shape = np.load(os.path.join(cardamom_dir, 'mixture_middle_shape.npy'))
+        model.transit_nodes = np.load(os.path.join(cardamom_dir, 'mixture_transit_nodes.npy'))
         model.d = np.load(os.path.join(cardamom_dir, 'degradations.npy'))
         pi_init_path = os.path.join(cardamom_dir, 'pi_init.pkl')
         if os.path.exists(pi_init_path):
@@ -169,7 +169,7 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
 
     if model.a.ndim == 3:
         model.a = _sample_rows(model.a)
-        model.middle_shape = _sample_rows(model.middle_shape)
+        model.transit_nodes = _sample_rows(model.transit_nodes)
 
     # ─── LOAD CORE NETWORK (raw CardamomOT infer_network output) ────────────
     # inter.npy / basal.npy are the main result of CardamomOT inference and

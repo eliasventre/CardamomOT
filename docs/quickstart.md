@@ -107,7 +107,7 @@ cardamomot pipeline \
     -i my_project \
     --stimulus 1.0 \          # stimulus-edge penalisation in [0,1]            (model.stimulus)
     --prior 1.0 \             # weight of edges absent from the prior in [0,1] (model.prior_network_pen)
-    --mean-forcing 0.5 \      # mean-forcing intensity of the NB mixture       (model.mean_forcing_em)
+    --mean-forcing 0.5 \      # mean forcing of the CEM, only with hard_em     (model.mean_forcing_em)
     --force-basins 1.0 \      # basin weights kept in the network fit, [0,1]   (model.force_basins)
     --temporal-basins 1        # basin weights per timepoint (0 or 1)           (model.temporal_basins)
 
