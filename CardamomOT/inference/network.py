@@ -139,10 +139,10 @@ def set_network_cost(cost, likelihood=False):
     _MODE, _LIK = cost_code(cost), bool(likelihood)
 
 
-BALANCE_MIN_FREQ = 0.05  # fit_network_balance: floor of the frequency of a main mode (weights at most 1 / 0.05 of the mean)
+BALANCE_MIN_FREQ = 0.05  # fit_network_balance: floor of the frequency of a main mode (weights at most (1 / 0.05)^gamma)
 
 
-TARGET_ROWS = ('w', 'mid', 'u1', 'u2', 'll', 'tl', 'kap', 'obs')
+TARGET_ROWS = ('w', 'mid', 'u1', 'u2', 'll', 'tl', 'kap', 'obs', 'lu1', 'lu2', 'lent')
 
 
 class TargetArray(np.ndarray):
@@ -150,7 +150,8 @@ class TargetArray(np.ndarray):
     term and the QUT use those of the target of each row: w, weight (fit_network_balance); mid, position of the
     central mode (ordinal cost; -1: two main modes); u1, u2, warped targets of the ordinal cost (expectations under
     the posteriors of the levels); ll (N, L), tl (N, L), kap (N,), obs (N,), log-likelihoods of the counts at the
-    levels, positions of the levels, precision of the prior and rows with a real cell (likelihood cost)."""
+    levels, positions of the levels, precision of the prior and rows with a real cell (likelihood cost); lu1, lu2,
+    lent (N, L), targets of the levels in the network cost (lik_levels)."""
 
     def __array_finalize__(self, obj):
         for k in TARGET_ROWS:
@@ -174,12 +175,13 @@ def with_targets(y_target, **rows):
     return out
 
 
-def balance_weights(y_target, ys, ks, transit=None):
-    """TargetArray of y_target (N,) with the weights of fit_network_balance: per sample, 1 / frequency of the
+def balance_weights(y_target, ys, ks, transit=None, gamma=1.0):
+    """TargetArray of y_target (N,) with the weights of fit_network_balance: per sample, 1 / frequency^gamma of the
     main mode of each row (nearest main mode of the mixture ks, (n_modes,) or (n_samples, n_modes); transit
     (n_samples,): transition levels per interval between its main modes, a transitional row counting for its nearest
-    main mode), frequency floored at BALANCE_MIN_FREQ, mean 1 over the rows of the sample: every main mode of a sample
-    weighs the same in the fit."""
+    main mode), frequency floored at BALANCE_MIN_FREQ, mean 1 over the rows of the sample: each main mode of a sample
+    (with the transitions nearest to it, in their proportions) weighs frequency^(1 - gamma) in the fit, the same for
+    all at gamma = 1."""
     ks = np.asarray(ks, dtype=float)
     ys = np.asarray(ys).astype(int)
     w = np.ones(len(y_target))
@@ -192,7 +194,7 @@ def balance_weights(y_target, ys, ks, transit=None):
         lv = np.unique(np.round(sigmoid_target(main, kb[0], kb[1]), 6))
         near = np.argmin(np.abs(np.asarray(y_target)[m, None] - lv[None]), axis=1)
         freq = np.bincount(near, minlength=len(lv)) / len(m)
-        ws = 1.0 / np.maximum(freq[near], BALANCE_MIN_FREQ)
+        ws = np.maximum(freq[near], BALANCE_MIN_FREQ) ** -gamma
         w[m] = ws / ws.mean()
     return with_targets(y_target, w=w)
 
@@ -224,32 +226,6 @@ def _row_mid(yt, n):
     return np.full(n, -1.0) if mid is None else np.ascontiguousarray(mid, dtype=float)
 
 
-def _lik_terms(sig, ll, tl, kap, mode=0, mid=None):
-    """Likelihood cost of the rows (n,): -log sum_l exp(ll_l) p(l | sigma), p(l | sigma) proportional to
-    exp(-kap C(sigma, tau_l)) on the levels of finite ll, C the network cost of code mode (central modes mid (n,) for
-    the ordinal cost; the prior of the basin updates); and its derivative in sigma, kap sum_l (r_l - p_l) dC / d sigma
-    (r the posteriors, p the prior; for the cross-entropy, in the logit, kap (E_p[tau] - E_r[tau]))."""
-    n, L = ll.shape
-    s = np.ascontiguousarray(np.repeat(sig, L), dtype=float)
-    t = np.ascontiguousarray(tl, dtype=float).ravel()
-    if mode == 2:
-        m = np.ascontiguousarray(np.repeat(np.full(n, -1.0) if mid is None else mid, L), dtype=float)
-        kl, dk = ordinal_cost(s, t, m).reshape(n, L), ordinal_grad(s, t, m).reshape(n, L)
-    elif mode == 1:
-        kl, dk = (2.0 * (s - t) ** 2).reshape(n, L), (4.0 * (s - t)).reshape(n, L)
-    else:
-        kl, dk = cross_entropy(s, t).reshape(n, L), grad_main_loss(s, t, 1).reshape(n, L)
-    ok = np.isfinite(ll)
-    lp = np.where(ok, -kap[:, None] * kl, -np.inf)
-    lz = np.logaddexp.reduce(lp, axis=1)
-    p = np.exp(lp - lz[:, None])
-    la = np.where(ok, ll + lp, -np.inf)
-    lm = np.logaddexp.reduce(la, axis=1)
-    r = np.exp(la - lm[:, None])
-    d = kap * np.sum(np.where(ok, (r - p) * dk, 0.0), axis=1)
-    return lz - lm, d
-
-
 LIK_BIG = 1e6  # log-likelihood gap of the other levels of a row whose level is known (onehot_levels)
 
 
@@ -265,16 +241,20 @@ def onehot_levels(t, tl, ll):
 
 
 def lik_cost_any(sig, ll, tl, kap, mode=0, mid=None):
-    """lik_cost_genes for any leading shape: sig, kap, mid (...), ll, tl (..., L); 0 for the genes of a single level."""
-    L = np.shape(ll)[-1]
-    C = cost_any(np.repeat(np.asarray(sig, dtype=float)[..., None], L, axis=-1), tl, mode,
-                 None if mid is None else np.repeat(np.asarray(mid, dtype=float)[..., None], L, axis=-1))
-    ok = np.isfinite(ll)
-    lp = np.where(ok, -np.asarray(kap, dtype=float)[..., None] * C, -np.inf)
-    with np.errstate(invalid='ignore'):
-        best = np.max(np.where(ok, ll, -np.inf), axis=-1)
-        out = best - np.logaddexp.reduce(np.where(ok, ll + lp, -np.inf), axis=-1) + np.logaddexp.reduce(lp, axis=-1)
-    return np.where(np.isfinite(best), out, 0.0)
+    """Likelihood term (lik_terms) shifted by the best log-likelihood of each element (>= 0; 0 for a gene of a single
+    level), for any leading shape: sig, kap, mid (...), ll, tl (..., L)."""
+    shape = np.broadcast_shapes(np.shape(sig), np.shape(ll)[:-1])
+    n, L = int(np.prod(shape)), np.shape(ll)[-1]
+
+    def flat(x, last=()):
+        # Writable contiguous rows (n, *last) of x broadcast to the shape (numba rejects read-only views)
+        return np.array(np.broadcast_to(np.asarray(x, dtype=float), shape + last), dtype=float).reshape((n,) + last)
+    ll2, tl2 = flat(ll, (L,)), flat(tl, (L,))
+    ok = np.isfinite(ll2).astype(float)
+    ll2 = np.where(ok > 0, ll2, 0.0)  # no infinity in the kernels
+    C = ordinal_consts(flat(-1.0 if mid is None else mid)) if mode == 2 else np.zeros((0, 9))
+    c = lik_terms(flat(sig), ll2, ok, *lik_levels(tl2, ok, mode, C), flat(kap), mode, C, False)[0]
+    return (best_loglik(ll2, ok) + c).reshape(shape)
 
 
 def lik_null_deviance(ll, tl, kap, mode=0, mid=None, n_grid=199, max_cells=2000):
@@ -304,42 +284,41 @@ def lik_null_deviance(ll, tl, kap, mode=0, mid=None, n_grid=199, max_cells=2000)
     return out
 
 
-def _loss_grad_elem(sig, yt, t=None, grad=False):
+def _loss_grad_elem(sig, yt, t=None, grad=True):
     """Element-wise data term of sigma against the targets t (yt by default; nodes of the flow matching), with the row
-    arrays of yt (central mode, warped targets, likelihood of the counts), times the weight of the row; with grad, its
-    derivative in sigma. With the likelihood (_LIK), every row in it, in the same units: the counts of the rows with a
-    real cell (end states), the level of the target (onehot_levels) on the other rows and on the nodes."""
+    arrays of yt (weight, central mode, likelihood of the counts) and the warped targets of t (yt by default; the
+    warps of t when it carries none), times the weight of the row, and with grad its derivative in sigma (None
+    otherwise), in one pass: (loss (n,), grad (n,) or None). With the likelihood (_LIK), every row in it, in the same
+    units: the counts of the rows with a real cell (end states), the level of the target (onehot_levels) on the other
+    rows and on the nodes."""
     t0 = np.ascontiguousarray(yt if t is None else t, dtype=float)
     sig = np.ascontiguousarray(sig, dtype=float)
+    w = _row_w(yt)
     if _LIK and getattr(yt, 'll', None) is not None:
         ll = np.array(yt.ll, dtype=float)
         known = np.ones(len(t0), bool) if t is not None else ~(np.asarray(yt.obs) > 0)
         if np.any(known):
             ll[known] = onehot_levels(t0[known], yt.tl[known], ll[known])
-        lk = _lik_terms(sig, ll, yt.tl, yt.kap, _MODE, None if _MODE != 2 else _row_mid(yt, len(t0)))
-        return _row_w(yt) * (lk[1] if grad else lk[0])
+        ok = np.isfinite(ll).astype(float)
+        ll = np.where(ok > 0, ll, 0.0)  # no infinity in the kernels
+        C = ordinal_consts(_row_mid(yt, len(t0))) if _MODE == 2 else np.zeros((0, 9))
+        lev = (yt.lu1, yt.lu2, yt.lent) if getattr(yt, 'lu1', None) is not None else \
+            lik_levels(np.ascontiguousarray(yt.tl, dtype=float), ok, _MODE, C)  # targets of the levels
+        c, d = lik_terms(sig, ll, ok, *(np.ascontiguousarray(a, dtype=float) for a in lev),
+                         np.ascontiguousarray(yt.kap, dtype=float), _MODE, C, grad)
+        return w * c, (w * d if grad else None)
     if _MODE == 2:
-        mid = _row_mid(yt, len(t0))
-        u1, u2 = (getattr(yt, 'u1', None), getattr(yt, 'u2', None)) if t is None else (None, None)
+        C = ordinal_consts(_row_mid(yt, len(t0)))
+        src = yt if t is None else t
+        u1, u2 = getattr(src, 'u1', None), getattr(src, 'u2', None)
         if u1 is None:
-            u1, u2 = ordinal_targets(t0, mid)
-        u1, u2 = np.ascontiguousarray(u1, dtype=float), np.ascontiguousarray(u2, dtype=float)
-        c = ordinal_grad_w(sig, u1, u2, mid) if grad else ordinal_cost_w(sig, u1, u2, mid)
-    elif grad:
-        c = 4.0 * (sig - t0) if _MODE == 1 else grad_main_loss(sig, t0, 1)
-    else:
-        c = net_cost(sig, t0, _MODE)
-    return _row_w(yt) * c
-
-
-def _loss_elem(sig, yt, t=None):
-    """Element-wise data term (_loss_grad_elem)."""
-    return _loss_grad_elem(sig, yt, t)
-
-
-def _dloss(sig, yt, t=None):
-    """d data term / d sigma (_loss_grad_elem)."""
-    return _loss_grad_elem(sig, yt, t, grad=True)
+            u1, u2 = ordinal_targets_c(t0, C)
+        c, d = ordinal_terms(sig, np.ascontiguousarray(u1, dtype=float), np.ascontiguousarray(u2, dtype=float), C,
+                             grad)
+        return w * c, (w * d if grad else None)
+    if _MODE == 1:
+        return w * net_cost(sig, t0, 1), (w * 4.0 * (sig - t0) if grad else None)
+    return w * net_cost(sig, t0, 0), (w * grad_main_loss(sig, t0, 1) if grad else None)
 
 
 def _d2loss(sig):
@@ -365,14 +344,6 @@ def _softplus(x):
 
 
 @njit(fastmath=True, cache=True)
-def _expit(x):
-    if x >= 0:
-        return 1.0 / (1.0 + np.exp(-x))
-    e = np.exp(x)
-    return e / (1.0 + e)
-
-
-@njit(fastmath=True, cache=True)
 def _ce1(p, t):
     """Cross-entropy of one prediction p against one target t (cross_entropy)."""
     pc, tc = min(max(p, eps_CE), 1 - eps_CE), min(max(t, eps_CE), 1 - eps_CE)
@@ -388,25 +359,78 @@ def _dce1(p, t):
 
 
 @njit(fastmath=True, cache=True)
-def _warp(x, m, sa, sb):
-    """Monotone warp of [0, 1] onto itself (0 and 1 fixed), of slope sa below m and sb above it (bend smoothed over
-    ORD_H): (T(x), dT / dx)."""
-    f0 = sa * 0.0 + (sb - sa) * ORD_H * _softplus((0.0 - m) / ORD_H)
-    f1 = sa * 1.0 + (sb - sa) * ORD_H * _softplus((1.0 - m) / ORD_H)
-    fx = sa * x + (sb - sa) * ORD_H * _softplus((x - m) / ORD_H)
-    return (fx - f0) / (f1 - f0), (sa + (sb - sa) * _expit((x - m) / ORD_H)) / (f1 - f0)
+def ordinal_consts(mid):
+    """Constants (n, 9) of the two warps of the ordinal cost at the central modes mid (n,): monotone maps of [0, 1]
+    onto itself (0 and 1 fixed), of slope sa below m and sb above it, the bend smoothed over ORD_H, T(x) proportional
+    to sa x + (sb - sa) ORD_H softplus((x - m) / ORD_H) - T(0) (_warps). Columns: m, then for each warp sa, sb, T(0)
+    and 1 / (T(1) - T(0)) before normalisation; computed once per run of equal central modes (rows of one sample); m
+    outside (0, 1) (no central mode) leaves the other columns at 0."""
+    C = np.zeros((mid.shape[0], 9))
+    for i in range(mid.shape[0]):
+        m = mid[i]
+        C[i, 0] = m
+        if not 0.0 < m < 1.0:
+            continue
+        if i > 0 and m == mid[i - 1]:
+            C[i] = C[i - 1]
+            continue
+        s0, s1 = ORD_H * _softplus(-m / ORD_H), ORD_H * _softplus((1.0 - m) / ORD_H)
+        a1, b1, a2, b2 = (1.0 - ORD_EPS) / m, ORD_EPS / (1.0 - m), ORD_EPS / m, (1.0 - ORD_EPS) / (1.0 - m)
+        C[i, 1], C[i, 2], C[i, 3], C[i, 4] = a1, b1, (b1 - a1) * s0, 1.0 / (a1 + (b1 - a1) * (s1 - s0))
+        C[i, 5], C[i, 6], C[i, 7], C[i, 8] = a2, b2, (b2 - a2) * s0, 1.0 / (a2 + (b2 - a2) * (s1 - s0))
+    return C
+
+
+@njit(fastmath=True, cache=True)
+def _warps(x, C, i, grad):
+    """Both warps (T_1(x), T_2(x)) of the ordinal cost with the constants C[i] (ordinal_consts; one softplus shared by
+    the two), and with grad their slopes (0 otherwise)."""
+    z = (x - C[i, 0]) / ORD_H
+    e = np.exp(-abs(z))
+    sp = ORD_H * (max(z, 0.0) + np.log1p(e))
+    t1 = (C[i, 1] * x + (C[i, 2] - C[i, 1]) * sp - C[i, 3]) * C[i, 4]
+    t2 = (C[i, 5] * x + (C[i, 6] - C[i, 5]) * sp - C[i, 7]) * C[i, 8]
+    if not grad:
+        return t1, t2, 0.0, 0.0
+    ex = 1.0 / (1.0 + e) if z >= 0 else e / (1.0 + e)
+    return t1, t2, (C[i, 1] + (C[i, 2] - C[i, 1]) * ex) * C[i, 4], (C[i, 5] + (C[i, 6] - C[i, 5]) * ex) * C[i, 8]
+
+
+@njit(fastmath=True, cache=True)
+def ordinal_targets_c(t, C):
+    """ordinal_targets with the constants C (n, 9) of the warps (ordinal_consts)."""
+    u1, u2 = t.copy(), t.copy()
+    for i in range(t.shape[0]):
+        if 0.0 < C[i, 0] < 1.0:
+            w1, w2, _, _ = _warps(t[i], C, i, False)
+            u1[i], u2[i] = w1, w2
+    return u1, u2
 
 
 @njit(fastmath=True, cache=True)
 def ordinal_targets(t, mid):
     """Warped targets (u1, u2) (1-D arrays) of the ordinal cost: the two warps of t (t itself without central mode)."""
-    u1, u2 = t.copy(), t.copy()
-    for i in range(t.shape[0]):
-        m = mid[i]
-        if 0.0 < m < 1.0:
-            u1[i] = _warp(t[i], m, (1.0 - ORD_EPS) / m, ORD_EPS / (1.0 - m))[0]
-            u2[i] = _warp(t[i], m, ORD_EPS / m, (1.0 - ORD_EPS) / (1.0 - m))[0]
-    return u1, u2
+    return ordinal_targets_c(t, ordinal_consts(mid))
+
+
+@njit(fastmath=True, cache=True)
+def ordinal_terms(p, u1, u2, C, grad):
+    """Ordinal cost (n,) of p against the warped targets (u1, u2) with the constants C (n, 9) of the warps
+    (ordinal_consts), and with grad its derivative in p (empty otherwise), in one pass; the cross-entropy against u1
+    without central mode."""
+    n = p.shape[0]
+    out, d = np.empty(n), np.empty(n if grad else 0)
+    for i in range(n):
+        if not 0.0 < C[i, 0] < 1.0:
+            out[i] = _ce1(p[i], u1[i])
+            if grad:
+                d[i] = _dce1(p[i], u1[i])
+            continue
+        t1, t2, s1, s2 = _warps(p[i], C, i, grad)
+        out[i] = _ce1(t1, u1[i]) + _ce1(t2, u2[i])
+        if grad:
+            d[i] = _dce1(t1, u1[i]) * s1 + _dce1(t2, u2[i]) * s2
+    return out, d
 
 
 @njit(fastmath=True, cache=True)
@@ -414,90 +438,120 @@ def ordinal_cost_w(p, u1, u2, mid):
     """Ordinal cost (1-D arrays) of p against the warped targets (u1, u2) (ordinal_targets, or their expectations
     under the posteriors of the levels: the M-step of the EM, the cost being linear in its warped targets); the
     cross-entropy against u1 without central mode."""
-    out = np.empty(p.shape[0])
-    for i in range(p.shape[0]):
-        m = mid[i]
-        if m <= 0.0 or m >= 1.0:
-            out[i] = _ce1(p[i], u1[i])
-            continue
-        out[i] = _ce1(_warp(p[i], m, (1.0 - ORD_EPS) / m, ORD_EPS / (1.0 - m))[0], u1[i]) + \
-            _ce1(_warp(p[i], m, ORD_EPS / m, (1.0 - ORD_EPS) / (1.0 - m))[0], u2[i])
-    return out
-
-
-@njit(fastmath=True, cache=True)
-def ordinal_grad_w(p, u1, u2, mid):
-    """d ordinal_cost_w / d p (1-D arrays)."""
-    out = np.empty(p.shape[0])
-    for i in range(p.shape[0]):
-        m = mid[i]
-        if m <= 0.0 or m >= 1.0:
-            out[i] = _dce1(p[i], u1[i])
-            continue
-        u, du = _warp(p[i], m, (1.0 - ORD_EPS) / m, ORD_EPS / (1.0 - m))
-        v, dv = _warp(p[i], m, ORD_EPS / m, (1.0 - ORD_EPS) / (1.0 - m))
-        out[i] = _dce1(u, u1[i]) * du + _dce1(v, u2[i]) * dv
-    return out
+    return ordinal_terms(p, u1, u2, ordinal_consts(mid), False)[0]
 
 
 @njit(fastmath=True, cache=True)
 def ordinal_cost(p, t, mid):
     """Ordinal cost (1-D arrays): with a central main mode at mid (0 < mid < 1), sum of the cross-entropies of p and
-    t through two monotone warps of [0, 1] (0 and 1 fixed, _warp), sending the central mode to 1 - ORD_EPS and to
+    t through two monotone warps of [0, 1] (0 and 1 fixed, ordinal_consts), sending the central mode to 1 - ORD_EPS and to
     ORD_EPS: the central mode is resolved as an end of both warps, as finely as the extreme modes, with the tails of
     the cross-entropy (finite cost, non-vanishing gradient) and 0 at p = t; the cross-entropy without central mode
     (mid outside (0, 1)), and for two main modes."""
-    u1, u2 = ordinal_targets(t, mid)
-    return ordinal_cost_w(p, u1, u2, mid)
+    C = ordinal_consts(mid)
+    u1, u2 = ordinal_targets_c(t, C)
+    return ordinal_terms(p, u1, u2, C, False)[0]
 
 
 @njit(fastmath=True, cache=True)
-def ordinal_grad(p, t, mid):
-    """d ordinal_cost / d p (1-D arrays)."""
-    u1, u2 = ordinal_targets(t, mid)
-    return ordinal_grad_w(p, u1, u2, mid)
+def _xlogx(t):
+    """t log t + (1 - t) log(1 - t), clipped as _ce1: the part of the cross-entropy against t that depends on t only."""
+    tc = min(max(t, eps_CE), 1 - eps_CE)
+    return t * np.log(tc) + (1 - t) * np.log(1 - tc)
+
+
+# The likelihood kernels take the levels of each row as a mask ok (n, L) (1: level of the gene, np.isfinite of the
+# log-likelihoods, computed in numpy) and use no infinity: they may be inlined into fastmath callers (my_otdistance),
+# where tests on -inf are not reliable.
 
 
 @njit(fastmath=True, cache=True)
-def cost1(p, t, mode, m):
-    """Network cost of code mode of one prediction p against one target t (central mode m for the ordinal cost)."""
-    if mode == 1:
-        return 2.0 * (p - t) ** 2
-    if mode == 2 and 0.0 < m < 1.0:
-        a1, b1, a2, b2 = (1.0 - ORD_EPS) / m, ORD_EPS / (1.0 - m), ORD_EPS / m, (1.0 - ORD_EPS) / (1.0 - m)
-        return _ce1(_warp(p, m, a1, b1)[0], _warp(t, m, a1, b1)[0]) + \
-            _ce1(_warp(p, m, a2, b2)[0], _warp(t, m, a2, b2)[0])
-    return _ce1(p, t)
-
-
-@njit(cache=True)  # no fastmath: the levels beyond those of a gene are -inf
-def lik_cost_genes(sig, ll, tl, kap, mode, mid):
-    """Likelihood term (G,) of the counts of one cell (log-likelihoods ll (G, L) at the levels tl (G, L), -inf beyond
-    the levels of a gene) under the prior exp(-kap C(sigma, tau_l)) (kap (G,), cost of code mode, central modes mid
-    (G,)), at the predicted sigma (G,), shifted by the best log-likelihood of each gene (>= 0, a constant per cell
-    and gene for the OT): max_l ll_l - log sum_l exp(ll_l) p(l | sigma)."""
-    G, L = ll.shape
-    out = np.zeros(G)
-    for g in range(G):
-        lp = np.full(L, -np.inf)
-        best = -np.inf
+def lik_levels(tl, ok, mode, C):
+    """Targets (u1, u2, ent) (n, L) of the levels tl (n, L) of the rows (mask ok (n, L)) in the network cost of code
+    mode, computed once: the positions (u1 = tl, u2 = 0) for the cross-entropy and the euclidean cost, their two
+    warps for the ordinal cost (constants C (n, 9), ordinal_consts; unused otherwise), and ent the part of the
+    cross-entropies that depends on the levels only (_xlogx)."""
+    n, L = ok.shape
+    u1, u2, ent = np.zeros((n, L)), np.zeros((n, L)), np.zeros((n, L))
+    for i in range(n):
+        warped = mode == 2 and 0.0 < C[i, 0] < 1.0
         for l in range(L):
-            if np.isfinite(ll[g, l]):
-                lp[l] = -kap[g] * cost1(sig[g], tl[g, l], mode, mid[g])
-                best = max(best, ll[g, l])
-        if not np.isfinite(best):
+            if ok[i, l] <= 0.0:
+                continue
+            if warped:
+                w1, w2, _, _ = _warps(tl[i, l], C, i, False)
+                u1[i, l], u2[i, l], ent[i, l] = w1, w2, _xlogx(w1) + _xlogx(w2)
+            else:
+                u1[i, l] = tl[i, l]
+                ent[i, l] = 0.0 if mode == 1 else _xlogx(tl[i, l])
+    return u1, u2, ent
+
+
+@njit(fastmath=True, cache=True)
+def best_loglik(ll, ok):
+    """Best log-likelihood (n,) of each row of ll (n, L) over its levels (mask ok), 0 for a row without."""
+    out = np.zeros(ll.shape[0])
+    for i in range(ll.shape[0]):
+        found = False
+        for l in range(ll.shape[1]):
+            if ok[i, l] > 0.0 and (not found or ll[i, l] > out[i]):
+                out[i], found = ll[i, l], True
+    return out
+
+
+@njit(fastmath=True, cache=True)
+def lik_terms(sig, ll, ok, u1, u2, ent, kap, mode, C, grad):
+    """Likelihood cost (n,) of the rows: -log sum_l exp(ll_l) p(l | sigma), p(l | sigma) proportional to
+    exp(-kap C(sigma, tau_l)) on the levels of the mask ok (n, L) (0 for a row without), C the network cost of code
+    mode (the prior of the basin updates) against the targets of the levels (lik_levels: u1, u2, ent (n, L);
+    constants C (n, 9) of the ordinal cost), the logs of sigma (or of its two warps) computed once per row; with grad
+    its derivative in sigma, kap sum_l (r_l - p_l) dC_l / d sigma (r the posteriors, p the prior), empty otherwise."""
+    n, L = ll.shape
+    out, d = np.zeros(n), np.zeros(n if grad else 0)
+    lp, dc = np.zeros(L), np.zeros(L)
+    for i in range(n):
+        p = sig[i]
+        warped = mode == 2 and 0.0 < C[i, 0] < 1.0
+        x1, x2, s1, s2 = p, 0.5, 1.0, 0.0
+        if warped:
+            x1, x2, s1, s2 = _warps(p, C, i, grad)
+        c1, c2 = min(max(x1, eps_CE), 1 - eps_CE), min(max(x2, eps_CE), 1 - eps_CE)
+        a1, b1 = np.log(c1), np.log(1 - c1)
+        a2, b2 = (np.log(c2), np.log(1 - c2)) if warped else (0.0, 0.0)
+        # d CE / d sigma = (x - u) k, k = slope / (x (1 - x)), 0 where x is clipped (_dce1)
+        k1 = s1 / (x1 * (1 - x1)) if eps_CE <= x1 <= 1 - eps_CE else 0.0
+        k2 = s2 / (x2 * (1 - x2)) if warped and eps_CE <= x2 <= 1 - eps_CE else 0.0
+        found, mz, ma = False, 0.0, 0.0  # max of the log-prior and of the log-joint over the levels
+        for l in range(L):
+            if ok[i, l] <= 0.0:
+                continue
+            if mode == 1:
+                c, dc[l] = 2.0 * (p - u1[i, l]) ** 2, 4.0 * (p - u1[i, l])
+            else:
+                c = ent[i, l] - u1[i, l] * a1 - (1 - u1[i, l]) * b1 - u2[i, l] * a2 - (1 - u2[i, l]) * b2
+                dc[l] = (x1 - u1[i, l]) * k1 + (x2 - u2[i, l]) * k2
+            lp[l] = -kap[i] * c
+            if not found or lp[l] > mz:
+                mz = lp[l]
+            if not found or ll[i, l] + lp[l] > ma:
+                ma = ll[i, l] + lp[l]
+            found = True
+        if not found:
             continue
-        mz, ma = np.max(lp), -np.inf
-        for l in range(L):
-            if np.isfinite(lp[l]):
-                ma = max(ma, ll[g, l] + lp[l])
         sz, sa = 0.0, 0.0
         for l in range(L):
-            if np.isfinite(lp[l]):
+            if ok[i, l] > 0.0:
                 sz += np.exp(lp[l] - mz)
-                sa += np.exp(ll[g, l] + lp[l] - ma)
-        out[g] = best - (ma + np.log(sa)) + (mz + np.log(sz))
-    return out
+                sa += np.exp(ll[i, l] + lp[l] - ma)
+        lz, lm = mz + np.log(sz), ma + np.log(sa)
+        out[i] = lz - lm
+        if grad:
+            g = 0.0
+            for l in range(L):
+                if ok[i, l] > 0.0:
+                    g += (np.exp(ll[i, l] + lp[l] - lm) - np.exp(lp[l] - lz)) * dc[l]
+            d[i] = kap[i] * g
+    return out, d
 
 
 def cost_curvature(sig, mode, mid=None, h=1e-3):
@@ -513,7 +567,7 @@ def cost_curvature(sig, mode, mid=None, h=1e-3):
 
 
 def ordinal_params(mid):
-    """Parameters (m, sa_1, sb_1, sa_2, sb_2, has) of the two warps of the ordinal cost (_warp) for the central modes
+    """Parameters (m, sa_1, sb_1, sa_2, sb_2, has) of the two warps of the ordinal cost (ordinal_consts) for the central modes
     mid (any shape); identity warps (sa = sb = 1) without central mode (has False: the second one is left out)."""
     mid = np.asarray(mid, dtype=float)
     has = (mid > 0.0) & (mid < 1.0)
@@ -798,11 +852,6 @@ def _compute_sigma_per_sample(theta_inter, theta_basal_all, ref_network, yp, ys,
     return sigma
 
 
-def _sigma_loss(sigma, yt):
-    """Data term of the sigmoid against its target yt (sigmoid_target of the target kon): symmetric ON / OFF."""
-    return float(np.sum(_loss_elem(sigma, yt)))
-
-
 class DistTerm:
     """
     Distribution term of the end-state fit (weight_network_distribution): lam x sum over the groups (sample, time) of
@@ -859,15 +908,16 @@ def _dist_loss_grad(sig, d):
     return d.lam * loss, d.lam * dl
 
 
-def _end_loss(sigma, yt, d=None):
-    """End-state term: cross-entropy (+ distribution term)."""
-    return _sigma_loss(sigma, yt) + (0.0 if d is None else _dist_loss_grad(sigma, d)[0])
-
-
-def _end_grad_terms(sigma, yt, d=None):
-    """d end-state term / d logit per cell."""
-    tmp = _sigma_grad_terms(sigma, yt)
-    return tmp if d is None else tmp + _dist_loss_grad(sigma, d)[1] * sigma * (1 - sigma)
+def _end_terms(sigma, yt, d=None, grad=True):
+    """End-state term: data term of the sigmoid against its target yt (+ distribution term), and with grad its
+    derivative in the logit per cell (None otherwise): (loss, d loss / d logit (n,))."""
+    lv, dl = _loss_grad_elem(sigma, yt, grad=grad)
+    loss = float(np.sum(lv))
+    if d is not None:
+        lw, dlw = _dist_loss_grad(sigma, d)
+        loss += lw
+        dl = dl + dlw if grad else None
+    return loss, (dl * sigma * (1 - sigma) if grad else None)
 
 
 class PathNodes:
@@ -877,7 +927,8 @@ class PathNodes:
     nodes (N, Q, K), weights (N, Q + 1) (column 0 for the end state, the row itself, then the nodes: 0 then 1 / Q, or
     1 on the end state for the rows without previous interval), and the kon of the target in force at each node,
     kon (N, Q) (mode of the start state before the switch alpha of the target, of the end state after it);
-    targets (N, Q): their sigmoid targets (set by inference_network).
+    targets (N, Q): their sigmoid targets (set by main_loop_inference; with the ordinal cost, a TargetArray carrying
+    their warped targets).
     """
 
     def __init__(self, nodes, weights, kon=None, targets=None):
@@ -936,12 +987,12 @@ def _mem_terms(basal_s, th, Y):
 def _mem_loss_grad(basal_s, th, Y, yt, grad=True, dist=None):
     """Cross-entropy of sigma_bar against yt (+ distribution term) and its gradients (d / d th (K,), d / d basal)."""
     sig_bar, terms = _mem_terms(basal_s, th, Y)
-    loss = _sigma_loss(sig_bar, yt)
+    lv, dl = _loss_grad_elem(sig_bar, yt, grad=grad)
     lw, dlw = (0.0, 0.0) if dist is None else _dist_loss_grad(sig_bar, dist)
-    loss += lw
+    loss = float(np.sum(lv)) + lw
     if not grad:
         return loss, None, None
-    dl = _dloss(sig_bar, yt) + dlw
+    dl = dl + dlw
     g_th, g_b = 0.0, 0.0  # (K,) after the first term, (2K,) with the log-thresholds (learn)
     for w, sq, Yq in terms:
         tmp = dl * w * sq * (1 - sq)
@@ -984,9 +1035,10 @@ def _path_fit(theta_of, basal, ys, us, terms, yt, weights_samples, grad=True):
                 continue
             t_s = None if tq is None else tq[mask]  # weight and central mode of the row on its nodes too
             sig = logistic(basal[s_idx] + _logit(Y_s, th))
-            Q += ws * np.sum(w_s * _loss_elem(sig, yt_s, t_s))
+            lv, dl = _loss_grad_elem(sig, yt_s, t_s, grad=grad)
+            Q += ws * np.sum(w_s * lv)
             if grad:
-                tmp = _dloss(sig, yt_s, t_s) * w_s * sig * (1 - sig)
+                tmp = dl * w_s * sig * (1 - sig)
                 g_th += _logit_grad(Y_s, th, tmp)
                 g_b += float(np.sum(tmp))
         if grad:
@@ -994,12 +1046,14 @@ def _path_fit(theta_of, basal, ys, us, terms, yt, weights_samples, grad=True):
     return Q, out
 
 
-def objective(X, weights_samples, ys, yp, ypm, yt, G, g, n_samples,
-              theta_ref, ref_network, l_pen, weight_flow_matching, final,
-              constrain_basal_uniform=0.0, basal_free_mask=None, ridge=None, dist=None):
+def objective_grad(X, weights_samples, ys, yp, ypm, yt, G, g, n_samples,
+                   theta_ref, ref_network, l_pen, weight_flow_matching, final,
+                   constrain_basal_uniform=0.0, basal_free_mask=None, ridge=None, dist=None, grad=True):
     """
-    Loss function for a single gene — joint over all samples.
+    Loss function for a single gene — joint over all samples — and with grad its gradient w.r.t. X, in one pass (the
+    terms of each row computed once): (Q, dQ / dX or None).
     ridge : (G,) or None; Gaussian prior 0.5 * sum ridge * (theta - theta_ref)^2 (network_ridge).
+    dist : DistTerm of the end-state term or None.
 
     X = theta, shape (G + n_samples,)
       0..G-1      : interaction weights
@@ -1013,111 +1067,75 @@ def objective(X, weights_samples, ys, yp, ypm, yt, G, g, n_samples,
     """
     theta_inter = X[:G]           # (G,)
     theta_basal = X[G:]           # (n_samples,)
+    theta_eff = theta_inter * ref_network
 
-    Q = 0
+    Q = 0.0
+    dq = np.zeros_like(X) if grad else None
     us = np.unique(ys.ravel())
     ns_unique: int = len(us)
     w_fm = _fm_weight(weight_flow_matching, ypm)
 
-    if isinstance(yp, MemStates):  # sigma averaged on the mRNA memory of the target
-        theta_eff = theta_inter * ref_network
-        for cnt, s in enumerate(us):
-            weight_s = np.sum(weights_samples) / weights_samples[cnt]
-            mask = (ys == s)
-            Q += (1 - w_fm) * _mem_loss_grad(theta_basal[int(s)], theta_eff, yp[mask], yt[mask], grad=False,
-                                             dist=_sl(dist, mask))[0] \
-                * weight_s / ns_unique
-    else:
-        sigma = _compute_sigma_per_sample(theta_inter, theta_basal, ref_network, yp, ys, us)
-        for cnt, s in enumerate(us):
-            weight_s = np.sum(weights_samples) / weights_samples[cnt]
-            mask = (ys == s)
-            Q += (1 - w_fm) * _end_loss(sigma[mask], yt[mask], _sl(dist, mask)) * weight_s / ns_unique
-
     if w_fm:
-        theta_eff = theta_inter * ref_network
-        Q += w_fm * _path_fit(lambda s: theta_eff, theta_basal, ys, us, _path_terms(yp, ypm), yt,
-                              weights_samples, grad=False)[0]
+        q, out = _path_fit(lambda s: theta_eff, theta_basal, ys, us, _path_terms(yp, ypm), yt, weights_samples,
+                           grad=grad)
+        Q += w_fm * q
+        for s_idx, ws, gt, gb in out:
+            dq[:G] += w_fm * ref_network * gt * ws
+            dq[G + s_idx] += w_fm * gb * ws
+    mem = isinstance(yp, MemStates)  # sigma averaged on the mRNA memory of the target
+    sigma = None if mem else _compute_sigma_per_sample(theta_inter, theta_basal, ref_network, yp, ys, us)
+    for cnt, s in enumerate(us):
+        s_idx = int(s)
+        weight_s = (1 - w_fm) * np.sum(weights_samples) / weights_samples[cnt] / ns_unique
+        mask = (ys == s)
+        if mem:
+            q, res, rb = _mem_loss_grad(theta_basal[s_idx], theta_eff, yp[mask], yt[mask], grad=grad,
+                                        dist=_sl(dist, mask))
+        else:
+            q, tmp = _end_terms(sigma[mask], yt[mask], _sl(dist, mask), grad)
+            if grad:
+                res, rb = _logit_grad(yp[mask], theta_eff, tmp), np.sum(tmp)
+        Q += weight_s * q
+        if grad:
+            dq[:G] += ref_network * res * weight_s
+            dq[G + s_idx] += rb * weight_s
 
     d_inter = theta_inter - theta_ref[:G]
     Q += theta_penalization(d_inter * (ref_network > 0), l_pen)
+    if grad:
+        dq[:G] += grad_theta_penalization(d_inter, l_pen) * (ref_network > 0)
     if final:
         # L2 towards the reference on sqrt(w) * theta (costs 1/w on the effective interaction, as L1); the L1 keeps
         # its full level, so the QUT holds for the edges absent from the reference
         Q += r_elasticnet * l2_penalization(np.sqrt(ref_network) * d_inter, l_pen)
+        if grad:
+            dq[:G] += r_elasticnet * grad_l2_penalization(d_inter, l_pen) * ref_network
     if ridge is not None:
         Q += 0.5 * np.sum(ridge * d_inter ** 2)
+        if grad:
+            dq[:G] += ridge * d_inter
 
-    # Uniformity penalty: push free-sample basals toward their common mean
+    # Uniformity penalty: push free-sample basals toward their common mean (gradient 2λ(θ_basal[s] − mean))
     if constrain_basal_uniform > 0.0 and basal_free_mask is not None:
         free_idx = np.where(basal_free_mask)[0]
         if len(free_idx) >= 2:
             theta_free = theta_basal[free_idx]
             mean_free  = theta_free.mean()
             Q += constrain_basal_uniform * np.sum((theta_free - mean_free) ** 2)
+            if grad:
+                dq[G + free_idx] += 2.0 * constrain_basal_uniform * (theta_free - mean_free)
 
-    return Q
-
-
-def _sigma_grad_terms(sigma, yt):
-    """d loss / d logit per cell, for _sigma_loss."""
-    return _dloss(sigma, yt) * sigma * (1 - sigma)
+    return Q, dq
 
 
-def grad_theta(X, weights_samples, ys, yp, ypm, yt, G, g, n_samples,
-               theta_ref, ref_network, l_pen, weight_flow_matching, final,
-               constrain_basal_uniform=0.0, basal_free_mask=None, ridge=None, dist=None):
-    """Gradient of objective w.r.t. X = theta (dist: DistTerm of the end-state term or None)."""
-    theta_inter = X[:G]
-    theta_basal = X[G:]
-    dq = np.zeros_like(X)
-    us = np.unique(ys.ravel())
-    ns_unique: int = len(us)
+def objective(X, *args, **kwargs):
+    """Loss of objective_grad."""
+    return objective_grad(X, *args, grad=False, **kwargs)[0]
 
-    w_fm = _fm_weight(weight_flow_matching, ypm)
-    if w_fm:
-        theta_eff = theta_inter * ref_network
-        for s_idx, ws, gt, gb in _path_fit(lambda s: theta_eff, theta_basal, ys, us, _path_terms(yp, ypm), yt,
-                                           weights_samples)[1]:
-            dq[:G] += w_fm * ref_network * gt * ws
-            dq[G + s_idx] += w_fm * gb * ws
-    for pass_w, Y in [(1 - w_fm, yp)]:
-        if isinstance(Y, MemStates):  # sigma averaged on the mRNA memory of the target
-            theta_eff = theta_inter * ref_network
-            for cnt, s in enumerate(us):
-                s_idx = int(s)
-                weight_s = np.sum(weights_samples) / weights_samples[cnt]
-                mask = (ys == s)
-                _, res, rb = _mem_loss_grad(theta_basal[s_idx], theta_eff, Y[mask], yt[mask], dist=_sl(dist, mask))
-                dq[:G] += pass_w * ref_network * res * weight_s / ns_unique
-                dq[G + s_idx] += pass_w * rb * weight_s / ns_unique
-            continue
-        sigma = _compute_sigma_per_sample(theta_inter, theta_basal, ref_network, Y, ys, us)
-        for cnt, s in enumerate(us):
-            s_idx = int(s)
-            weight_s = np.sum(weights_samples) / weights_samples[cnt]
-            mask = (ys == s)
-            tmp = _end_grad_terms(sigma[mask], yt[mask], _sl(dist, mask))
-            res = _logit_grad(Y[mask], theta_inter * ref_network, tmp)
-            dq[:G] += pass_w * ref_network * res * weight_s / ns_unique
-            dq[G + s_idx] += pass_w * np.sum(tmp) * weight_s / ns_unique
 
-    d_inter = theta_inter - theta_ref[:G]
-    dq[:G] += grad_theta_penalization(d_inter, l_pen) * (ref_network > 0)
-    if final:
-        dq[:G] += r_elasticnet * grad_l2_penalization(d_inter, l_pen) * ref_network
-    if ridge is not None:
-        dq[:G] += ridge * d_inter
-
-    # Gradient of uniformity penalty: 2λ(θ_basal[s] − mean) for free samples
-    if constrain_basal_uniform > 0.0 and basal_free_mask is not None:
-        free_idx = np.where(basal_free_mask)[0]
-        if len(free_idx) >= 2:
-            theta_free = theta_basal[free_idx]
-            mean_free  = theta_free.mean()
-            dq[G + free_idx] += 2.0 * constrain_basal_uniform * (theta_free - mean_free)
-
-    return dq
+def grad_theta(X, *args, **kwargs):
+    """Gradient of objective w.r.t. X = theta (objective_grad)."""
+    return objective_grad(X, *args, **kwargs)[1]
 
 
 def _sigma_refinement(theta_basal, inter_with_diag, cond, Y, ys, us):
@@ -1131,11 +1149,12 @@ def _sigma_refinement(theta_basal, inter_with_diag, cond, Y, ys, us):
     return sigma
 
 
-def objective_refinement(X, inter, weights_samples, ys, yp, ypm, yt,
-                          diag, G, g, n_samples, l_pen, weight_flow_matching, cond=None, dist=None, ridge=None,
-                          thresh=None):
+def objective_refinement_grad(X, inter, weights_samples, ys, yp, ypm, yt,
+                              diag, G, g, n_samples, l_pen, weight_flow_matching, cond=None, dist=None, ridge=None,
+                              thresh=None, grad=True):
     """
-    Loss for the refinement step with per-sample basal.
+    Loss for the refinement step with per-sample basal, and with grad its gradient w.r.t. X (interaction
+    corrections, basals, log-threshold shifts), in one pass: (Q, dQ / dX or None).
 
     X shape (G + n_samples,), (2 G + n_samples,) with thresh
       0..G-1    : multiplicative corrections for inter
@@ -1150,94 +1169,68 @@ def objective_refinement(X, inter, weights_samples, ys, yp, ypm, yt,
     if thresh is not None:
         d = X[G + n_samples:]
         yp, ypm = _shift_thresholds(yp, d), _shift_thresholds(ypm, d)
-
-    Q = 0
-    us = np.unique(ys.ravel())
-    ns_unique: int = len(us)
-    inter_with_diag = theta_inter + diag
-
-    w_fm = _fm_weight(weight_flow_matching, ypm)
-    if w_fm:
-        Q += w_fm * _path_fit(lambda s: _of_cond(inter_with_diag, cond, s), theta_basal, ys, us,
-                              _path_terms(yp, ypm), yt, weights_samples, grad=False)[0]
-    for pass_w, Y in [(1 - w_fm, yp)]:
-        if isinstance(Y, MemStates):  # sigma averaged on the mRNA memory of the target
-            for cnt, s in enumerate(us):
-                weight_s = np.sum(weights_samples) / weights_samples[cnt]
-                mask = (ys == s)
-                Q += pass_w * _mem_loss_grad(theta_basal[int(s)], _of_cond(inter_with_diag, cond, int(s)), Y[mask],
-                                             yt[mask], grad=False, dist=_sl(dist, mask))[0] * weight_s / ns_unique
-            continue
-        sigma = _sigma_refinement(theta_basal, inter_with_diag, cond, Y, ys, us)
-        for cnt, s in enumerate(us):
-            weight_s = np.sum(weights_samples) / weights_samples[cnt]
-            mask = (ys == s)
-            Q += pass_w * _end_loss(sigma[mask], yt[mask], _sl(dist, mask)) * weight_s / ns_unique
-
-    # l_pen: (G,) per-edge penalty (1/w times the base one, see refine_inference)
-    Q += theta_penalization(X[:g], l_pen[:g])
-    Q += theta_penalization(X[g + 1:G], l_pen[g + 1:G])
-    if ridge is not None:  # Gaussian prior on the effects c_e theta_e (relaxed refinement)
-        Q += 0.5 * np.sum(ridge * theta_inter ** 2)
-    if thresh is not None:
-        Q += np.sum((thresh[0] + d - thresh[1]) ** 2) / (2 * thresh[2] ** 2)
-    return Q
-
-
-def grad_correc(X, inter, weights_samples, ys, yp, ypm, yt,
-                diag, G, g, n_samples, l_pen, weight_flow_matching, cond=None, dist=None, ridge=None, thresh=None):
-    """Gradient of objective_refinement w.r.t. X (interaction corrections, basals, log-threshold shifts)."""
-    theta_inter = inter.copy() * X[:G]
-    theta_basal = X[G:G + n_samples]  # (n_samples,)
-    if thresh is not None:
-        d = X[G + n_samples:]
-        yp, ypm = _shift_thresholds(yp, d), _shift_thresholds(ypm, d)
     inter_with_diag = theta_inter + diag
     sl_d = slice(G + n_samples, None)
 
-    dq = np.zeros_like(X)
+    Q = 0.0
+    dq = np.zeros_like(X) if grad else None
     us = np.unique(ys.ravel())
     ns_unique: int = len(us)
 
     w_fm = _fm_weight(weight_flow_matching, ypm)
     if w_fm:
-        for s_idx, ws, gt, gb in _path_fit(lambda s: _of_cond(inter_with_diag, cond, s), theta_basal, ys, us,
-                                           _path_terms(yp, ypm), yt, weights_samples)[1]:
+        q, out = _path_fit(lambda s: _of_cond(inter_with_diag, cond, s), theta_basal, ys, us,
+                           _path_terms(yp, ypm), yt, weights_samples, grad=grad)
+        Q += w_fm * q
+        for s_idx, ws, gt, gb in out:
             gt, gd = _split_grad(gt, G)
             dq[:G] += w_fm * _of_cond(inter, cond, s_idx) * gt * ws
             dq[G + s_idx] += w_fm * gb * ws
             dq[sl_d] += w_fm * gd * ws
-    for pass_w, Y in [(1 - w_fm, yp)]:
-        if isinstance(Y, MemStates):  # sigma averaged on the mRNA memory of the target
-            for cnt, s in enumerate(us):
-                s_idx = int(s)
-                weight_s = np.sum(weights_samples) / weights_samples[cnt]
-                mask = (ys == s)
-                _, res, rb = _mem_loss_grad(theta_basal[s_idx], _of_cond(inter_with_diag, cond, s_idx), Y[mask],
-                                            yt[mask], dist=_sl(dist, mask))
-                res, rd = _split_grad(res, G)
-                dq[:G] += pass_w * _of_cond(inter, cond, s_idx) * res * weight_s / ns_unique
-                dq[G + s_idx] += pass_w * rb * weight_s / ns_unique
-                dq[sl_d] += pass_w * rd * weight_s / ns_unique
-            continue
-        sigma = _sigma_refinement(theta_basal, inter_with_diag, cond, Y, ys, us)
-        for cnt, s in enumerate(us):
-            s_idx = int(s)
-            weight_s = np.sum(weights_samples) / weights_samples[cnt]
-            mask = (ys == s)
-            tmp = _end_grad_terms(sigma[mask], yt[mask], _sl(dist, mask))
-            res, rd = _split_grad(_logit_grad(Y[mask], _of_cond(inter_with_diag, cond, s_idx), tmp), G)
-            dq[:G] += pass_w * _of_cond(inter, cond, s_idx) * res * weight_s / ns_unique
-            dq[G + s_idx] += pass_w * np.sum(tmp) * weight_s / ns_unique
-            dq[sl_d] += pass_w * rd * weight_s / ns_unique
+    mem = isinstance(yp, MemStates)  # sigma averaged on the mRNA memory of the target
+    sigma = None if mem else _sigma_refinement(theta_basal, inter_with_diag, cond, yp, ys, us)
+    for cnt, s in enumerate(us):
+        s_idx = int(s)
+        weight_s = (1 - w_fm) * np.sum(weights_samples) / weights_samples[cnt] / ns_unique
+        mask = (ys == s)
+        th = _of_cond(inter_with_diag, cond, s_idx)
+        if mem:
+            q, res, rb = _mem_loss_grad(theta_basal[s_idx], th, yp[mask], yt[mask], grad=grad, dist=_sl(dist, mask))
+        else:
+            q, tmp = _end_terms(sigma[mask], yt[mask], _sl(dist, mask), grad)
+            if grad:
+                res, rb = _logit_grad(yp[mask], th, tmp), np.sum(tmp)
+        Q += weight_s * q
+        if grad:
+            res, rd = _split_grad(res, G)
+            dq[:G] += _of_cond(inter, cond, s_idx) * res * weight_s
+            dq[G + s_idx] += rb * weight_s
+            dq[sl_d] += rd * weight_s
 
-    dq[:g] += grad_theta_penalization(X[:g], l_pen[:g])
-    dq[g + 1:G] += grad_theta_penalization(X[g + 1:G], l_pen[g + 1:G])
-    if ridge is not None:
-        dq[:G] += (ridge * theta_inter * inter).reshape(-1, G).sum(axis=0)
+    # l_pen: (G,) per-edge penalty (1/w times the base one, see refine_inference)
+    Q += theta_penalization(X[:g], l_pen[:g]) + theta_penalization(X[g + 1:G], l_pen[g + 1:G])
+    if grad:
+        dq[:g] += grad_theta_penalization(X[:g], l_pen[:g])
+        dq[g + 1:G] += grad_theta_penalization(X[g + 1:G], l_pen[g + 1:G])
+    if ridge is not None:  # Gaussian prior on the effects c_e theta_e (relaxed refinement)
+        Q += 0.5 * np.sum(ridge * theta_inter ** 2)
+        if grad:
+            dq[:G] += (ridge * theta_inter * inter).reshape(-1, G).sum(axis=0)
     if thresh is not None:
-        dq[sl_d] += (thresh[0] + d - thresh[1]) / thresh[2] ** 2
-    return dq
+        Q += np.sum((thresh[0] + d - thresh[1]) ** 2) / (2 * thresh[2] ** 2)
+        if grad:
+            dq[sl_d] += (thresh[0] + d - thresh[1]) / thresh[2] ** 2
+    return Q, dq
+
+
+def objective_refinement(X, *args, **kwargs):
+    """Loss of objective_refinement_grad."""
+    return objective_refinement_grad(X, *args, grad=False, **kwargs)[0]
+
+
+def grad_correc(X, *args, **kwargs):
+    """Gradient of objective_refinement w.r.t. X (objective_refinement_grad)."""
+    return objective_refinement_grad(X, *args, **kwargs)[1]
 
 
 def core_inference(y_samples, y_prot, y_prot_mod, y_target, theta_init, theta_ref,
@@ -1274,7 +1267,8 @@ def core_inference(y_samples, y_prot, y_prot_mod, y_target, theta_init, theta_re
     loss_fn = partial(objective, **kw)
     grad_fn = partial(grad_theta, **kw)
 
-    res = minimize(loss_fn, X_flat, jac=grad_fn, method="L-BFGS-B", bounds=bounds, options=_lbfgs_options(G))
+    res = minimize(partial(objective_grad, **kw), X_flat, jac=True, method="L-BFGS-B", bounds=bounds,
+                   options=_lbfgs_options(G))
     _log_failure(res, loss_fn(X_flat), 'inference')
 
     if check_gradient:
@@ -1407,8 +1401,8 @@ def _loss_grad_conditions(X, weights_samples, ys, yp, ypm, yt, G, n_samples,
                 g_basal[s_idx] += ws * gb
                 continue
             sig = _sigma_of(basal[s_idx], eff[c], Y[mask])
-            Q += ws * _end_loss(sig, yt[mask], _sl(dist, mask))
-            tmp = _end_grad_terms(sig, yt[mask], _sl(dist, mask))
+            q_s, tmp = _end_terms(sig, yt[mask], _sl(dist, mask))
+            Q += ws * q_s
             g_eff[c] += ws * _logit_grad(Y[mask], eff[c], tmp)
             g_basal[s_idx] += ws * np.sum(tmp)
 
@@ -1630,8 +1624,8 @@ def qut_mixed(y_samples, y_prot, y_prot_mod, y_target, ref_network, G, g, n_samp
               weight_flow_matching=weight_flow_matching, final=0)
     null = dict(kw, ys=y_samples, yp=y_prot, ypm=y_prot_mod, yt=y_target, weights_samples=weights)
     bounds = [(0.0, 0.0)] * G + [(-_basal_bound(G), _basal_bound(G))] * n_samples
-    X0 = minimize(partial(objective, **null), _null_start(G, n_samples, y_samples, y_target),
-                  jac=partial(grad_theta, **null),
+    X0 = minimize(partial(objective_grad, **null), _null_start(G, n_samples, y_samples, y_target),
+                  jac=True,
                   method="L-BFGS-B", bounds=bounds, options=_lbfgs_options(G)).x
     w_fm = _fm_weight(weight_flow_matching, y_prot_mod)
     ws_of = {s: np.mean(weights) / weights[i] for i, s in enumerate(us)}
@@ -1942,7 +1936,8 @@ def refine_inference(y_samples, y_prot, y_prot_mod, y_target, inter, basal, thet
     loss_fn = partial(objective_refinement, **kw)
     grad_fn = partial(grad_correc, **kw)
 
-    res = minimize(loss_fn, X_flat, jac=grad_fn, method="L-BFGS-B", bounds=bounds, options=_lbfgs_options(G))
+    res = minimize(partial(objective_refinement_grad, **kw), X_flat, jac=True, method="L-BFGS-B", bounds=bounds,
+                   options=_lbfgs_options(G))
     _log_failure(res, loss_fn(X_flat), 'refining')
 
     if check_gradient:
@@ -1998,8 +1993,8 @@ def qut_garrote(y_samples, y_prot, y_prot_mod, y_target, inter, basal, G, g, n_s
     # Null basals: invariant under within-sample permutations of the target
     null = dict(kw, ypm=y_prot_mod, yt=y_target)
     bb = _basal_bound(G)
-    X0 = minimize(partial(objective_refinement, **null), np.r_[np.zeros(G), np.asarray(basal, dtype=float)],
-                  jac=partial(grad_correc, **null), method="L-BFGS-B",
+    X0 = minimize(partial(objective_refinement_grad, **null), np.r_[np.zeros(G), np.asarray(basal, dtype=float)],
+                  jac=True, method="L-BFGS-B",
                   bounds=[(0.0, 0.0)] * G + [(-bb, bb)] * n_samples, options=_lbfgs_options(G)).x
     ys = np.asarray(y_samples).astype(int)
     groups = [np.flatnonzero(ys == s) for s in np.unique(ys)]
@@ -2035,8 +2030,8 @@ def qut_penalty(y_samples, y_prot, y_prot_mod, y_target, ref_network, G, g, n_sa
     # Null basals: invariant under within-sample permutations of the target
     bounds = [(0.0, 0.0)] * G + [(-_basal_bound(G), _basal_bound(G))] * n_samples
     null = dict(kw, ypm=y_prot_mod, yt=y_target)
-    X0 = minimize(partial(objective, **null), _null_start(G, n_samples, y_samples, y_target),
-                  jac=partial(grad_theta, **null),
+    X0 = minimize(partial(objective_grad, **null), _null_start(G, n_samples, y_samples, y_target),
+                  jac=True,
                   method="L-BFGS-B", bounds=bounds, options=_lbfgs_options(G)).x
     ys = np.asarray(y_samples).astype(int)
     groups = [np.flatnonzero(ys == s) for s in np.unique(ys)]
@@ -2093,8 +2088,8 @@ def qut_conditions(y_samples, y_prot, y_prot_mod, y_target, ref_network, G, g, n
     null = dict(kw, ys=y_samples, yp=y_prot, ypm=y_prot_mod, yt=y_target, weights_samples=weights,
                 constrain_basal_uniform=constrain_basal_uniform, basal_free_mask=basal_free_mask)
     bounds = [(0.0, 0.0)] * G + [(-_basal_bound(G), _basal_bound(G))] * n_samples
-    X0 = minimize(partial(objective, **null), _null_start(G, n_samples, y_samples, y_target),
-                  jac=partial(grad_theta, **null),
+    X0 = minimize(partial(objective_grad, **null), _null_start(G, n_samples, y_samples, y_target),
+                  jac=True,
                   method="L-BFGS-B", bounds=bounds, options=_lbfgs_options(G)).x
     groups = [np.flatnonzero(ys == s) for s in us]
     rng = np.random.default_rng(1000 * g + len(y_target))
@@ -2147,15 +2142,16 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
     network_cost: data term of the fit, 'ce' (cross-entropy), 'euclidean' (2 (sigma - target)^2) or 'ordinal'
     (ordinal_cost, central mode of each sample in ordinal_mid (n_samples,) or (1,)), QUT included.
     network_likelihood: on the rows with a real cell, the negative log-likelihood of its counts under the prior
-    exp(-kappa C) of that cost on the levels (_lik_terms: the exact M-step; the cost itself on the rows without real
+    exp(-kappa C) of that cost on the levels (lik_terms: the exact M-step; the cost itself on the rows without real
     cell and on the nodes of the flow matching), the QUT permuting the counts with the targets.
     level_data (A (N, L), tau_l (N, L), kappa (N,), obs (N,)) of the rows, with network_likelihood: A the
     log-likelihoods of the counts at the levels of the rows with a real cell (obs), 0 at the levels of the gene in
     the sample of the other rows (-inf beyond), whose level is that of their target (onehot_levels), as on the nodes.
     ordinal_u: (u1, u2) (N,) warped targets of the ordinal cost of the rows (soft targets: their expectations under
     the posteriors of the levels, E_q[T_k(tau_l)], the M-step of the EM), None: the warps of the targets.
-    network_balance: rows weighted by 1 / frequency of their main mode in their sample (balance_weights; transition
-    levels per interval of each sample in balance_transit (n_samples,) or None), QUT included.
+    network_balance: exponent gamma in [0, 1] (False: none, True: 1): rows weighted by 1 / frequency^gamma of their main
+    mode in their sample (balance_weights; transition levels per interval of each sample in balance_transit
+    (n_samples,) or None), QUT included.
     mixed: (tau2, tau2_basal) of the mixed model (core_inference_mixed), with cond = patient of each sample; replaces
     condition_pen, constrain_basal_uniform and alpha, and adds the statistics of its variances as a sixth element.
     dist: DistTerm of the end-state term (weight_network_distribution) or None; the sparsity levels (QUT) are those of
@@ -2200,17 +2196,23 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
             if ordinal_u is None else ordinal_u  # soft targets: expected warped targets of the levels
         y_target = with_targets(y_target, mid=mid, u1=u1, u2=u2)
     if lik:
-        ll, tl, kap, obs = level_data
-        y_target = with_targets(y_target, ll=ll, tl=tl, kap=kap, obs=obs)
+        ll, tl, kap, obs = (np.ascontiguousarray(a, dtype=float) for a in level_data)
+        C = ordinal_consts(np.ascontiguousarray(mid)) if network_cost == 'ordinal' else np.zeros((0, 9))
+        lu1, lu2, lent = lik_levels(tl, np.isfinite(ll).astype(float), cost_code(network_cost), C)  # levels, once
+        y_target = with_targets(y_target, ll=ll, tl=tl, kap=kap, obs=obs, lu1=lu1, lu2=lu2, lent=lent)
     if network_balance:
         if mixed is not None:
             raise ValueError("fit_network_balance is not supported with mixed_effect_model_conditions")
-        y_target = balance_weights(y_target, y_samples, ks, balance_transit)
+        y_target = balance_weights(y_target, y_samples, ks, balance_transit, float(network_balance))
     if y_prot_mod is not None:  # targets in force at the flow-matching nodes
         lo, hi = np.asarray(kb[..., 0]), np.asarray(kb[..., 1])  # scalars, or one per row (per-sample mixtures)
         lo, hi = (lo[:, None], hi[:, None]) if lo.ndim else (lo, hi)
         y_prot_mod = PathNodes(y_prot_mod.nodes, y_prot_mod.weights, y_prot_mod.kon,
                                sigmoid_target(y_prot_mod.kon, lo, hi))
+        if network_cost == 'ordinal':  # warped targets of the nodes, computed once
+            tn = np.ascontiguousarray(y_prot_mod.targets, dtype=float)
+            w1, w2 = ordinal_targets(tn.ravel(), np.repeat(mid, tn.shape[1]))
+            y_prot_mod.targets = with_targets(tn, u1=w1.reshape(tn.shape), u2=w2.reshape(tn.shape))
     C = 1 if cond is None else int(np.max(cond)) + 1
     n_rows = C * G   # interaction entries of theta
 

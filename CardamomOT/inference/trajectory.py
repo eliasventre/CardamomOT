@@ -6,7 +6,7 @@ Core functions for the inference of trajectories, mainly used in loop_trajectori
 import numpy as np
 import numba
 from numba import njit, prange
-from .network import net_cost, ordinal_cost, ordinal_cost_w, lik_cost_genes, cost_any, sigmoid_amplitudes, sigmoid_target, gene_weights
+from .network import net_cost, ordinal_consts, ordinal_targets_c, ordinal_terms, lik_levels, lik_terms, best_loglik, cost_any, sigmoid_amplitudes, sigmoid_target, gene_weights
 from .sigma import sigma_pairs, kon_matrix as kon_ref_vector  # noqa: F401 (kon_ref_vector: public name)
 from .sampling import stratified_choice
 
@@ -274,7 +274,7 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
                             g_active=np.zeros(0), spec=None, mem_frac=np.zeros(0),
                             mem_w=np.zeros((0, 0)), net_mode=0, net_mid=np.zeros(0), lik_ll=np.zeros((0, 0, 0)),
                             lik_tl=np.zeros((0, 0, 0)), lik_kap=np.zeros((0, 0)),
-                            tau_end2=np.zeros((0, 0))) -> np.ndarray:
+                            tau_end2=np.zeros((0, 0)), lik_ok=np.zeros((0, 0, 0))) -> np.ndarray:
     """
     OT cost between n1 trajectory ends and n2 real cells: w A + (1 - w) [(1 - 1/G) B + (1/G) P], with
     A = |Δ mRNA s1|² (mRNA in kon units, as the modes and proteins: k_z / k1 at the mean of mode z, up to the
@@ -289,10 +289,13 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
     modes net_mid (G,)) between the sigmoid of the network at the end states and tau_end (n2, G), the sigmoid targets
     of the real cells (sigmoid_target), summed over the genes with the weights w_genes (G,); ordinal cost with
     tau_end2 (n2, G) given: tau_end and tau_end2 are the warped targets (u1, u2) of the real cells (soft targets:
-    expectations under their posteriors, ordinal_cost_w). lik_ll (n2, G, L) given
+    expectations under their posteriors, ordinal_cost_w); otherwise the warps of tau_end, computed once per call
+    with the constants of the warps of each gene. lik_ll (n2, G, L) given
     (fit_likelihood 'network+ot'): the network term is instead the likelihood of the counts of each real cell under
     the prior exp(-kappa C) of the cost of code net_mode on its levels, at the sigma of the end state
-    (lik_cost_genes: log-likelihoods lik_ll at the levels lik_tl (n2, G, L), precisions lik_kap (n2, G)).
+    (lik_terms, shifted by the best log-likelihood of each gene: log-likelihoods lik_ll at the levels lik_tl (n2, G,
+    L) of the mask lik_ok (n2, G, L) (1: level of the gene; lik_ll finite on it), precisions lik_kap (n2, G); the
+    targets of the levels computed once per call, lik_levels).
     d0 (G,) given: end proteins from the mRNA bridges (prot_bridge_end), mode_init / mode_end being then the kon levels
     of the modes and the mRNA rna * s1 * rna_to_x in the same units; empty: find_next_prot on shrunk modes. mrna_dil
     (mrna_dilution, with b_init / b_end): mRNA of the bridges relaxing at d0 + b, switched at birth_alpha as the protein
@@ -322,6 +325,36 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
     kon_rna_init = vect_rna_init * s1
 
     weight_init: float = weight_fixed if weight_fixed >= 0 else (n_iter <= intensity_prior) * (1 / n_iter)**(1 - 1/n_iter)
+
+    # Computed once, before the parallel loop (arrays allocated unconditionally: a parfor may read the first
+    # definition of an array redefined in a branch). Ordinal cost: constants of the warps of each gene (net_mid,
+    # unused for the other costs) and warped targets of the real cells (u1, u2)
+    ord_c = ordinal_consts(np.ascontiguousarray(net_mid))
+    n_ord = n2 if net_mode == 2 and lik_ll.shape[0] == 0 else 0
+    u1_end, u2_end = np.zeros((n_ord, G)), np.zeros((n_ord, G))
+    for j in range(n_ord):
+        if tau_end2.shape[0] > 0:  # soft targets: their expected warps
+            u1_end[j], u2_end[j] = tau_end[j], tau_end2[j]
+        else:
+            w1, w2 = ordinal_targets_c(np.ascontiguousarray(tau_end[j]), ord_c)
+            u1_end[j], u2_end[j] = w1, w2
+    # Likelihood: targets of the levels of the real cells and their best log-likelihoods (shift >= 0)
+    n_lik, n_lev = lik_ll.shape[0], lik_ll.shape[2]
+    lik_u1, lik_u2, lik_ent = np.zeros((n_lik, G, n_lev)), np.zeros((n_lik, G, n_lev)), np.zeros((n_lik, G, n_lev))
+    lik_best = np.zeros(n_lik)
+    for j in range(n_lik):
+        a1, a2, a3 = lik_levels(np.ascontiguousarray(lik_tl[j]), np.ascontiguousarray(lik_ok[j]), net_mode, ord_c)
+        lik_u1[j], lik_u2[j], lik_ent[j] = a1, a2, a3
+        lik_best[j] = np.sum(w_genes * best_loglik(np.ascontiguousarray(lik_ll[j]), np.ascontiguousarray(lik_ok[j])))
+
+    # mRNA memory read before the parallel loop: inside it, the invariant mem_w[0] and mem_frac[0] would be hoisted out
+    # of their conditions (out of bounds without memory). single: one node of weight 1 (late_mrna_nodes = 1)
+    n_mem = mem_frac.shape[0]
+    mem_w0, f0 = np.zeros(G), np.zeros(G)
+    if n_mem > 0:
+        mem_w0[:] = mem_w[0]
+        f0[:] = mem_frac[0]
+    single = n_mem == 1 and np.max(mem_w0) == 0.0
 
     for i in prange(n1):  # parallelize cell-by-cell
 
@@ -375,25 +408,23 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
         kind = 0 if bridge else (1 if b_end.shape[0] == n2 else 2)
 
         # --- Terms of the cost; network term = cross-entropy on the sigmoid of the genes, weighted by w_genes ---
-        single = mem_frac.shape[0] == 1 and np.max(mem_w[0]) == 0.0
         if single:  # single node of weight 1 (late_mrna_nodes = 1): sigma at the lagged proteins only
             prot_q = np.empty((n2, G + ns))
             prot_q[:, :ns] = stim_vals * scale_proteins
-            f = np.full(G, mem_frac[0])
             for j in range(0, n2):
-                prot_q[j, ns:] = _pair_state(f, kind, d1, d0_i, d0_end_i[j], d1_i, d1_end_i[j], prot_init_i,
+                prot_q[j, ns:] = _pair_state(f0, kind, d1, d0_i, d0_end_i[j], d1_i, d1_end_i[j], prot_init_i,
                                              kon_rna_init_i * rna_to_x, kon_rna_end[j] * rna_to_x, mode_init[i],
                                              mode_init_i, mode_end[j], alpha_i, alpha_b_i[j], delta_t, prot_end_i[j],
                                              rna_init_i, vect_rna_end[j], c_i, s1)
             sigma = sigma_pairs(basal, inter, prot_q, spec)
         else:
             sigma = sigma_pairs(basal, inter, prot_full_i, spec)
-        if mem_frac.shape[0] > 0 and not single:
+        if n_mem > 0 and not single:
             # sigma averaged along the mRNA memory of each target (nodes of the same bridge / flow)
-            sig_bar = mem_w[0] * sigma[:, ns:, 1]
+            sig_bar = mem_w0 * sigma[:, ns:, 1]
             prot_q = np.empty((n2, G + ns))
             prot_q[:, :ns] = stim_vals * scale_proteins
-            for q in range(mem_frac.shape[0]):
+            for q in range(n_mem):
                 f = np.full(G, mem_frac[q])
                 for j in range(0, n2):
                     prot_q[j, ns:] = _pair_state(f, kind, d1, d0_i, d0_end_i[j], d1_i, d1_end_i[j], prot_init_i,
@@ -408,14 +439,12 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
             diff_rna = gmask * (kon_rna_end[j] - kon_rna_init_i)
             cost_rna[i, j] = np.sum(diff_rna * diff_rna)
             if lik_ll.shape[0] > 0:
-                cost_net[i, j] = np.sum(w_genes * lik_cost_genes(np.ascontiguousarray(sigma[j, ns:, 1]), lik_ll[j],
-                                                                 lik_tl[j], lik_kap[j], net_mode, net_mid))
-            elif net_mode == 2 and tau_end2.shape[0] > 0:  # expected warped targets (u1 = tau_end, u2 = tau_end2)
-                cost_net[i, j] = np.sum(w_genes * ordinal_cost_w(np.ascontiguousarray(sigma[j, ns:, 1]), tau_end[j],
-                                                                 tau_end2[j], net_mid))
-            elif net_mode == 2:
-                cost_net[i, j] = np.sum(w_genes * ordinal_cost(np.ascontiguousarray(sigma[j, ns:, 1]), tau_end[j],
-                                                               net_mid))
+                cost_net[i, j] = lik_best[j] + np.sum(w_genes * lik_terms(
+                    np.ascontiguousarray(sigma[j, ns:, 1]), lik_ll[j], lik_ok[j], lik_u1[j], lik_u2[j], lik_ent[j],
+                    lik_kap[j], net_mode, ord_c, False)[0])
+            elif net_mode == 2:  # warped targets of the real cells
+                cost_net[i, j] = np.sum(w_genes * ordinal_terms(np.ascontiguousarray(sigma[j, ns:, 1]), u1_end[j],
+                                                                u2_end[j], ord_c, False)[0])
             else:
                 cost_net[i, j] = np.sum(w_genes * net_cost(sigma[j, ns:, 1], tau_end[j], net_mode))
             cost_prot[i, j] = np.sum(diff_prot * diff_prot)

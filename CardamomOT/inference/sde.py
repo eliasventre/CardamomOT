@@ -367,7 +367,7 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                          has_t=torch.tensor(has.astype(float), dtype=f64)))
 
     def warp_t(x, m, sa, sb):
-        """_warp of the ordinal cost (network.py) in torch, values only (differentiable)."""
+        """Warp of the ordinal cost (ordinal_consts, network.py) in torch, values only (differentiable)."""
         F = lambda y: sa * y + (sb - sa) * ORD_H * torch.nn.functional.softplus((y - m) / ORD_H)
         return (F(x) - F(torch.zeros_like(x))) / (F(torch.ones_like(x)) - F(torch.zeros_like(x)))
 
