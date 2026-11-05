@@ -494,6 +494,8 @@ def load_train_arrays(p, cardamom_dir, train_ids):
         print(f"[infer_test] Error: {', '.join(missing) or 'data_train.h5ad'} missing (rerun infer_network_structure)")
         sys.exit(1)
     train = {k: np.load(v) for k, v in paths.items()}
+    kappa_path = os.path.join(cardamom_dir, 'net_kappa.npy')  # kappa of the prior per (training sample, gene)
+    train['net_kappa'] = np.load(kappa_path) if os.path.exists(kappa_path) else None
     obs = ad.read_h5ad(train_path, backed='r').obs
     train['cell_times'] = obs['time'].to_numpy(dtype=float)
     if len(train['cell_times']) != train['basins_final'].shape[0]:

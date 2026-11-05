@@ -445,6 +445,12 @@ def main(argv):
     np.save(os.path.join(cardamom_dir, 'n_iter_inference'),
             np.array([ctx['n_iter_reg'], ctx['weight_init'], ctx['weight_prob'], ctx['reg_factor']], dtype=float))
     np.save(os.path.join(cardamom_dir, 'degradations'), model.d)
+    # Precision kappa of the network prior on the levels per (sample, gene) (infer_test, likelihood in the OT)
+    kappa_path = os.path.join(cardamom_dir, 'net_kappa.npy')
+    if getattr(model, 'net_kappa_samples', None) is not None:
+        np.save(kappa_path, model.net_kappa_samples)
+    elif os.path.exists(kappa_path):
+        os.remove(kappa_path)
     if model.observed_prot is not None:
         np.save(os.path.join(cardamom_dir, 'protein_scale'), model.protein_scale)
     if model.R_opt is not None:

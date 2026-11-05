@@ -29,14 +29,16 @@ from ..config import resolve_cell_type_obs, CELL_TYPE_OBS_KEYS
 from ..inference.trajectory import ks_of, s1_of, s1_rows, inter_of, birth_alpha, prot_bridge, prot_bridge_end
 from ..inference.mixture import (_compute_nu_with_temporal_constraint, fit_grid_mixture, grid_weights_fixed, high_mode_bound,
                                  mixture_criterion, transit_groups)
-from ..inference.network import cross_entropy, dist_term, _dist_loss_grad, learn_mixed_variances
+from ..inference.network import (cost_any, cost_code, cost_curvature, cost_gene_weights, null_deviance, dist_term,
+                                 _dist_loss_grad, learn_mixed_variances, ordinal_targets, ordinal_cost_w, lik_cost_any,
+                                 onehot_levels, lik_null_deviance)
 from ..inference.trajectory import kon_switch_fraction
 from ..inference.sigma import (SPEC_PHI, SPEC_LINK, PHI_IDENTITY, LINK_LOGISTIC, LINK_NAMES, phi_code, link_code,
                                default_spec, is_herbach, herbach_code, START_M, PHI_HERBACH,
                                edge_thresholds, reset_edge_thresholds)
 from ..inference.simulations import simulate_next_mrna_pdmp, ChromatinModel, chrom_gate, chrom_values, Simulation
 from ..inference import (inference_network_multi, active_regulators, PathProt, signed_floor, sigmoid_amplitudes,
-                        sigmoid_target, gene_weights,
+                        sigmoid_target,
                         minimal_repetition_choice, find_next_prot, find_next_prot_dilution, my_otdistance, count_errors,
                         kon_ref_vector, inference_alpha, inference_alpha_1thread,
                         NegativeBinomialMixtureEM, predict_resp,
@@ -292,8 +294,8 @@ class NetworkModel:
         self.proba_init = None
         self.basins = None   # basin (mode index) of each cell and gene, (N_cells, G_tot) int
         self.modes_soft = None  # one_hot_probas = False: expected mode of each cell and gene under the posteriors updated by the network (targets of the network fit and of the network term of the OT)
-        self._target_mix = 0.0  # one_hot_probas = False: weight of the EMD basins in the network targets (1 at the first iteration of fit_network, 0 from min_n_loops)
-        self.posteriors_soft = None # one_hot_probas = False: posteriors updated by the network (N_cells, G_tot, M), targets of the free-running fit (levels drawn from them)
+        self._target_mix = 0.0  # one_hot_probas = False: weight of the EMD basins in the network targets (1 at the first iteration of fit_network, 0 from 2 x min_n_loops)
+        self.posteriors_soft = None # one_hot_probas = False: posteriors updated by the network (N_cells, G_tot, M), targets of the free-running fit (mode expected under them)
 
         self.n_stimuli = n_stimuli
         self._stim_schedule = None
@@ -356,16 +358,17 @@ class NetworkModel:
         self.mixture_central_position = None # three modes: position sigma of the central mode between the extremes, fixed (0.5: the middle); None: learned in the M-step within [0.05, 0.95]
         self.max_grid_levels = 3 # 2 or 3: the mixture of each gene is the continuous model of the counts, NB of the burst frequency k_low + (k_high - k_low) sigma at the depth of the cell, sigma on two extreme modes and (3) a central mode at a position learned between them, with weights per time (fit_grid_mixture, from the modes of the initialization + hard_em + soft EM and from percentiles of the counts); its levels are the modes of the whole inference (basins, forcing, targets of the network); one mode against more is chosen per gene by BIC, two against three by mixture_selection_criterion, and the transitions between the modes (mixture_transit_nodes) by BIC.
         self.dispersion_max = 9.0 # NB mixture: cap of the rate c of the counts NB(k, c) (Fano factor 1 + 1 / c at least 1 + 1 / dispersion_max), applied while fitting (initialisation, CEM, soft EM, levels of the grid): Poisson-like genes would otherwise drift towards c -> infinity at fixed k / c
-        self.grid_network_precision_max = 100 # genes of more than two levels: upper bound of the precision kappa of the network prior on the levels in the basin updates, exp(-kappa KL(tau_l || sigma)) of width ~ sigma (1 - sigma) / kappa, kappa estimated per gene at each update by moment matching (mean sigma (1 - sigma) / mean (expected level - sigma)^2, at least 1 = the Bernoulli prior of two modes)
+        self.grid_network_precision_max = 100 # upper bound of the precision kappa of the network prior on the levels in the basin updates (kappa_estimation), estimated per sample and gene at each update for every gene of two levels or more, at least 1
+        self.kappa_estimation = 'moments' # precision kappa of the network prior on the levels (basin updates, score 'marginal', fit_likelihood), per sample and gene, every gene of two levels or more included (a tempered Bernoulli for two levels), within [1, grid_network_precision_max]: 'moments' = moment matching, exp(-kappa C) taken as locally Gaussian (mean (1 / C'') / mean (level - sigma)^2; underestimates kappa for the ordinal prior); 'likelihood' = the kappa maximising the likelihood of the counts of the cells under the prior at the current sigma, sum_i log sum_l exp(ll_il) p(l | sigma_i; kappa) (grid in log kappa)
 
         ## Basins of the cells (EM of fit_network)
-        self.one_hot_probas = True # basin of each cell (forcing of the trajectories) = mass-constrained assignment (EMD) of the mixture posteriors under the mode masses, then of the costs with the network term (ramped, weighted per gene) in fit_network, in both cases; True: network fit on these basins (classification EM); False: network fit on the expected modes under the posteriors updated by the network, entropic OT of regularization 1 under the same masses with the network term at full weight (E-step: posterior x network prior x mass factors), the targets going from the EMD basins at the first iteration to these expected modes at min_n_loops
-        self.weight_network_distribution = 0.1 # one_hot_probas = False, targets of more than two levels: weight of the distribution term of the network fit and of the stopping error, sum over (sample, time) of sum_i (sigma_(i) - q_i)^2 (sorted sigmas against the quantiles of the levels under the mean posterior of the cells: 1-D Wasserstein-2), so that the network keeps the spread of the targets and not only their mean per cell; ~2 x the weight of the cross-entropy near sigma = 0.5; 0: not computed
+        self.one_hot_probas = True # basin of each cell (forcing of the trajectories) = mass-constrained assignment (EMD) of the mixture posteriors under the mode masses, then of the costs with the network term (ramped, weighted per gene) in fit_network, in both cases; True: network fit on these basins (classification EM); False: network fit on the expected modes under the posteriors updated by the network, entropic OT of regularization 1 under the same masses with the network term at full weight (E-step: posterior x network prior x mass factors), the targets going from the EMD basins at the first iteration to these expected modes at 2 x min_n_loops
+        self.weight_network_distribution = 0 # one_hot_probas = False, targets of more than two levels: weight of the distribution term of the network fit and of the stopping error, sum over (sample, time) of sum_i (sigma_(i) - q_i)^2 (sorted sigmas against the quantiles of the levels under the mean posterior of the cells: 1-D Wasserstein-2), so that the network keeps the spread of the targets and not only their mean per cell; ~2 x the weight of the cross-entropy near sigma = 0.5; 0: not computed
 
         self.targets_accounting_late_mrna = False # True: the mRNA of a cell reflects its burst frequency over ~1 / d0 before the observation (d0 >= min_ratio x d1): every comparison of sigma with the mode of a cell (network fit, OT, basin updates, stopping error, score of the model learning, free-running fit, kon_theta, simulated counts) takes sigma along the memory of its mRNA (late_mrna_nodes); the forcing switches (alpha) when the network commits, delayed by the equivalent step of the mRNA when the forcing is the mRNA level (adaptive shrinkage, no mrna_bridge)
         self.late_mrna_nodes = 4 # with targets_accounting_late_mrna, for the network fit, the stopping error, the basin updates and the score of the model learning: 1 = single lagged node per class of targets (late_mrna_classes): sigma at the proteins (1 - exp(-d0 dt)) / d0 before the state, the mean of the memory kernel truncated at the start of the interval; Q >= 2 = sigma averaged on Q nodes over the last min(interval, 5 / d0) hours with the weights d0 exp(-d0 (t - s)) of each target (mass before the window on the earliest node), Q + 1 evaluations of sigma. The OT, the free-running fit, kon_theta and the simulated counts, which evaluate sigma many times, always use the single lagged nodes
         self.late_mrna_classes = 3 # with targets_accounting_late_mrna: classes of the targets by d0 (equal sizes), each with its single lagged node (the mean lag of its genes): sigma of each target at the lag of its class, cost x classes of the single node
-        self.weight_flow_matching = 0.25 # weight of the flow-matching term of the network fits (end-state term: 1 - weight), ramped from 0 at the first iteration to this value at min_n_loops
+        self.weight_flow_matching = 0.4 # weight of the flow-matching term of the network fits (end-state term: 1 - weight), ramped from 0 at the first iteration to this value at min_n_loops
         self.flow_matching_nodes = 1 # flow matching: nodes in each interval around the switch a of the state (mean of the alphas of the genes that change mode): just after it (a + 0.1, at a when a >= 1/2), then equally spaced on [0, a] and [a, 1] alternately; equally weighted, the regulators at their protein states there and the target at its kon in force (mode of the start state before its switch alpha, of the end state after it)
                    
         # Per-cell sequencing depth
@@ -380,6 +383,11 @@ class NetworkModel:
         ## Infer network (single network: kon = sigmoid between the lowest and the highest mode of each gene)
         # Loop for the inference
         self.min_n_loops = 10 # minimal number of iterations in inference loops
+        self.fit_ot_cost = 'ordinal' # network term of the OT cost of the trajectories: 'ce' = cross-entropy KL(tau || sigma), genes weighted by w = 1 - k_low / k_high; 'euclidean' = 2 (sigma - tau)^2 (uniform resolution of the levels, while the cross-entropy resolves the extreme levels finely and the intermediate ones coarsely), genes weighted by w^2 (kon in units of the highest mode); 'ordinal' = cross-entropy through two monotone warps of [0, 1] sending the central main mode (three main modes) to 1 - 0.05 and 0.05, so that it is resolved as finely as the extreme modes (the cross-entropy with two main modes), genes weighted by w; the stopping errors use the same cost and gene weights
+        self.fit_network_cost = 'ordinal' # data term of the network fit (and its QUT, and the 'ce' score of model_learning_score) and network prior on the levels of the basin updates (and the 'marginal' score), so that the EM is coherent: 'ce' = cross-entropy (logistic regression on tau, convex), prior exp(-kappa KL(tau_l || sigma)) ~ Binomial(kappa tau_l; kappa, sigma) (Bernoulli of sigma for two levels); 'euclidean' = 2 (sigma - tau)^2 (non-convex), Gaussian prior exp(-2 kappa (tau_l - sigma)^2); 'ordinal' = the ordinal cost of fit_ot_cost (non-convex), prior exp(-kappa ordinal(sigma, tau_l)), soft targets the expected warped levels; 'ordinal' not with mixed_effect_model_conditions
+        self.fit_likelihood = False # False: the network fit on the targets (expected levels: EM with an approximate M-step beyond two levels); 'network': on the states with a real cell, the negative log-likelihood of its counts under the prior of fit_network_cost with the kappa of the basins (exact M-step: the 'marginal' score of the model learning), the cost of fit_network_cost on the other states and on the nodes of the flow matching; 'network+ot': also the network term of the OT of the trajectories (likelihood of the counts of each real cell at the end state of each trajectory; then the stopping errors too, and the gene weights of the OT in fit_network_cost); the costs of fit_network_cost / fit_ot_cost until min_n_loops; not with mixed_effect_model_conditions
+        self.fit_network_balance = False # network fit (and its QUT): each state weighted by 1 / frequency of its main mode (nearest main mode of the mixture, a transitional state counting for its nearest one) in its sample, frequency floored at 0.02, mean weight 1 per sample, so that a small population weighs as much as a large one (not the maximum likelihood; not with mixed_effect_model_conditions)
+        self.ot_gene_weight_schedule = True # gene weights of the network term of the OT and of the EMD basins always go from 1 - k_low / k_high (squared for the euclidean OT, iteration 1) to equal weights (min_n_loops), geometric interpolation, same sum; True: then, for the OT only, to 1 / null deviance of the gene in fit_ot_cost (2 x min_n_loops; mean cost of the best constant prediction over the basins of the real cells of the sample, 2 Var(tau) for the euclidean cost, floored at that of a gene of std 0.05: each gene weighs as the fraction of its deviance explained, a population missed costing the same whatever its share), the loop not stopping before; False: equal weights from min_n_loops on. The free-running fit of the refine uses the weights of the end of this schedule (on the hard modes of each sample, in its cost sde_mode_cost)
         self.count_max = 5 # Stopping criteria
         self.max_iter = 40 # max iteration for main loop
         # Trajectory inference with OT
@@ -423,9 +431,9 @@ class NetworkModel:
         # GRN: regulation function sigma of the burst frequency
         self.model_learning_grn = True # True: the family of the GRN regulation function sigma of each target gene is selected in fit_network among model_learning_link x model_learning_phi, and sigma_spec_grn (saved as cardamomOT/sigma_spec_grn.npy) is used by every later step; False: logistic of a linear input for every gene (default model, sigma_spec_grn ignored)
         self.model_learning_link = ['logistic'] # with model_learning_grn: candidate links of sigma (logistic only for now)
-        self.model_learning_phi = ['herbach'] # with model_learning_grn: candidate transformations of the regulators, phi(P) = P ('identity', sigmoid of a linear input, not a default candidate: within 0.09-0.14 of the Herbach type of m = 2 on [0, Pbar], and unbounded beyond Pbar), log(1 + P / kappa) (Hill type, graded) or the Herbach type (saturating, 0 at P = 0, theta at saturation, Hill transition of coefficient m around the threshold s halfway between its low and high protein levels; form set by model_learning_herbach_form; one candidate per m of model_learning_herbach_m); a single link and phi (and m): that family is forced for every gene and the whole pipeline (no selection, no extra cost), e.g. ['logarithm'] for Hill functions; 'logarithm' is not a default candidate, as it matches the Herbach type of m = 1 on [0, Pbar] within 0.04-0.08
+        self.model_learning_phi = ['identity','herbach'] # with model_learning_grn: candidate transformations of the regulators, phi(P) = P ('identity', sigmoid of a linear input, not a default candidate: within 0.09-0.14 of the Herbach type of m = 2 on [0, Pbar], and unbounded beyond Pbar), log(1 + P / kappa) (Hill type, graded) or the Herbach type (saturating, 0 at P = 0, theta at saturation, Hill transition of coefficient m around the threshold s halfway between its low and high protein levels; form set by model_learning_herbach_form; one candidate per m of model_learning_herbach_m); a single link and phi (and m): that family is forced for every gene and the whole pipeline (no selection, no extra cost), e.g. ['logarithm'] for Hill functions; 'logarithm' is not a default candidate, as it matches the Herbach type of m = 1 on [0, Pbar] within 0.04-0.08
         self.herbach_threshold_sd = 1.0 # exact Herbach targets: the threshold s_ij of each edge is learned in the refinement of the network fits (Gaussian prior of this sd on log s_ij around the threshold s_j of the regulator, s_ij within [0.01, 2] x Pbar), a lower threshold lifting the repression bound -log(1 + (Pbar / s_ij)^m) of a fixed one; self-regulations keep theirs; None / 0: thresholds fixed at s_j. The approximate form keeps s_j (linear in theta, its threshold would mimic m)
-        self.model_learning_herbach_form = ['approximate', 'exact'] # with model_learning_grn: forms of the Herbach candidates, 'approximate' = linear in theta, phi(P) = Pbar h(P / s) / h(Pbar / s), h(x) = x^m / (1 + x^m) (theta times a Hill step: the contribution of Herbach et al. to first order in theta), or 'exact' = psi(t, P / s) = log((1 + e^t (P/s)^m) / (1 + (P/s)^m)), nonlinear in theta (theta Pbar = its effect at the high mode); the first form is the base form, with which m is selected in [model_learning_start, model_learning_freeze); with a second form, a form window of the same length follows, in which each target compares its base family (m*) with the second form at m* (and its neighbours with model_learning_form_neighbours) (BIC of the learned thresholds, model_learning_threshold_bic); the current family of each target sets sigma everywhere
+        self.model_learning_herbach_form = ['approximate'] # with model_learning_grn: forms of the Herbach candidates, 'approximate' = linear in theta, phi(P) = Pbar h(P / s) / h(Pbar / s), h(x) = x^m / (1 + x^m) (theta times a Hill step: the contribution of Herbach et al. to first order in theta), or 'exact' = psi(t, P / s) = log((1 + e^t (P/s)^m) / (1 + (P/s)^m)), nonlinear in theta (theta Pbar = its effect at the high mode); the first form is the base form, with which m is selected in [model_learning_start, model_learning_freeze); with a second form, a form window of the same length follows, in which each target compares its base family (m*) with the second form at m* (and its neighbours with model_learning_form_neighbours) (BIC of the learned thresholds, model_learning_threshold_bic); the current family of each target sets sigma everywhere
         self.model_learning_form_neighbours = False # with model_learning_grn, form window: the second Herbach form is tried at the m* of the target only (False) or also at the neighbours of m* in model_learning_herbach_m (True: up to two more fits per update)
         self.model_learning_herbach_m = [1, 2, 4] # with model_learning_grn: Hill coefficients m of the Herbach candidates (one candidate family each, m of the target selected with its family)
         self.model_learning_kappa = 0.1 # with model_learning_grn: kappa of every regulator (phi = log) relative to the protein level Pbar of its highest mode (scale_proteins); phi is normalised so that phi(Pbar) = Pbar
@@ -445,32 +453,36 @@ class NetworkModel:
         self.use_temporal_degradations = 1 # If so, compute temporal degradation rates for simulations ?
         self.degradation_rates_per_condition = True # with network conditions: network, d1, d0 / d1 and the scale of theta refined separately per condition (its samples and genes, its network as rappel; stored per sample); False: one shared fit from the mean network (forced True with select_genes_per_condition)
         self.fit_scale_theta = True # refine: scale of theta per target gene (and interval with use_temporal_degradations) learned in the free-running fit (within [1/5, 5]); False: scale 1
-        self.sde_free_theta = False # refine with refine_theta_with_sde: network and basal learned from scratch (start 0, every entry with its sign, no rappel; sparsity by the L1 at the QUT with sde_qut), windows from the first observed time only over the whole time course (only the initial proteins are used): as if everything was learned from the output of infer_mixture
-        self.sde_adaptive_lasso = True # with sde_free_theta and sde_qut: second pass, adaptive lasso (weights 1 / |theta| of the first pass, on its support) at its QUT per target, from the null model of that target given the first pass (its column of theta at 0, its basal refitted)
+        self.sde_unitary_for_protonly = True # refine with the protein-only PDMP (simulation_stochastic, not simulation_mrnas_direct) on proteins reconstructed with the mRNA (inference_mrnas_direct or mrna_bridge): True = unitary proteins (modes, literature d1_eff) and the network refitted on them, as the ODE; False = the proteins of fit_network rescaled to the protein-only model (one factor per gene), the network of fit_network in the same units (rows of the regulators x their factor; refitted with sde_refit_network)
+        self.sde_refit_network = False # refine with refine_theta_with_sde: True = network refitted (final = 1) on the reference proteins of the free-running fit (unitary or rescaled) before it; False = the network of fit_network (rows of the regulators rescaled with the proteins), refined in it
+        self.sde_free_theta = False # refine with refine_theta_with_sde: network and basal learned from scratch (start 0, every entry with its sign, no rappel; L1 on theta at the QUT), windows from the first observed time only over the whole time course (only the initial proteins are used): as if everything was learned from the output of infer_mixture
+        self.sde_adaptive_lasso = False # with sde_free_theta: second pass, adaptive lasso (weights 1 / |theta| of the first pass, on its support) at its QUT per target, from the null model of that target given the first pass (its column of theta at 0, its basal refitted, its observations permuted)
+        self.sde_qut_reps_adaptive = 10 # with sde_adaptive_lasso: replicates of the null models of the targets given the first pass (QUT of the second pass)
+        self.sde_qut_cells = 512 # free-running fit with sde_free_theta: QUT on a fixed subsample of sde_qut_cells trajectories per window and observed cells per time, its level rescaled by sqrt(sde_qut_cells / n) (n the median number of observed cells per time); None = all cells
         self.refine_theta_with_sde = True # refine: starting network = that of fit_network, refitted (final = 1) on the unitary trajectories on the modes when those are the reference proteins (ODE, and protein-only PDMP with proteins reconstructed with the mRNA); True = that network refined (support and signs kept) with d1, d0 / d1 and the scale of theta by the free-running fit of the simulation model (ODE / SDE) on the observed modes; False = that network fixed in that fit
         self.min_ratio = 1.01 # lower bound of d0 / d1: bursting regime, imposed on the literature rates at the start of fit_network / infer_test (with a warning), then kept by the refine
         self.max_ratio = 50.0 # upper bound of d0 / d1 in the refine and the simulations: beyond, the simulations are nearly deterministic and only slower
         # Free-running fit (ODE / SDE)
-        self.sde_qut = False # free-running fit with refine_theta_with_sde: L1 on theta - theta of fit_network at the quantile universal threshold (qut_level-quantile of the largest gradient per target at that network, on data drawn from the simulation model: parametric bootstrap), instead of the L2 rappel sde_lambda_theta on theta
         self.sde_epochs = 30 # free-running fit: optimizer steps per horizon of the curriculum (windows of 1, sde_horizon_growth, sde_horizon_growth^2, ... observed intervals of each sample, up to sde_max_horizon)
         self.sde_lr = 5e-2 # free-running fit: Adam learning rate of the network (theta, basal)
         self.sde_lr_rates = 1e-2 # free-running fit: Adam learning rate of the log rates (d1, d0 / d1) and of the log scale of theta
         self.sde_lr_decay = 1.0 # free-running fit: peak learning rates x sde_lr_decay at each new horizon of the curriculum (warm restarts)
         self.sde_lr_min_frac = 1.0 # free-running fit: cosine decay of the learning rates within each horizon, down to sde_lr_min_frac x the peak (1 = constant)
-        self.sde_lambda_theta = 0.1 # free-running fit: rappel of theta / basal towards the starting network (relative L2)
+        # free-running fit: theta anchored to the starting network by the relative L2 sde_lambda_theta (no L1); with sde_free_theta, L1 on theta at the QUT simulated by permutation (qut_level), no anchor; the basal from its starting value, without rappel
+        self.sde_lambda_theta = 0.1 # free-running fit (not with sde_free_theta): anchor of theta to the starting network, relative L2 sum (theta - theta_start)^2 / sum theta_start^2 on its support
         self.sde_lambda_rates = 1.0 # free-running fit: rappel of log d1, log(d1 / d0) and log scale towards their starting values (literature)
-        self.sde_mode_cost = 'ce' # free-running fit: 'ce' = entropic OT whose ground cost is the cross-entropy of fit_network between the simulated sigma and the observed modes; 'euclidean' = debiased Sinkhorn on the unit modes (simulated kon read on the grid of levels)
+        self.sde_mode_cost = None # free-running fit: None = fit_ot_cost; 'ce' / 'ordinal' = entropic OT whose ground cost is the network cost of fit_network (cross-entropy, or ordinal with the central modes) between the simulated sigma and the observed modes; 'euclidean' = debiased Sinkhorn on the unit modes (simulated kon read on the grid of levels)
         self.sde_kon_weight = 1.0 # free-running fit: weight of the term on the modes, and of the cross-entropy of the initial states against their modes
         self.sde_mrna_weight = 0.1 # free-running fit with simulation_mrnas_direct: weight of the debiased Sinkhorn on the normalised mRNA (refinement: the modes dominate)
-        self.sde_protein_weight = 0 # free-running fit: weight of the debiased Sinkhorn between the simulated proteins and the reference proteins at each reached observed time (trajectories of fit_network, unitary proteins for the ODE, or observed proteins), per gene in units of their standard deviation, relative to the term on kon; 0: kon (and mRNA) only
-        self.sde_bptt = 3 # free-running fit: truncated backpropagation, simulated states detached every sde_bptt intervals of a window (None = through the whole window)
+        self.sde_protein_weight = 0.0 # free-running fit: weight of the debiased Sinkhorn between the simulated proteins and the reference proteins at each reached observed time (trajectories of fit_network, unitary proteins for the ODE, or observed proteins), per gene in units of their standard deviation, relative to the term on kon; 0: kon (and mRNA) only
+        self.sde_bptt = 3 # with sde_free_theta (single window over the whole time course): truncated backpropagation, simulated states detached every sde_bptt intervals (None = through the whole window); never with the horizons of the pipeline (short windows from the reference proteins, whose late errors must reach the early dynamics)
         self.sde_n_sub = 10 # free-running fit: integration steps per interval
         self.sde_horizon_growth = 1 # free-running fit: geometric curriculum, each horizon (observed intervals) the previous one x sde_horizon_growth (at least + 1) up to sde_max_horizon; 1 = every horizon
-        self.sde_max_horizon = 6 # free-running fit: longest window of the curriculum, in observed intervals of each sample (a sample with fewer takes its whole time course); windows starting at every observed time, from the reference proteins (those of the starting network); with sde_free_theta: whole time course from the first observed time only
+        self.sde_max_horizon = 10 # free-running fit: longest window of the curriculum, in observed intervals of each sample (a sample with fewer takes its whole time course); windows starting at every observed time, from the reference proteins (those of the starting network); with sde_free_theta: whole time course from the first observed time only
         self.sde_windows = 10 # free-running fit: window starts drawn at each step (None = all; bounds the cost with many timepoints)
-        self.sde_batch_size = 256 # free-running fit: trajectories per sample and window at each step (and observed cells per time)
+        self.sde_batch_size = 128 # free-running fit: trajectories per sample and window at each step (and observed cells per time)
         # Within the inference loop (refine_in_loop)
-        self.refine_in_loop = False # True: in fit_network, between the network fit and alpha, refine_in_loop_epochs steps of the free-running fit of refine_network_degradations on its longest windows (model of the simulations: ODE, protein-only PDMP with simulation_stochastic, explicit mRNA with simulation_mrnas_direct): constant d1 (d1_eff) and d0 / d1 (rappel sde_lambda_rates towards the literature), no scale, the network too with refine_theta_with_sde; the rates (converted to the full d0, d1) then drive the trajectories
+        self.refine_in_loop = False # True: in fit_network, between the network fit and alpha, refine_in_loop_epochs steps of the free-running fit of refine_network_degradations on its longest windows (explicit mRNA with inference_mrnas_direct, mrna_bridge or simulation_mrnas_direct, else the model of the simulations: protein-only PDMP with simulation_stochastic, else ODE): constant d1 (d1_eff) and d0 / d1 (rappel sde_lambda_rates towards the literature), no scale, the network too with refine_theta_with_sde; the rates (converted to the full d0, d1) then drive the trajectories
         self.refine_in_loop_start = 3 # with refine_in_loop: first iteration of the updates
         self.refine_in_loop_period = 3 # with refine_in_loop: iterations between two updates (the last cycle is completed before stopping)
         self.refine_in_loop_epochs = 10 # with refine_in_loop: optimizer steps at each update (windows of sde_max_horizon only)
@@ -1440,28 +1452,324 @@ class NetworkModel:
         self.mixed_tau = (tau2, tau2_b)
         self._log_mixed_tau(verb)
 
-    def _penalty_kw(self):
-        """Penalties of the network fits (inference_network_multi)."""
+    def _penalty_kw(self, ks, y_real=None, y_kon=None, y_samples=None):
+        """Penalties and data term of the network fits (inference_network_multi; ks: mixtures of the fit, for the
+        central modes of the ordinal cost; y_real, y_kon, y_samples: real cell, target kon and sample index of each
+        state): fit_network_cost (ordinal cost with soft targets: the expected warped targets, _warped_targets) and,
+        with fit_likelihood after the ramp (_lik_on), the likelihoods of the levels of the real cells and the levels and
+        kappa of the samples (level_data)."""
+        cost = self.fit_network_cost
+        lev = getattr(self, '_lev_cells', None)
+        ok = lev is not None and y_real is not None and len(np.asarray(y_real)) and \
+            np.max(np.asarray(y_real)) < len(lev[0])
+        level_data, lik = None, False
+        if self._fit_likelihood() and ok and getattr(self, '_lik_on', False):
+            level_data = (lev[0], lev[1], self._net_kappa, y_real) + self._sample_levels(ks) + \
+                (self._kappa_samples(self._n_central(ks)),)
+            lik = True
+        ordinal_u = None
+        if cost == 'ordinal' and y_kon is not None and y_samples is not None:
+            ordinal_u = self._warped_targets(y_kon, y_real, y_samples, ks)
         return dict(qut_level=self.qut_level, qut_n_perm=self.qut_n_perm, network_ridge=self.network_ridge,
-                    network_relaxed=self.network_relaxed, herbach_threshold_sd=self.herbach_threshold_sd)
+                    network_relaxed=self.network_relaxed, herbach_threshold_sd=self.herbach_threshold_sd,
+                    network_cost=cost, network_balance=self.fit_network_balance, level_data=level_data,
+                    network_likelihood=lik, ordinal_u=ordinal_u,
+                    balance_transit=self._transit_counts(ks) if self.fit_network_balance else None,
+                    ordinal_mid=self._central_modes(ks, self._n_central(ks)) if cost == 'ordinal' else None)
+
+    def _warped_targets(self, y_kon, y_real, rows_samples, ks, lam=None):
+        """Expected warped targets (u1, u2) (N, G_tot) of the ordinal cost of the states (one_hot_probas = False):
+        E_q[T_k(tau_l)] over the levels of the real cell of each state under its posteriors updated by the network,
+        mixed with the warps of its EMD basin as the network targets (lam, default _target_mix; the ordinal cost is
+        linear in its warped targets: the M-step of the EM, where T_k(E_q[tau]) would take a cell split between the
+        extreme modes for the central one); states without real cell at the warps of their y_kon. rows_samples: sample
+        index of each state. None without posteriors (hard targets: the warps of the targets)."""
+        out = self._posterior_levels(y_kon, y_real, rows_samples, ks)
+        if out is None:
+            return None
+        P, lev = out
+        ks = np.asarray(ks, dtype=float)
+        rs = np.asarray(rows_samples, dtype=int)
+        kb = sigmoid_amplitudes(ks)
+        kb = kb[rs] if ks.ndim == 3 else kb[None]
+        tau_l = sigmoid_target(lev, kb[..., :1], kb[..., 1:])  # (N, G, L)
+        mid = self._central_modes(ks, self._n_central(ks))
+        mid = mid[np.minimum(rs, len(mid) - 1)]  # (N, G)
+        N, G, L = tau_l.shape
+        w1, w2 = ordinal_targets(np.ascontiguousarray(tau_l, dtype=float).ravel(),
+                                 np.ascontiguousarray(np.repeat(mid, L, axis=1), dtype=float).ravel())
+        u1, u2 = (P * w1.reshape(N, G, L)).sum(axis=2), (P * w2.reshape(N, G, L)).sum(axis=2)
+        lam = self._target_mix if lam is None else lam
+        if lam > 0:  # EMD basins of the real cells, as _soft_target_modes
+            r = np.flatnonzero(np.asarray(y_real) >= 0)
+            tb = sigmoid_target(self.modes[np.asarray(y_real)[r]], kb[r if len(kb) > 1 else [0], :, 0],
+                                kb[r if len(kb) > 1 else [0], :, 1])
+            b1, b2 = ordinal_targets(np.ascontiguousarray(tb, dtype=float).ravel(),
+                                     np.ascontiguousarray(mid[r], dtype=float).ravel())
+            u1[r] = lam * b1.reshape(len(r), G) + (1 - lam) * u1[r]
+            u2[r] = lam * b2.reshape(len(r), G) + (1 - lam) * u2[r]
+        return u1, u2
+
+    def _ot_net_targets(self, cell_idx, s_idx, ks, kb_s):
+        """Targets (tau_end, tau_end2) of the network term of the OT (my_otdistance) for the real cells cell_idx of
+        sample s_idx (bounds kb_s): the sigmoid targets of the network targets (soft with one_hot_probas = False) and no
+        second array, or with the ordinal cost on soft targets (_ordinal_soft) the expected warped targets (u1, u2)."""
+        ns = self.n_stimuli
+        if self._ordinal_soft():
+            u1, u2 = self._warped_targets(self.modes[cell_idx], cell_idx, np.full(len(cell_idx), s_idx), ks)
+            return np.ascontiguousarray(u1[:, ns:]), np.ascontiguousarray(u2[:, ns:])
+        kon = self.modes[cell_idx] if self.modes_soft is None else self._soft_target_modes(cell_idx)
+        return np.ascontiguousarray(sigmoid_target(kon[:, ns:], kb_s[ns:, 0], kb_s[ns:, 1])), np.zeros((0, 0))
+
+    def _ordinal_soft(self):
+        """True when the network cost of the OT and of the stopping errors is the ordinal cost on soft targets (expected
+        warped targets, _warped_targets; not with the likelihood)."""
+        return self._ot_metric() == 'ordinal' and not self._ot_lik() and not self.one_hot_probas and \
+            self.posteriors_soft is not None
+
+    def _sample_levels(self, ks):
+        """Positions tau (S, G_tot, M) of the levels of each gene in the samples 0..S-1 of ks (S = _n_central(ks)) and
+        log-likelihoods 0 on them / -inf beyond (S, G_tot, M), M that of the levels of the real cells (_lev_cells):
+        the levels of the states without real cell and of the nodes, whose level is that of their target."""
+        ks = np.asarray(ks, dtype=float)
+        n = self._n_central(ks)
+        M = self._lev_cells[0].shape[2] if getattr(self, '_lev_cells', None) is not None else ks.shape[-1]
+        k = np.stack([ks_of(ks, s) for s in range(n)])[..., :M]  # (S, G, M)
+        kb = sigmoid_amplitudes(k)
+        tl = sigmoid_target(k, kb[..., :1], kb[..., 1:])
+        n_lev = np.stack([self._n_levels(ks_of(ks, s)) for s in range(n)])
+        return tl, np.where(np.arange(M)[None, None, :] < n_lev[..., None], 0.0, -np.inf)
+
+    def _kappa_samples(self, n=1):
+        """Precision kappa (max(n, S), G_tot) of the network prior on the levels in each sample (constant over its
+        cells: _net_kappa of its first cell; 1 where it has no cell)."""
+        kap, cs = self._net_kappa, self._cell_s
+        out = np.ones((max(int(n), int(cs.max()) + 1 if len(cs) else 1), kap.shape[1]))
+        for s in np.unique(cs):
+            out[s] = kap[np.flatnonzero(cs == s)[0]]
+        return out
+
+    def _transit_counts(self, ks):
+        """Transition levels per interval (n, G_tot) of each gene in the samples 0..n-1 of ks (n = _n_central(ks)),
+        from transit_nodes (0: modes only)."""
+        n, G = self._n_central(ks), np.shape(ks)[-2]
+        tr = None if self.transit_nodes is None else np.asarray(self.transit_nodes, dtype=int)
+        if tr is None:
+            return np.zeros((n, G), int)
+        return np.stack([tr[min(s, len(tr) - 1)] if tr.ndim == 2 else tr for s in range(n)])
+
+    def _fit_likelihood(self):
+        """fit_likelihood: None (False), 'network' or 'network+ot'."""
+        v = self.fit_likelihood
+        if v in (False, None, 0, 'False', 'false', ''):
+            return None
+        if v not in ('network', 'network+ot'):
+            raise ValueError(f"fit_likelihood must be False, 'network' or 'network+ot', got {v!r}")
+        return v
+
+    def _ot_lik(self):
+        """True when the network term of the OT (and the stopping errors) is the likelihood of the counts."""
+        return self._fit_likelihood() == 'network+ot' and getattr(self, '_lik_on', False) and \
+            getattr(self, '_lev_cells', None) is not None
+
+    def _lik_ot_kw(self, cell_idx):
+        """Likelihood arrays of the real cells cell_idx for the network term of the OT (my_otdistance), {} unless
+        _ot_lik."""
+        if not self._ot_lik():
+            return {}
+        ns = self.n_stimuli
+        ll, tl = self._lev_cells
+        return dict(lik_ll=np.ascontiguousarray(ll[cell_idx, ns:]), lik_tl=np.ascontiguousarray(tl[cell_idx, ns:]),
+                    lik_kap=np.ascontiguousarray(self._net_kappa[cell_idx, ns:], dtype=float))
+
+    def _lik_rows(self, tau, real, pos, ks):
+        """Likelihood arrays (ll, tl, kappa) (n, G_tot - ns, ...) of rows of targets tau (n, G_tot - ns): the counts of
+        the real cell real >= 0, else the level of the target (onehot_levels) among those of the sample pos."""
+        ns = self.n_stimuli
+        real = np.asarray(real, dtype=int)
+        tl_s, ll0_s = self._sample_levels(ks)
+        ps = np.minimum(pos, len(tl_s) - 1)
+        kap_s = self._kappa_samples(len(tl_s))
+        ll, tl, kap = ll0_s[ps][:, ns:].copy(), tl_s[ps][:, ns:].copy(), kap_s[ps][:, ns:].copy()
+        r = real >= 0
+        ll[~r] = onehot_levels(tau[~r], tl[~r], ll[~r])
+        ll[r], tl[r], kap[r] = (self._lev_cells[0][real[r], ns:], self._lev_cells[1][real[r], ns:],
+                                self._net_kappa[real[r], ns:])
+        return ll, tl, kap
+
+    def _state_error(self, y_prot, kon_beta, ks, inter, basal, samples_id, samples_data, mem, real):
+        """Stopping error of the states with the network term of the OT (gene weights _error_gene_weights): with the
+        likelihood of the counts (_ot_lik), lik_cost_any of the real cell of each state (real >= 0), of the level of its
+        target otherwise (onehot_levels, same units); ordinal cost on soft targets (_ordinal_soft), against the expected
+        warped targets (_warped_targets). Weighted mean over the genes, mean over the states."""
+        ns = self.n_stimuli
+        sd = self.samples_data if samples_data is None else samples_data
+        sid = np.sort(np.unique(sd)) if samples_id is None else np.asarray(samples_id)
+        sig = self._sigma_bar(y_prot, mem, ks, inter, basal, sid, sd)[:, ns:]
+        pos = np.searchsorted(sid, sd)
+        gw = self._error_gene_weights(ks, sid)[pos][:, ns:]
+        mids = self._central_modes(ks, len(sid))[pos][:, ns:]
+        code = cost_code(self._ot_metric())
+        if self._ot_lik():
+            kb = sigmoid_amplitudes(ks)
+            kb = kb[pos] if np.ndim(ks) == 3 else kb[None]
+            tau = sigmoid_target(np.asarray(kon_beta, dtype=float), kb[..., 0], kb[..., 1])[:, ns:]
+            err = lik_cost_any(sig, *self._lik_rows(tau, real, pos, ks), code, mids)
+        else:
+            u1, u2 = self._warped_targets(kon_beta, real, pos, ks)
+            err = ordinal_cost_w(np.ascontiguousarray(sig).ravel(), np.ascontiguousarray(u1[:, ns:]).ravel(),
+                                 np.ascontiguousarray(u2[:, ns:]).ravel(),
+                                 np.ascontiguousarray(mids).ravel()).reshape(sig.shape)
+        return float(np.mean(np.sum(gw * err, axis=1) / np.maximum(gw.sum(axis=1), EPS)))
+
+    def _ot_metric(self):
+        """Network cost of the OT, its gene weights and the stopping errors: that of the prior (fit_network_cost) when
+        they are the likelihood of the counts, else fit_ot_cost."""
+        return self.fit_network_cost if self._ot_lik() else self.fit_ot_cost
+
+    def _kappa_ml(self, ll, C, n_grid=60):
+        """Precision kappa of the prior exp(-kappa C) on the levels maximising the mean log-likelihood of the counts of
+        the cells, mean_i log sum_l exp(ll_il) p(l | sigma_i; kappa) (ll (n, L) log-likelihoods at the levels, -inf
+        beyond those of the gene; C (n, L) the network cost of each level at the sigma of the cell), on a grid in log
+        kappa within [1, grid_network_precision_max]."""
+        ok = np.isfinite(ll)
+        grid = np.exp(np.linspace(0.0, np.log(max(self.grid_network_precision_max, 1.0 + EPS)), n_grid))
+        best, k_best = -np.inf, 1.0
+        for k in grid:
+            lp = np.where(ok, -k * C, -np.inf)
+            lp = lp - np.logaddexp.reduce(lp, axis=1, keepdims=True)
+            v = float(np.mean(np.logaddexp.reduce(np.where(ok, ll + lp, -np.inf), axis=1)))
+            if v > best:
+                best, k_best = v, float(k)
+        return k_best
+
+    def _prior_code(self):
+        """Code (COST_CODES) of the network prior on the levels in the basin updates: that of fit_network_cost
+        (coherent EM)."""
+        return cost_code(self.fit_network_cost)
 
     def _spec_chrom(self):
         """Families of the chromatin opening function: sigma_spec_chrom with model_learning_chrom, else None
         (logistic)."""
         return self.sigma_spec_chrom if self.model_learning_chrom else None
 
+    def _central_modes(self, ks, n):
+        """Position tau (n, G_tot) of the central main mode of each gene in the samples 0..n-1 (mixtures ks, levels the
+        modes and the transit_nodes transitions between them), -1 without central mode: the cut of the ordinal cost."""
+        return np.stack([self._central_modes_of(ks_of(ks, k), k) for k in range(n)]) if n else \
+            np.zeros((0, np.shape(ks)[-2]))
+
+    def _central_modes_of(self, ks_s, s_idx):
+        """_central_modes (G_tot,) of sample s_idx, of mixtures ks_s (G_tot, n_modes)."""
+        tr = None if self.transit_nodes is None else np.asarray(self.transit_nodes)
+        ks_s = np.asarray(ks_s, dtype=float)
+        L = self._n_levels(ks_s)
+        n_tr = np.zeros(len(L), int) if tr is None else (tr[min(s_idx, len(tr) - 1)] if tr.ndim == 2 else tr)
+        out = np.full(len(L), -1.0)
+        for g in range(len(L)):
+            step = int(n_tr[g]) + 1
+            if (L[g] + step - 1) % step == 0 and (L[g] + step - 1) // step == 3:  # three main modes
+                out[g] = float(sigmoid_target(ks_s[g, step], ks_s[g, 0], ks_s[g].max()))
+        return out
+
+    def _n_central(self, ks):
+        """Number of samples of the central modes of ks (_central_modes)."""
+        tr = None if self.transit_nodes is None else np.asarray(self.transit_nodes)
+        return max(ks.shape[0] if np.ndim(ks) == 3 else 1, len(tr) if tr is not None and tr.ndim == 2 else 1)
+
+    def _schedule_u(self, n_iter, context=None):
+        """Position u = (n_iter - 1) / min_n_loops of the gene weights of the network terms (2 for the test set,
+        context)."""
+        return 2.0 if context is not None else max(n_iter - 1, 0) / max(self.min_n_loops, 1)
+
+    def _ot_gene_weights(self, ks_s, s_idx, n_iter, vect_samples_id, samples_id, context):
+        """Gene weights (G - ns,) of the network term of the OT of sample s_idx, at u (_schedule_u), on the genes of two
+        distinct modes, with the sum of w_c = cost_gene_weights of fit_ot_cost (1 - k_low / k_high, squared for the
+        euclidean cost): geometric interpolation from w_c (u = 0) to equal weights (u = 1), then equal weights, or with
+        ot_gene_weight_schedule, to 1 / null deviance in fit_ot_cost (u = 2; _null_deviance of the positions of the
+        basins of the real cells of the sample: each gene weighs as the fraction of its deviance explained, a
+        population missed costing the same whatever its share; 1 / (2 Var(tau)) for the euclidean cost)."""
+        self._weights_cells = (np.asarray(vect_samples_id), np.asarray(samples_id))  # for the stopping errors
+        return self._gene_weights_at(ks_s, s_idx, self._schedule_u(n_iter, context), vect_samples_id, samples_id)
+
+    def _gene_weights_at(self, ks_s, s_idx, u, vect_samples_id, samples_id):
+        """Gene weights (G - ns,) of the OT of sample s_idx at u (_ot_gene_weights); vect_samples_id: sample of each
+        row of self.modes (real cells), None: no null-deviance stage (u capped at 1)."""
+        ns = self.n_stimuli
+        w_k = cost_gene_weights(ks_s, cost_code(self._ot_metric()))[ns:]
+        if not self.ot_gene_weight_schedule or vect_samples_id is None:
+            u = min(u, 1.0)
+        on = w_k > 0
+        if u <= 1.0:
+            w = np.where(on, np.power(np.maximum(w_k, EPS), 1.0 - u), 0.0)
+        else:
+            kb = sigmoid_amplitudes(ks_s)
+            cells = np.asarray(vect_samples_id) == samples_id[s_idx]
+            tau = sigmoid_target(np.asarray(self.modes, dtype=float)[cells][:, ns:], kb[ns:, 0], kb[ns:, 1])
+            mid = self._central_modes_of(ks_s, s_idx)[ns:]
+            if self._ot_lik():  # null deviance of the likelihood of the counts, the network term of the OT
+                w_dev = 1.0 / self._lik_null_deviance(np.flatnonzero(cells), cost_code(self._ot_metric()), mid)
+            else:
+                w_dev = 1.0 / self._null_deviance(tau, cost_code(self._ot_metric()), mid)
+            w = np.where(on, np.power(w_dev, min(u - 1.0, 1.0)), 0.0)
+        return w * w_k.sum() / max(w.sum(), EPS)
+
+    def _lik_null_deviance(self, cells, mode, mid):
+        """lik_null_deviance (G',) of the real cells cells (one sample) under the prior of code mode (central modes mid
+        (G',)), at the current kappa, cached per (cells, kappa)."""
+        ns = self.n_stimuli
+        kap = np.ascontiguousarray(self._net_kappa[cells, ns:], dtype=float)
+        key = ('lik', hash(np.ascontiguousarray(cells).tobytes()), hash(kap.tobytes()), int(mode),
+               hash(np.ascontiguousarray(mid).tobytes()))
+        cache = self.__dict__.setdefault('_null_dev_cache', {})
+        if key not in cache:
+            if len(cache) > 64:
+                cache.clear()
+            cache[key] = lik_null_deviance(self._lev_cells[0][cells, ns:], self._lev_cells[1][cells, ns:], kap, mode,
+                                           mid)
+        return cache[key]
+
+    def _null_deviance(self, tau, mode, mid):
+        """null_deviance (G',) of the positions tau (n, G') of the basins in the network cost of code mode (central
+        modes mid (G',)), cached per (positions, cost)."""
+        key = (hash(np.ascontiguousarray(tau).tobytes()), int(mode), hash(np.ascontiguousarray(mid).tobytes()))
+        cache = self.__dict__.setdefault('_null_dev_cache', {})
+        if key in cache:
+            return cache[key]
+        out = null_deviance(tau, mode, mid)
+        if len(cache) > 64:
+            cache.clear()
+        cache[key] = out
+        return out
+
+    def _error_gene_weights(self, ks, sid):
+        """Gene weights (len(sid), G_tot) of the stopping errors, row k for the sample of index k: those of the OT
+        (_gene_weights_at) at the position _err_u of the loop (the end of the schedule by default), on the real cells
+        of the last OT (_weights_cells); 0 on the stimuli."""
+        ns, u = self.n_stimuli, getattr(self, '_err_u', 2.0)
+        cells, ids = getattr(self, '_weights_cells', (None, None))
+        out = np.zeros((len(sid), np.shape(ks)[-2]))
+        for k in range(len(sid)):
+            ok = cells is not None and k < len(ids) and len(cells) == len(self.modes)
+            out[k, ns:] = self._gene_weights_at(ks_of(ks, k), k, u, cells if ok else None, ids)
+        return out
+
     @staticmethod
-    def _mode_network_cost(kon_pred, obj):
-        """Network term of the basin costs, -log p(mode | network) = KL(tau_m || sigma) (cells x modes), tau_m and
-        sigma the sigmoid targets of the modes obj and of the predicted kon (same cross-entropy as the network fit),
-        and the gene weight w = 1 - k_low / k_high (cells x 1) of the EMD basins, so that weakly separated genes keep
-        a weak network term in the forcing. Returns (KL, w)."""
+    def _mode_network_cost(kon_pred, obj, code=0, mid=-1.0, u=None):
+        """Network term of the basin costs, -log p(mode | network) up to kappa (cells x modes): the network cost of
+        code (_prior_code: KL(tau_m || sigma), 2 (tau_m - sigma)^2 or the ordinal cost with the central mode mid)
+        between sigma and tau_m, the sigmoid targets of the predicted kon and of the modes obj; and the gene weight of the EMD basins (cells x 1), w = 1 - k_low / k_high for both costs (a
+        stability weight, not a unit: the scale is kappa), so that weakly separated genes keep a weak network term in
+        the forcing; at u (_schedule_u), w^(1 - u) up to equal weights from u = 1 on (no null-deviance stage: the
+        basins are one EMD per gene, whose network term is scaled by the precision kappa). Returns (cost, w)."""
         k_lo, k_hi = obj[:, :1], obj.max(axis=1, keepdims=True)
         sig = sigmoid_target(np.asarray(kon_pred, dtype=float)[:, None], k_lo, k_hi)
         tau = sigmoid_target(obj, k_lo, k_hi)
         sig_b = np.ascontiguousarray(np.broadcast_to(sig, tau.shape), dtype=float).ravel()
-        kl = cross_entropy(sig_b, np.ascontiguousarray(tau, dtype=float).ravel()).reshape(tau.shape)
+        kl = cost_any(sig_b, np.ascontiguousarray(tau, dtype=float).ravel(), code, mid).reshape(tau.shape)
         w = np.clip(1.0 - k_lo / np.maximum(k_hi, EPS), 0.0, 1.0)
+        if u is not None:
+            w = np.where(w > 0, np.power(np.maximum(w, EPS), max(1.0 - u, 0.0)), 0.0)
         return kl, w
 
     def _set_mode_soft(self, cells, g, m_idx):
@@ -2097,7 +2405,8 @@ class NetworkModel:
                             alpha_pool, time, s_idx, prot_init, kon_modified[current_indices, ns:], G)
                     s1_s, ks_s = s1_of(s1, s_idx), ks_of(ks, s_idx)
                     # Sigmoid bounds and weights of the genes for the network term of the OT cost
-                    kb_s, w_s = sigmoid_amplitudes(ks_s), gene_weights(ks_s)[ns:]
+                    kb_s = sigmoid_amplitudes(ks_s)
+                    w_s = self._ot_gene_weights(ks_s, s_idx, n_iter, vect_samples_id, samples_id, context)
                     (d0_br, d1p_br), rna_to_x = self._bridge_rates(s_idx=s_idx), self.scale_proteins / self.fact_simple
                     if d0_br is not None:  # bridges: kon levels of the modes, mRNA in the same units
                         mode_init = kon_modified[current_indices, ns:] * self.scale_proteins
@@ -2113,6 +2422,7 @@ class NetworkModel:
                     rate_tgt, c_tgt, b_tgt = self._dilution(cell_idx)
                     b_src = np.zeros(0) if b_src is None else b_src
                     b_tgt = np.zeros(0) if b_tgt is None else b_tgt
+                    net_tau = self._ot_net_targets(cell_idx, s_idx, ks, kb_s)
                     pairwise_dist = my_otdistance(
                         kon_modified[current_indices, ns:], self.modes[cell_idx, ns:],
                         prot_init,
@@ -2122,9 +2432,7 @@ class NetworkModel:
                         s1_s, self._d1_traj(s_idx=s_idx)[ns:], times[b] - time, basal_s, inter_of(inter, s_idx),
                         # Network term: same target as the network fit (soft with one_hot_probas = False), the forcing
                         # of the bridge and alpha keeping the forcing modes (EMD basins)
-                        sigmoid_target((self.modes[cell_idx] if self.modes_soft is None
-                                        else self._soft_target_modes(cell_idx))[:, ns:],
-                                       kb_s[ns:, 0], kb_s[ns:, 1]), w_s,
+                        net_tau[0], w_s,
                         n_iter=n_iter, intensity_prior=intensity_prior,
                         n_stimuli=ns, stim_vals=np.asarray(self._stim_schedule.at(times[b], s_idx), dtype=np.float64),
                         scale_proteins=self.scale_proteins,
@@ -2135,6 +2443,9 @@ class NetworkModel:
                         g_active=np.zeros(0) if self.gene_mask is None
                         else self.active_genes(s_idx)[ns:].astype(np.float64),
                         spec=self._spec_grn(), **self._memory_ot_kw(s_idx, times[b] - time, b_tgt),
+                        net_mode=cost_code(self._ot_metric()),
+                        net_mid=np.ascontiguousarray(self._central_modes(ks, s_idx + 1)[s_idx, ns:]),
+                        **self._lik_ot_kw(cell_idx), tau_end2=net_tau[1],
                     )
 
                     delta_t = times[b] - time
@@ -2752,15 +3063,16 @@ class NetworkModel:
 
     def _reset_model_learning(self, G_tot):
         """Families of the targets at the start of fit_network: the single candidate if there is one (sigma forced for
-        the whole pipeline, no selection), else the Herbach candidate of m closest to START_M (lower m, then first form of
-        model_learning_herbach_form on a tie), else
-        the first candidate; kappa, Pbar and thresholds of the regulators; stimuli always identity."""
+        the whole pipeline, no selection), else identity if it is a candidate, else the Herbach candidate of m closest
+        to START_M (lower m, then first form of model_learning_herbach_form on a tie), else the first candidate; kappa,
+        Pbar and thresholds of the regulators; stimuli always identity."""
         from ..inference.sigma import set_family
         cands = self._model_learning_candidates()
         self.sigma_spec_grn = default_spec(G_tot, kappa=self.model_learning_kappa * self.scale_proteins,
                                            pbar=self.scale_proteins, thresh=self._herbach_thresholds(G_tot))
         herb = [c for c in cands if is_herbach(c[0])]
-        start = min(herb, key=lambda c: (abs(c[2] - START_M), c[2])) if herb else cands[0]
+        ident = [c for c in cands if c[0] == PHI_IDENTITY]
+        start = ident[0] if ident else min(herb, key=lambda c: (abs(c[2] - START_M), c[2])) if herb else cands[0]
         set_family(self.sigma_spec_grn, slice(None), start)
         self.sigma_spec_grn[:self.n_stimuli, SPEC_PHI] = PHI_IDENTITY
         self.sigma_spec_grn[:self.n_stimuli, SPEC_LINK] = LINK_LOGISTIC
@@ -2827,13 +3139,15 @@ class NetworkModel:
         return loglik, np.ascontiguousarray(tau)
 
     @staticmethod
-    def _marginal_nll(sig, loglik, tau, kappa):
+    def _marginal_nll(sig, loglik, tau, kappa, code=0, mid=None):
         """Negative log-likelihood (n, G_tot) of the counts under the network prior on the levels, -log sum_l
         exp(loglik_l) p(l | sigma), p(l | sigma) proportional to exp(-kappa KL(tau_l || sigma)) on the levels of the
-        gene (Bernoulli of sigma with two levels, kappa = 1)."""
+        gene (Bernoulli of sigma with two levels, kappa = 1), or with the network cost of code (_prior_code, the prior
+        of the basin updates; central modes mid (n, G_tot) for the ordinal cost)."""
         from scipy.special import logsumexp
         sig_b = np.ascontiguousarray(np.broadcast_to(np.asarray(sig, dtype=float)[..., None], tau.shape)).ravel()
-        kl = cross_entropy(sig_b, np.ascontiguousarray(tau, dtype=float).ravel()).reshape(tau.shape)
+        mid_b = None if mid is None else np.broadcast_to(np.asarray(mid, dtype=float)[..., None], tau.shape).ravel()
+        kl = cost_any(sig_b, np.ascontiguousarray(tau, dtype=float).ravel(), code, mid_b).reshape(tau.shape)
         logp = np.where(np.isfinite(loglik), -np.asarray(kappa, dtype=float)[..., None] * kl, -np.inf)
         logp = logp - logsumexp(logp, axis=2, keepdims=True)
         return -logsumexp(loglik + logp, axis=2)
@@ -2842,7 +3156,8 @@ class NetworkModel:
         """Score (G_tot,) of each target on all the data: the mean fit (basal, inter) of a family, with the edge
         thresholds of spec, on every state of the sub-samples with a real cell (sigma averaged on the mRNA memory with
         mem), model_learning_score: 'marginal', negative log-likelihood of the counts of their real cells under the
-        network prior on the levels (_marginal_nll); 'ce', cross-entropy against the expected levels under the
+        network prior on the levels (_marginal_nll); 'ce', data term of the network fit (fit_network_cost) against
+        the expected levels under the
         current posteriors (the basin levels with one_hot_probas: Q function of the classification EM); mean per
         state. With model_learning_threshold_bic, + (k / 2) log N / N for the k learned edge thresholds of an exact
         Herbach target (N states). The validation of the whole model is the test set."""
@@ -2856,12 +3171,23 @@ class NetworkModel:
                               sample_idx, y_samples[rows], sigma_spec=spec)
         if self.model_learning_score == 'marginal':
             marg, cells = self._ml_levels, y_real[rows]
-            nll = self._marginal_nll(sig, marg[0][cells], marg[1][cells], self._net_kappa[cells])
+            mid = self._central_modes(ks, self._n_central(ks))
+            mid = mid[np.minimum(np.asarray(y_samples[rows], dtype=int), len(mid) - 1)]
+            nll = self._marginal_nll(sig, marg[0][cells], marg[1][cells], self._net_kappa[cells], self._prior_code(),
+                                     mid)
         else:
             kb = self._ml_kb_cells
             tau = sigmoid_target(self.modes if self.modes_soft is None else self.modes_soft, kb[..., 0], kb[..., 1])
-            nll = cross_entropy(np.ascontiguousarray(sig, dtype=float).ravel(),
-                                np.ascontiguousarray(tau[y_real[rows]], dtype=float).ravel()).reshape(sig.shape)
+            mid = self._central_modes(ks, self._n_central(ks))
+            mid = mid[np.minimum(np.asarray(y_samples[rows], dtype=int), len(mid) - 1)]
+            if self._prior_code() == 2 and not self.one_hot_probas and self.posteriors_soft is not None:
+                # ordinal cost on the expected warped targets of the current posteriors (M-step)
+                cells = y_real[rows]
+                u1, u2 = self._warped_targets(self.modes[cells], cells, y_samples[rows], ks, lam=0.0)
+                nll = ordinal_cost_w(*(np.ascontiguousarray(a, dtype=float).ravel() for a in (sig, u1, u2, mid))
+                                     ).reshape(np.shape(sig))
+            else:
+                nll = cost_any(sig, tau[y_real[rows]], self._prior_code(), mid)
         score = nll.mean(axis=0)
         if self.model_learning_threshold_bic and self.herbach_threshold_sd and spec is not None:
             inter = np.asarray(fit[1], dtype=float)
@@ -3039,12 +3365,25 @@ class NetworkModel:
             self._net_kappa = np.ones(self.proba_init.shape[:2])
             self._ml_levels = self._level_likelihoods(ks, vect_t, vect_samples_id, samples_id) \
                 if self.model_learning_score == 'marginal' else None
+        # Likelihoods and positions of the levels of the real cells for the likelihood and ordinal network costs, and the
+        # precision of the prior (updated by the basins)
+        self._lik_on = context is not None  # test set: the likelihood in the OT as at the end of the training
+        self._lev_cells = None
+        self._cell_s = np.searchsorted(np.asarray(samples_id), vect_samples_id) if np.ndim(ks) == 3 else \
+            np.zeros(len(vect_samples_id), int)  # sample of each real cell
+        if self._fit_likelihood() or self.fit_network_cost == 'ordinal' or self.kappa_estimation == 'likelihood':
+            self._lev_cells = getattr(self, '_ml_levels', None) if model_learning and \
+                getattr(self, '_ml_levels', None) is not None else \
+                self._level_likelihoods(ks, vect_t, vect_samples_id, samples_id)
+            if getattr(self, '_net_kappa', None) is None or len(self._net_kappa) != len(self.proba_init):
+                self._net_kappa = np.ones(self.proba_init.shape[:2])
         return ramp_targets, model_learning, ml_start, ml_freeze
 
     def _update_basins(self, kon_vector_formodes, to_keep_for_update, vect_t, vect_samples_id, times, samples_id,
-                       ks, n_iter, kov_cell_mask=None, weight_prob=None):
+                       ks, n_iter, kov_cell_mask=None, weight_prob=None, it_shift=0):
         """E-step: basins, modes and (one_hot_probas = False) soft posteriors of the real cells given the kon
-        kon_vector_formodes predicted by the network on their proteins."""
+        kon_vector_formodes predicted by the network on their proteins; it_shift: shift of the iteration of the OT
+        (loop_trajectories), for the schedule of the gene weights."""
         ns, G_tot = self.n_stimuli, kon_vector_formodes.shape[1]
         # --- Update modes ---
         n_cells = self.proba_init.shape[0]
@@ -3063,6 +3402,16 @@ class NetworkModel:
         def assign_basins(mu, nu, dist, dist_soft, groups=None):
             # Target masses nu: EMD basins (forcing), and the posteriors updated by the network (one_hot_probas = False)
             return self._assign_from_costs(mu, nu, dist, dist_soft, groups=groups)
+
+        # Network prior on the levels (fit_network_cost, coherent EM), central modes, and schedule of the gene weights of
+        # the EMD basins
+        code_b = self._prior_code()
+        mids_b = self._central_modes(ks, max(len(groups_s), 1)) if code_b == 2 else None
+        if self.kappa_estimation not in ('moments', 'likelihood'):
+            raise ValueError(f"kappa_estimation must be 'moments' or 'likelihood', got {self.kappa_estimation!r}")
+        lev_b = getattr(self, '_lev_cells', None)
+        kappa_ml = self.kappa_estimation == 'likelihood' and lev_b is not None and len(lev_b[0]) == n_cells
+        u_b = self._schedule_u(n_iter + it_shift)
 
         def basin_costs(proba, keep, kappa, kl, wg):
             # EMD basins: network term ramped (weight_prob) and weighted per gene, as a label set by the network
@@ -3097,9 +3446,13 @@ class NetworkModel:
                 # modes) while a cell predicted at sigma lies at the level sigma; kappa by moment matching on the
                 # reached cells of the sample, mean sigma (1 - sigma) / mean E_q[(level - sigma)^2] (EM update of the
                 # precision of the prior: second moment under the posteriors q, one_hot_probas = False; (basin
-                # level - sigma)^2 otherwise, CEM)
+                # level - sigma)^2 otherwise, CEM). Euclidean prior exp(-2 kappa (level - sigma)^2), of variance
+                # 1 / (4 kappa): kappa = 1 / (4 mean E_q[(level - sigma)^2]); in general exp(-kappa C) is locally
+                # Gaussian of variance 1 / (kappa C''), C'' the curvature of the cost (cost_curvature): kappa = mean
+                # (1 / C'') / mean E_q[(level - sigma)^2]; for every gene, two levels included (kappa_estimation)
                 sel = in_s & (to_keep_for_update > 0)
-                if l_s > 2 and sel.sum() > 1:
+                mid_g = -1.0 if mids_b is None else float(mids_b[min(s, len(mids_b) - 1), g])
+                if l_s > 1 and sel.sum() > 1:  # every gene of two levels or more, Bernoulli ones included
                     o = obj[sel, :l_s]
                     lo, hi = o[:, 0], o.max(axis=1)
                     sig = sigmoid_target(kon_vector_formodes[sel, g], lo, hi)
@@ -3109,8 +3462,14 @@ class NetworkModel:
                         q = self.posteriors_soft[sel, g, :l_s]
                         tau_l = sigmoid_target(o, lo[:, None], hi[:, None])
                         dev2 = (q * (tau_l - sig[:, None]) ** 2).sum(axis=1) / np.maximum(q.sum(axis=1), EPS)
-                    kappa[in_s] = float(np.clip(np.mean(sig * (1 - sig)) / max(np.mean(dev2), EPS), 1.0,
-                                                self.grid_network_precision_max))
+                    if kappa_ml:  # maximum likelihood of the counts under the prior at the current sigma
+                        tau_l = sigmoid_target(o, lo[:, None], hi[:, None])
+                        C = cost_any(np.repeat(sig[:, None], l_s, axis=1), tau_l, code_b, np.full(tau_l.shape, mid_g))
+                        kappa[in_s] = self._kappa_ml(self._lev_cells[0][sel, g, :l_s], C)
+                    else:
+                        num = np.mean(1.0 / cost_curvature(sig, code_b, np.full(len(sig), mid_g)))
+                        kappa[in_s] = float(np.clip(num / max(np.mean(dev2), EPS), 1.0,
+                                                    self.grid_network_precision_max))
                 # One EMD per (sample, time) with temporal_basins, else per sample, on the levels and masses of the sample
                 for t_i in (times if temporal else [None]):
                     indices = in_s & (vect_t == t_i) if temporal else in_s
@@ -3126,7 +3485,7 @@ class NetworkModel:
                     proba_i /= np.max(proba_i, axis=1, keepdims=True)
                     obj_i = obj[indices, :l_s]
                     mu = np.ones(n_i) / n_i
-                    kl, wg = self._mode_network_cost(kon_vector_formodes[indices, g], obj_i)
+                    kl, wg = self._mode_network_cost(kon_vector_formodes[indices, g], obj_i, code_b, mid_g, u_b)
                     dist, dist_soft = basin_costs(proba_i, to_keep_for_update[indices, None], kappa[indices, None],
                                                   kl, wg)
                     idx, probs = assign_basins(mu, nu, dist, dist_soft, groups=grp)
@@ -3248,7 +3607,8 @@ class NetworkModel:
         gene (_protein_scale, exact first moment, as for observed proteins): means weighted towards the distribution
         without branching by exp(-int R_opt) along each trajectory (the trajectories are the lineages: no ancestor
         kernel), dilution at the birth rates of the states, kbar the forcing modes. The proteins keep their
-        distribution (not the deterministic unitary ones). Returns y_prot with the genes rescaled.
+        distribution (not the deterministic unitary ones). Returns (y_prot with the genes rescaled, factor (G,): level
+        of the high mode in their units, the proteins being divided by factor / scale_proteins; 1 for the stimuli).
         """
         ns = self.n_stimuli
         T, N = len(times), int(np.sum(self.times_data == times[0]))
@@ -3274,7 +3634,9 @@ class NetworkModel:
                   f"(high mode in their units / scale_proteins) median {np.median(lam / self.scale_proteins):.3g}, range "
                   f"[{lam.min() / self.scale_proteins:.3g}, {lam.max() / self.scale_proteins:.3g}]; R² of the means: "
                   f"median {np.median(r2):.3f}")
-        return out
+        fac = np.ones(P.shape[1])
+        fac[ns:] = lam / self.scale_proteins
+        return out, fac
 
     def _scale_observed_proteins(self, P_raw, vect_t, vect_samples_id, times, samples_id, ks, verb=True):
         """
@@ -3368,7 +3730,8 @@ class NetworkModel:
                         sample_conditions=self.sample_conditions, condition_pen=self.network_condition_pen,
                         gene_mask=self.gene_mask, sigma_spec_grn=spec,
                         dist_targets=self._distribution_targets(y_kon, y_real, y_samples, vect_t, ks, valid_cells),
-                        mixed=self._mixed_prior(), **self._penalty_kw())
+                        mixed=self._mixed_prior(),
+                        **self._penalty_kw(ks, y_real, self._network_targets(y_kon, y_real), y_samples))
                 return fit_on
             if frozen:
                 return fit_on_spec(self._spec_grn(), basal_start, inter_start)([np.flatnonzero(valid_cells)])[0]
@@ -3394,7 +3757,12 @@ class NetworkModel:
                 break
 
             # --- M-step, with the error of the network before / after the fit ---
-            err_kw = dict(samples_id=sample_idx, samples_data=y_samples,
+            # Stopping errors with the network cost and gene weights of the OT at the end of their schedule (no OT here,
+            # the network good from the start)
+            self._err_u = 2.0
+            self._lik_on = n_iter > min_n_loops  # likelihood network cost after the ramp
+            self._weights_cells = (np.asarray(vect_samples_id), np.asarray(samples_id))
+            err_kw = dict(samples_id=sample_idx, samples_data=y_samples, real=y_real,
                           dist=self._distribution_targets(y_kon, y_real, y_samples, vect_t, ks, valid_cells))
             kon_err = self._network_targets(y_kon, y_real)
             error = self._count_errors_per_sample(P, kon_err, ks, inter, basal, **err_kw)
@@ -3414,7 +3782,10 @@ class NetworkModel:
 
             if count_end >= 1 and (errors[-2] - errors[-1]) < 1e-3:
                 count_end += 1
-            if (count_end < 1) and (n_iter > min_n_loops) and (errors[-1] - errors[-2]) > 0:
+            # Unblock the counter once the errors compare the same targets (expected modes after the first iteration
+            # with ramp_targets) and the same cost (likelihood after the first iteration with 'network+ot')
+            n_ramp = min_n_loops + int(ramp_targets or self._fit_likelihood() == 'network+ot')
+            if (count_end < 1) and (n_iter > n_ramp) and (errors[-1] - errors[-2]) > 0:
                 count_end += 1
             n_iter += 1
 
@@ -3682,7 +4053,7 @@ class NetworkModel:
                         sample_conditions=self.sample_conditions, condition_pen=self.network_condition_pen,
                         gene_mask=self.gene_mask, sigma_spec_grn=spec, y_prot_mem=y_prot_mem,
                         dist_targets=self._distribution_targets(y_kon, y_real, y_samples, vect_t_sim, ks, valid),
-                        mixed=self._mixed_prior(), **self._penalty_kw())
+                        mixed=self._mixed_prior(), **self._penalty_kw(ks, y_real, fit_targets(), y_samples))
                 return fit_on
             if frozen:
                 return fit_on_spec(self._spec_grn(), basal_start, inter_start)([np.flatnonzero(valid)])[0]
@@ -3843,7 +4214,10 @@ class NetworkModel:
             dist_err = self._distribution_targets(y_kon, y_real, y_samples, vect_t_sim, ks, valid)
             dist_err = None if dist_err is None else (dist_err[0][valid], dist_err[1][valid], dist_err[2][valid],
                                                       dist_err[3])
-            err_kw = dict(samples_id=sample_idx, samples_data=y_samples[valid], mem=mem_err, fm=fm_err, dist=dist_err)
+            self._err_u = self._schedule_u(n_iter + it_shift, context)  # gene weights of the OT of this iteration
+            self._lik_on = n_iter > min_n_loops  # likelihood network cost after the ramp
+            err_kw = dict(samples_id=sample_idx, samples_data=y_samples[valid], mem=mem_err, fm=fm_err, dist=dist_err,
+                          real=None if y_real is None else np.asarray(y_real)[valid])
             error = self._count_errors_per_sample(y_prot[valid], kon_err, ks, inter, basal, **err_kw)
             if fit_net:
                 # Mean of fits on independent stratified subsamples covering the trajectory states
@@ -3882,8 +4256,14 @@ class NetworkModel:
             if count_end >= 1:
                 if (errors[-2] - errors[-1]) < 1e-3:
                     count_end += 1
-            # Unblock the counter
-            if (count_end < 1) and (n_iter > min_n_loops) and (errors[-1] - errors[-2]) > 0:
+            # Unblock the counter once the gene weights of the OT reached their end (2 x min_n_loops with the std stage,
+            # it_shift earlier) and the network targets the expected modes (_target_mix 0 at 2 x min_n_loops)
+            n_ramp = max(min_n_loops, (2 if self.ot_gene_weight_schedule else 1) * min_n_loops - it_shift)
+            if ramp_targets:
+                n_ramp = max(n_ramp, 2 * min_n_loops)
+            if self._fit_likelihood() == 'network+ot':  # errors in the likelihood from min_n_loops + 1 on
+                n_ramp = max(n_ramp, min_n_loops + 1)
+            if (count_end < 1) and (n_iter > n_ramp) and (errors[-1] - errors[-2]) > 0:
                 count_end += 1
             n_iter += 1
 
@@ -3955,7 +4335,7 @@ class NetworkModel:
             print("number of non reached cells", np.sum(to_keep_for_update == 0))
 
             self._update_basins(kon_vector_formodes, to_keep_for_update, vect_t, vect_samples_id, times, samples_id,
-                                ks, n_iter, kov_cell_mask)
+                                ks, n_iter, kov_cell_mask, it_shift=it_shift)
 
 
         # --- Growth pass: net growth of the final trajectories given the final network ---
@@ -4072,8 +4452,7 @@ class NetworkModel:
         sd = self.samples_data if samples_data is None else samples_data
         sid = np.sort(np.unique(sd)) if samples_id is None else np.asarray(samples_id)
         sig = self._sigma_bar(y_prot, mem, ks, inter, basal, sid, sd)
-        gw = gene_weights(ks)
-        gw = gw[np.searchsorted(sid, sd)] if np.ndim(ks) == 3 else np.broadcast_to(gw[None], (len(sig), gw.shape[-1]))
+        gw = self._error_gene_weights(ks, sid)[np.searchsorted(sid, sd)]
         wn = gw[:, ns:] / np.maximum(gw[:, ns:].sum(axis=1, keepdims=True), EPS)
         post, tau, grp, lam = dist
         err = 0.0
@@ -4115,8 +4494,8 @@ class NetworkModel:
         return not ok
 
     def _posterior_levels(self, y_kon, y_real, rows_samples, ks):
-        """Posteriors (N, G, L) and levels (N, G, L) (normalised kon) of the real cell of each state, for targets
-        drawn from them (one_hot_probas = False); states without real cell, and the stimuli, at their y_kon.
+        """Posteriors (N, G, L) and levels (N, G, L) (normalised kon) of the real cell of each state
+        (one_hot_probas = False); states without real cell, and the stimuli, at their y_kon.
         rows_samples: sample index of each state. None without posteriors."""
         if self.one_hot_probas or self.posteriors_soft is None or y_real is None or len(y_real) != len(y_kon):
             return None
@@ -4139,16 +4518,18 @@ class NetworkModel:
         """
         refine_in_loop: refine_in_loop_epochs optimizer steps of the free-running fit (_fit_free_running) on the
         windows of sde_max_horizon only (whole time course when it fits), on the modes of
-        the current trajectories: the model of the simulations (explicit mRNA with simulation_mrnas_direct, protein-
-        only PDMP with simulation_stochastic, else ODE), whatever built the trajectories (inference_mrnas_direct:
-        full d1 and d0 / d1). Constant rates of that model from the current self.d (protein-only models: d1_eff and
+        the current trajectories (their proteins start the windows, their mRNA with explicit mRNA): explicit mRNA when
+        the trajectories are built with the mRNA (inference_mrnas_direct or mrna_bridge) or with
+        simulation_mrnas_direct, else the model of the simulations (protein-only PDMP with simulation_stochastic,
+        else ODE). Constant rates of that model from the current self.d (protein-only models: d1_eff and
         eps = 1 / (1 + r)), rappel towards the literature (d_literature) in the same units, decreasing along the
         updates (sde_lambda_rates x refine_in_loop_decay^k), no scale; the network
-        too with refine_theta_with_sde (rappel towards the current fit). The learned rates are converted back to
+        too with refine_theta_with_sde (relative L2 anchor sde_lambda_theta to the current fit). The learned rates are converted back to
         the full (d0, d1) of self.d (ODE: d0 / d1 kept); returns (basal, inter).
         """
         ns = self.n_stimuli
-        mode = 'sde2' if (self.simulation_mrnas_direct and self.simulation_stochastic) else \
+        mode = 'sde2' if (self.inference_mrnas_direct or self.mrna_bridge
+                          or (self.simulation_mrnas_direct and self.simulation_stochastic)) else \
             ('sde1' if self.simulation_stochastic else 'ode')
         _, _, k1 = self._mixture_terms()
         r = np.maximum(self.d[0] / self.d[1], self.min_ratio)
@@ -4409,7 +4790,10 @@ class NetworkModel:
                 hard_forcing_ref=hard_forcing_ref if hard_forcing_ref is not None else self.hard_forcing_ref,
                 ref_constraint_pct=ref_constraint_pct if ref_constraint_pct is not None else self.ref_constraint_pct,
             )
-
+        # Precision of the network prior on the levels per (sample, gene) at the end of the training (infer_test, with
+        # the likelihood in the OT)
+        self.net_kappa_samples = self._kappa_samples(len(samples_id)) \
+            if getattr(self, '_net_kappa', None) is not None and getattr(self, '_cell_s', None) is not None else None
 
         # --- Print results (optional) ---
         if verb:
@@ -4689,22 +5073,26 @@ class NetworkModel:
             kw.update(mem_frac=np.ascontiguousarray(frac[0]), mem_w=np.ascontiguousarray(w[0][:, self.n_stimuli:]))
         return kw
 
-    def _fm_error(self, path, y_prot, kon_beta, ks, inter, basal, samples_id=None, samples_data=None):
+    def _fm_error(self, path, y_prot, kon_beta, ks, inter, basal, samples_id=None, samples_data=None, real=None):
         """Flow-matching error of the rows, as the flow-matching term of the network fit: sum over the end state
-        (weight path.weights[:, 0]) and the nodes (weights path.weights[:, q + 1]) of the cross-entropy between sigma at
-        their states and the sigmoid target of the kon in force there, weighted by gene_weights, mean over the rows."""
+        (weight path.weights[:, 0]) and the nodes (weights path.weights[:, q + 1]) of the network cost of the OT between
+        sigma at their states and the sigmoid target of the kon in force there, gene weights of the OT, mean over the
+        rows. With the likelihood (_ot_lik), the counts of the real cell of each row (real) at the end state and the
+        level of the kon in force at the nodes (onehot_levels, same units); ordinal cost on soft targets, the expected
+        warped targets at the end state."""
         ns = self.n_stimuli
         sd = self.samples_data if samples_data is None else samples_data
         sid = np.sort(np.unique(sd)) if samples_id is None else np.asarray(samples_id)
-        kb, gw = sigmoid_amplitudes(ks), gene_weights(ks)
-        pos = np.searchsorted(sid, sd)
-        kb, gw = (kb[pos], gw[pos]) if np.ndim(ks) == 3 else (kb[None], gw[None])
+        kb, pos = sigmoid_amplitudes(ks), np.searchsorted(sid, sd)
+        kb, gw = kb[pos] if np.ndim(ks) == 3 else kb[None], self._error_gene_weights(ks, sid)[pos]
+        mid = self._central_modes(ks, len(sid))
         w_g = np.broadcast_to(gw[..., ns:], (len(y_prot), gw.shape[-1] - ns))
         w_g = w_g / np.maximum(w_g.sum(axis=1, keepdims=True), EPS)
         terms = [(path.weights[:, 0], y_prot, kon_beta)] + [(path.weights[:, q + 1], path.nodes[:, q], path.kon[:, q])
                                                            for q in range(path.nodes.shape[1])]
         total = np.zeros(len(y_prot))
-        for w, Y, kon in terms:
+        code = cost_code(self._ot_metric())
+        for q, (w, Y, kon) in enumerate(terms):
             rows = np.flatnonzero(np.max(w, axis=1) > 0) if w.ndim == 2 else np.flatnonzero(w > 0)
             if not len(rows):
                 continue
@@ -4713,15 +5101,24 @@ class NetworkModel:
                                  kb[rows if len(kb) > 1 else [0], ..., 1])
             tau = sigmoid_target(np.asarray(kon)[rows], kb[rows if len(kb) > 1 else [0], ..., 0],
                                  kb[rows if len(kb) > 1 else [0], ..., 1])
-            ce = cross_entropy(np.ascontiguousarray(sig[:, ns:]).ravel(),
-                               np.ascontiguousarray(tau[:, ns:]).ravel()).reshape(len(rows), -1)
+            r_q = np.full(len(rows), -1) if q or real is None else np.asarray(real, dtype=int)[rows]
+            if self._ot_lik():
+                ce = lik_cost_any(sig[:, ns:], *self._lik_rows(tau[:, ns:], r_q, pos[rows], ks), code,
+                                  mid[pos[rows], ns:])
+            elif q == 0 and real is not None and self._ordinal_soft():
+                u1, u2 = self._warped_targets(np.asarray(kon)[rows], r_q, pos[rows], ks)
+                ce = ordinal_cost_w(np.ascontiguousarray(sig[:, ns:]).ravel(), np.ascontiguousarray(u1[:, ns:]).ravel(),
+                                    np.ascontiguousarray(u2[:, ns:]).ravel(),
+                                    np.ascontiguousarray(mid[pos[rows], ns:]).ravel()).reshape(len(rows), -1)
+            else:
+                ce = cost_any(sig[:, ns:], tau[:, ns:], code, mid[pos[rows], ns:])
             ww = w[rows] if w.ndim == 1 else w[rows][:, ns:]
             ww = ww[:, None] if ww.ndim == 1 else ww
             total[rows] += np.sum(ww * ce * w_g[rows], axis=1)
         return float(total.mean())
 
     def _count_errors_per_sample(self, y_prot, kon_beta, ks, inter, basal,
-                                  samples_id=None, samples_data=None, mem=None, fm=None, dist=None):
+                                  samples_id=None, samples_data=None, mem=None, fm=None, dist=None, real=None):
         """
         Weighted-average count_errors respecting per-sample basal.
         When basal is 1-D, delegates to count_errors directly.
@@ -4732,36 +5129,43 @@ class NetworkModel:
             times the flow-matching error (_fm_error), as the objective of the network fit.
         dist : distribution targets of the rows (_distribution_targets) or None: the distribution term of the network
             fit is added to the end-state error, per cell, with the gene weights of the cross-entropy.
+        real : real cell of each row (-1: none); with the likelihood in the OT (_ot_lik) or the ordinal cost on soft
+            targets (_ordinal_soft), the end-state error is _state_error.
         """
         if fm is not None and fm[1] > 0:
             end = self._count_errors_per_sample(y_prot, kon_beta, ks, inter, basal, samples_id, samples_data, mem,
-                                                dist=dist)
+                                                dist=dist, real=real)
             return (1 - fm[1]) * end + fm[1] * self._fm_error(fm[0], y_prot, kon_beta, ks, inter, basal, samples_id,
-                                                                samples_data)
+                                                                samples_data, real=real)
         if dist is not None:
-            end = self._count_errors_per_sample(y_prot, kon_beta, ks, inter, basal, samples_id, samples_data, mem)
+            end = self._count_errors_per_sample(y_prot, kon_beta, ks, inter, basal, samples_id, samples_data, mem,
+                                                real=real)
             return end + self._distribution_error(y_prot, mem, ks, inter, basal, samples_id, samples_data, dist)
+        if real is not None and (self._ot_lik() or self._ordinal_soft()):
+            return self._state_error(y_prot, kon_beta, ks, inter, basal, samples_id, samples_data, mem, real)
         if mem is not None:
             ns = self.n_stimuli
             sd = self.samples_data if samples_data is None else samples_data
             sid = np.sort(np.unique(sd)) if samples_id is None else np.asarray(samples_id)
             sig = self._sigma_bar(y_prot, mem, ks, inter, basal, sid, sd)
-            kb, gw = sigmoid_amplitudes(ks), gene_weights(ks)
-            pos = np.searchsorted(sid, sd)
-            kb, gw = (kb[pos], gw[pos]) if np.ndim(ks) == 3 else (kb[None], gw[None])
+            kb, pos = sigmoid_amplitudes(ks), np.searchsorted(sid, sd)
+            kb, gw = kb[pos] if np.ndim(ks) == 3 else kb[None], self._error_gene_weights(ks, sid)[pos]
             tau = sigmoid_target(kon_beta, kb[..., 0], kb[..., 1])
-            ce = cross_entropy(np.ascontiguousarray(sig[:, ns:]).ravel(),
-                               np.ascontiguousarray(tau[:, ns:]).ravel()).reshape(len(sig), -1)
+            ce = cost_any(sig[:, ns:], tau[:, ns:], cost_code(self._ot_metric()),
+                          self._central_modes(ks, len(sid))[pos, ns:])
             w = np.broadcast_to(gw[..., ns:], ce.shape)
             return float(np.sum(ce * w / np.maximum(w.sum(axis=1, keepdims=True), EPS)) / max(len(sig), 1))
         if basal.ndim < 2 and ks.ndim < 3 and inter.ndim < 3:
-            return count_errors(y_prot, kon_beta, ks, basal, inter,
-                                n_stimuli=self.n_stimuli, spec=self._spec_grn())
+            return count_errors(y_prot, kon_beta, ks, basal, inter, n_stimuli=self.n_stimuli, spec=self._spec_grn(),
+                                mode=cost_code(self._ot_metric()), mid=self._central_modes(ks, 1)[0, self.n_stimuli:],
+                                w=self._error_gene_weights(ks, [0])[0, self.n_stimuli:])
         if samples_data is None:
             samples_data = self.samples_data
         if samples_id is None:
             samples_id = np.sort(np.unique(samples_data))
         total_err, total_cells = 0.0, 0
+        gw = self._error_gene_weights(ks, samples_id)[:, self.n_stimuli:]
+        mid = self._central_modes(ks, len(samples_id))[:, self.n_stimuli:]
         for s_idx, s in enumerate(samples_id):
             mask = (samples_data == s)
             n_s = int(mask.sum())
@@ -4770,7 +5174,8 @@ class NetworkModel:
             basal_s = basal[min(s_idx, basal.shape[0] - 1)] if basal.ndim == 2 else basal
             err_s = count_errors(y_prot[mask], kon_beta[mask],
                                  ks_of(ks, s_idx), basal_s, inter_of(inter, s_idx),
-                                 n_stimuli=self.n_stimuli, spec=self._spec_grn())
+                                 n_stimuli=self.n_stimuli, spec=self._spec_grn(),
+                                 mode=cost_code(self._ot_metric()), mid=mid[s_idx], w=gw[s_idx])
             total_err += err_s * n_s
             total_cells += n_s
         return total_err / total_cells if total_cells > 0 else 0.0
@@ -4791,8 +5196,10 @@ class NetworkModel:
         protein-only PDMP with proteins reconstructed with the mRNA (inference_mrnas_direct or mrna_bridge); else the
         proteins of fit_network (or the rescaled observed proteins, proteins_observed), whose network is then that of
         fit_network.
-        With unitary proteins, the network is refitted (final = 1) on them (their scale); else that of fit_network.
-        - refine_theta_with_sde = True: that network refined in the free-running fit (support and signs kept).
+        Starting network: that of fit_network (rows of the regulators rescaled with the proteins), refitted (final = 1)
+        on the reference proteins with sde_refit_network or refine_theta_with_sde = False.
+        - refine_theta_with_sde = True: that network refined in the free-running fit (support and signs kept, relative
+          L2 anchor sde_lambda_theta).
         - refine_theta_with_sde = False: that network fixed.
         With network conditions and degradation_rates_per_condition, one fit per condition (stored per sample).
         d1_eff kept in d1_eff_t.
@@ -4886,19 +5293,33 @@ class NetworkModel:
         eps_start = 1.0 / r_lit if mode == 'sde2' else 1.0 / (1 + r_lit)
         # Start and rappel: the rates of fit_network (learned with refine_in_loop, else the literature)
         # Unitary proteins (modes, literature d1_eff) without observed proteins for the ODE, and for the protein-only
-        # PDMP when fit_network reconstructed them with the mRNA; else the proteins and network of fit_network
+        # PDMP when fit_network reconstructed them with the mRNA with sde_unitary_for_protonly (else these proteins
+        # rescaled to the protein-only model, and the network of fit_network); else the proteins and network of
+        # fit_network
         observed = self.proteins_observed or self.observed_prot is not None
-        unitary = not observed and (mode == 'ode' or (mode == 'sde1' and bool(self.inference_mrnas_direct
-                                                                              or self.mrna_bridge)))
+        mrna_prot = mode == 'sde1' and not observed and bool(self.inference_mrnas_direct or self.mrna_bridge)
+        unitary = not observed and (mode == 'ode' or (mrna_prot and self.sde_unitary_for_protonly))
         if verb:
             print(f"[refine_network_degradations] reference proteins of the {mode} fit: "
                   + ('unitary (modes)' if unitary else 'those of fit_network'
                      + (' (observed, rescaled)' if self.proteins_observed or self.observed_prot is not None else '')))
-        if unitary:
-            # Network refitted (final = 1) on the unitary proteins (their scale), then refined in the free-running
-            # fit with refine_theta_with_sde, else fixed
+        # Network refitted (final = 1) on these proteins with sde_refit_network, or when it stays fixed in the fit
+        refit = bool(self.sde_refit_network or not self.refine_theta_with_sde)
+        if unitary and refit:
             y_prot, basal, inter = self._refine_trajectories_network(
                 self.kon_beta, d1_unit[ns:], times, N_tot, ks, valid, samples_id, verb=verb)
+        elif unitary:  # network of fit_network
+            y_prot = self.estimate_trajectories(self.prot, times, d1_unit[ns:], N=N_tot, kon_beta=self.kon_beta,
+                                                s=self.scale_proteins, birth=self._state_birth())
+        elif mrna_prot:
+            # Proteins reconstructed with the mRNA, to the scale of the protein-only model; the network of fit_network
+            # in the same units (rows of the regulators x their factor), refitted on them with refit
+            y_prot, fac = self._rescale_trajectory_proteins(self.prot, times, valid, samples_id, verb=verb)
+            inter = np.asarray(inter, dtype=float) * fac[:, None]
+            if refit:
+                y_prot, basal, inter = self._refine_trajectories_network(
+                    self.kon_beta, None, times, N_tot, ks, valid, samples_id, verb=verb, y_prot_given=y_prot,
+                    inter_given=inter)
         else:
             y_prot = self.prot  # proteins and network of fit_network
         # These proteins only start the windows of the fit: self.prot and self.kon_theta stay those of fit_network
@@ -5063,8 +5484,8 @@ class NetworkModel:
         """
         d1, eps = d1 / d0 and the scale of theta per target gene (per interval with use_temporal_degradations) by
         the free-running fit of the simulation model (fit_free_running: 'ode', 'sde1' protein-only PDMP, 'sde2'
-        explicit mRNA) from the trajectory states, on the kon of the observed modes (one_hot_probas = False: levels
-        drawn from the posteriors updated by the network at every minibatch); the network (support and
+        explicit mRNA) from the trajectory states, on the kon of the observed modes (one_hot_probas = False: their mean
+        under the posteriors updated by the network; never drawn); the network (support and
         signs kept) refined with refine_theta_with_sde, else fixed. Dilution and branching as in the simulations.
         Without the MLP (prolif None), the rates of the nearest trajectory state at the start of each interval
         (_nearest_states, against the forcing modes kon_targets): birth b_states (dilution, mean of its two ends) and
@@ -5085,9 +5506,14 @@ class NetworkModel:
         samples_rows = np.asarray(self.samples_data if samples_rows is None else samples_rows)
         kon_targets = self.kon_beta if kon_targets is None else kon_targets
         real_idx = getattr(self, 'traj_real_idx', None) if real_idx is None else real_idx
-        # Targets: levels drawn from the posteriors of the real cells (distribution not contracted, as their mean)
+        # Observed modes: the basins (one_hot_probas), else the expected modes under the posteriors updated by the
+        # network of the real cells, never drawn
         post = None if self._soft_targets_missing(real_idx, 'free-running fit') else \
             self._posterior_levels(kon_targets, real_idx, samples_rows[:len(kon_targets)], ks)
+        obs_kon = np.asarray(kon_targets, dtype=float) if post is None else (post[0] * post[1]).sum(axis=-1)
+        # Ordinal cost on these soft targets: their expected warped targets (as the network fit and the OT)
+        warp = None if post is None or (self.sde_mode_cost or self.fit_ot_cost) != 'ordinal' else \
+            np.stack(self._warped_targets(kon_targets, real_idx, samples_rows[:len(kon_targets)], ks, lam=0.0), axis=1)
         X = y_prot.reshape(T, N_tot, G)
         R = None if mode != 'sde2' else np.asarray(self.rna if rna is None else rna, dtype=float).reshape(T, N_tot, G)
         prolif = self.prolif_network if prolif == 'model' else prolif
@@ -5117,26 +5543,27 @@ class NetworkModel:
             if not len(slots):
                 continue
             kb_s = kb[min(s_idx, kb.shape[0] - 1)] if kb.ndim == 3 else kb
-            ks_s = np.asarray(ks)[min(s_idx, np.shape(ks)[0] - 1)] if np.ndim(ks) == 3 else np.asarray(ks)
             k1_s = np.asarray(s1_of(k1, s_idx), dtype=float)
             stim = np.array([self._stim_schedule.per_cell(times[t + 1], np.array([s]))[0]
                              for t in range(T - 1)], dtype=float) * self.scale_proteins
-            # Genes of two modes: sigma is the probability of the high mode, compared as a Bernoulli draw
             t_first = int(np.argmax([np.any(valid[N_tot * t + slots]) for t in range(T)]))  # first observed time
             stim0 = np.asarray(self._stim_schedule.per_cell(times[t_first], np.array([s]))[0],
                                dtype=float) * self.scale_proteins
             g = dict(X=X[:, slots].astype(float), k_lo=kb_s[:, 0], k_hi=kb_s[:, 1], k1=k1_s, stim=stim, stim0=stim0,
+                     mid=self._central_modes_of(ks_of(ks, s_idx), s_idx),  # central modes (ordinal cost)
                      valid0=np.asarray(valid[N_tot * t_first + slots], dtype=bool),
-                     binary=1 + np.argmax(ks_s, axis=-1) == 2, mode_levels=ks_s,
                      cond=int(cond[min(s_idx, len(cond) - 1)]),
                      idx=min(s_idx, basal.shape[0] - 1) if inter.ndim < 3 else min(s_idx, inter.shape[0] - 1),
                      targets=[None if not np.any(valid[N_tot * t + slots]) else
-                              kon_targets[N_tot * t + slots][valid[N_tot * t + slots]] for t in range(T)],
+                              obs_kon[N_tot * t + slots][valid[N_tot * t + slots]] for t in range(T)],
+                     # hard modes (basins) of the same cells: gene weights of ot_gene_weight_schedule, as the OT
+                     hard=[None if not np.any(valid[N_tot * t + slots]) else
+                           np.asarray(kon_targets, dtype=float)[N_tot * t + slots][valid[N_tot * t + slots]]
+                           for t in range(T)],
+                     wtargets=None if warp is None else [None if not np.any(valid[N_tot * t + slots]) else
+                                                         warp[N_tot * t + slots][valid[N_tot * t + slots]]
+                                                         for t in range(T)],
                      start_ok=np.array([np.any(valid[N_tot * t + slots]) for t in range(T)]))
-            if post is not None:  # posteriors and levels of the observed states, targets drawn from them
-                rows = [N_tot * t + slots[valid[N_tot * t + slots]] for t in range(T)]
-                g['post'] = [None if g['targets'][t] is None else post[0][rows[t]] for t in range(T)]
-                g['levels'] = [None if g['targets'][t] is None else post[1][rows[t]] for t in range(T)]
             if mode == 'sde2':  # normalised mRNA m = M c s / k1 (mean kon s, as the bridges)
                 M = R[:, slots] * (self.scale_proteins * np.asarray(s1_of(c_nb, s_idx)) / np.maximum(k1_s, 1e-12))[None, None, :]
                 M[..., :ns] = 0.0
@@ -5207,13 +5634,16 @@ class NetworkModel:
                 learn_theta=bool(pick(learn_theta, self.refine_theta_with_sde)), learn_d=True,
                 learn_eps=mode != 'ode', learn_scale=bool(pick(learn_scale, self.fit_scale_theta)),
                 temporal=bool(pick(temporal, self.use_temporal_degradations)),
-                lam_theta=0.0 if free else self.sde_lambda_theta, lam_rates=pick(lam_rates, self.sde_lambda_rates),
+                lam_theta=0.0 if free else float(self.sde_lambda_theta),
+                lam_rates=pick(lam_rates, self.sde_lambda_rates),
                 eps_bounds=(1.0 / self.max_ratio, 1.0 / self.min_ratio), epochs=pick(epochs, self.sde_epochs),
                 lr=self.sde_lr, lr_rates=self.sde_lr_rates, lr_decay=self.sde_lr_decay,
                 lr_min_frac=self.sde_lr_min_frac, n_sub=self.sde_n_sub, batch_size=self.sde_batch_size,
                 scale_p=float(self.scale_proteins), horizon_growth=float(self.sde_horizon_growth),
                 max_horizon=None if free else self.sde_max_horizon, n_windows=self.sde_windows, first_start_only=free,
                 free_theta=free, adaptive=free and bool(self.sde_adaptive_lasso),
+                qut_reps_adaptive=int(self.sde_qut_reps_adaptive),
+                qut_cells=self.sde_qut_cells, null_dev_weights=bool(self.ot_gene_weight_schedule),
                 n_cond=n_cond, d1_ref=tile(d1_ref), eps_ref=tile(eps_ref),
                 only_max_horizon=only_max_horizon,
                 seed=task_seed(self.seed, *key), verb=verb > 1 if tag == 'fit_network' else verb,
@@ -5222,8 +5652,8 @@ class NetworkModel:
                 prot_weight=0.0 if mode == 'ode' and (self.proteins_observed or self.observed_prot is not None)
                 else float(self.sde_protein_weight or 0.0),  # ODE on observed proteins: no proximity term
                 mrna_dilution=self.mrna_dilution_on(),
-                qut_level=self.qut_level if self.sde_qut else None, mode_cost=self.sde_mode_cost,
-                kon_weight=float(self.sde_kon_weight), mrna_weight=float(self.sde_mrna_weight), bptt=self.sde_bptt)
+                qut_level=self.qut_level if free else None, mode_cost=self.sde_mode_cost or self.fit_ot_cost,
+                kon_weight=float(self.sde_kon_weight), mrna_weight=float(self.sde_mrna_weight), bptt=self.sde_bptt if free else None)
 
         try:
             if not separate:
@@ -5256,12 +5686,14 @@ class NetworkModel:
         return basal_new, theta, d1_t, eps_t, scale_t, cond
 
     def _refine_trajectories_network(self, kon_targets, d1, times, N_tot, ks, valid, samples_id, verb=True,
-                                     y_prot_given=None):
+                                     y_prot_given=None, inter_given=None):
         """Proteins along the couplings of fit_network towards kon_targets (relaxation d1) and network refitted on
         them (final fit, without flow-matching term; inter_simul_ref as reference if given; y_prot_given: these
-        proteins instead). Returns (y_prot, basal, inter)."""
+        proteins instead; inter_given: network of reference and start instead of that of fit_network, e.g. in the
+        units of y_prot_given). Returns (y_prot, basal, inter)."""
         ns = self.n_stimuli
-        basal_ref, inter_ref = self.basal.copy(), self.inter.copy()
+        basal_ref = self.basal.copy()
+        inter_ref = self.inter.copy() if inter_given is None else np.array(inter_given, dtype=float)
         if self.inter_simul_ref is not None:
             inter_ref = self._normalize_theta(self.inter_simul_ref, self.inter.shape[-1], is_inter=True)
         # Network conditions refitted together (degradation_rates_per_condition = False): mean network as reference
@@ -5274,8 +5706,10 @@ class NetworkModel:
         y_prot = self.estimate_trajectories(self.prot, times, d1, N=N_tot, kon_beta=kon_targets,
                                             s=self.scale_proteins, birth=self._state_birth()) \
             if y_prot_given is None else np.asarray(y_prot_given, dtype=float)
-        error = self._count_errors_per_sample(y_prot[valid], self.kon_beta[valid], ks, self.inter, self.basal,
-                                              samples_id=samples_id, samples_data=self.samples_data[valid])
+        error = self._count_errors_per_sample(y_prot[valid], self.kon_beta[valid], ks,
+                                              self.inter if inter_given is None else np.asarray(inter_given, float),
+                                              self.basal, samples_id=samples_id,
+                                              samples_data=self.samples_data[valid])
 
         # Network targets as in fit_network (expected modes); the trajectories keep the forcing modes
         real_idx = getattr(self, 'traj_real_idx', None)
@@ -5296,7 +5730,7 @@ class NetworkModel:
                 # Separate per condition (no fused term) with degradation_rates_per_condition, else a common network
                 sample_conditions=self.sample_conditions if self.per_condition_fits()[0] else None,
                 condition_pen=0.0, gene_mask=self.gene_mask,
-                sigma_spec_grn=self._spec_grn(), **self._penalty_kw(),
+                sigma_spec_grn=self._spec_grn(), **self._penalty_kw(ks, real_idx, targets, self.samples_data),
                 dist_targets=None if targets is self.kon_beta else self._distribution_targets(
                     self.kon_beta, real_idx, self.samples_data, self.times_data, ks, valid),
             )
@@ -6065,6 +6499,27 @@ class NetworkModel:
                 self.modes_soft[:, g] = tmp_soft
                 self.posteriors_soft[:, g, :tmp_post.shape[1]] = tmp_post
 
+    def _test_kappa(self, train, vect_samples_id, G_tot):
+        """Precision kappa (N_cells, G_tot) of the network prior on the levels of the test cells (_net_kappa): that of
+        their sample at the end of the training (train['net_kappa'], per training sample), the median over the
+        training samples for a sample absent from the training; required with the likelihood in the OT
+        (fit_likelihood 'network+ot')."""
+        kap_tr = train.get('net_kappa')
+        if kap_tr is None:
+            if self._fit_likelihood() == 'network+ot':
+                raise ValueError("infer_test with fit_likelihood = 'network+ot' needs net_kappa.npy "
+                                 "(rerun infer_network_structure)")
+            self._net_kappa = None
+            return
+        kap_tr = np.asarray(kap_tr, dtype=float)
+        ids = [str(x) for x in train.get('sample_ids', [])]
+        med = np.median(kap_tr, axis=0)
+        self._net_kappa = np.empty((len(vect_samples_id), G_tot))
+        for s in np.unique(vect_samples_id):
+            rows = np.asarray(vect_samples_id) == s
+            self._net_kappa[rows] = kap_tr[ids.index(str(s))] if str(s) in ids and ids.index(str(s)) < len(kap_tr) \
+                else med
+
     def infer_test(self, data, vect_samples_id=None, verb=True, stimulus_schedule=None,
                    basal_ref=None, transition_rates=None, time_key='time', context=None, train=None):
         """
@@ -6146,6 +6601,7 @@ class NetworkModel:
                        'weight_prob': self._weight_prob(self.min_n_loops), 'reg_factor': 1.0}
         self._assign_calibrated_basins(train, vect_t, times, ks, ks_cells, cell_s, samples_id, G_tot,
                                        context['weight_prob'], act_cells=self.cell_gene_mask(cell_s))
+        self._test_kappa(train, vect_samples_id, G_tot)
         if kov_cell_mask is not None:  # KO cells at the lowest mode, OV cells at the highest one
             self._force_kov_modes(kov_cell_mask, ks, ks_cells, lev_cells)
 

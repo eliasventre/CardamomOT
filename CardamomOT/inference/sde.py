@@ -29,6 +29,7 @@ import torch
 from geomloss import SamplesLoss
 
 from .sigma import sigma_torch
+from .network import ORD_H, NULL_DEV_SD, ordinal_params, null_deviance, cost_code
 
 try:  # geomloss 'auto' switches to the KeOps 'online' backend above 5000² pairs: needs pykeops
     import pykeops.torch  # noqa: F401
@@ -40,7 +41,7 @@ SCALE_BOUNDS = (0.2, 5.0)  # scale of theta per target gene: within [1/5, 5] (ne
 
 
 def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1', learn_theta=True,
-                     learn_d=True, learn_eps=True, learn_scale=True, temporal=True, lam_theta=1.0, lam_rates=1.0,
+                     learn_d=True, learn_eps=True, learn_scale=True, temporal=True, lam_theta=0.0, lam_rates=1.0,
                      eps_bounds=(1 / 50, 1 / 1.5), epochs=30, lr=1e-2, n_sub=20, batch_size=256, n_rep=2,
                      max_horizon=None, horizon_growth=2.0, n_windows=10, n_cond=1, d1_ref=None, eps_ref=None, only_max_horizon=False,
                      blur=0.05, noise='gamma', scale_p=1.0, seed=0, verb=False, spec=None, support_tol=0.0,
@@ -48,18 +49,17 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                      mrna_weight=1.0, free_theta=False, lam_l1=0.0, first_start_only=False,
                      qut_level=None, qut_reps=20, null_epochs=10, sink_scaling=0.9, mode_cost='ce',
                      ce_eps=0.05, init_weight=None, lr_rates=None, lr_decay=1.0, lr_min_frac=1.0, bptt=None,
-                     adaptive=False):
+                     adaptive=False, qut_reps_adaptive=10, null_epochs_adaptive=3, qut_cells=None,
+                     null_dev_weights=False):
     """
     groups: one dict per sample s with
         'X' (T, n, G) trajectory states (starts of the windows; mode 'sde2' also 'M' (T, n, G) normalised mRNA
         and 'M_targets' list of T arrays of observed normalised mRNA),
-        'targets' list of T arrays (n_t, G) of observed kon (None: time not observed), 'k_lo', 'k_hi', 'k1' (G,),
-        optionally 'post' / 'levels' lists of T arrays (n_t, G, L): posteriors and levels of each observed cell, the
-        targets being then drawn from them at every minibatch (their mean 'targets' would contract the distribution),
-        optionally 'mode_levels' (G, L) levels of the mixture of each gene (normalised kon, grid padded by
-        repetition): the simulated kon is read as a mode, drawn between the two levels around it with the mean kept
-        (Bernoulli of sigma for two modes), straight-through gradient; else 'binary' (G,) bool, genes of two modes so
-        read between k_lo and k_hi,
+        'targets' list of T arrays (n_t, G) of observed kon (None: time not observed; the modes, or their mean under
+        the posteriors: no draw, the simulated kon compared as it is), 'hard' (optional, as 'targets') the hard modes
+        (basins) of the same cells, for the units / weights of null_dev_weights, 'wtargets' (optional, ordinal cost,
+        list of T arrays (n_t, 2, G)) their expected warped targets (u1, u2) under the posteriors (soft targets),
+        'k_lo', 'k_hi', 'k1' (G,),
         'stim' (T - 1, ns) stimulus of each interval, 'stim0' (ns,) stimulus at the first observed time, 'idx' index of its basal / network rows, 'cond' index of its
         kinetics (network condition, 0 .. n_cond - 1: d1, eps and scale per condition),
         'start_ok' (T,) bool times observed for the sample (windows start only there and span its observed intervals,
@@ -74,7 +74,8 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         each gene): the observed modes of a target are compared with its kon at the proteins the lag of its class
         before each reached time (integration step nearest to it, the start of the interval at most).
     theta (G, G) or (S, G, G), basal (S, G): starting network (support |theta| > support_tol and signs kept,
-    the other entries set to 0; rappel lam_theta on the support);
+    the other entries set to 0; the basal a starting value only, without rappel; lam_theta: anchor of theta to it,
+    relative L2 sum (theta - theta_start)^2 / sum theta_start^2 on its support, with the L1);
     d1, eps, scale (T - 1, G): starting rates (rappel lam_rates on the logs towards d1_ref, eps_ref, default the
     starting values, and towards a scale of 1); only_max_horizon: no curriculum, windows of the whole time
     course only; temporal: one value per interval, else shared; max_horizon: longest window of the curriculum, in observed
@@ -90,21 +91,29 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
     staying a pure decay rate. prot_weight > 0: + prot_weight x debiased Sinkhorn, at the last time of each window,
     between the simulated proteins and the trajectory states 'X' of that time (reference proteins: reconstructed by
     fit_network, unitary for the ODE, or observed), per gene in units of their standard deviation. kon_weight,
-    mrna_weight: weights of the Sinkhorn on the kon of the observed modes and ('sde2') on the observed mRNA, both in
-    units of the highest mode of each gene (unit modes; mRNA positioned on the modes, as in the OT of fit_network).
-    free_theta: every entry of theta learned with its sign (network from scratch, e.g. null or random start; rappel
-    lam_theta as a mean squared deviation; no scale of theta), else support and signs of theta kept. lam_l1: L1 on theta - theta_null
+    mrna_weight: weights of the Sinkhorn on the kon of the observed modes and ('sde2') on the observed mRNA, the gene
+    weights of the end of ot_gene_weight_schedule in fit_network: positions tau = (kon - k_lo) / (k_hi - k_lo), genes
+    equally weighted (mRNA in the same units, x scale_p); null_dev_weights (ot_gene_weight_schedule), in units of the
+    standard deviation of the gene in each group (positions of the hard modes: 1 / (2 Var(tau)); normalised mRNA).
+    free_theta: every entry of theta learned with its sign (network from scratch, e.g. null or random start; no
+    scale of theta), else support and signs of theta kept. lam_l1: L1 on theta - theta_null
     (theta_null = 0 with free_theta, else the starting network), in units of the loss gradient, by a proximal step
     after each Adam step preconditioned as that step (soft threshold lr lam / (sqrt(v_hat) + eps)): exact zeros;
-    replaces the L2 rappel on theta. qut_level: lam per target by the quantile universal threshold instead, the
-    qut_level-quantile over qut_reps replicates of max_g |dL/dtheta_gj| at the null model (theta_null, basal fitted
-    with theta_null fixed over null_epochs steps per horizon with free_theta), the observed modes and mRNA being
-    replaced by draws of the null model from the initial states (parametric bootstrap). sink_scaling: annealing
+    replaces the L2 rappel on theta. qut_level: lam per target by the quantile universal threshold instead, as in
+    fit_network: qut_level-quantile over qut_reps replicates of max_g |dL/dtheta_gj| at the null network (theta 0,
+    basal of the null network: closed form, then null_epochs steps on the longest windows; with free_theta, basal and
+    rates over the curriculum, start of the fit; else the starting network and basal restored after the QUT), the observed modes and mRNA of each target permuted across the observed
+    cells of each group, all times together; the windows start from the same states. qut_cells: the QUT computed on
+    a fixed subsample of qut_cells trajectories per window and observed cells per time (all window starts), its
+    level rescaled by sqrt(qut_cells / n) (n the median number of observed cells per time; null noise of the
+    gradient of a mean loss in 1 / sqrt(n)); None: all cells. sink_scaling: annealing
     ratio of the Sinkhorn iterations (geomloss 'scaling'): 0.9 brings the gradients within ~10 % of the converged
-    ones (0.5 can flip their sign). mode_cost: 'euclidean', debiased Sinkhorn on the unit modes (simulated kon read on
-    the grid of levels); 'ce', entropic OT whose ground cost is the cross-entropy of fit_network between the continuous
-    sigma of the simulated states and the positions tau of the observed modes (gene weights 1 - k_lo / k_hi),
-    regularisation ce_eps (annealed down to it), gradient through the optimal plan. init_weight: weight of the initial
+    ones (0.5 can flip their sign). mode_cost: 'euclidean', debiased Sinkhorn on the modes in the units of units();
+    'ce' / 'ordinal', entropic OT whose ground cost is the network cost of fit_network (cross-entropy, or the ordinal cost with the
+    central modes 'mid' (G,) of each group, -1 without) between the continuous sigma of the simulated states and the
+    positions tau of the observed modes, on the scale of the euclidean cost (mode_weights: genes of the group's
+    condition equally weighted; null_dev_weights, 1 / (2 null deviance) of the gene in that cost over the hard modes of
+    the group, null_deviance), regularisation ce_eps (annealed down to it), gradient through the optimal plan. init_weight: weight of the initial
     term (None: that of the kon term). lr_rates: Adam learning rate of the rates and
     scales (None: lr); schedule of both: warm restarts at each horizon of the curriculum, peak x lr_decay at each new
     horizon, cosine decay down to lr_min_frac x the peak within the horizon (1: constant). bptt: truncated
@@ -113,8 +122,10 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
     curriculum lengthening it up to max_horizon. adaptive (free_theta with qut_level): second pass, adaptive lasso
     on the support of the first one, weights 1 / |theta_1| (warm start), at its own QUT per target j: qut_level-quantile
     of max_g |theta_1,gj| |dL/dtheta_gj| at the null model of j given the first pass (column j of theta set to 0, its
-    basal refitted, the other targets as fitted), whose simulated cells are heterogeneous, unlike the global null
-    model (all sigma equal: entropic couplings that only see the mean of each regulator per time).
+    basal refitted, the other targets as fitted; the observations of j permuted), whose simulated cells are
+    heterogeneous, unlike the global null model (all sigma equal: entropic couplings that only see the mean of each
+    regulator per time); the null models of all targets simulated together, as copies of the windows,
+    qut_reps_adaptive replicates, basals refitted over null_epochs_adaptive steps.
     Always: + the cross-entropy (as in fit_network) between the sigma of the initial states (first observed time of
     each group, stimulus 'stim0' of the schedule) and the modes of their own cells (groups 'valid0' (n,) bool: slots
     of the observed cells at that time), with the weight of the kon term (init_weight): it sets the basal at the initial
@@ -164,23 +175,29 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
     sink = SamplesLoss('sinkhorn', p=2, blur=blur, scaling=sink_scaling, debias=True, backend=SINKHORN_BACKEND)
     tens = [dict(k_lo=torch.tensor(g['k_lo'], dtype=f64), k_hi=torch.tensor(g['k_hi'], dtype=f64),
                  k1=torch.tensor(np.maximum(g['k1'], 1e-8), dtype=f64),
-                 binary=None if g.get('binary') is None or not np.any(g['binary'][ns:]) else
-                 torch.tensor(np.asarray(g['binary'][ns:], dtype=bool)),
                  lag_w=None if g.get('lag') is None else torch.tensor(np.asarray(g['lag_w'], dtype=float)))
             for g in groups]
 
-    def units(gi, g, scale=1.0):
-        """Per-gene units of the kon (scale 1) and normalised mRNA (scale_p) distances: the highest mode of each gene
-        (unit modes kon / k_hi, i.e. sigma (1 - k_lo / k_hi) up to a constant; mRNA positioned on the modes), genes
-        out of the group's condition (gmask) left out."""
-        u = scale * tens[gi]['k_hi'][ns:].clamp(min=1e-12)
+    def units(gi, g, mrna=False):
+        """Per-gene units of the kon (mrna False) and normalised mRNA (mrna True) distances of group gi, as the gene
+        weights of the end of ot_gene_weight_schedule: the span k_hi - k_lo (positions tau, genes equally weighted;
+        mRNA positioned on the modes, x scale_p), with null_dev_weights the standard deviation of the gene in the
+        group (sd_k / sd_m); genes out of the group's condition (gmask) left out."""
+        if null_dev_weights:
+            u = sd_m[gi] if mrna else sd_k[gi]
+        else:
+            u = (scale_p if mrna else 1.0) * (tens[gi]['k_hi'] - tens[gi]['k_lo'])[ns:].clamp(min=1e-12)
         return u if g.get('gmask') is None else u / torch.tensor(g['gmask'][ns:], dtype=f64).clamp(min=1e-12)
 
     def signed_theta():
         return th * mask if free_theta else sgn * torch.relu(th) * mask
 
+    # Null models of the QUT: 'Z' (as th) added to theta (gradient at the null network); null copies of the adaptive
+    # QUT: 'cols' (W,) target of each window, 'D' (G, G), 'b' (as ba)
+    nctx = {}
+
     def theta_of(i):
-        t_ = signed_theta()
+        t_ = signed_theta() if nctx.get('Z') is None else signed_theta() + nctx['Z']
         return t_[i] if t_.dim() == 3 else t_
 
     def rates_of(tw, c):
@@ -191,7 +208,14 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
     def kon_of(P, gi, s):
         """kon (W, n, G) of the states P (W, n, G) of group gi, scale of theta s (W, G) of each window."""
         g, c = groups[gi], tens[gi]
-        return c['k_lo'] + (c['k_hi'] - c['k_lo']) * sigma_torch(P, theta_of(g['idx']), ba[g['idx']], s, spec, all_edges=free_theta)
+        sig = sigma_torch(P, theta_of(g['idx']), ba[g['idx']], s, spec, all_edges=free_theta or 'Z' in nctx)
+        cols = nctx.get('cols')
+        if cols is not None and len(cols) == P.shape[0]:  # null copies: column cols[w] of window w from (D, b)
+            sig0 = sigma_torch(P, nctx['D'], nctx['b'][g['idx']], s, spec, all_edges=True)
+            M = torch.zeros((P.shape[0], 1, G), dtype=f64)
+            M[np.arange(P.shape[0]), 0, cols] = 1.0
+            sig = sig * (1 - M) + sig0 * M
+        return c['k_lo'] + (c['k_hi'] - c['k_lo']) * sig
 
     def kon_read(P_obs, gi, s):
         """kon (W, n, G) compared with the observed modes: at the proteins P_obs (W, n, G), or with the mRNA memory
@@ -276,82 +300,99 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                              for k in range(k_lag.shape[1])])
         return P, Mn, s, dlogw, P_lag, Kb
 
-    def level_grid(ml):
-        """Sorted distinct levels of each target gene (Gt, L), padded with their highest level, and their counts."""
-        lv = [np.unique(np.round(v, 12)) for v in np.asarray(ml, dtype=float)[ns:]]
-        L = max(len(v) for v in lv)
-        return np.stack([np.pad(v, (0, L - len(v)), mode='edge') for v in lv]), np.array([len(v) for v in lv])
-    levels = [None if g.get('mode_levels') is None else level_grid(g['mode_levels']) for g in groups]
+    def kon_targets(g, t, i):
+        """Observed kon (len(i), G - ns) of the cells i at time t."""
+        return g['targets'][t][i][:, ns:]
 
-    def observed_kon(kon, gi, r):
-        """Simulated kon (W, n, G - ns) read as the observed modes: drawn between the two levels of the mixture around
-        it, the upper one with probability its relative position (mean kept; Bernoulli of sigma for two modes),
-        straight-through gradient; without levels, genes of two modes ('binary') only."""
-        if levels[gi] is not None:
-            lv, nl = levels[gi]
-            k = kon.detach().numpy()
-            x = np.clip(k, lv[:, 0], lv[np.arange(len(nl)), nl - 1])
-            i = np.clip((lv[:, 1:] <= x[..., None]).sum(-1), 0, np.maximum(nl - 2, 0))  # lower level index
-            lo = np.take_along_axis(np.broadcast_to(lv, k.shape + lv.shape[-1:]), i[..., None], -1)[..., 0]
-            hi = np.take_along_axis(np.broadcast_to(lv, k.shape + lv.shape[-1:]),
-                                    np.minimum(i + 1, nl - 1)[..., None], -1)[..., 0]
-            lo, hi = torch.tensor(lo, dtype=f64), torch.tensor(hi, dtype=f64)
-            span = torch.clamp(hi - lo, min=1e-12)
-            p = ((kon - lo) / span).clamp(0.0, 1.0)
-            z = torch.tensor(r.random(tuple(kon.shape)) < p.detach().numpy(), dtype=f64)
-            return lo + (hi - lo) * (z + p - p.detach())
-        b = tens[gi]['binary']
-        if b is None:
-            return kon
-        lo, hi = tens[gi]['k_lo'][ns:], tens[gi]['k_hi'][ns:]
-        sig = ((kon - lo) / torch.clamp(hi - lo, min=1e-12)).clamp(0.0, 1.0)
-        z = torch.tensor(r.random(tuple(kon.shape)) < sig.detach().numpy(), dtype=f64)
-        return torch.where(b, lo + (hi - lo) * (z + sig - sig.detach()), kon)
-
-    def kon_targets(g, t, i, r):
-        """Observed kon (len(i), G - ns) of the cells i at time t: levels drawn from their posteriors (generator r),
-        else their 'targets'."""
-        if g.get('post') is None:
-            return g['targets'][t][i][:, ns:]
-        P, lev = g['post'][t][i][:, ns:], g['levels'][t][i][:, ns:]
-        k = (np.cumsum(P, axis=-1) < r.random(P.shape[:2])[..., None]).sum(-1).clip(max=P.shape[-1] - 1)
-        return np.take_along_axis(lev, k[..., None], axis=-1)[..., 0]
+    def warped_targets(g, t, i):
+        """Expected warped targets (len(i), 2, G - ns) of the ordinal cost of the cells i at time t ('wtargets'),
+        None without."""
+        return None if mode_cost != 'ordinal' or g.get('wtargets') is None else g['wtargets'][t][i][..., ns:]
 
     def init_targets(gi, g):
         """Initial states paired with their cells (slots 'valid0' at the first observed time) and their sigmoid targets
-        tau (n0, G - ns): position of their mode between the lowest and highest ones, expected under the posteriors."""
+        tau (n0, G - ns): position of their mode between the lowest and highest ones; ordinal cost with 'wtargets',
+        their expected warped targets (n0, 2, G - ns)."""
         t_f = obs_t[gi][0]
         sl = np.flatnonzero(g['valid0']) if g.get('valid0') is not None else np.arange(len(g['targets'][t_f]))
+        wt = warped_targets(g, t_f, slice(None))
+        if wt is not None:
+            return sl, np.array(wt, dtype=float)
         lo, hi = g['k_lo'][ns:], g['k_hi'][ns:]
         pos = lambda k: np.clip((k - lo) / np.maximum(hi - lo, 1e-12), 0.0, 1.0)
-        if g.get('post') is not None:
-            tau = (g['post'][t_f][:, ns:] * pos(np.moveaxis(g['levels'][t_f][:, ns:], -1, 0)).transpose(1, 2, 0)).sum(-1)
-        else:
-            tau = pos(g['targets'][t_f][:, ns:])
-        return sl, tau
+        return sl, pos(g['targets'][t_f][:, ns:])
 
-    def init_term(gi, g, full):
-        """Cross-entropy (as in fit_network) between the sigma of the initial states (stimulus 'stim0') and the
-        sigmoid targets of their cells, gene weights 1 - k_lo / k_hi, mean over the cells."""
+    def init_term(gi, g, full, copies=None):
+        """Initial states (stimulus 'stim0') against the modes of their own cells, with the ground cost of the modes
+        at the other times, as the mean cost of this known pairing (the scale of the transport cost <pi, C> of the
+        other times, pi summing to 1): mode_cost 'ce' / 'ordinal', network cost (as in fit_network) between sigma and
+        the sigmoid targets, gene weights mode_weights; 'euclidean', |kon - Y|^2 / 2 in the units of units() (Y the
+        observed kon; geomloss cost of p = 2).
+        copies: every column from the null copies (D, b), each against the targets of its own copy (sum of the
+        initial terms of the copies)."""
         sl, tau = g['tau0'] if g.get('tau0') is not None else init_tg[gi]
+        if copies is not None and g.get('copy_draws') is not None:
+            tau = tau.copy()
+            for c, j in enumerate(copies):
+                tau[..., j - ns] = g['copy_draws'][c]['tau0'][1][..., j - ns]
         i0 = np.arange(len(sl)) if full or len(sl) <= batch_size else rng.choice(len(sl), batch_size, replace=False)
         P0 = torch.tensor(g['X'][obs_t[gi][0]][sl[i0]], dtype=f64)[None]
         P0[..., :ns] = torch.tensor(np.asarray(g['stim0'], dtype=float), dtype=f64)
         s0 = rates_of(np.array([min(obs_t[gi][0], T1 - 1)]), g.get('cond', 0))[2]
-        sig = sigma_torch(P0, theta_of(g['idx']), ba[g['idx']], s0, spec, all_edges=free_theta)[0, :, ns:]
-        sig = sig.clamp(1e-6, 1 - 1e-6)
-        t_ = torch.tensor(tau[i0], dtype=f64)
-        ce = -(t_ * torch.log(sig) + (1 - t_) * torch.log(1 - sig))
-        lo, hi = g['k_lo'][ns:], g['k_hi'][ns:]
-        gw = np.clip(1.0 - lo / np.maximum(hi, 1e-12), 0.0, 1.0) * (1.0 if g.get('gmask') is None else g['gmask'][ns:])
-        gw = torch.tensor(gw, dtype=f64)
-        return (ce * gw).sum(-1).mean() / gw.sum().clamp(min=1e-12)
+        if copies is None:
+            sig = sigma_torch(P0, theta_of(g['idx']), ba[g['idx']], s0, spec,
+                              all_edges=free_theta or 'Z' in nctx)[0, :, ns:]
+        else:
+            sig = sigma_torch(P0, nctx['D'], nctx['b'][g['idx']], s0, spec, all_edges=True)[0, :, ns:]
+        if mode_cost == 'euclidean':
+            lo_t, hi_t = tens[gi]['k_lo'][ns:], tens[gi]['k_hi'][ns:]
+            span = hi_t - lo_t
+            kon0, Y = lo_t + span * sig, lo_t + span * torch.tensor(tau[i0], dtype=f64)
+            return 0.5 * (((kon0 - Y) / units(gi, g)) ** 2).sum(-1).mean()
+        ce = 0.0
+        tg_ = tau[i0]
+        for sg, tg, wk in warped(gi, sig, (tg_[:, 0], tg_[:, 1]) if tg_.ndim == 3 else tg_):
+            sg = sg.clamp(1e-6, 1 - 1e-6)
+            ce = ce + wk * -(tg * torch.log(sg) + (1 - tg) * torch.log(1 - sg))
+        return (ce * mode_weights(gi, g)).sum(-1).mean()
 
-    def ot_ce(a, sig, b, tau, gw):
+    # Ordinal cost: the two warps of each group (ordinal_params of its central modes, identity for the cross-entropy)
+    ordp = []
+    for g in groups:
+        mid = np.full(G - ns, -1.0) if mode_cost != 'ordinal' or g.get('mid') is None else \
+            np.asarray(g['mid'], dtype=float)[ns:]
+        m, a1, b1, a2, b2, has = ordinal_params(mid)
+        ordp.append(dict(np=(m, a1, b1, a2, b2), has=has,
+                         t=[torch.tensor(v, dtype=f64) for v in (m, a1, b1, a2, b2)],
+                         has_t=torch.tensor(has.astype(float), dtype=f64)))
+
+    def warp_t(x, m, sa, sb):
+        """_warp of the ordinal cost (network.py) in torch, values only (differentiable)."""
+        F = lambda y: sa * y + (sb - sa) * ORD_H * torch.nn.functional.softplus((y - m) / ORD_H)
+        return (F(x) - F(torch.zeros_like(x))) / (F(torch.ones_like(x)) - F(torch.zeros_like(x)))
+
+    def warped(gi, sig, tau):
+        """[(sigma_k, tau_k, weight_k (Gt,))] of the network cost of group gi: the cross-entropy, (sigma, tau, 1); the
+        ordinal cost, the two warps (the second one on the genes with a central mode only). tau numpy or torch, or for
+        the ordinal cost a pair (u1, u2) of targets already warped (expected warped targets of soft targets)."""
+        as_t = lambda x: x if torch.is_tensor(x) else torch.tensor(np.asarray(x, dtype=float), dtype=f64)
+        if mode_cost != 'ordinal':
+            return [(sig, as_t(tau), 1.0)]
+        m, a1, b1, a2, b2 = ordp[gi]['t']
+        t1, t2 = (as_t(tau[0]), as_t(tau[1])) if isinstance(tau, tuple) else \
+            (warp_t(as_t(tau), m, a1, b1), warp_t(as_t(tau), m, a2, b2))
+        return [(warp_t(sig, m, a1, b1), t1, 1.0), (warp_t(sig, m, a2, b2), t2, ordp[gi]['has_t'])]
+
+    def ot_ce(a, sig, b, tau, gw, gi=0):
         """Entropic OT (B batches) between sigma (B, N, Gt) of weights a (B, N) and targets tau (B, M, Gt) of weights
-        b (B, M), ground cost the weighted cross-entropy (gw (Gt,) summing to 1); value <pi, C>, gradient pi."""
-        ls, l1s = torch.log(sig.clamp(1e-6, 1 - 1e-6)), torch.log1p(-sig.clamp(1e-6, 1 - 1e-6))
-        C = -(ls @ (gw * tau).transpose(1, 2) + l1s @ (gw * (1 - tau)).transpose(1, 2))  # (B, N, M)
+        b (B, M), ground cost the weighted network cost (cross-entropy, or the ordinal cost: sum of the cross-entropies
+        of the two warps of group gi, both linear in their targets; gw (Gt,), mode_weights); value <pi, C>, gradient
+        pi."""
+        C = 0.0
+        for sg, tg, wk in warped(gi, sig, tau):
+            w_ = gw * wk
+            ls, l1s = torch.log(sg.clamp(1e-6, 1 - 1e-6)), torch.log1p(-sg.clamp(1e-6, 1 - 1e-6))
+            C = C - (ls @ (w_ * tg).transpose(1, 2) + l1s @ (w_ * (1 - tg)).transpose(1, 2))  # (B, N, M)
         la, lb = torch.log(a.clamp(min=1e-300)), torch.log(b)
         with torch.no_grad():
             Cd = C.detach()
@@ -369,32 +410,76 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
             pi = torch.exp((f[:, :, None] + g_[:, None, :] - Cd) / e + la[:, :, None] + lb[:, None, :])
         return (pi * C).sum(dim=(1, 2))
 
-    def mode_weights(gi, g):
-        """Gene weights of the cross-entropy, 1 - k_lo / k_hi on the genes of the group's condition, summing to 1."""
-        lo, hi = g['k_lo'][ns:], g['k_hi'][ns:]
-        w = np.clip(1.0 - lo / np.maximum(hi, 1e-12), 0.0, 1.0) * (1.0 if g.get('gmask') is None else g['gmask'][ns:])
-        return torch.tensor(w / max(w.sum(), 1e-12), dtype=f64)
+    # null_dev_weights, per group, on the positions tau of the hard modes of its observed cells ('hard': the basins, as
+    # the OT of fit_network; 'targets' without), all times together, as the last stage of ot_gene_weight_schedule: the
+    # cross-entropy / ordinal cost weighted by 1 / null deviance of the gene in that cost (null_deviance), the euclidean
+    # one in units (k_hi - k_lo) max(std(tau), NULL_DEV_SD) (1 / (2 Var(tau)), same floor): a population of share p
+    # missed costs the same whatever p. Normalised mRNA: its standard deviation in the group, floored at NULL_DEV_SD
+    # scale_p (k_hi - k_lo)
+    if null_dev_weights:
+        w_dev, sd_k, sd_m = [], [], []
+        for gi, g in enumerate(groups):
+            span = np.maximum(g['k_hi'][ns:] - g['k_lo'][ns:], 1e-12)
+            hard = g['hard'] if g.get('hard') is not None else g['targets']
+            taus = np.clip((np.concatenate([a for a in hard if a is not None and len(a)])[:, ns:] - g['k_lo'][ns:])
+                           / span, 0.0, 1.0)
+            mid = np.where(ordp[gi]['has'], ordp[gi]['np'][0], -1.0)
+            w_dev.append(1.0 / null_deviance(taus, cost_code(mode_cost), mid))
+            sd_k.append(torch.tensor(span * np.maximum(taus.std(axis=0), NULL_DEV_SD), dtype=f64))
+            if mode == 'sde2':
+                mt = np.concatenate([m for m in g['M_targets'] if m is not None and len(m)])[:, ns:]
+                sd_m.append(torch.tensor(np.maximum(mt.std(axis=0), NULL_DEV_SD * scale_p * span), dtype=f64))
+            else:
+                sd_m.append(None)
 
-    def windows_loss(p_sel, H, full=False):
+    def mode_weights(gi, g):
+        """Gene weights (genes of the group's condition) of the cross-entropy / ordinal cost of the modes, on the scale
+        of the euclidean one, sum_g omega_g 2 (sigma - tau)^2 (geomloss cost |x - y|^2 / 2 in the units of units(); the
+        cross-entropy to second order at tau = 0.5): 1 / 4 as the euclidean cost on the positions tau; with
+        null_dev_weights, 1 / (2 null deviance) as the euclidean 1 / (4 Var(tau))."""
+        w = np.ones(G - ns) if g.get('gmask') is None else np.asarray(g['gmask'][ns:], dtype=float)
+        return torch.tensor(w * w_dev[gi] / 2 if null_dev_weights else w / 4, dtype=f64)
+
+    def windows_loss(p_sel, H, full=False, copies=None):
         """Mean loss of the windows starting at the observed times of rank p_sel of each group and spanning H of its
         observed intervals (all of them if fewer), all windows of a group in one batch: one batched Sinkhorn per
-        interval (targets resampled to a common size; full: fixed draws of the targets)."""
+        interval (targets resampled to a common size; full: fixed draws of the targets). copies (C,) targets: every
+        window repeated as C null copies (the copy c with the column copies[c] of the null model nctx, against the
+        draws g['copy_draws'][c] when present); sum over the copies of their mean losses."""
         loss, n_terms = 0.0, 0
-        r_tg = np.random.default_rng(seed + 2) if full else rng
+        C = 1 if copies is None else len(copies)
         for gi, g in enumerate(groups):
             ob = obs_t[gi]
             if w_term['init'] > 0 and len(ob):  # kon of the initial states (initial stimulus) against the initial modes
-                loss = loss + w_term['init'] * init_term(gi, g, full)
+                loss = loss + w_term['init'] * init_term(gi, g, full, copies)
                 n_terms += 1
             Hg = min(H, len(ob) - 1)
             p_ok = np.array([p for p in p_sel if p + Hg < len(ob)], dtype=int) if Hg >= 1 else np.zeros(0, int)
             if not len(p_ok):
                 continue
+            # Edge effect: each observed time weighted by the inverse of the number of windows of the horizon that
+            # reach it (an end time is reached by one window, a middle one by Hg), so that every time counts equally
+            cov = np.zeros(len(ob))
+            for p in starts_of(Hg):
+                if p + Hg < len(ob):
+                    cov[p + 1:p + Hg + 1] += 1
+            w_rank = np.where(cov > 0, cov[cov > 0].mean() / np.maximum(cov, 1), 0.0)
+            w_time = dict(zip(ob, w_rank))
             a_ok, L = ob[p_ok], ob[p_ok + Hg] - ob[p_ok]  # starts and lengths (intervals of the time grid)
             W, n = len(a_ok), g['X'].shape[1]
-            slots = np.stack([np.arange(n) if full or n <= batch_size else rng.choice(n, batch_size, replace=False)
+            sub = nctx.get('sub') if full else None  # fixed subsample of the QUT (qut_cells)
+            slots = np.stack([sub[gi][0] if sub is not None else
+                              np.arange(n) if full or n <= batch_size else rng.choice(n, batch_size, replace=False)
                               for _ in range(W)])
             slots = np.repeat(slots, n_rep, axis=1)                       # (W, n_p)
+            cidx = None
+            if copies is not None:  # null copies of every window
+                a_ok, L, slots = np.repeat(a_ok, C), np.repeat(L, C), np.repeat(slots, C, axis=0)
+                cidx = np.tile(np.arange(C), len(p_ok))
+                nctx['cols'] = np.asarray(copies)[cidx]
+                W = len(a_ok)
+            gv = (lambda w: g) if cidx is None or g.get('copy_draws') is None else \
+                (lambda w: dict(g, **g['copy_draws'][cidx[w]]))
             P = torch.tensor(g['X'][a_ok[:, None], slots], dtype=f64)
             Mn = torch.tensor(g['M'][a_ok[:, None], slots], dtype=f64) if mode == 'sde2' else None
             # kon read on the mRNA (memory_filter): from the kon of the start states
@@ -409,6 +494,9 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                     Mn = None if Mn is None else Mn[kt]
                     Kb = None if Kb is None else Kb[kt]
                     W = len(a_ok)
+                    if cidx is not None:
+                        cidx = cidx[keep]
+                        nctx['cols'] = np.asarray(copies)[cidx]
                 tw = a_ok + k
                 if bptt is not None and k > 0 and k % int(bptt) == 0:  # truncated backpropagation: states detached
                     P = P.detach()
@@ -425,28 +513,36 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                 obs = [w for w in range(W) if g['targets'][tw[w] + 1] is not None and len(g['targets'][tw[w] + 1])]
                 if not obs:
                     continue
-                M = len(g['targets'][tw[obs[0]] + 1]) if full else batch_size
-                sel = [rng.choice(len(g['targets'][tw[w] + 1]), M, replace=len(g['targets'][tw[w] + 1]) < M)
-                       if not full else np.arange(M) for w in obs]
-                Y = torch.tensor(np.stack([kon_targets(g, tw[w] + 1, i, r_tg) for w, i in zip(obs, sel)]), dtype=f64)
+                if sub is not None:
+                    M, sel = len(sub[gi][1][tw[obs[0]] + 1]), [sub[gi][1][tw[w] + 1] for w in obs]
+                else:
+                    M = len(g['targets'][tw[obs[0]] + 1]) if full else batch_size
+                    sel = [rng.choice(len(g['targets'][tw[w] + 1]), M, replace=len(g['targets'][tw[w] + 1]) < M)
+                           if not full else np.arange(M) for w in obs]
+                Y = torch.tensor(np.stack([kon_targets(gv(w), tw[w] + 1, i) for w, i in zip(obs, sel)]),
+                                 dtype=f64)
                 wts = torch.softmax(torch.tensor(logw[obs], dtype=f64), dim=1)
+                wv = torch.tensor([w_time[tw[w] + 1] for w in obs], dtype=f64)  # edge-effect weights
                 u = torch.full((len(obs), M), 1.0 / M, dtype=f64)
                 if Kb is not None:
                     kon_c = Kb[obs][..., ns:]
                 else:
                     P_sel = P_obs[obs] if tens[gi]['lag_w'] is None else P_obs[:, obs]
                     kon_c = kon_read(P_sel, gi, s[obs])[..., ns:]
-                if w_term['kon'] > 0 and mode_cost == 'ce':  # continuous sigma against the positions of the modes
+                if w_term['kon'] > 0 and mode_cost != 'euclidean':  # continuous sigma against the positions of the modes
                     lo, hi = tens[gi]['k_lo'][ns:], tens[gi]['k_hi'][ns:]
                     span = torch.clamp(hi - lo, min=1e-12)
                     sig = ((kon_c - lo) / span).clamp(0.0, 1.0)
                     tau = ((Y - lo) / span).clamp(0.0, 1.0)
-                    loss = loss + w_term['kon'] * ot_ce(wts, sig, u, tau, mode_weights(gi, g)).sum()
+                    if warped_targets(g, tw[obs[0]] + 1, sel[0]) is not None:  # soft targets: expected warped targets
+                        TW = torch.tensor(np.stack([warped_targets(gv(w), tw[w] + 1, i) for w, i in zip(obs, sel)]),
+                                          dtype=f64)
+                        tau = (TW[:, :, 0], TW[:, :, 1])
+                    loss = loss + w_term['kon'] * (wv * ot_ce(wts, sig, u, tau, mode_weights(gi, g), gi)).sum()
                 elif w_term['kon'] > 0:
                     # Genes of the group's condition only (select_genes_per_condition): the others are not compared
                     gk = units(gi, g)
-                    kon = observed_kon(kon_c, gi, r_tg)
-                    loss = loss + w_term['kon'] * sink(wts, kon / gk, u, Y / gk).sum()
+                    loss = loss + w_term['kon'] * (wv * sink(wts, kon_c / gk, u, Y / gk)).sum()
                 fin = [j for j, w in enumerate(obs) if L[w] == k + 1]  # windows ending at this time
                 if prot_weight > 0 and fin:  # proximity to the reference proteins at the end of the window
                     nX, wf = g['X'].shape[1], [obs[j] for j in fin]
@@ -456,22 +552,19 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                     gp = sdp if g.get('gmask') is None else sdp / torch.tensor(g['gmask'][ns:], dtype=f64).clamp(min=1e-12)
                     loss = loss + prot_weight * sink(wts[fin], P[wf][..., ns:] / gp, up, Yp / gp).sum()
                 if mode == 'sde2' and w_term['mrna'] > 0:  # observed mRNA (same cells)
-                    Ym = torch.tensor(np.stack([g['M_targets'][tw[w] + 1][i][:, ns:] for w, i in zip(obs, sel)]),
+                    Ym = torch.tensor(np.stack([gv(w)['M_targets'][tw[w] + 1][i][:, ns:] for w, i in zip(obs, sel)]),
                                       dtype=f64)
-                    gm_ = units(gi, g, scale_p)
-                    loss = loss + w_term['mrna'] * sink(wts, Mn[obs][..., ns:] / gm_, u, Ym / gm_).sum()
-                n_terms += len(obs)
+                    gm_ = units(gi, g, mrna=True)
+                    loss = loss + w_term['mrna'] * (wv * sink(wts, Mn[obs][..., ns:] / gm_, u, Ym / gm_)).sum()
+                n_terms += float(wv.sum()) / C
+        nctx['cols'] = None
         return loss / max(n_terms, 1)
 
     def penalty():
-        th_r, ba_r, ld_r, le_r, ls_r = ref
+        th_r, _, ld_r, le_r, ls_r = ref
         p = 0.0
-        if learn_theta:
-            if lam_th is None:  # L2 rappel on theta, unless the L1
-                den = mask.sum() if free_theta else (th_r ** 2 * mask).sum() + 1e-12
-                p = p + lam_theta * ((th - th_r) ** 2 * mask).sum() / den
-            den_b = ba[..., ns:].numel() if free_theta else (ba_r[..., ns:] ** 2).sum() + 1e-12
-            p = p + lam_theta * ((ba - ba_r)[..., ns:] ** 2).sum() / den_b
+        if learn_theta and lam_theta > 0 and not free_theta:  # anchor to the starting network
+            p = p + lam_theta * ((th - th_r) ** 2 * mask).sum() / ((th_r ** 2 * mask).sum() + 1e-12)
         for par, r_, on in ((ld, ld_r, learn_d), (le, le_r, learn_eps), (ls, ls_r, ls.requires_grad)):
             if on:
                 p = p + lam_rates * ((par - r_)[..., ns:] ** 2).mean()
@@ -527,42 +620,44 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
 
     def null_draws(r):
         """Observed modes and mRNA of each group drawn from the current model, integrated from its initial states
-        (all trajectories, resampled by their branching weights to the sizes of the observations); the modes of each
-        cell read as in the fit (observed_kon)."""
+        (all trajectories, resampled by their branching weights to the sizes of the observations): diagnostic."""
         out = []
+        C = 1
         with torch.no_grad():
             for gi, g in enumerate(groups):
                 ob = obs_t[gi]
-                as_modes = lambda kon: observed_kon(kon, gi, r)[0].numpy()
+                as_modes = lambda kon: kon.numpy()
                 t_f, n = ob[0], g['X'].shape[1]
-                sl = np.arange(n)[None]
-                P = torch.tensor(g['X'][t_f][None], dtype=f64)
-                Mn = torch.tensor(g['M'][t_f][None], dtype=f64) if mode == 'sde2' else None
-                Kb = torch.tensor(g['K0'][t_f][None], dtype=f64) if memory_filter else None
-                logw = np.zeros((1, n))
-                tg = [None] * T
-                mt = [None] * T if mode == 'sde2' else None
+                sl = np.repeat(np.arange(n)[None], C, axis=0)
+                rep = lambda a: torch.tensor(np.repeat(a[None], C, axis=0), dtype=f64)
+                P = rep(g['X'][t_f])
+                Mn = rep(g['M'][t_f]) if mode == 'sde2' else None
+                Kb = rep(g['K0'][t_f]) if memory_filter else None
+                logw = np.zeros((C, n))
+                tg = [[None] * T for _ in range(C)]
+                mt = [[None] * T for _ in range(C)] if mode == 'sde2' else None
 
                 def record(t, kon, Mn_, logw):
                     m = len(g['targets'][t])
-                    w = np.exp(logw[0] - logw[0].max())
-                    i = r.choice(n, m, replace=True, p=w / w.sum())
-                    k = np.zeros((m, G))
-                    k[:, ns:] = kon[i]
-                    tg[t] = k
-                    if mt is not None:
-                        mt[t] = Mn_[0][i].numpy()
+                    for c in range(C):
+                        w = np.exp(logw[c] - logw[c].max())
+                        i = r.choice(n, m, replace=True, p=w / w.sum())
+                        k = np.zeros((m, G))
+                        k[:, ns:] = kon[c][i]
+                        tg[c][t] = k
+                        if mt is not None:
+                            mt[c][t] = Mn_[c][i].numpy()
                 P0 = P.clone()
                 P0[..., :ns] = torch.tensor(np.asarray(g['stim0'], dtype=float), dtype=f64)
-                s0 = rates_of(np.array([min(t_f, T1 - 1)]), g.get('cond', 0))[2]
+                s0 = rates_of(np.full(C, min(t_f, T1 - 1)), g.get('cond', 0))[2]
                 record(t_f, as_modes(kon_of(P0, gi, s0)[..., ns:]), Mn, logw)
                 sl0 = init_tg[gi][0]
                 k0 = as_modes(kon_of(P0[:, sl0], gi, s0)[..., ns:])
                 lo, hi = g['k_lo'][ns:], g['k_hi'][ns:]
-                tau0 = (sl0, np.clip((k0 - lo) / np.maximum(hi - lo, 1e-12), 0.0, 1.0))
+                tau0 = [(sl0, np.clip((k0[c] - lo) / np.maximum(hi - lo, 1e-12), 0.0, 1.0)) for c in range(C)]
                 stim = torch.tensor(g['stim'], dtype=f64)
                 for t in range(t_f, ob[-1]):
-                    tw = np.array([t])
+                    tw = np.full(C, t)
                     P = P.clone()
                     P[..., :ns] = stim[tw][:, None, :]
                     P, Mn, s_, dlogw, P_obs, Kb = run_interval(P, Mn, gi, tw, sl, Kb)
@@ -573,60 +668,127 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                     P_obs[..., :ns] = stim[tw][:, None, :]
                     kon = Kb[..., ns:] if Kb is not None else kon_read(P_obs, gi, s_)[..., ns:]
                     record(t + 1, as_modes(kon), Mn, logw)
-                out.append(dict(targets=tg, post=None, M_targets=mt, tau0=tau0))
+                draws = [dict(targets=tg[c], M_targets=None if mt is None else mt[c], tau0=tau0[c])
+                         for c in range(C)]
+                out.append(draws[0])
         return out
 
-    def qut_lambda(weight=None, seed_off=3):
-        """lam (G,) per target: qut_level-quantile of max_g weight_gj |dL/dtheta_gj| (weight: 1, or |theta_1| of the
-        adaptive lasso) at the current (null) model on null draws."""
-        r = np.random.default_rng(seed + seed_off)
+    def permuted(gi, g, js, r):
+        """Observations of group gi with the modes and mRNA of each gene of js permuted across its
+        observed cells, all times together (null network: time-invariant, independent genes), and their initial
+        targets (tau0)."""
+        ts = [t for t in range(T) if g['targets'][t] is not None and len(g['targets'][t])]
+        cut = np.cumsum([len(g['targets'][t]) for t in ts])[:-1]
+        perms = {j: r.permutation(int(sum(len(g['targets'][t]) for t in ts))) for j in js}
+        out = {}
+        for key in ('targets', 'M_targets', 'wtargets'):
+            if g.get(key) is None:
+                continue
+            A = np.concatenate([g[key][t] for t in ts])
+            for j, p in perms.items():
+                A[:, ..., j] = A[p, ..., j]
+            out[key] = [None] * T
+            for t, part in zip(ts, np.split(A, cut)):
+                out[key][t] = part
+        out['tau0'] = init_targets(gi, dict(g, **out))
+        return out
+
+    def null_basal(b=None):
+        """Basal of the null network in closed form, written in b (default ba): at theta 0 all the simulated sigma of a
+        target are equal, and the cross-entropy is minimal at the mean position of its observed modes (all observed
+        times of the samples of each row of the basal), sigma = that mean."""
+        b = ba if b is None else b
+        acc = {}
+        for gi, g in enumerate(groups):
+            lo, hi = g['k_lo'][ns:], g['k_hi'][ns:]
+            pos = lambda k: np.clip((k - lo) / np.maximum(hi - lo, 1e-12), 0.0, 1.0)
+            for t in range(T):
+                if g['targets'][t] is None or not len(g['targets'][t]):
+                    continue
+                tau = pos(g['targets'][t][:, ns:])
+                a_ = acc.setdefault(g['idx'], [0.0, 0])
+                a_[0], a_[1] = a_[0] + tau.sum(0), a_[1] + len(tau)
+        s_ = torch.exp(ls.detach().clamp(ls_lo, ls_hi)).mean(dim=(0, 1)).numpy()[ns:]
+        with torch.no_grad():
+            for i, (tot, n) in acc.items():
+                m = np.clip(tot / max(n, 1), 1e-3, 1 - 1e-3)
+                b[i, ns:] = torch.tensor(np.log(m / (1 - m)) / s_, dtype=f64)
+
+    def null_grad():
+        """|dL/dtheta| (as th) at the null network (Z = 0 added to theta = 0) on the current observations."""
+        (gz,) = torch.autograd.grad(windows_loss(starts_of(H_max), H_max, full=True), nctx['Z'])
+        return np.abs(gz.numpy())
+
+    def qut_subsample():
+        """Fixed subsample of the QUT (qut_cells) in nctx['sub'] and the factor of its level, sqrt(qut_cells / n);
+        nothing (factor 1) when every group has at most qut_cells cells per time."""
+        counts = [len(g['targets'][t]) for g in groups for t in range(T)
+                  if g['targets'][t] is not None and len(g['targets'][t])]
+        n_med = float(np.median(counts)) if counts else 0.0
+        if qut_cells is None or n_med <= qut_cells:
+            return 1.0
+        m, r = int(qut_cells), np.random.default_rng(seed + 7)
+        sub = {}
+        for gi, g in enumerate(groups):
+            n = g['X'].shape[1]
+            tg = {t: r.choice(len(g['targets'][t]), m, replace=len(g['targets'][t]) < m) for t in range(T)
+                  if g['targets'][t] is not None and len(g['targets'][t])}
+            sub[gi] = (np.sort(r.choice(n, min(m, n), replace=False)), tg)
+        nctx['sub'] = sub
+        return float(np.sqrt(m / n_med))
+
+    def qut_lambda():
+        """lam (G,) per target: qut_level-quantile of max_g |dL/dtheta_gj| at the null network (theta 0, current basal)
+        on observations of each target permuted across its observed cells (fit_network's QUT)."""
+        r = np.random.default_rng(seed + 3)
         saved = list(groups)
         cand = mask.detach().numpy() > 0
         cand[..., :ns] = False
-        w = 1.0 if weight is None else weight
         stats = np.zeros((int(qut_reps), G))
         for k in range(int(qut_reps)):
-            for gi, d in enumerate(null_draws(r)):
-                groups[gi] = dict(saved[gi], **d)
-            loss = windows_loss(starts_of(H_max), H_max, full=True)
-            (gr,) = torch.autograd.grad(loss, th)
-            a = np.where(cand, w * np.abs(gr.numpy()), 0.0)
-            stats[k] = a.reshape(-1, G, G).max(axis=(0, 1))
+            for gi, g in enumerate(saved):
+                groups[gi] = dict(g, **permuted(gi, g, range(ns, G), r))
+            stats[k] = np.where(cand, null_grad(), 0.0).reshape(-1, G, G).max(axis=(0, 1))
         groups[:] = saved
         return np.quantile(stats, qut_level, axis=0)
 
     def adaptive_qut(w1):
         """lam (G,) of the adaptive lasso of weights 1 / w1 (w1 = |theta_1|): per target j, null model of j given the
-        first pass (column j of theta at 0, basal of j refitted over null_epochs steps of the longest windows, the
-        rest fixed), QUT of max_g w1_gj |dL/dtheta_gj| on its draws."""
+        first pass (column j of theta at 0, basal of j that of the null network: closed form, then
+        null_epochs_adaptive steps of the longest windows; the rest fixed), QUT of max_g w1_gj |dL/dtheta_gj| on the observations of j permuted; the null
+        models of all targets simulated together (null copies of the windows, nctx)."""
         lam2 = np.zeros(G)
-        th1, ba1 = th.detach().clone(), ba.detach().clone()
-        for j in range(ns, G):
-            if not np.any(w1[..., j] > 0):
-                continue
-            with torch.no_grad():
-                th[..., j] = 0.0
-            onehot = torch.zeros_like(ba)
-            onehot[..., j] = 1.0
-            hook = ba.register_hook(lambda gr_, m=onehot: gr_ * m)
-            opt = torch.optim.Adam([ba], lr=lr)
-            for _ in range(int(null_epochs)):
-                opt.zero_grad()
-                windows_loss(starts_of(H_max), H_max).backward()
-                opt.step()
-            hook.remove()
-            th.grad = None
-            wj = np.zeros_like(w1)
-            wj[..., j] = w1[..., j]
-            lam2[j] = qut_lambda(wj, seed_off=5 + j)[j]
-            with torch.no_grad():
-                th.copy_(th1)
-                ba.copy_(ba1)
+        w1m = np.asarray(w1).reshape(-1, G, G).max(axis=0)
+        copies = np.array([j for j in range(ns, G) if np.any(w1m[:, j] > 0)], dtype=int)
+        if not len(copies):
+            return lam2
+        D = torch.zeros((G, G), dtype=f64, requires_grad=True)  # null columns: theta 0, gradient of the statistic
+        bn = ba.detach().clone()                                 # null basals (column j used by copy j only)
+        null_basal(bn)
+        bn.requires_grad_(True)
+        nctx.update(D=D, b=bn, cols=None)
+        opt = torch.optim.Adam([bn], lr=lr)
+        for _ in range(int(null_epochs_adaptive)):
+            opt.zero_grad()
+            (bn.grad,) = torch.autograd.grad(windows_loss(starts_of(H_max), H_max, copies=copies), [bn])
+            opt.step()
+        r = np.random.default_rng(seed + 5)
+        saved = list(groups)
+        stats = np.zeros((int(qut_reps_adaptive), G))
+        for k in range(int(qut_reps_adaptive)):
+            for gi, g in enumerate(saved):
+                groups[gi] = dict(g, copy_draws=[permuted(gi, g, [j], r) for j in copies])
+            (gD,) = torch.autograd.grad(windows_loss(starts_of(H_max), H_max, full=True, copies=copies), [D])
+            stats[k] = (w1m * np.abs(gD.numpy())).max(axis=0)
+        groups[:] = saved
+        nctx.clear()
+        lam2[copies] = np.quantile(stats, qut_level, axis=0)[copies]
         return lam2
 
     def term_diag():
         """Diagnostic at the current model: gradient of each term (initial, modes, mRNA) on the stimulus edges and the
-        basals, and mean unit modes / mRNA per observed time, drawn from the model against the observations."""
+        basals, and mean modes / mRNA (units of units()) per observed time, drawn from the model against the
+        observations."""
         saved = dict(w_term)
         p2 = lambda v: np.array2string(np.asarray(v), precision=4, max_line_width=200)
         for name in ('init', 'kon', 'mrna'):
@@ -639,9 +801,9 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         w_term.update(saved)
         r = np.random.default_rng(seed + 4)
         for gi, (g, d) in enumerate(zip(groups, null_draws(r))):
-            uk, um = units(gi, g).numpy(), units(gi, g, scale_p).numpy()
+            uk, um = units(gi, g).numpy(), units(gi, g, mrna=True).numpy()
             for t in obs_t[gi]:
-                obs_k = kon_targets(g, t, np.arange(len(g['targets'][t])), r).mean(0) / uk
+                obs_k = kon_targets(g, t, np.arange(len(g['targets'][t]))).mean(0) / uk
                 line = f"[term_diag] group {gi} t={times[t]:g}: modes sim {p2(d['targets'][t][:, ns:].mean(0) / uk)} " \
                        f"obs {p2(obs_k)}"
                 if mode == 'sde2':
@@ -652,15 +814,34 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
     lam_th = None
     if learn_theta and (qut_level is not None or lam_l1 > 0):
         if qut_level is not None:
-            if free_theta:  # null model: theta_null fixed, basal and rates fitted
-                th.requires_grad_(False)
+            # Null network: theta 0, basal fitted (and the rates with free_theta; else start restored after the QUT)
+            th0_, ba0_ = th.detach().clone(), ba.detach().clone()
+            with torch.no_grad():
+                th.zero_()
+            th.requires_grad_(False)
+            null_basal()
+            if free_theta:  # start of the fit: basal and rates of the null network over the curriculum
                 train(adam([ba], [ld, le, ls]), null_epochs)
-                th.requires_grad_(True)
-            lam_th = qut_lambda()
-            if verb:  # gradient of the observed data at the null model, against the threshold
-                (gr,) = torch.autograd.grad(windows_loss(starts_of(H_max), H_max, full=True), th)
-                a = np.where(mask.detach().numpy() > 0, np.abs(gr.numpy()), 0.0).reshape(-1, G, G).max(axis=0)
+            else:  # basal of the null network only (as qut_penalty of fit_network), longest windows
+                opt_b = torch.optim.Adam([ba], lr=lr)
+                for _ in range(int(null_epochs)):
+                    opt_b.zero_grad()
+                    (ba.grad,) = torch.autograd.grad(windows_loss(starts_of(H_max), H_max), [ba])
+                    opt_b.step()
+            nctx['Z'] = torch.zeros_like(th, requires_grad=True)
+            f_sub = qut_subsample()
+            lam_th = qut_lambda() * f_sub
+            if verb:  # gradient of the observed data at the null network, against the threshold
+                a = np.where(mask.detach().numpy() > 0, null_grad(), 0.0).reshape(-1, G, G).max(axis=0)
                 a[:, :ns] = 0.0
+            del nctx['Z']
+            nctx.pop('sub', None)
+            th.requires_grad_(True)
+            if not free_theta:
+                with torch.no_grad():
+                    th.copy_(th0_)
+                    ba.copy_(ba0_)
+            if verb:
                 print(f"[fit_free_running] QUT (level {qut_level}) per target: "
                       + np.array2string(lam_th[ns:], precision=4) + "; data max |grad|: "
                       + np.array2string(a.max(axis=0)[ns:], precision=4)
@@ -693,7 +874,9 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
             # Second pass: adaptive lasso on the support of the first one, at its QUT given the first pass
             w1 = np.abs(signed_theta().detach().numpy())
             w1[..., :ns] = 0.0
-            lam2 = adaptive_qut(w1)
+            f_sub = qut_subsample()
+            lam2 = adaptive_qut(w1) * f_sub
+            nctx.pop('sub', None)
             sup = torch.tensor(w1 > 0, dtype=f64)
             with torch.no_grad():
                 mask.copy_(sup)

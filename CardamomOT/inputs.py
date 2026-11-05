@@ -41,7 +41,7 @@ PARAMETER_GROUPS = [
         'mean_forcing_em', 'batch_size_mixture', 'max_iter_softEM', 'min_mixture_components', 'mixture_min_percentage', 'max_grid_levels',
         'mixture_transit_nodes', 'mixture_central_position', 'mixture_transit_selection', 'dispersion_max', 'mixture_selection_criterion', 'integrate_samples', 'ref_sample_integration']),
     ('Network inference', [
-        'force_basins', 'temporal_basins', 'min_n_loops', 'max_iter', 'batch_size_traj', 'n_network_fits',
+        'force_basins', 'temporal_basins', 'min_n_loops', 'ot_gene_weight_schedule', 'fit_ot_cost', 'fit_network_cost', 'fit_likelihood', 'kappa_estimation', 'fit_network_balance', 'max_iter', 'batch_size_traj', 'n_network_fits',
         'constrain_basal_uniform', 'network_condition_pen', 'mixed_effect_model_conditions',
         'weight_flow_matching',
         'flow_matching_nodes',
@@ -50,9 +50,9 @@ PARAMETER_GROUPS = [
         'inference_mrnas_direct', 'mrna_bridge', 'targets_accounting_late_mrna', 'late_mrna_nodes',
         'late_mrna_classes', 'min_ratio']),
     ('Refine: kinetic rates by the free-running fit', [
-        'refine_theta_with_sde', 'sde_free_theta', 'sde_adaptive_lasso', 'fit_scale_theta', 'degradation_rates_per_condition', 'use_temporal_degradations',
-        'sde_epochs', 'sde_lr', 'sde_lr_rates', 'sde_lr_decay', 'sde_lr_min_frac', 'sde_mode_cost',
-        'sde_kon_weight', 'sde_mrna_weight', 'sde_bptt', 'sde_protein_weight', 'sde_qut', 'sde_max_horizon',
+        'refine_theta_with_sde', 'sde_unitary_for_protonly', 'sde_refit_network', 'sde_free_theta', 'sde_adaptive_lasso', 'sde_qut_reps_adaptive', 'sde_qut_cells', 'fit_scale_theta', 'degradation_rates_per_condition', 'use_temporal_degradations',
+        'sde_epochs', 'sde_lr', 'sde_lambda_theta', 'sde_lr_rates', 'sde_lr_decay', 'sde_lr_min_frac', 'sde_mode_cost',
+        'sde_kon_weight', 'sde_mrna_weight', 'sde_bptt', 'sde_protein_weight', 'sde_max_horizon',
         'sde_horizon_growth', 'sde_windows', 'refine_in_loop']),
     ('Model learning of the regulation function', [
         'model_learning_grn', 'model_learning_phi', 'model_learning_herbach_form', 'herbach_threshold_sd', 'model_learning_threshold_bic', 'model_learning_form_neighbours', 'model_learning_herbach_m', 'model_learning_link', 'model_learning_kappa',

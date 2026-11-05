@@ -6,7 +6,7 @@ Core functions for the inference of trajectories, mainly used in loop_trajectori
 import numpy as np
 import numba
 from numba import njit, prange
-from .network import cross_entropy, sigmoid_amplitudes, sigmoid_target, gene_weights
+from .network import net_cost, ordinal_cost, ordinal_cost_w, lik_cost_genes, cost_any, sigmoid_amplitudes, sigmoid_target, gene_weights
 from .sigma import sigma_pairs, kon_matrix as kon_ref_vector  # noqa: F401 (kon_ref_vector: public name)
 from .sampling import stratified_choice
 
@@ -186,17 +186,19 @@ def _birth_alpha_row(alpha, kon_init, kon_end, tol):
     return w * alpha + (1 - w) * mean_alpha
 
 
-def count_errors(vect_prot, vect_kon, ks, Y, X, n_stimuli=1, spec=None):
+def count_errors(vect_prot, vect_kon, ks, Y, X, n_stimuli=1, spec=None, mode=0, mid=None, w=None):
     """
-    Cross-entropy between the sigmoid of the network (basal Y, interactions X; spec: families of sigma) and the
-    sigmoid target of the kon vect_kon, mean over the cells and over the genes weighted by gene_weights.
+    Network cost (cost_any of code mode; central modes mid (G - n_stimuli,) for the ordinal cost) between the sigmoid
+    of the network (basal Y, interactions X; spec: families of sigma) and the sigmoid target of the kon vect_kon, mean
+    over the cells and over the genes with the weights w (G - n_stimuli,) (None: the genes of two distinct modes,
+    equally weighted).
     """
     N, G = vect_prot.shape
     ns = n_stimuli
     sigma = sigma_pairs(Y, X, vect_prot, spec)[:, ns:, 1]
     kb = sigmoid_amplitudes(ks)[ns:]
-    w = gene_weights(ks)[ns:]
-    ce = cross_entropy(sigma, sigmoid_target(vect_kon[:, ns:], kb[:, 0], kb[:, 1]))
+    w = (gene_weights(ks)[ns:] > 0).astype(float) if w is None else np.asarray(w, dtype=float)
+    ce = cost_any(sigma, sigmoid_target(vect_kon[:, ns:], kb[:, 0], kb[:, 1]), mode, mid)
     return float(np.sum(ce * w)) / (N * max(float(np.sum(w)), EPS))
 
 
@@ -270,7 +272,9 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
                             b_init=np.zeros(0), b_end=np.zeros(0), alpha_tol=0.6,
                             d0=np.zeros(0), rna_to_x=1.0, mrna_dil=False,
                             g_active=np.zeros(0), spec=None, mem_frac=np.zeros(0),
-                            mem_w=np.zeros((0, 0))) -> np.ndarray:
+                            mem_w=np.zeros((0, 0)), net_mode=0, net_mid=np.zeros(0), lik_ll=np.zeros((0, 0, 0)),
+                            lik_tl=np.zeros((0, 0, 0)), lik_kap=np.zeros((0, 0)),
+                            tau_end2=np.zeros((0, 0))) -> np.ndarray:
     """
     OT cost between n1 trajectory ends and n2 real cells: w A + (1 - w) [(1 - 1/G) B + (1/G) P], with
     A = |Δ mRNA s1|² (mRNA in kon units, as the modes and proteins: k_z / k1 at the mean of mode z, up to the
@@ -281,8 +285,14 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
     rates of the sources and of the targets (dilution: rate d1 + b, mode targets times d1 / (d1 + b)), switched in the
     equation of each gene at its birth_alpha (alpha_tol: threshold of inference_alpha); empty = no dilution. Only the cost is returned: the (n1, n2, G) end states are never
     stored; recompute them with find_next_prot / find_next_prot_dilution for the sampled pairs.
-    Network term: cross-entropy between the sigmoid of the network at the end states and tau_end (n2, G), the sigmoid
-    targets of the real cells (sigmoid_target), summed over the genes with the weights w_genes (G,) (gene_weights).
+    Network term: network cost of code net_mode (fit_ot_cost: cross-entropy, euclidean, or ordinal with the central
+    modes net_mid (G,)) between the sigmoid of the network at the end states and tau_end (n2, G), the sigmoid targets
+    of the real cells (sigmoid_target), summed over the genes with the weights w_genes (G,); ordinal cost with
+    tau_end2 (n2, G) given: tau_end and tau_end2 are the warped targets (u1, u2) of the real cells (soft targets:
+    expectations under their posteriors, ordinal_cost_w). lik_ll (n2, G, L) given
+    (fit_likelihood 'network+ot'): the network term is instead the likelihood of the counts of each real cell under
+    the prior exp(-kappa C) of the cost of code net_mode on its levels, at the sigma of the end state
+    (lik_cost_genes: log-likelihoods lik_ll at the levels lik_tl (n2, G, L), precisions lik_kap (n2, G)).
     d0 (G,) given: end proteins from the mRNA bridges (prot_bridge_end), mode_init / mode_end being then the kon levels
     of the modes and the mRNA rna * s1 * rna_to_x in the same units; empty: find_next_prot on shrunk modes. mrna_dil
     (mrna_dilution, with b_init / b_end): mRNA of the bridges relaxing at d0 + b, switched at birth_alpha as the protein
@@ -397,7 +407,17 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
             diff_prot = gmask * (prot_end_i[j] - prot_init_i) / scale_proteins
             diff_rna = gmask * (kon_rna_end[j] - kon_rna_init_i)
             cost_rna[i, j] = np.sum(diff_rna * diff_rna)
-            cost_net[i, j] = np.sum(w_genes * cross_entropy(sigma[j, ns:, 1], tau_end[j]))
+            if lik_ll.shape[0] > 0:
+                cost_net[i, j] = np.sum(w_genes * lik_cost_genes(np.ascontiguousarray(sigma[j, ns:, 1]), lik_ll[j],
+                                                                 lik_tl[j], lik_kap[j], net_mode, net_mid))
+            elif net_mode == 2 and tau_end2.shape[0] > 0:  # expected warped targets (u1 = tau_end, u2 = tau_end2)
+                cost_net[i, j] = np.sum(w_genes * ordinal_cost_w(np.ascontiguousarray(sigma[j, ns:, 1]), tau_end[j],
+                                                                 tau_end2[j], net_mid))
+            elif net_mode == 2:
+                cost_net[i, j] = np.sum(w_genes * ordinal_cost(np.ascontiguousarray(sigma[j, ns:, 1]), tau_end[j],
+                                                               net_mid))
+            else:
+                cost_net[i, j] = np.sum(w_genes * net_cost(sigma[j, ns:, 1], tau_end[j], net_mode))
             cost_prot[i, j] = np.sum(diff_prot * diff_prot)
 
     # mRNA and protein terms brought to the median of the network term, then mRNA term (weight_init) handing over to it
