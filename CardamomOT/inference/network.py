@@ -139,7 +139,7 @@ def set_network_cost(cost, likelihood=False):
     _MODE, _LIK = cost_code(cost), bool(likelihood)
 
 
-BALANCE_MIN_FREQ = 0.02  # fit_network_balance: floor of the frequency of a main mode (weights at most 1 / 0.02 of the mean)
+BALANCE_MIN_FREQ = 0.05  # fit_network_balance: floor of the frequency of a main mode (weights at most 1 / 0.05 of the mean)
 
 
 TARGET_ROWS = ('w', 'mid', 'u1', 'u2', 'll', 'tl', 'kap', 'obs')
