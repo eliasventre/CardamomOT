@@ -41,7 +41,7 @@ PARAMETER_GROUPS = [
         'mean_forcing_em', 'batch_size_mixture', 'max_iter_softEM', 'min_mixture_components', 'mixture_min_percentage', 'max_grid_levels',
         'mixture_transit_nodes', 'mixture_central_position', 'mixture_transit_selection', 'dispersion_max', 'mixture_selection_criterion', 'integrate_samples', 'ref_sample_integration']),
     ('Network inference', [
-        'force_basins', 'temporal_basins', 'min_n_loops', 'ot_gene_weight_schedule', 'fit_ot_cost', 'fit_network_cost', 'fit_likelihood', 'kappa_estimation', 'fit_network_balance', 'max_iter', 'batch_size_traj', 'n_network_fits',
+        'force_basins', 'temporal_basins', 'min_n_loops', 'ot_gene_weight_schedule', 'fit_ot_cost', 'fit_network_cost', 'fit_likelihood', 'kappa_estimation', 'fit_network_balance', 'transition_constraint_weight', 'max_iter', 'batch_size_traj', 'n_network_fits',
         'constrain_basal_uniform', 'network_condition_pen', 'mixed_effect_model_conditions',
         'weight_flow_matching',
         'flow_matching_nodes',
@@ -59,11 +59,11 @@ PARAMETER_GROUPS = [
         'model_learning_start', 'model_learning_freeze', 'model_learning_period', 'model_learning_margin',
         'model_learning_score', 'network_relaxed']),
     ('Proliferation and simulation', [
-        'growth_reg_source', 'proliferation_mlp', 'prolif_uses_stimulus', 'n_proliferation_markers', 'ProliferationMLP_per_condition',
+        'growth_reg_source', 'proliferation_mlp', 'sde_learn_proliferation', 'sde_proliferation_anchor', 'prolif_uses_stimulus', 'n_proliferation_markers', 'ProliferationMLP_per_condition',
         'simulation_stochastic',
         'simulation_mrnas_direct',
-        'protein_dilution', 'mrna_dilution']),
-    ('Report', ['classifier_method', 'embedding_method_visualization', 'cell_depth_for_representation',
+        'protein_dilution', 'mrna_dilution', 'depth_growth_share']),
+    ('Report', ['classifier_method', 'classifier_balance', 'embedding_method_visualization', 'cell_depth_for_representation',
                 'report_normalize', 'report_log1p', 'report_n_umap']),
     ('Reproducibility', ['seed']),
 ]
@@ -131,12 +131,16 @@ SHEETS = {
                    'cell_type_proliferation (delta added to its rate of proliferation_rates, which is then the '
                    'rate without stimulus), or a gene list of gene_lists / GENE1+GENE2 / a gene (delta x mRNA '
                    'signature score in [0, 1])'),
+         ('TRANS1', 'Effect of inference stimulus 1 on the transition rates (per hour), FROM>TO:delta comma-separated '
+                    '(cell types of the transition grouping), scaled by its schedule and added to the transition_rates '
+                    'of the sample (then the rates without stimulus; 0 without them): row "all" for every sample, the '
+                    'row of a sample for that sample only'),
          ('comment', 'Free comment (ignored)')],
         'Perturbations of the measured data, used by the inference: genetic perturbations of samples (KO / OV), '
         'samples held out for validation (remove_from_inference, reference_sample), '
-        'and the inference stimuli (row sample_id = all: targets STIMk and effects on proliferation RATEk, '
-        'k = column of stimulus_inference_schedule). Empty: one stimulus, every gene a possible target, no '
-        'effect on the rates.'),
+        'and the inference stimuli (row sample_id = all: targets STIMk, effects on proliferation RATEk and on the '
+        'transitions TRANSk, k = column of stimulus_inference_schedule; TRANSk may also be given in the row of a '
+        'sample). Empty: one stimulus, every gene a possible target, no effect on the rates.'),
     'perturbation_simulation': (
         [('KO', 'Knocked-out genes, comma-separated; GENE-X for a partial KO of X%'),
          ('OV', 'Over-expressed genes, comma-separated; GENE-X for a partial OV of X%'),
@@ -167,17 +171,12 @@ SHEETS = {
                                  'cells of this type (dilution of the proteins); with the net rate, gives the death rate'),
          ('death_rate_per_hour', 'Optional reference death rate, in h^-1: anchors the death rate of the cells of this '
                                  'type; with the net rate, gives the birth rate')],
-        'Anchors of the proliferation rates per cell type (fit_population_anchors, get_proliferation_rates); every '
-        'cell type needs a net rate, given directly or as birth - death. Birth and death, when given, anchor the two '
-        'rates separately; otherwise the change of the net rate is shared between them. Rows with a sample_id anchor '
-        'that sample only (a sample with rows of its own ignores the default ones); a sample without anchors borrows '
-        'those of the best-fitting sample.'),
-    'population_sizes': (
-        [('time', 'Timepoint'), ('population_size', 'Total population size at this timepoint (any unit: only the '
-                                                    'ratios between times of a sample are used)'),
-         ('sample_id', 'Optional: dataset_id of the sample (empty or "all": default of the samples without rows)')],
-        'Population sizes per sample and time: they constrain the absolute growth in fit_population_anchors and in '
-        'the growth estimated by optimal transport.'),
+        'Anchors of the proliferation rates per cell type (get_proliferation_rates), used as given: their consistency '
+        'with the evolution of the proportions of the types (population data, transitions) is established upstream '
+        'of CardamomOT. Every cell type needs a net rate, given directly or as birth - death. Birth and death, when '
+        'given, anchor the two rates separately; otherwise the change of the net rate is shared between them. Rows '
+        'with a sample_id anchor that sample only (a sample with rows of its own ignores the default ones); a sample '
+        'with neither keeps its literature estimate.'),
     'transition_rates': (
         [('from \\ to', 'Source cell type (rows) and target cell types (header): transition rates in h^-1 '
                         '(off-diagonal, 0 = no direct transition; diagonal ignored)')],
@@ -185,7 +184,8 @@ SHEETS = {
         'probabilities expm(Q dt): first column = source cell types, header = target cell types '
         '(as in obs cell_type_transition, else cell_type). To give a matrix per sample, add a column sample_id '
         'right of the matrix (one value per row of the block, or one block per sample); rows without sample_id '
-        'are the default of the samples without block of their own.'),
+        'are the default of the samples without block of their own. These are the rates without the inference '
+        'stimuli, whose effects are the TRANSk of perturbation_inference.'),
 }
 
 def _is_empty(v):
@@ -198,6 +198,11 @@ def _clean(v):
     if isinstance(v, float) and v.is_integer():
         return int(v)
     return v
+
+
+def _sample_label(v):
+    """dataset_id label of a sample_id cell ('' if empty), integral numbers without decimals (1.0 -> '1')."""
+    return '' if _is_empty(v) else str(_clean(v))
 
 
 # ---------------------------------------------------------------------------
@@ -272,8 +277,9 @@ def create_workbook(path):
 def upgrade_workbook(path, out=None):
     """
     Brings an existing workbook to the current layout without touching the values of the kept sheets: the headers
-    sample_id of proliferation_rates and population_sizes, birth_rate_per_hour / death_rate_per_hour of
-    proliferation_rates, times_test of times (former times_to_inference / times_to_simulate renamed), and the removal of the former sheet doubling_times. Saved in place (out=None) or as `out`.
+    sample_id, birth_rate_per_hour / death_rate_per_hour of proliferation_rates, TRANS1 of perturbation_inference,
+    times_test of times (former times_to_inference / times_to_simulate renamed), and the removal of the former sheets
+    doubling_times and population_sizes. Saved in place (out=None) or as `out`.
     Returns what was changed.
     """
     from openpyxl import load_workbook
@@ -289,7 +295,7 @@ def upgrade_workbook(path, out=None):
                 added.append(f'column {cell.value} of times renamed {new}')
                 cell.value = new
                 cell.comment = Comment(dict(SHEETS['times'][0])[new], 'CardamomOT', width=320, height=90)
-    for sheet, column, pos in (('proliferation_rates', 'sample_id', 3), ('population_sizes', 'sample_id', 3),
+    for sheet, column, pos in (('proliferation_rates', 'sample_id', 3), ('perturbation_inference', 'TRANS1', 8),
                                ('proliferation_rates', 'birth_rate_per_hour', 4),
                                ('proliferation_rates', 'death_rate_per_hour', 5), ('times', 'times_test', 3)):
         ws = wb[sheet] if sheet in wb.sheetnames else None
@@ -300,17 +306,24 @@ def upgrade_workbook(path, out=None):
             c.comment = Comment(doc, 'CardamomOT', width=320, height=90)
             ws.column_dimensions[c.column_letter].width = max(16, len(column) + 4)
             added.append(f'column {column} of {sheet}')
-    if 'doubling_times' in wb.sheetnames:
-        del wb['doubling_times']
-        added.append('sheet doubling_times removed (population constraints: proliferation_rates, transition_rates, '
-                     'population_sizes)')
-    # Descriptions of the sheets in the readme sheet
+    for old in ('doubling_times', 'population_sizes'):
+        if old in wb.sheetnames:
+            del wb[old]
+            added.append(f'sheet {old} removed (population constraints: proliferation_rates, transition_rates, made '
+                         'consistent with the data upstream)')
+    # Descriptions of the sheets in the readme sheet; rows of the removed sheets deleted
     if 'readme' in wb.sheetnames:
-        for row in wb['readme'].iter_rows(min_col=1, max_col=2):
+        ws = wb['readme']
+        for row in ws.iter_rows(min_col=1, max_col=2):
             name, cell = row[0].value, row[1]
             if name in SHEETS and cell.value != SHEETS[name][1]:
                 cell.value = SHEETS[name][1]
                 added.append(f'readme description of {name}')
+        for r in range(ws.max_row, 0, -1):
+            name = ws.cell(row=r, column=1).value
+            if name in ('doubling_times', 'population_sizes'):
+                ws.delete_rows(r)
+                added.append(f'readme row of {name} removed')
     if added:
         wb.save(out or path)
     return added
@@ -408,8 +421,8 @@ def _split_samples(df):
     """(default rows, {sample_id: rows}) of a schedule sheet (sample_id empty or "all" = default)."""
     if 'sample_id' not in df or not len(df):
         return df, {}
-    sid = df['sample_id'].astype(str).str.strip()
-    default = df['sample_id'].isna() | sid.str.lower().isin(['', 'all', 'nan', 'none'])
+    sid = df['sample_id'].map(_sample_label)
+    default = sid.str.lower().isin(['', 'all', 'nan', 'none'])
     return df[default], {s: df[~default & (sid == s)] for s in sorted(set(sid[~default]))}
 
 
@@ -520,7 +533,7 @@ def export(wb, out_dir):
     # Inference stimuli (row all of perturbation_inference): targets STIMk and rate effects RATEk
     pi = read_sheet(wb, 'perturbation_inference')
     # Row of the inference stimuli: sample_id 'all' or empty (the rows of a sample carry its KO / OV, removal)
-    is_all = (pi['sample_id'].isna() | pi['sample_id'].astype(str).str.strip().str.lower().isin(['', 'all', 'nan', 'none'])
+    is_all = (pi['sample_id'].map(_sample_label).str.lower().isin(['', 'all', 'nan', 'none'])
               if 'sample_id' in pi else pd.Series(True, index=pi.index))
     lists, rates = {}, {}
     for _, r in pi[is_all].iterrows():
@@ -550,6 +563,25 @@ def export(wb, out_dir):
         import json
         json.dump({str(k): v for k, v in rates.items()}, open(os.path.join(out_dir, 'stimulus_rates.json'), 'w'),
                   indent=1)
+    # Effects of the inference stimuli on the transition rates (TRANSk): row all = every sample, row of a sample = that
+    # sample only (replaces the row all for that stimulus)
+    from .tools.perturbations import parse_transition
+    trans = {'default': {}, 'samples': {}}
+    for i, r in pi.iterrows():
+        for c in pi.columns:
+            m = re.fullmatch(r'TRANS(\d+)', str(c))
+            if not m or _is_empty(r[c]):
+                continue
+            k = int(m.group(1))
+            if k > n_inf:
+                print(f"[CardamomOT] Warning: perturbation_inference {c} but stimulus_inference_schedule has {n_inf} "
+                      f"stimulus column(s): ignored")
+                continue
+            dest = trans['default'] if is_all[i] else trans['samples'].setdefault(str(_clean(r['sample_id'])), {})
+            dest.setdefault(str(k), []).extend(parse_transition(_clean(r[c])))
+    if trans['default'] or trans['samples']:
+        import json
+        json.dump(trans, open(os.path.join(out_dir, 'stimulus_transitions.json'), 'w'), indent=1)
 
     ss_all = read_sheet(wb, 'stimulus_simulation_schedule')
     s_inf = sorted([c for c in ss_all.columns if c.startswith('stimulus_') and ss_all[c].notna().any()],
@@ -651,17 +683,9 @@ def export(wb, out_dir):
         if vals:
             write(f'{col}.txt', '\n'.join(f'{float(v):g}' for v in vals) + '\n')
 
-    # Population sizes: rows without sample_id = default, the others per sample
-    ps = read_sheet(wb, 'population_sizes')
-    if all(c in ps for c in ('time', 'population_size')):
-        ps = ps.dropna(subset=['time', 'population_size'])
-        if len(ps):
-            import json
-            default, per_sample = _split_samples(ps)
-            entry = lambda d: {f'{float(_clean(t)):g}': float(_clean(n)) for t, n in zip(d['time'], d['population_size'])}
-            spec = {'default': entry(default) if len(default) else None,
-                    'samples': {sid: entry(d) for sid, d in per_sample.items() if len(d)}}
-            json.dump(spec, open(os.path.join(out_dir, 'population_sizes.json'), 'w'), indent=1)
+    if len(read_sheet(wb, 'population_sizes')):
+        print("[CardamomOT] Warning: sheet population_sizes ignored (the population data are used upstream, to make "
+              "proliferation_rates and transition_rates consistent with the data); upgrade_workbook removes it")
 
     # Proliferation anchors: rows without sample_id = default (proliferation_rates.txt: type, net, birth, death), the
     # others per sample (json); each row resolved to (net, birth, death) by resolve_proliferation_row
@@ -743,53 +767,29 @@ def proliferation_sample_anchors(project):
     return json.load(open(path)) if os.path.exists(path) else {}
 
 
-def population_sizes(project):
-    """({time: size} or None default, {dataset_id: {time: size}}) of the population_sizes sheet."""
-    import json
-    path = os.path.join(input_dir(project), 'population_sizes.json')
-    if not os.path.exists(path):
-        return None, {}
-    spec = json.load(open(path))
-    conv = lambda d: {float(t): float(n) for t, n in d.items()} if d else None
-    return conv(spec.get('default')), {s: conv(d) for s, d in spec.get('samples', {}).items()}
-
-
-def sample_population_sizes(project, sample):
-    """{time: size} of a sample (its rows, else the default rows), None if none."""
-    default, per = population_sizes(project)
-    return per.get(str(sample)) or default
-
-
-def fitted_anchors(project):
-    """Corrected anchors of fit_population_anchors.py (cardamomOT/population_anchors.json), None if absent."""
-    import json
-    path = os.path.join(os.path.abspath(project), 'cardamomOT', 'population_anchors.json')
-    return json.load(open(path)) if os.path.exists(path) else None
-
-
-def load_transition_rates(project, fitted=True):
+def load_transition_rates(project):
     """
-    Transition rate matrices: None, the default DataFrame (no per-sample block), or {'default': DataFrame or None,
-    dataset_id: DataFrame} (for NetworkModel._load_ot_constraints). Those of fit_population_anchors.py (corrected on
-    the proportions, per sample) if it was run and fitted some, else those of the transition_rates sheet (fitted=False:
-    always the sheet).
+    Transition rate matrices of the transition_rates sheet: {'default': DataFrame or None, dataset_id: DataFrame}
+    (for NetworkModel._load_ot_constraints), None without any.
     """
     import glob
-    anchors = fitted_anchors(project) if fitted else None
-    if anchors and anchors.get('transitions'):
-        out = {'default': None}
-        for sid, t in anchors['transitions'].items():
-            m = pd.DataFrame(0.0, index=t['types'], columns=t['types'])
-            for a_, row in t['matrix'].items():
-                for b_, v in row.items():
-                    m.loc[a_, b_] = v
-            out[sid] = m
-        return out
     d = input_dir(project)
     read = lambda f: pd.read_csv(f, sep=None, engine='python', index_col=0).rename(index=str).rename(columns=str)
     default = read(os.path.join(d, 'transition_rates.csv')) if os.path.exists(os.path.join(d, 'transition_rates.csv')) else None
     per = {os.path.basename(f)[len('transition_rates__'):-4]: read(f) for f in sorted(glob.glob(os.path.join(d, 'transition_rates__*.csv')))}
-    return {'default': default, **per} if per else default
+    return {'default': default, **per} if (per or default is not None) else None
+
+
+def load_transition_effects(project):
+    """Effects of the inference stimuli on the transition rates (TRANSk of perturbation_inference): {'default': {k:
+    [(from, to, delta)]}, 'samples': {dataset_id: {k: [...]}}} (k = 1, 2...: stimulus_k), None without any."""
+    import json
+    path = os.path.join(input_dir(project), 'stimulus_transitions.json')
+    if not os.path.exists(path):
+        return None
+    d = json.load(open(path))
+    conv = lambda e: {int(k): [tuple(x) for x in v] for k, v in e.items()}
+    return {'default': conv(d.get('default', {})), 'samples': {s: conv(e) for s, e in d.get('samples', {}).items()}}
 
 
 def project_parameters(project):

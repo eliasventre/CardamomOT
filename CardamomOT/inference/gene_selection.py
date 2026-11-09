@@ -470,8 +470,8 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
                  literature_weight=1.0, literature_resources='extended', max_free_params=None,
                  min_entropy_change=0.1, min_nb_separation=0.15, n_cells_mixture=1024, seuil_mixture=0.01,
                  dispersion_max=None,
-                 n_cells_network=1000, sample_key='dataset_id', forced_genes=None, stimulus_targets=None,
-                 drivers=None, n_driver=0,
+                 n_cells_network=1000, sample_key='dataset_id', forced_genes=None, marker_genes=None,
+                 stimulus_targets=None, drivers=None, n_driver=0,
                  species=None, use_depth_factor=False, report_edge_prob=0.6, entropy_preselection=True,
                  sample_combination='consensus', seed=0, verb=True):
     """
@@ -498,7 +498,8 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
     classical_ot.driver_order): the first n_driver are required terminals (role 'driver', after the queries,
     before the entropy genes), subject to the universe and the variability floor; the others fill the budget.
     forced_genes: genes always selected (required terminals, exempt from the variability floor),
-    e.g. those perturbed in KO_OV_Stim_simulate.txt. stimulus_targets: one gene list per stimulus
+    e.g. those perturbed in KO_OV_Stim_simulate.txt. marker_genes: the forced genes that are proliferation
+    markers (role 'marker' in the report, the other forced genes 'perturbed'). stimulus_targets: one gene list per stimulus
     (read_stimulus_targets): stimulus edges are restricted to its listed genes, possible interactions only
     (they do not enter the gene universe; no constraint if
     none is in the data).
@@ -667,9 +668,10 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
     e_req = [x for x in e_all if x[0] not in taken][:n_entropy]
     required = list(dict.fromkeys(forced + [g for g, _ in q_req] + [g for g, _ in d_req] + [g for g, _ in e_req]))
     group = dict(q_all + e_all + d_all)
-    # Role of a gene in several lists: perturbed > query > driver > entropy
+    # Role of a gene in several lists: perturbed > marker > query > driver > entropy
+    markers = set(marker_genes or [])
     role = {**{g: 'entropy' for g, _ in e_all}, **{g: 'driver' for g, _ in d_all}, **{g: 'query' for g, _ in q_all},
-            **{g: 'perturbed' for g in forced}}
+            **{g: 'marker' if g in markers else 'perturbed' for g in forced}}
     # Budget left: further queries, drivers and entropy genes in turn
     rest = [[g for g, _ in lst if g not in required] for lst in (q_all, d_all, e_all)]
     optional = list(dict.fromkeys(g for i in range(max(map(len, rest), default=0)) for lst in rest if i < len(lst)

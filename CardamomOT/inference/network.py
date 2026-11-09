@@ -1471,8 +1471,10 @@ def fuse_conditions(theta_c, tol=1e-2, act=None):
 
 def _masked_median(x, on):
     """Median over axis 0 of the entries where on (0 where none)."""
-    m = np.nanmedian(np.where(on, x, np.nan), axis=0) if on.any() else np.zeros(x.shape[1:])
-    return np.nan_to_num(m)
+    m, has = np.zeros(x.shape[1:]), on.any(axis=0)   # regulators absent from every condition of the target: 0
+    if has.any():
+        m[has] = np.nanmedian(np.where(on, x, np.nan)[:, has], axis=0)
+    return m
 
 
 def core_inference_conditions(y_samples, y_prot, y_prot_mod, y_target, theta_init, theta_ref,

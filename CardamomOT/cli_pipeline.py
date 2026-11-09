@@ -20,26 +20,19 @@ from CardamomOT.config import STATIONARY_EXIT_CODE, STATIONARY_MESSAGE
 # Pipeline steps in order ("default" is replaced by the steps given by the project parameters)
 PIPELINE_STEPS = [
     {
-        "id": "estimate_cell_depth",
-        "name": "Cell depth",
-        "script": "estimate_cell_depth.py",
-        "description": "Diagnose per-cell sequencing depth effects on the whole transcriptome and, if "
-                        "needed and allowed, store a depth factor per cell (obs['depth_factor'])",
-    },
-    {
-        "id": "fit_population_anchors",
-        "name": "Population anchors",
-        "script": "fit_population_anchors.py",
-        "description": "Correct the prescribed proliferation / transition rates of each sample on the evolution of "
-                        "its cell types and population sizes (small growth and transition model), borrow them for "
-                        "the samples without constraint",
-    },
-    {
         "id": "get_proliferation_rates",
         "name": "Proliferation rates",
         "script": "get_proliferation_rates.py",
         "description": "Estimate net proliferation rate per cell from literature gene "
                         "signatures (runs on the full gene set, before gene selection)",
+    },
+    {
+        "id": "estimate_cell_depth",
+        "name": "Cell depth",
+        "script": "estimate_cell_depth.py",
+        "description": "Diagnose per-cell sequencing depth effects on the whole transcriptome and, if "
+                        "needed and allowed, store a depth factor per cell (obs['depth_factor']) and its "
+                        "association with the birth rate (uns['depth_growth'])",
     },
     {
         "id": "split_dataset",

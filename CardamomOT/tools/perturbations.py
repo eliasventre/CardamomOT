@@ -87,6 +87,20 @@ def parse_rate(cell):
     return out
 
 
+def parse_transition(cell):
+    """Transition-rate effects of a TRANS cell: [(from, to, delta)] from 'FROM>TO:delta, ...' (cell types)."""
+    s = str(cell).strip()
+    if s.lower() in ('', '0', 'none', 'nan'):
+        return []
+    out = []
+    for tok in filter(None, (t.strip() for t in s.split(','))):   # spaces kept inside the type names
+        m = re.fullmatch(r'(.+?)\s*>\s*(.+?)\s*:\s*([-+0-9.eE]+)', tok)
+        if not m:
+            raise ValueError(f"TRANS entry '{tok}' must be FROM>TO:delta (e.g. Proliferative>Quiescent:0.005)")
+        out.append((m.group(1), m.group(2), float(m.group(3))))
+    return out
+
+
 def rate_target_genes(target, genes, input_dir=None):
     """
     Genes of a RATE target among `genes` (model genes): None for 'all', else the genes of the gene list

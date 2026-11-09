@@ -238,6 +238,7 @@ def main(argv):
 
         def run(ad_sel, combo, drivers):
             """select_genes on the cells ad_sel (sample_combination combo, fate drivers)."""
+            markers = proliferation_markers(p, model, ad_sel, perturbed)
             return select_genes(
                 ad_sel, queries, model.num_max_genes, n_query=model.n_query_genes, n_entropy=model.n_entropy_genes,
                 stim=stim_at(np.sort(np.unique(ad_sel.obs['time'].values))), cell_type_key=resolve_cell_type_obs(ad_sel, 'selection'),
@@ -252,7 +253,7 @@ def main(argv):
                 n_cells_mixture=model.batch_size_mixture, seuil_mixture=model.seuil,
                 dispersion_max=model.dispersion_max,  # rate cap of the mixture whose basins the selection predicts
                 n_cells_network=model.batch_size_mixture or 1000,  # cost of the network: capped without batch_size_mixture
-                forced_genes=list(dict.fromkeys(perturbed + proliferation_markers(p, model, ad_sel, perturbed))),
+                forced_genes=list(dict.fromkeys(perturbed + markers)), marker_genes=markers,
                 stimulus_targets=read_stimulus_targets(input_dir(p)),
                 drivers=drivers, n_driver=int(model.n_driver_genes), entropy_preselection=bool(model.entropy_preselection),
                 use_depth_factor=model.use_depth_factor, report_edge_prob=model.selection_edge_prob,
@@ -326,7 +327,8 @@ def main(argv):
                                                 adata.n_obs))
             res = trajectory_preservation(adata, genes_list_final, d['Z'].astype(float), full, d['transported'],
                                           bool(model.use_depth_factor), int(model.classical_ot_max_cells),
-                                          0 if model.seed is None else int(model.seed))
+                                          0 if model.seed is None else int(model.seed), project=p,
+                                          transition_weight=float(model.transition_constraint_weight))
             res['network_method'] = model.network_method
             # Capacity of the selection to predict the fates of the classical OT (cells before the last time)
             fate_path = os.path.join(p, 'cardamomOT', 'classical_OT', 'fate.npz')

@@ -103,10 +103,10 @@ LOGISTIC_CS = np.logspace(-3, 1, 9)  # inverse L2 penalties tried by the cross-v
 
 def make_classifier(method='random_forest', seed=0, n_estimators=100):
     """Unfitted classifier: random forest on the counts, or logistic regression on standardised log1p counts (relies
-    less on fine co-expression, which models with independent genes given their state cannot reproduce), with
-    balanced class weights (rare types count as much as the others) and its L2 penalty C chosen by 3-fold
-    cross-validation on the training cells (balanced accuracy; every time pooled). Both take the counts of
-    representation (divided by the depth factor or not)."""
+    less on fine co-expression, which models with independent genes given their state cannot reproduce), with its
+    L2 penalty C chosen by 3-fold cross-validation on the training cells (balanced accuracy; every time pooled). Both
+    take the counts of representation (divided by the depth factor or not); class weights are given at fit
+    (fit_classifier)."""
     key = METHODS.get(str(method).strip().lower())
     if key is None:
         raise ValueError(f"classifier_method '{method}': use 'random_forest' or 'logistic'")
@@ -118,8 +118,21 @@ def make_classifier(method='random_forest', seed=0, n_estimators=100):
     from sklearn.preprocessing import FunctionTransformer, StandardScaler
     return make_pipeline(FunctionTransformer(_log1p), StandardScaler(),
                          LogisticRegressionCV(Cs=LOGISTIC_CS, cv=StratifiedKFold(3, shuffle=True, random_state=seed),
-                                              class_weight='balanced', scoring='balanced_accuracy', max_iter=2000,
-                                              n_jobs=-1))
+                                              scoring='balanced_accuracy', max_iter=2000, n_jobs=-1))
+
+
+def class_weights(y, balance=0.5):
+    """Weight 1 / n_c^balance of each cell of class c (mean 1): a class of frequency f weighs f^(1 - balance), 0 = the
+    frequencies of the data, 1 = every class alike (classifier_balance)."""
+    _, inv, n = np.unique(y, return_inverse=True, return_counts=True)
+    w = n[inv].astype(float) ** -float(balance)
+    return w * len(w) / w.sum()
+
+
+def fit_classifier(clf, X, y, balance=0.5):
+    """clf (make_classifier) fitted on (X, y) with the class weights of class_weights."""
+    key = f'{clf.steps[-1][0]}__sample_weight' if hasattr(clf, 'steps') else 'sample_weight'
+    return clf.fit(X, y, **{key: class_weights(y, balance)})
 
 
 def _chosen_c(clf):
@@ -135,35 +148,38 @@ def classifier_method(p):
 
 def classifier_options(p):
     """Cell-type classifier options of a project for train_classifier (notebooks): dict(method = classifier_method,
-    cell_depth = cell_depth_for_representation and a depth factor computed)."""
+    balance = classifier_balance, cell_depth = cell_depth_for_representation and a depth factor computed)."""
     from ..run_options import settings, StepOptions
     from ..inputs import depth_factor_used
     cfg = settings(StepOptions(p=str(p).rstrip('/') + '/'))
     # Counts / depth factor only when the run modelled the depth (data and model draws transformed alike)
-    return dict(method=cfg.classifier_method,
+    return dict(method=cfg.classifier_method, balance=float(cfg.classifier_balance),
                 cell_depth=bool(cfg.cell_depth_for_representation) and depth_factor_used(p))
 
 
 # 1. Entraînement du modèle
 def train_classifier(adata, label_key='cell_type', sample_key=SAMPLE_KEY, min_cells=50, assign=None, n_estimators=100, seed=0,
-                     method=None, cell_depth=False):
+                     method=None, cell_depth=False, balance=None):
     """
     Classifier (method: 'random_forest' or 'logistic', see make_classifier; None = classifier_method of base.py, use
     classifier_options(project) for the value of a project) of obs[label_key] on the observed cells of
     adata, divided by their depth factor if cell_depth (representation; predict_cell_types then divides the model draws
-    by the depth factor of the cells they mimic). With several samples (obs[sample_key]), one per sample (SampleClassifiers); a sample with
+    by the depth factor of the cells they mimic), class weights 1 / count^balance (class_weights; None =
+    classifier_balance of base.py). With several samples (obs[sample_key]), one per sample (SampleClassifiers); a sample with
     fewer than min_cells cells or a single cell type has none and takes that of its `assign` or of the closest name.
     """
-    if method is None:
+    if method is None or balance is None:
         from ..model.base import NetworkModel
-        method = NetworkModel(1).classifier_method
+        method = NetworkModel(1).classifier_method if method is None else method
+        balance = NetworkModel(1).classifier_balance if balance is None else balance
     X_all = representation(adata, cell_depth)
 
     def fit(X, y, tag=''):
-        clf = make_classifier(method, seed, n_estimators).fit(X, y)
+        clf = fit_classifier(make_classifier(method, seed, n_estimators), X, y, balance)
         c = _chosen_c(clf)
         if c is not None:
-            print(f"[cell types] {tag or 'all cells'}: logistic regression, C = {c:g} (cross-validated, balanced classes)")
+            print(f"[cell types] {tag or 'all cells'}: logistic regression, C = {c:g} (cross-validated, class weights "
+                  f"1 / count^{float(balance):g})")
         return clf
 
     y_all = adata.obs[label_key].astype(str).values

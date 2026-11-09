@@ -6,9 +6,11 @@ with its default parameters, solved by the scaling algorithm of Chizat et al. 20
 
 Per sample and pair of consecutive timepoints: entropic unbalanced OT (Chizat et al. scaling algorithm) on
 the squared Euclidean distances of a PCA of log1p(counts / depth factor), divided by their median; source
-marginal ∝ exp(r Δt) with r the net proliferation rate (obs['proliferation_net_rate']) when available,
-relaxed (lambda1) so that cells may grow or die, target marginal nearly strict (lambda2). Defaults of WOT:
-epsilon = 0.05, lambda1 = 1, lambda2 = 50.
+marginal ∝ exp(r Δt) with r the net proliferation rate of the cell over the interval (stimulus of the interval,
+stimulus_rates.interval_rates) when available, relaxed (lambda1) so that cells may grow or die, target marginal
+nearly strict (lambda2). Defaults of WOT: epsilon = 0.05, lambda1 = 1, lambda2 = 50. Samples with transition rates
+(transition_rates, TRANSk): the split of each source type among the target types is kept close to the forward
+split of the model of the types (inference.transition_constraint), as in the OT of CardamomOT.
 
 From the couplings: cell-type transitions, genes differentially expressed in the ancestors of each cell
 type (its immediate ancestors against those of the other cells, weighted Welch t) next to the genes
@@ -28,18 +30,36 @@ import scipy.sparse
 EPSILON, LAMBDA1, LAMBDA2 = 0.05, 1.0, 50.0
 
 
-def unbalanced_sinkhorn(a, b, C, eps=EPSILON, lam1=LAMBDA1, lam2=LAMBDA2, n_iter=3000, tol=1e-7):
-    """Entropic unbalanced OT plan diag(u) K diag(v), K = exp(-C / eps) (scaling algorithm, KL marginal penalties)."""
+def unbalanced_sinkhorn(a, b, C, eps=EPSILON, lam1=LAMBDA1, lam2=LAMBDA2, n_iter=3000, tol=1e-7, blocks=None):
+    """Entropic unbalanced OT plan diag(u) K diag(v), K = exp(-C / eps) (scaling algorithm, KL marginal penalties).
+    blocks = (source types, target types, forward split P, exponent f_T): plan diag(u) (K * W[types]) diag(v), the
+    blocks rescaled at each iteration towards the split P (inference.transition_constraint)."""
     K = np.exp(-C / eps)
     u, v = np.ones(len(a)), np.ones(len(b))
     f1, f2 = lam1 / (lam1 + eps), lam2 / (lam2 + eps)
+    if blocks is None:
+        for _ in range(n_iter):
+            u_prev = u
+            u = (a / np.maximum(K @ v, 1e-300)) ** f1
+            v = (b / np.maximum(K.T @ u, 1e-300)) ** f2
+            if np.max(np.abs(u - u_prev) / np.maximum(u, 1e-300)) < tol:
+                break
+        return u[:, None] * K * v[None, :]
+    from ..inference.transition_constraint import _targets, _block_log_w
+    st, tt, P, f_T = blocks
+    n_t = P.shape[0]
+    Pm, src_ok, tgt_ok = _targets(P, st, tt, n_t, relaxed=f_T < 1.0)
+    logP = np.log(Pm)
+    S1, T1, W = np.eye(n_t)[st], np.eye(n_t)[tt], np.ones((n_t, n_t))
     for _ in range(n_iter):
-        u_prev = u
-        u = (a / np.maximum(K @ v, 1e-300)) ** f1
-        v = (b / np.maximum(K.T @ u, 1e-300)) ** f2
-        if np.max(np.abs(u - u_prev) / np.maximum(u, 1e-300)) < tol:
+        u_prev, W_prev = u, W
+        u = (a / np.maximum(((K @ (v[:, None] * T1)) * W[st]).sum(axis=1), 1e-300)) ** f1
+        v = (b / np.maximum(((K.T @ (u[:, None] * S1)) * W[:, tt].T).sum(axis=1), 1e-300)) ** f2
+        S0 = S1.T @ (u[:, None] * (K @ (v[:, None] * T1)))   # block masses without W
+        W = np.exp(_block_log_w(np.log(np.maximum(S0, 1e-300)), logP, src_ok, tgt_ok, f_T))
+        if max(np.max(np.abs(u - u_prev) / np.maximum(u, 1e-300)), np.max(np.abs(W - W_prev) / W)) < tol:
             break
-    return u[:, None] * K * v[None, :]
+    return u[:, None] * K * W[st][:, tt] * v[None, :]
 
 
 def sq_dist(A, B):
@@ -69,11 +89,14 @@ def welch(X, w1, w2):
 
 
 def run_couplings(Z, times, samples, growth=None, max_cells=5000, eps=EPSILON, lam1=LAMBDA1, lam2=LAMBDA2,
-                  seed=0, verb=True):
+                  seed=0, verb=True, types=None, transitions=None, weight=0.0):
     """
     Couplings of every sample between its consecutive timepoints, on the rows of Z. Cells beyond max_cells
-    per (sample, time) are left out (velocity by kernel regression). Returns a list of
-    dict(sample, t_from, t_to, src, tgt, P) with P dense (len(src) x len(tgt)), total mass 1.
+    per (sample, time) are left out (velocity by kernel regression). growth: net rate of each cell over the interval
+    that starts at its time. types (indices of the transition grouping) and transitions (TypeTransitions): split of
+    each source type kept close to that of the model of the types (exponent weight / (weight + eps), the cost being
+    in units of its median). Returns a list of dict(sample, t_from, t_to, src, tgt, P) with P dense (len(src) x
+    len(tgt)), total mass 1 (and split, masses: model and realised splits of the types, with a constraint).
     """
     rng = np.random.default_rng(seed)
     out = []
@@ -91,9 +114,23 @@ def run_couplings(Z, times, samples, growth=None, max_cells=5000, eps=EPSILON, l
             a = np.exp(growth[src] * dt) if growth is not None else np.ones(len(src))
             a /= a.sum()
             b = np.ones(len(tgt)) / len(tgt)
-            P = unbalanced_sinkhorn(a, b, C, eps, lam1, lam2)
+            blocks = None
+            Q = transitions.matrix(s, t1) if (transitions is not None and types is not None and weight) else None
+            if Q is not None:
+                from ..inference.transition_constraint import forward_split
+                n_t = len(transitions.labels)
+                m0 = (samples == s) & (times == t0)
+                r = np.array([growth[m0 & (types == k)].mean() if growth is not None and np.any(m0 & (types == k))
+                              else 0.0 for k in range(n_t)])
+                f_T = 1.0 if np.isinf(weight) else weight / (weight + eps)
+                blocks = (types[src], types[tgt], forward_split(Q, r, dt), f_T)
+            P = unbalanced_sinkhorn(a, b, C, eps, lam1, lam2, blocks=blocks)
             P /= max(P.sum(), 1e-300)
-            out.append(dict(sample=s, t_from=float(t0), t_to=float(t1), src=src, tgt=tgt, P=P))
+            blk = dict(sample=s, t_from=float(t0), t_to=float(t1), src=src, tgt=tgt, P=P)
+            if blocks is not None:
+                from ..inference.transition_constraint import block_masses
+                blk.update(split=blocks[2], masses=block_masses(P, blocks[0], blocks[1], len(blocks[2])))
+            out.append(blk)
             if verb:
                 print(f"[classical_OT] sample {s}: {t0:g} -> {t1:g}, {len(src)} x {len(tgt)} cells")
     return out
@@ -177,19 +214,41 @@ def dense_blocks(blocks):
     return out
 
 
-def classical_couplings(A, fit, use_depth, max_cells=5000, seed=0, min_cells=10, verb=True):
+def classical_couplings(A, fit, use_depth, max_cells=5000, seed=0, min_cells=10, verb=True, project=None,
+                        transition_weight=0.0, times_grid=None):
     """
     Preprocessing and couplings of the classical OT on the cells fit of A (raw counts; obs time, dataset_id,
-    proliferation_net_rate): log1p(counts / depth factor if use_depth, else normalize_total), genes expressed
-    in >= min_cells fit cells, PCA (50) fitted on the fit cells. Returns (X log, genes, Z PCA of every cell,
-    blocks with src / tgt = rows of A).
+    proliferation rates): log1p(counts / depth factor if use_depth, else normalize_total), genes expressed
+    in >= min_cells fit cells, PCA (50) fitted on the fit cells. Growth over each interval and transition constraint
+    (transition_rates / TRANSk of the project, weight transition_weight) as in CardamomOT, the rows of the schedules
+    on times_grid (timepoints of all the transported cells; default those of fit); without project, growth at the
+    net rates of obs. Returns (X log, genes, Z PCA of every cell, blocks with src / tgt = rows of A).
     """
     import anndata as ad
     import scanpy as sc
     from .embedding import log_normalised
     times = A.obs['time'].astype(float).values if 'time' in A.obs else np.zeros(A.n_obs)
     samples = A.obs['dataset_id'].astype(str).values if 'dataset_id' in A.obs else np.full(A.n_obs, '0')
-    growth = A.obs['proliferation_net_rate'].astype(float).values if 'proliferation_net_rate' in A.obs else None
+    idx = np.flatnonzero(fit)
+    obs_fit = A.obs.iloc[idx]   # transported cells: rates and types as in CardamomOT
+    grid = np.unique(times[idx]) if times_grid is None else np.unique(times_grid)
+    growth, types, transitions = None, None, None
+    bd = None
+    if project is not None:
+        from ..stimulus_rates import interval_rates
+        bd = interval_rates(project, obs_fit, times_sorted=grid)
+    if bd is not None:
+        growth = bd[0] - bd[1]
+    elif 'proliferation_net_rate' in obs_fit:
+        growth = obs_fit['proliferation_net_rate'].astype(float).values
+    if project is not None and transition_weight:
+        from ..config import resolve_cell_type_obs
+        from ..inference.transition_constraint import TypeTransitions
+        col = resolve_cell_type_obs(A, 'transition')
+        if col is not None:
+            lab = obs_fit[col].astype(str).values
+            transitions = TypeTransitions(project, np.unique(lab), grid)
+            types = np.searchsorted(transitions.labels, lab)
     X = log_normalised(A, use_depth)
     keep = np.asarray((X[fit] > 0).sum(axis=0)).ravel() >= min_cells
     X, genes = X[:, keep].tocsr(), A.var_names.values[keep].astype(str)
@@ -198,9 +257,8 @@ def classical_couplings(A, fit, use_depth, max_cells=5000, seed=0, min_cells=10,
     PCs = B.varm['PCs']
     mean = np.asarray(X[fit].mean(axis=0)).ravel()
     Z = np.asarray(X @ PCs) - mean @ PCs
-    idx = np.flatnonzero(fit)
-    blocks = run_couplings(Z[idx], times[idx], samples[idx], None if growth is None else growth[idx],
-                           max_cells=max_cells, seed=seed, verb=verb)
+    blocks = run_couplings(Z[idx], times[idx], samples[idx], growth, max_cells=max_cells, seed=seed, verb=verb,
+                           types=types, transitions=transitions, weight=float(transition_weight or 0.0))
     for blk in blocks:
         blk['src'], blk['tgt'] = idx[blk['src']], idx[blk['tgt']]
     return X, genes, Z, blocks
@@ -243,10 +301,12 @@ def _fate_distance(blocks_a, blocks_b, labels):
     return float(np.average(d, weights=w)) if w else np.nan
 
 
-def trajectory_preservation(A, genes, Z_full, blocks_full, fit, use_depth, max_cells=5000, seed=0, n_random=3):
+def trajectory_preservation(A, genes, Z_full, blocks_full, fit, use_depth, max_cells=5000, seed=0, n_random=3,
+                            project=None, transition_weight=0.0):
     """
     How much a gene set preserves the trajectories of the classical OT on every gene: the same OT (same cells,
-    preprocessing and parameters) on the gene set only, compared with the full one by (i) the weighted cosine
+    preprocessing and parameters, growth and transition constraint of the project) on the gene set only, compared
+    with the full one by (i) the weighted cosine
     of the velocities of the transported cells in the full PCA space (1 = same directions) and (ii) the mean
     Jensen-Shannon distance of the cell-type fate distributions (0 = same transitions; needs obs['cell_type']).
     Baseline: n_random random sets of as many genes. Returns a dict.
@@ -255,7 +315,8 @@ def trajectory_preservation(A, genes, Z_full, blocks_full, fit, use_depth, max_c
     V_full = _velocity(Z_full, blocks_full)
 
     def score(gs):
-        sub = classical_couplings(A[:, list(gs)], fit, use_depth, max_cells, seed, min_cells=1, verb=False)[3]
+        sub = classical_couplings(A[:, list(gs)], fit, use_depth, max_cells, seed, min_cells=1, verb=False,
+                                  project=project, transition_weight=transition_weight)[3]
         V = _velocity(Z_full, sub)
         ok = np.isfinite(V).all(axis=1) & np.isfinite(V_full).all(axis=1)
         return (_weighted_cosine(V[ok], V_full[ok]),

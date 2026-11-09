@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import pandas as pd
 import scipy
-from umap import UMAP
+from .embedding import Embedder
 
 
 def _enforce_cell_type_order(adata, class_order, label_key='cell_type'):
@@ -101,7 +101,7 @@ def _plot_celltype_panel(adatas, names, class_order=None):
 
 def _fit_umap(adatas, names, reference_idx=0, norm=True, log=True):
     """Fit UMAP on adatas[reference_idx] and project all others onto it."""
-    reducer = UMAP(random_state=42, min_dist=0.7)
+    reducer = Embedder('umap', seed=42)
     ref = adatas[reference_idx]
     if norm:
         sc.pp.normalize_total(ref, target_sum=1e4)
@@ -123,7 +123,7 @@ def _fit_umap(adatas, names, reference_idx=0, norm=True, log=True):
 
 def _joint_umap(adatas, names, norm=True, log=True):
     """Fit UMAP jointly on all adatas concatenated."""
-    reducer = UMAP(random_state=42, min_dist=0.7)
+    reducer = Embedder('umap', seed=42)
     adata_all = ad.concat(adatas, join='inner', label='source', keys=names)
     if norm:
         sc.pp.normalize_total(adata_all, target_sum=1e4)
@@ -274,7 +274,7 @@ def _plot_prot(adatas, names, project_on_full):
         adata.obs_names = [f"{name}_{i}" for i in range(adata.n_obs)]
         adata.obs["source"] = name
 
-    reducer = UMAP(random_state=42, min_dist=0.7)
+    reducer = Embedder('umap', seed=42)
     if project_on_full:
         X = adata_traj.X.toarray() if scipy.sparse.issparse(adata_traj.X) else adata_traj.X
         proj = reducer.fit(X)

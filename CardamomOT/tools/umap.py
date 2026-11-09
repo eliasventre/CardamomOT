@@ -1,4 +1,4 @@
-from umap import UMAP
+from .embedding import Embedder
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gs
@@ -40,7 +40,7 @@ def plot_data_umap_toref(data_ref_base, data_sim_base, times, file_from, file_to
     if logscale:
         data_ref[1:, :], data_sim[1:, :] = np.log(1 + data_ref[1:, :]), np.log(1 + data_sim[1:, :])
     # Compute the UMAP projection
-    reducer = UMAP(random_state=42, min_dist=.7)
+    reducer = Embedder('umap', seed=42)
     proj = reducer.fit(data_ref[1:,:].T)
     x_ref = proj.transform(data_ref[1:,:].T)
     x_sim = proj.transform(data_sim[1:,:].T)
@@ -130,7 +130,7 @@ def plot_data_umap_altogether(data_real_base, data_ref_base, data_beta_base,
             np.log(1 + data_theta[1:, :]), np.log(1 + data_sim[1:, :])
         
     # Compute the UMAP projection
-    reducer = UMAP(random_state=42, min_dist=.7)
+    reducer = Embedder('umap', seed=42)
     proj = reducer.fit(data_real[1:,:].T)
     x_ref = proj.transform(data_ref[1:,:].T)
     x_sim = proj.transform(data_sim[1:,:].T)

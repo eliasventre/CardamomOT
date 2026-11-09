@@ -15,6 +15,7 @@
 # ./run.sh experimental_datasets/Kameneva 0.2 1 1 1 1 --from infer_network_structure
 # ./run.sh experimental_datasets/Schiebinger 1 1 1 1 1 --from infer_network_structure
 
-./run.sh collaborations/Copycat_RMS2trt 1 1 1 1 1 
-
-# ./run.sh collaborations/Copycat_sc 1 0 1 1 1 --from infer_network_structure
+# ./run.sh collaborations/Copycat_sc/RMS2_trt 1 0 1 1 1 
+./run.sh collaborations/Copycat_sc/RMS9_trt 1 0 1 1 1 
+./run.sh collaborations/Copycat_sc/RD_trt 1 0 1 1 1 
+./run.sh collaborations/Copycat_sc/RMS_all 1 0 1 1 1 

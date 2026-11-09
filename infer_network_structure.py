@@ -23,6 +23,8 @@ Output files:
     - cardamom/basal.npy: basal expression parameters per sample (n_samples×G)
     - cardamom/alpha.npy: cellular scaling factors
     - cardamomOT/couplings.npz: final soft couplings of the trajectories between consecutive observed times
+    - cardamomOT/transition_rates_corrected.json: samples with a transition constraint: prescribed transitions, those
+      consistent with the final plans, model and realised splits of the types per interval
       (sparse: src / tgt = rows of data_<split>.h5ad, w = mass, sample, t_from, t_to; CardamomOT.tools.velocity)
 """
 import sys; sys.path += ['../']
@@ -383,8 +385,9 @@ def main(argv):
             print(f"[infer_network_structure] Warning: could not load KO_OV_inference.txt: {e}")
 
     # ─── LOAD TRANSITION RATES (optional) ───────────────────────────────────
-    from CardamomOT.inputs import load_transition_rates
-    transition_rates = load_transition_rates(p)  # default matrix, or {'default': ..., dataset_id: ...} with matrices per sample
+    from CardamomOT.inputs import load_transition_rates, load_transition_effects
+    transition_rates = load_transition_rates(p)  # {'default': matrix or None, dataset_id: matrix}, or None
+    transition_effects = load_transition_effects(p)   # TRANSk of perturbation_inference
     if transition_rates is not None:
         _m = transition_rates
         print(f"[infer_network_structure] Loaded transition rates: " + (f"shape={_m.shape}" if hasattr(_m, 'shape') else
@@ -401,7 +404,7 @@ def main(argv):
     model.fit_network(adata, verb=1, stimulus_schedule=stim_sched,
                       basal_init=basal_init, inter_init=inter_init,
                       basal_ref=basal_ref, inter_ref=inter_ref,
-                      transition_rates=transition_rates)
+                      transition_rates=transition_rates, transition_effects=transition_effects)
 
     # Save inferred network structure parameters
     cardamom_dir = os.path.join(p, 'cardamomOT')
@@ -453,10 +456,21 @@ def main(argv):
         os.remove(kappa_path)
     if model.observed_prot is not None:
         np.save(os.path.join(cardamom_dir, 'protein_scale'), model.protein_scale)
-    if model.R_opt is not None:
-        np.save(os.path.join(cardamom_dir, 'data_R_opt'), model.R_opt)
-    if model.R_prior is not None:  # prior rates of the states (use_recomputed_proliferation = False downstream)
-        np.save(os.path.join(cardamom_dir, 'data_R_prior'), model.R_prior)
+    # Growth of the states (R_opt) and their prior rates (use_recomputed_proliferation = False downstream); files of an
+    # earlier run removed when not recomputed
+    for name, arr in (('data_R_opt', model.R_opt), ('data_R_prior', model.R_prior)):
+        path = os.path.join(cardamom_dir, name + '.npy')
+        if arr is not None:
+            np.save(path, arr)
+        elif os.path.exists(path):
+            os.remove(path)
+    # Transitions consistent with the plans of the samples with a transition constraint (diagnostic, report)
+    tr_path = os.path.join(cardamom_dir, 'transition_rates_corrected.json')
+    if getattr(model, 'transitions_corrected', None):
+        import json
+        json.dump(model.transitions_corrected, open(tr_path, 'w'), indent=1)
+    elif os.path.exists(tr_path):
+        os.remove(tr_path)
     # Real cell (row of data_<split>.h5ad) behind each trajectory state, -1 if none
     np.save(os.path.join(cardamom_dir, 'data_traj_real_idx'), model.traj_real_idx)
     # one_hot_probas = False: expected modes and posteriors updated by the network, per real cell (targets of

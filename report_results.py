@@ -93,8 +93,14 @@ def main(argv):
                               protein_dilution=bool(model.protein_dilution),
                               mrna_dilution=model.mrna_dilution_on(),
                               classifier_method=str(model.classifier_method),
+                              classifier_balance=float(model.classifier_balance),
                               select_genes=bool(model.select_genes),
                               use_recomputed_proliferation=bool(model.use_recomputed_proliferation),
+                              scale_proteins=float(model.scale_proteins), n_growth_nodes=int(model.n_growth_nodes),
+                              mrna_shrinkage=(model.adaptive_shrinkage if model.inference_mrnas_direct
+                                              and not model.mrna_bridge else None),
+                              fact_simple=float(model.fact_simple),
+                              depth_growth_share=float(model.depth_growth_share),
                               simulation_model='sde2' if (model.simulation_mrnas_direct and model.simulation_stochastic)
                               else ('sde1' if model.simulation_stochastic else 'ode'))
     except FileNotFoundError as e:

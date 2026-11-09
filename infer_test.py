@@ -59,7 +59,7 @@ from CardamomOT.inference.integration import nb_cell_parameters
 from CardamomOT.inference.depth import state_depth, simulation_depth
 from CardamomOT.run_options import parse_step_options, settings, configure
 from CardamomOT.config import n_inference_stimuli
-from CardamomOT.schedules import StimulusSchedule, sample_names, test_schedule
+from CardamomOT.schedules import StimulusSchedule, sample_names, test_pass_rows, held_out_schedule
 
 
 def main(argv):
@@ -119,8 +119,8 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
     n_stimuli = n_inference_stimuli(input_dir(p))
     # Without a test schedule, the inference one is carried from the inference times to the test ones
     inference_times = np.unique(np.load(os.path.join(cardamom_dir, 'data_times.npy')))
-    stim_sched, test_overrides = test_schedule(p, n_stimuli, times=times_obs, inference_times=inference_times)
-    test_overrides = {s: v for s, v in test_overrides.items() if s not in removed}  # validation pass
+    # (the same as the state rates of these cells in get_proliferation_rates, schedules.test_pass_schedule)
+    stim_sched, test_overrides = test_pass_rows(p, n_stimuli, times_obs, inference_times, removed)
     stim_sched_simul = stim_sched
 
     # ─── INITIALIZE MODEL AND LOAD TRAINING PARAMETERS ──────────────────
@@ -293,8 +293,9 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
             basal_ref_test = None
 
     # ─── LOAD OPTIONAL TRANSITION RATES ─────────────────────────────────
-    from CardamomOT.inputs import load_transition_rates
-    transition_rates_test = load_transition_rates(p)  # default matrix, or {'default': ..., dataset_id: ...} with matrices per sample
+    from CardamomOT.inputs import load_transition_rates, load_transition_effects
+    transition_rates_test = load_transition_rates(p)  # {'default': matrix or None, dataset_id: matrix}, or None
+    transition_effects = load_transition_effects(p)   # TRANSk of perturbation_inference
     if transition_rates_test is not None:
         _m = transition_rates_test
         print(f"[infer_test] Loaded transition rates: " + (f"shape={_m.shape}" if hasattr(_m, 'shape') else
@@ -308,7 +309,7 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
     try:
         model.infer_test(adata, verb=1, stimulus_schedule=stim_sched,
                          basal_ref=basal_ref_test,
-                         transition_rates=transition_rates_test,
+                         transition_rates=transition_rates_test, transition_effects=transition_effects,
                          context=context, train=train)
         print(f"[infer_test] Test trajectory inference completed")
     except Exception as e:
@@ -327,16 +328,15 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
     model.ratios = ratios
     model.d_t = d_t
     model.load_chromatin(cardamom_dir)  # chromatin regions of the simulations, if any
+    model.load_prot_factor(cardamom_dir)  # proteins in the units of the refined network (simulations, MLP)
 
     # ─── RESTRICTED POST-PROCESSING: ESTIMATE TRAJECTORIES + KON_THETA ──
     # Runs only the estimate_trajectories step (updates protein paths along the
     # inferred OT couplings) and recomputes kon_theta with the simul network.
     # No network inference, MLP training, or degradation update is performed.
     print(f"[infer_test] Running restricted post-processing (estimate_trajectories + kon_theta)...")
-    # Net growth of the test states as in the training (use_recomputed_proliferation): the growth pass, else the prior
-    # rates of their real cells (birth / death of the dilution, fit_birth_death_to_growth); never the growth pass then
-    if not model.use_recomputed_proliferation:
-        model.R_opt = getattr(model, 'R_prior', None)
+    # Net growth of the test states as in the training (R_states, use_recomputed_proliferation): the growth pass, else
+    # the prior rates of their real cells (birth / death of the dilution, fit_birth_death_to_growth)
     try:
         model.refine_network_degradations(test=True, stimulus_schedule=stim_sched)
         print(f"[infer_test] Restricted post-processing completed")
@@ -377,6 +377,10 @@ def test_pass(p, opts, adata, cardamom_dir, removed=()):
     if model.simulate_with_proliferation or model.protein_dilution:
         from simulate_network import attach_proliferation
         attach_proliferation(model, p, tag='[infer_test]', branching=model.simulate_with_proliferation)
+        from CardamomOT.inference.proliferations import ConditionProliferation
+        if isinstance(model.prolif_network, ConditionProliferation) and len(model.prolif_network.sample_cond) == len(train_ids):
+            # Conditions of the test samples (their indices follow the sorted test samples)
+            model.prolif_network.sample_cond = model.prolif_network.sample_cond[rows_s]
     print(f"[infer_test] Simulating network dynamics on test set...")
     try:
         model.simulate_network(sim_times, stimulus_schedule=stim_sched_simul)
@@ -511,7 +515,7 @@ def _restrict_slots(model, keep):
     """Model trajectories restricted to the slots `keep` (bool (N,)), every timepoint."""
     T = len(np.unique(model.times_data))
     n = len(model.times_data)  # length before any restriction (times_data itself is restricted in the loop)
-    for attr in ('prot', 'rna', 'kon_beta', 'kon_theta', 'traj_real_idx', 'R_opt', 'samples_data',
+    for attr in ('prot', 'rna', 'kon_beta', 'kon_theta', 'traj_real_idx', 'R_opt', 'R_prior', 'R_states', 'samples_data',
                  'state_birth', 'state_death', 'state_stim_birth', 'state_stim_death', 'traj_valid', 'times_data'):
         arr = getattr(model, attr, None)
         if arr is not None and np.ndim(arr) >= 1 and len(arr) == n:
@@ -531,7 +535,6 @@ def validation_pass(p, opts, adata_rem, removed, refs, cardamom_dir):
     names = sample_names(train)
     base, _ = load_simulation_model(p, opts, train, tag='[infer_test]')
     ns = base.n_stimuli
-    default, overrides = test_schedule(p, ns)
     T_tr = np.sort(np.unique(base.times_data))
     N = int(np.sum(base.times_data == T_tr[0]))
     sd = (np.asarray(base.samples_data).astype(int)[:N] if base.samples_data is not None
@@ -559,7 +562,7 @@ def validation_pass(p, opts, adata_rem, removed, refs, cardamom_dir):
         # Simulated times: training times up to the last observed time of r, and the observed times of r
         t_obs = np.sort(np.unique(cells.obs['time'].astype(float)))
         sim_times = sorted({float(t) for t in T_tr if t <= t_obs[-1]} | {float(t) for t in t_obs} | {float(T_tr[0])})
-        sched = StimulusSchedule(m._build_default_schedule(np.array(sim_times), default, times_ref=T_tr), overrides)
+        sched = held_out_schedule(p, ns, T_tr, sim_times)  # as the rates of its cells (get_proliferation_rates)
         m._stim_schedule = StimulusSchedule({t: sched.at(t, r) for t in sim_times})
         print(f"[infer_test] Validation of removed sample {r} ({cells.n_obs} cells at {t_obs.tolist()}) from the "
               f"first-timepoint states of '{ref}' ({int(keep.sum())} trajectories); schedule "

@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import pandas as pd
 import scipy
-from umap import UMAP
+from .embedding import Embedder
 
 from .characterize_cell_type import train_classifier, predict_cell_types, plot_cell_type_proportions
 
@@ -22,7 +22,7 @@ def _enforce_cell_type_order(adata, class_order, label_key='cell_type'):
 
 
 def _fit_umap(adatas, names, reference_idx=0, norm=True, log=True):
-    reducer = UMAP(random_state=42, min_dist=0.7)
+    reducer = Embedder('umap', seed=42)
     ref = adatas[reference_idx]
     if norm:
         sc.pp.normalize_total(ref, target_sum=1e4)
@@ -43,7 +43,7 @@ def _fit_umap(adatas, names, reference_idx=0, norm=True, log=True):
 
 
 def _joint_umap(adatas, names, norm=True, log=True):
-    reducer = UMAP(random_state=42, min_dist=0.7)
+    reducer = Embedder('umap', seed=42)
     adata_all = ad.concat(adatas, join='inner', label='source', keys=names)
     if norm:
         sc.pp.normalize_total(adata_all, target_sum=1e4)

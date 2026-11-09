@@ -3,6 +3,7 @@
 Core functions for the inference of trajectories, mainly used in loop_trajectories
 """
 
+import math
 import numpy as np
 import numba
 from numba import njit, prange
@@ -144,6 +145,40 @@ def prot_bridge_end(d1, d0, d0_end, r0, r1, P0, x0, x1, m0, m1, alpha, alpha_b, 
     return np.maximum(PfT + QT / np.maximum(VT, 1e-12) * (x1 - muT), 0.0)
 
 
+@njit(inline='always')
+def _exp_conv_s(lam, rho, h):
+    # Scalar _exp_conv
+    dl = max(rho - lam, 1e-12) + min(rho - lam, 0.0)
+    return math.exp(-lam * h) * (-math.expm1(-dl * h)) / dl
+
+
+@njit(inline='always')
+def _bridge_step_end(d1, d0, mu, V, Pf, Q, m, r, h):
+    # Scalar _bridge_step restricted to (mu, V, Pf, Q), the moments of prot_bridge_end
+    rho = r + d0
+    Pf = Pf * math.exp(-r * h) + d1 * m * (-math.expm1(-r * h)) / r + d1 * (mu - m) * _exp_conv_s(d0, r, h)
+    Q = Q * math.exp(-rho * h) + d1 * m * (-math.expm1(-rho * h)) / rho + d1 * (V - m) * _exp_conv_s(2 * d0, rho, h)
+    return m + (mu - m) * math.exp(-d0 * h), m + (V - m) * math.exp(-2 * d0 * h), Pf, Q
+
+
+@njit(cache=True)
+def prot_bridge_end_row(d1, d0, d0_end, r0, r1, P0, x0, x1, fx1, m0, m1, fm1, alpha, alpha_b, T, out):
+    """prot_bridge_end of one pair (1-D arrays (G,)) written into out, without temporaries (inner loop of the OT
+    cost); the end levels are x1 * fx1 and m1 * fm1."""
+    for g in range(out.shape[0]):
+        a1 = min(alpha[g], alpha_b[g]) * T
+        a2 = max(alpha[g], alpha_b[g]) * T
+        f = alpha[g] < alpha_b[g]  # the modes switch first
+        m_end = m1[g] * fm1
+        m_mid = m_end if f else m0[g]
+        r_mid = r0[g] if f else r1[g]
+        d0_mid = d0[g] if f else d0_end[g]
+        mu, V, Pf, Q = _bridge_step_end(d1[g], d0[g], x0[g], 0.0, P0[g], 0.0, m0[g], r0[g], a1)
+        mu, V, Pf, Q = _bridge_step_end(d1[g], d0_mid, mu, V, Pf, Q, m_mid, r_mid, a2 - a1)
+        mu, V, Pf, Q = _bridge_step_end(d1[g], d0_end[g], mu, V, Pf, Q, m_end, r1[g], T - a2)
+        out[g] = max(Pf + Q / max(V, 1e-12) * (x1[g] * fx1 - mu), 0.0)
+
+
 @njit(cache=True)
 def prot_bridge(d1, d0, d0_end, r0, r1, P0, x0, x1, m0, m1, alpha, alpha_b, T, tau, P1):
     """
@@ -160,6 +195,58 @@ def prot_bridge(d1, d0, d0_end, r0, r1, P0, x0, x1, m0, m1, alpha, alpha_b, T, t
     wx = ok * (ST * Cx - QT * Cp) / det + (1.0 - ok) * Cx / VT
     wp = ok * (VT * Cp - QT * Cx) / det
     return np.maximum(Pf + wx * (x1 - muT) + wp * (P1 - PfT), 0.0)
+
+
+@njit(inline='always')
+def _bridge_step_s(d1, d0, mu, V, Pf, Q, S, Cx, Cp, m, r, h):
+    # Scalar _bridge_step (all seven moments)
+    rho = r + d0
+    E_rho_2r = _exp_conv_s(rho, 2 * r, h)
+    dl = max(rho - 2 * d0, 1e-8) + min(rho - 2 * d0, 0.0)
+    E3 = (_exp_conv_s(2 * d0, 2 * r, h) - _exp_conv_s(2 * d0 + dl, 2 * r, h)) / dl
+    S = S * math.exp(-2 * r * h) + 2 * d1 * (Q * E_rho_2r + d1 * m / rho * ((-math.expm1(-2 * r * h)) / (2 * r) - E_rho_2r)
+                                         + d1 * (V - m) * E3)
+    Cp = Cp * math.exp(-r * h) + d1 * Cx * _exp_conv_s(d0, r, h)
+    mu, V, Pf, Q = _bridge_step_end(d1, d0, mu, V, Pf, Q, m, r, h)
+    return mu, V, Pf, Q, S, Cx * math.exp(-d0 * h), Cp
+
+
+@njit(cache=True)
+def prot_bridge_row(d1, d0, d0_end, r0, r1, P0, x0, x1, fx1, m0, m1, fm1, alpha, alpha_b, T, tau, P1, out):
+    """prot_bridge of one pair (1-D arrays (G,), tau (G,)) written into out, without temporaries (inner loops of the
+    OT cost); the end levels are x1 * fx1 and m1 * fm1."""
+    for g in range(out.shape[0]):
+        a1 = min(alpha[g], alpha_b[g]) * T
+        a2 = max(alpha[g], alpha_b[g]) * T
+        f = alpha[g] < alpha_b[g]  # the modes switch first
+        m_end = m1[g] * fm1
+        m_mid = m_end if f else m0[g]
+        r_mid = r0[g] if f else r1[g]
+        d0_mid = d0[g] if f else d0_end[g]
+        t = tau[g]
+        # Forward to tau
+        mu, V, Pf, Q, S, _, _ = _bridge_step_s(d1[g], d0[g], x0[g], 0.0, P0[g], 0.0, 0.0, 0.0, 0.0, m0[g], r0[g],
+                                               min(t, a1))
+        mu, V, Pf, Q, S, _, _ = _bridge_step_s(d1[g], d0_mid, mu, V, Pf, Q, S, 0.0, 0.0, m_mid, r_mid,
+                                               min(max(t - a1, 0.0), a2 - a1))
+        mu, V, Pf, Q, S, _, _ = _bridge_step_s(d1[g], d0_end[g], mu, V, Pf, Q, S, 0.0, 0.0, m_end, r1[g],
+                                               max(t - a2, 0.0))
+        Pf_tau = Pf
+        # Then to T, with the covariances to P(tau)
+        mu, V, Pf, Q, S, Cx, Cp = _bridge_step_s(d1[g], d0[g], mu, V, Pf, Q, S, Q, S, m0[g], r0[g],
+                                                 max(a1 - t, 0.0))
+        mu, V, Pf, Q, S, Cx, Cp = _bridge_step_s(d1[g], d0_mid, mu, V, Pf, Q, S, Cx, Cp, m_mid, r_mid,
+                                                 max(a2 - max(t, a1), 0.0))
+        mu, V, Pf, Q, S, Cx, Cp = _bridge_step_s(d1[g], d0_end[g], mu, V, Pf, Q, S, Cx, Cp, m_end, r1[g],
+                                                 T - max(t, a2))
+        V = max(V, 1e-12)
+        det = V * S - Q * Q
+        # Weights of (x1, P1) in the conditional mean; P1 dropped where P(T) is (nearly) determined by x(T)
+        if det > 1e-10 * (V * S + 1e-300):
+            wx, wp = (S * Cx - Q * Cp) / det, (V * Cp - Q * Cx) / det
+        else:
+            wx, wp = Cx / V, 0.0
+        out[g] = max(Pf_tau + wx * (x1[g] * fx1 - mu) + wp * (P1[g] - Pf), 0.0)
 
 
 def birth_alpha(alpha, kon_init, kon_end, tol=0.6):
@@ -255,8 +342,10 @@ def _pair_state(f, kind, d1, d0_i, d0_end_j, d1_i, d1_end_j, prot_init_i, x0, x1
     bridge or flow as its end state (kind 0: mRNA bridge, 1: dilution, 2: flow of find_next_prot); f -> 0: start state."""
     f = np.maximum(f, 1e-9)
     if kind == 0:
-        return prot_bridge(d1, d0_i, d0_end_j, d1_i, d1_end_j, prot_init_i, x0, x1, mode_init_raw, mode_end_j, alpha_i,
-                           alpha_b_j, delta_t, f * delta_t, prot_end_j)
+        out = np.empty(f.shape[0])
+        prot_bridge_row(d1, d0_i, d0_end_j, d1_i, d1_end_j, prot_init_i, x0, x1, 1.0, mode_init_raw, mode_end_j, 1.0,
+                        alpha_i, alpha_b_j, delta_t, f * delta_t, prot_end_j, out)
+        return out
     if kind == 1:
         return find_next_prot_dilution(d1_i, d1_end_j, prot_init_i, mode_init_i, mode_end_j * (d1 / d1_end_j),
                                        np.minimum(alpha_i / f, 1.0), np.minimum(alpha_b_j / f, 1.0), s1, delta_t * f)
@@ -274,7 +363,8 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
                             g_active=np.zeros(0), spec=None, mem_frac=np.zeros(0),
                             mem_w=np.zeros((0, 0)), net_mode=0, net_mid=np.zeros(0), lik_ll=np.zeros((0, 0, 0)),
                             lik_tl=np.zeros((0, 0, 0)), lik_kap=np.zeros((0, 0)),
-                            tau_end2=np.zeros((0, 0)), lik_ok=np.zeros((0, 0, 0))) -> np.ndarray:
+                            tau_end2=np.zeros((0, 0)), lik_ok=np.zeros((0, 0, 0)), g_init=np.zeros(0),
+                            g_end=np.zeros(0)) -> np.ndarray:
     """
     OT cost between n1 trajectory ends and n2 real cells: w A + (1 - w) [(1 - 1/G) B + (1/G) P], with
     A = |Δ mRNA s1|² (mRNA in kon units, as the modes and proteins: k_z / k1 at the mean of mode z, up to the
@@ -283,7 +373,9 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
     At the first training pass (n_iter = 1, weight_fixed < 0) with intensity_prior < 1, the cost is zero (random
     couplings). b_init (n1,), b_end (n2,): birth
     rates of the sources and of the targets (dilution: rate d1 + b, mode targets times d1 / (d1 + b)), switched in the
-    equation of each gene at its birth_alpha (alpha_tol: threshold of inference_alpha); empty = no dilution. Only the cost is returned: the (n1, n2, G) end states are never
+    equation of each gene at its birth_alpha (alpha_tol: threshold of inference_alpha); empty = no dilution. g_init (n1,),
+    g_end (n2,): with them, protein synthesis factors of the sources and targets (mRNA content of growing cells: mode
+    targets times g, and for the bridges the mRNA and kon levels times g, switched with the modes at alpha); empty = 1. Only the cost is returned: the (n1, n2, G) end states are never
     stored; recompute them with find_next_prot / find_next_prot_dilution for the sampled pairs.
     Network term: network cost of code net_mode (fit_ot_cost: cross-entropy, euclidean, or ordinal with the central
     modes net_mid (G,)) between the sigmoid of the network at the end states and tau_end (n2, G), the sigmoid targets
@@ -364,14 +456,20 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
         mode_init_i = mode_init[i]
         kon_init_i = vect_kon_init[i]
         alpha_i = alpha[i]
-        # Dilution at the birth rate of the source before alpha: rate d1 + b, targets compressed by d1 / (d1 + b)
+        # Dilution at the birth rate of the source before alpha: rate d1 + b, targets compressed by d1 / (d1 + b) and
+        # synthesised at g
+        g_i = g_init[i] if g_init.shape[0] == n1 else 1.0
         if b_init.shape[0] == n1:
             d1_i = d1 + b_init[i]
-            c_i = d1 / d1_i
+            c_i = g_i * d1 / d1_i
         else:
             d1_i = d1.copy()
             c_i = np.ones_like(d1)
         mode_init_i = mode_init_i * c_i
+        # Bridges: mRNA and kon levels of the source times g
+        x0_i = kon_rna_init_i * rna_to_x * g_i
+        mode_raw_i = mode_init[i] * g_i
+        g_end_i = np.ones(n2)
         # mRNA of the bridges (mrna_dilution): rate d0 + b of the source before alpha_b, of the target after
         dil0 = mrna_dil and bridge and b_init.shape[0] == n1
         d0_i = d0 + b_init[i] if dil0 else d0.copy()
@@ -391,16 +489,17 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
                 d0_j = d0 + b_end[j] if (dil0 and b_end.shape[0] == n2) else d0_i
                 alpha_b = _birth_alpha_row(alpha_i, kon_init_i, vect_kon_end[j], alpha_tol) \
                     if b_end.shape[0] == n2 else alpha_i
-                prot_end_i[j, :] = prot_bridge_end(d1, d0_i, d0_j, d1_i, r_j, prot_init_i, kon_rna_init_i * rna_to_x,
-                                                   kon_rna_end[j] * rna_to_x, mode_init[i], mode_end[j],
-                                                   alpha_i, alpha_b, delta_t)
-                alpha_b_i[j], d1_end_i[j], d0_end_i[j] = alpha_b, r_j, d0_j
+                g_j = g_end[j] if g_end.shape[0] == n2 else g_i
+                prot_bridge_end_row(d1, d0_i, d0_j, d1_i, r_j, prot_init_i, x0_i, kon_rna_end[j], rna_to_x * g_j,
+                                    mode_raw_i, mode_end[j], g_j, alpha_i, alpha_b, delta_t, prot_end_i[j])
+                alpha_b_i[j], d1_end_i[j], d0_end_i[j], g_end_i[j] = alpha_b, r_j, d0_j, g_j
             elif b_end.shape[0] == n2:
                 d1_j = d1 + b_end[j]
+                g_j = g_end[j] if g_end.shape[0] == n2 else 1.0
                 alpha_b = _birth_alpha_row(alpha_i, kon_init_i, vect_kon_end[j], alpha_tol)
-                prot_end_i[j, :] = find_next_prot_dilution(d1_i, d1_j, prot_init_i, mode_init_i, mode_end[j] * (d1 / d1_j),
-                                                           alpha_i, alpha_b, s1, delta_t)
-                alpha_b_i[j], d1_end_i[j] = alpha_b, d1_j
+                prot_end_i[j, :] = find_next_prot_dilution(d1_i, d1_j, prot_init_i, mode_init_i,
+                                                           mode_end[j] * (g_j * d1 / d1_j), alpha_i, alpha_b, s1, delta_t)
+                alpha_b_i[j], d1_end_i[j], g_end_i[j] = alpha_b, d1_j, g_j
             else:
                 prot_end_i[j, :] = find_next_prot(d1_i, prot_init_i, rna_init_i, vect_rna_end[j], mode_init_i,
                                                   mode_end[j] * c_i, alpha_i, s1, delta_t)
@@ -413,9 +512,9 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
             prot_q[:, :ns] = stim_vals * scale_proteins
             for j in range(0, n2):
                 prot_q[j, ns:] = _pair_state(f0, kind, d1, d0_i, d0_end_i[j], d1_i, d1_end_i[j], prot_init_i,
-                                             kon_rna_init_i * rna_to_x, kon_rna_end[j] * rna_to_x, mode_init[i],
-                                             mode_init_i, mode_end[j], alpha_i, alpha_b_i[j], delta_t, prot_end_i[j],
-                                             rna_init_i, vect_rna_end[j], c_i, s1)
+                                             x0_i, kon_rna_end[j] * rna_to_x * g_end_i[j], mode_raw_i,
+                                             mode_init_i, mode_end[j] * g_end_i[j], alpha_i, alpha_b_i[j], delta_t,
+                                             prot_end_i[j], rna_init_i, vect_rna_end[j], c_i, s1)
             sigma = sigma_pairs(basal, inter, prot_q, spec)
         else:
             sigma = sigma_pairs(basal, inter, prot_full_i, spec)
@@ -428,8 +527,8 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
                 f = np.full(G, mem_frac[q])
                 for j in range(0, n2):
                     prot_q[j, ns:] = _pair_state(f, kind, d1, d0_i, d0_end_i[j], d1_i, d1_end_i[j], prot_init_i,
-                                                 kon_rna_init_i * rna_to_x, kon_rna_end[j] * rna_to_x, mode_init[i],
-                                                 mode_init_i, mode_end[j], alpha_i, alpha_b_i[j], delta_t,
+                                                 x0_i, kon_rna_end[j] * rna_to_x * g_end_i[j], mode_raw_i,
+                                                 mode_init_i, mode_end[j] * g_end_i[j], alpha_i, alpha_b_i[j], delta_t,
                                                  prot_end_i[j], rna_init_i, vect_rna_end[j], c_i, s1)
                 sig_bar = sig_bar + mem_w[q + 1] * sigma_pairs(basal, inter, prot_q, spec)[:, ns:, 1]
             for j in range(0, n2):

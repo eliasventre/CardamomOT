@@ -139,6 +139,60 @@ def step_rows(values, times_ref, times):
     return values[np.clip(idx, 0, min(len(ref), len(values)) - 1)]
 
 
+def held_out_schedule(project, n_stimuli, train_times, times):
+    """
+    Schedule of the samples removed from the inference (remove_from_inference), as in their validation
+    (infer_test.validation_pass): StimulusSchedule on the training times and `times`, default rows of
+    stimulus_test_schedule (else of the inference schedule) as a step function, at the times of their rows when the
+    workbook gives them, else on the training times, with the test overrides (else the inference ones) of the samples
+    (without time column: on the training times, whatever `times`); read with at(t, sample).
+    """
+    from .config import inference_schedule_times
+    from .inputs import input_dir
+    default, overrides = test_schedule(project, n_stimuli)
+    tr = np.sort(np.unique(np.asarray(train_times, dtype=float)))
+    grid = np.sort(np.unique(np.concatenate([tr, np.asarray(times, dtype=float)])))
+    overrides = {s: (tr if t is None else t, v) for s, (t, v) in overrides.items()}
+    if default is None:   # 0 at the first time, 1 after
+        rows = np.ones((len(grid), n_stimuli))
+        rows[grid == grid[0]] = 0.0
+    else:
+        d = input_dir(project)
+        test_path = os.path.join(d, 'stimulus_schedule_test.txt')
+        is_test = os.path.exists(test_path) and np.loadtxt(test_path, ndmin=2).shape[1] == n_stimuli
+        ref = inference_schedule_times(d, 'test' if is_test else 'inference')
+        stim = np.atleast_2d(np.asarray(default, dtype=float))
+        if ref is None:   # one row per training time, the last repeated
+            stim = np.vstack([stim, np.tile(stim[-1], (max(len(tr) - len(stim), 0), 1))])
+        rows = step_rows(stim, tr if ref is None else ref, grid)
+    return StimulusSchedule(dict(zip(grid.tolist(), rows)), overrides)
+
+
+def test_pass_rows(project, n_stimuli, test_times, train_times, removed=()):
+    """(default rows on the sorted test timepoints or None, per-sample overrides) of the held-out cells of the training
+    samples (infer_test.test_pass; their state rates in get_proliferation_rates, test_pass_schedule): test_schedule
+    carried to the test timepoints, the overrides of the samples removed from the inference left out (validation)."""
+    default, over = test_schedule(project, n_stimuli, times=test_times, inference_times=train_times)
+    return default, {s: v for s, v in over.items() if s not in set(removed)}
+
+
+def test_pass_schedule(project, n_stimuli, test_times, train_times, removed=(), names=None):
+    """StimulusSchedule of test_pass_rows on the sorted test timepoints, as NetworkModel._build_stimulus_schedule in
+    the test pass: one row per timepoint (the last repeated), without schedule 0 at the first timepoint and 1 after;
+    read with at(t, sample)."""
+    tt = np.sort(np.unique(np.asarray(test_times, dtype=float)))
+    default, over = test_pass_rows(project, n_stimuli, tt, train_times, removed)
+    if default is None:
+        rows = np.ones((len(tt), n_stimuli))
+        rows[0] = 0.0
+    else:
+        rows = np.atleast_2d(np.asarray(default, dtype=float))
+        rows = np.vstack([rows, np.tile(rows[-1], (max(len(tt) - len(rows), 0), 1))])[:len(tt)]
+        if rows.shape[1] == 1 and n_stimuli > 1:
+            rows = np.tile(rows, (1, n_stimuli))
+    return StimulusSchedule(dict(zip(tt.tolist(), rows)), over, names)
+
+
 def test_schedule(project, n_stimuli, times=None, inference_times=None):
     """
     (default matrix or None, per-sample overrides) of the held-out cells (infer_test): stimulus_test_schedule (rows

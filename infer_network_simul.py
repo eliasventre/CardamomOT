@@ -9,7 +9,8 @@ and parameter transformation for downstream simulation steps.
 
 Usage:
     python infer_network_simul.py -i <project_path> [--stimulus <float>] [--prior <float>]
-(simulate_with_proliferation or protein_dilution: trains the proliferation MLP; model_parameters sheet)
+(proliferation_mlp with simulate_with_proliferation or protein_dilution: trains the proliferation MLP; model_parameters
+sheet)
 
 Required input files:
     - Data/data_<split>.h5ad: count matrix with temporal information
@@ -23,7 +24,8 @@ Output files:
     - cardamom/ratios.npy: parameter ratios
     - cardamom/degradations_temporal.npy: temporal degradation rates
     - cardamom/data_state_rates.npz: birth and death rates of the trajectory states, consistent with the net growth
-      R_opt of fit_network and closest to the prior ones (used for the dilution here and in the simulations, and as
+      of the states (R_opt of fit_network, or the prior net rates: use_recomputed_proliferation) and closest to the
+      prior ones (used for the dilution here and in the simulations, and as
       targets of the birth / death heads of the proliferation MLP)
 """
 import sys; sys.path += ['../']
@@ -34,6 +36,7 @@ from CardamomOT.inputs import input_dir
 from CardamomOT.inference import signed_floor
 from CardamomOT.run_options import parse_step_options, settings, configure
 from CardamomOT.config import inference_schedule
+from CardamomOT.schedules import sample_names
 import anndata as ad
 import pandas as pd
 import os
@@ -117,9 +120,17 @@ def main(argv):
             model.modes_soft = soft['modes_soft']
             model.posteriors_soft = soft['posteriors_soft'].astype(float)
         model._load_ot_constraints(adata)
+        model.set_real_cells(adata)  # observed modes and mRNA compared with the free-running fit
+        # Per-sample schedules and source rates of the intervals, as in fit_network
+        model.set_sample_names(sample_names(adata))
+        model._stim_schedule = model._build_stimulus_schedule(np.sort(np.unique(model.times_data)), stim_sched)
+        model._set_interval_rates(adata.obs['time'].values.astype(float) if 'time' in adata.obs
+                                  else np.zeros(adata.n_obs),
+                                  adata.obs['dataset_id'].astype(str).values if 'dataset_id' in adata.obs
+                                  else np.full(adata.n_obs, '0'))
         # Net growth of the states: R_opt of the growth pass, or the prior rates (use_recomputed_proliferation)
-        model.R_opt = load_state_growth(os.path.join(p, 'cardamomOT'), model.use_recomputed_proliferation)
-        if model.R_opt is not None:
+        model.R_states = load_state_growth(os.path.join(p, 'cardamomOT'), model.use_recomputed_proliferation)
+        if model.R_states is not None:
             print("[infer_network_simul] Loaded the net growth of the states ("
                   + ("R_opt of the growth pass" if model.use_recomputed_proliferation else "prior rates") + ")")
         print("[infer_network_simul] Successfully loaded all network parameters")
@@ -276,7 +287,8 @@ def main(argv):
         if model._spec_grn() is not None:  # edge thresholds of the exact Herbach targets, learned again by a refit
             from CardamomOT.inference.sigma import save_sigma_spec_grn
             save_sigma_spec_grn(cardamom_dir, model._spec_grn())
-        model.save_state_rates(cardamom_dir)  # birth / death of the states (consistent with R_opt): dilution of the simulations
+        model.save_state_rates(cardamom_dir)  # birth / death of the states (consistent with R_states): dilution of the simulations
+        model.save_prot_factor(cardamom_dir)  # proteins in the units of the refined network (rescaled ones), if any
         # Proliferation model of an earlier run (single or per condition) removed before saving the new one
         import glob
         for f in glob.glob(os.path.join(cardamom_dir, 'prolif_network*.pt')) + [

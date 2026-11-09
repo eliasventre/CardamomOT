@@ -44,10 +44,10 @@ def attach_proliferation(model, p, tag='[simulate_network]', branching=True):
             print(f"{tag} proliferation_mlp = False: dilution at the birth rates of the nearest trajectory states")
             return False
         # Net growth of the trajectory states (those of the model when it already holds them, e.g. test states)
-        R, prot = getattr(model, 'R_opt', None), getattr(model, 'prot', None)
+        R, prot = getattr(model, 'R_states', None), getattr(model, 'prot', None)
         if R is None or (prot is not None and len(R) != len(prot)):
-            model.R_opt = load_state_growth(cdir, model.use_recomputed_proliferation)
-        if model.R_opt is None:
+            model.R_states = load_state_growth(cdir, model.use_recomputed_proliferation)
+        if model.R_states is None:
             print(f"{tag} Warning: simulate_with_proliferation = True but no net growth of the trajectory states "
                   "(data_R_opt.npy / data_R_prior.npy, infer_network_structure): no branching")
             return False
@@ -102,6 +102,7 @@ def load_simulation_model(p, opts, adata, tag='[simulate_network]'):
         model.kon_beta = np.load(os.path.join(p, 'cardamomOT', 'data_kon_beta.npy'))
         model.ratios = prm['ratios']
         model.load_state_rates(os.path.join(p, 'cardamomOT'))  # birth / death of the states (dilution)
+        model.load_prot_factor(os.path.join(p, 'cardamomOT'))  # proteins in the units of the refined network
         valid_path = os.path.join(p, 'cardamomOT', 'data_traj_valid.npy')  # observed trajectory states
         model.traj_valid = np.load(valid_path) if os.path.exists(valid_path) else None
         model.load_chromatin(os.path.join(p, 'cardamomOT'))  # chromatin regions, if any

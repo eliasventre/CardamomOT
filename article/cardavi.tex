@@ -40,18 +40,20 @@
 
 \paragraph{The thread.} The number of genes can grow; the number of regulators that the data can tell apart cannot (Section~\ref{sec:cap}). Most genes should therefore be targets of the core, not free regulators. They then become an information source: through the coupling, thousands of targets constrain the proteins of the core. The coupling is also what keeps the problem constrained: once an ancestor is chosen, it gives one equation per gene and per cell, where a fit on marginals alone is under-constrained (Section~\ref{sec:objective}). The two stages share this objective, written from the start, and differ in how it is optimised.
 
-\paragraph{What already exists in the code.} The negative binomial mixture, the rates, the mechanistic bridges, the OT cost with its network term, the recomputation of the end states on the pairs drawn from the coupling only, the fits per target with the QUT penalty, the update of the basins, and the free-running fit of the simulation model with reparametrised Gamma bursts (\texttt{inference/sde.py}), which gives the dynamics of the hidden variables. The current gene selection gives an initial core.
+\paragraph{What already exists in the code.} The negative binomial mixture, the rates, the mechanistic bridges, the OT cost with its network term, the recomputation of the end states on the pairs drawn from the coupling only, the fits per target with the QUT penalty, the update of the basins, and the free-running fit of the simulation model with reparametrised Gamma bursts (\texttt{inference/sde.py}), which gives the dynamics of the hidden variables. The mask of the allowed edges (\texttt{ref\_network}) can already express a core, and the statistic of the QUT is the one that decides the entry of a regulator (Section~\ref{sec:entry}). The current gene selection gives an initial core.
 
-\paragraph{Where we stand.} Nothing specific to this project is implemented. Propositions~\ref{prop:path} and~\ref{prop:bound} and the transition law~\eqref{eq:transition} have been checked numerically on small examples. The claims of Section~\ref{sec:cap} on the effective rank have not been measured on our datasets, and the central hypothesis, that genes outside the core improve the network of the core, has not been tested.
+\paragraph{Where we stand.} Nothing specific to this project is implemented: the architecture of the first stage and its procedures of selection (Section~\ref{sec:stage1}) are designed, not tested. Propositions~\ref{prop:path} and~\ref{prop:bound} and the transition law~\eqref{eq:transition} have been checked numerically on small examples. The claims of Section~\ref{sec:cap} on the effective rank have not been measured on our datasets, and the central hypothesis, that genes outside the core improve the network of the core, has not been tested.
 
-\paragraph{Next steps.} In the order of Section~\ref{sec:validation}, each step deciding whether the next one is worth doing:
+\paragraph{Next steps.} In the order of the implementation phases of the first stage (Section~\ref{sec:phases}) and of the levels of Section~\ref{sec:validation}, each step deciding whether the next one is worth doing:
 \begin{enumerate}[nosep]
-\item Simulated data with many genes and a known core: all the genes and a prior with decoys, against CardamomOT on the right genes only.
-\item Lock-in: remove a true regulator from the initial core, and check whether it comes back.
-\item Does the recovery of the core improve with the number of genes outside the core?
-\item The objective along the iterations of the first stage: which steps do not descend it?
-\item A hidden regulator: remove the mRNA of a known regulator, and recover its protein and its regulators.
+\item Phase A, on simulated data with many genes and a known core: all the genes and a prior with decoys, against CardamomOT on the right genes only (levels 1.1 and 1.2).
+\item Lock-in: remove a true regulator from the initial core, and check whether it comes back (level 1.3).
+\item Does the recovery of the core improve with the number of genes outside the core? (level 1.4)
+\item Phase B: promotion of satellites and delayed actions (level 1.5).
+\item Phase D: hidden variables, starting with a regulator whose mRNA is removed (level 1.6).
+\item The objective along the iterations of the first stage: which steps do not descend it? (level 2.1)
 \end{enumerate}
+Phase C, the move to thousands of genes, is needed for real datasets and can follow step 3.
 
 %======================================================================
 \section{Introduction}\label{sec:intro}
@@ -96,7 +98,7 @@ The regression of a target $g$ on the proteins has a design matrix $X$ of cells 
 
 The latent state of a cell is $z = (P, z^{\mathrm{h}})$: the proteins $P$ of the $K$ regulators of the core, and the states $z^{\mathrm{h}}$ of a few hidden variables. The stimuli are exogenous components of $z$, set by their schedules as in CardamomOT.
 
-Regulators are of two kinds. An \emph{anchored} regulator is a gene: its mRNA is observed, its levels come from its mixture and its rates from the tables. Its protein is latent, as in the current model. Not every regulator needs to be a transcription factor: a chromatin regulator, for instance, can be anchored. A \emph{hidden} variable has no observed mRNA (Section~\ref{sec:dynamics}). It is part of $z$ and cannot be deduced from the core: the core only predicts its production, and its state is read on its targets. A hidden variable whose state were a function of the core would only add a delay.
+Regulators are of two kinds. An \emph{anchored} regulator is a gene: its mRNA is observed, its levels come from its mixture and its rates from the tables. Its protein is latent, as in the current model. Not every regulator needs to be a transcription factor: a chromatin regulator, for instance, can be anchored. A \emph{hidden} variable has no observed mRNA (Section~\ref{sec:dynamics}). It is part of $z$ and cannot be deduced from the core: the core only predicts its production, and its state is read on its targets. A hidden variable whose state were a function of the core would only add a delay. Conversely, an anchored regulator whose action is indirect, such as a demethylase, acts on its targets with a delay of its own (Section~\ref{sec:dynamics}).
 
 The latent state predicts a law, not an expression. The recent path of $z$ gives the burst frequency of every gene (Section~\ref{sec:decoder}), and the counts remain stochastic given it. All the correlation between genes must therefore go through $z$, which gives a testable criterion: residual correlations between genes given $z$ show that something is missing from $z$.
 
@@ -157,6 +159,25 @@ Comparing it with $\sigma_h$ is the reachability term of Section~\ref{sec:object
 
 Hidden variables can represent two different things: an unobserved regulator of the network, with a small $a_h$, and a nuisance factor such as the cell cycle, with a large $a_h$, which behaves as a static factor per cell. The same parameter separates them, without two kinds of latent variables. The rate $d_{1,h}$ is only identifiable if $d_{1,h}\Delta$ is of the order of $1$: for $d_{1,h}\Delta \gg 1$, $\widehat M_h \approx z_h(j)$ and no memory is left.
 
+\paragraph{Delayed actions.} An anchored regulator can act indirectly: a demethylase, for instance, changes the state of the chromatin, which then changes transcription. Reading the exact level of its protein in the sigmoids of its targets ignores this delay. The targets of such a regulator $r$ read instead an action variable
+\begin{equation}\label{eq:action}
+\frac{dA_r}{dt} = d_{a,r}\,\big(P_r - A_r\big),
+\end{equation}
+and the current model is the limit $d_{a,r} \to \infty$. The protein keeps the degradation rate of the tables, and so do the direct effects of the regulator if it has any: changing its $d_1$ instead would change both. Offering both channels, $P_r$ and $A_r$, to the sparsity penalty would make them collinear when $d_{a,r}$ is large. Along a bridge, $A_r$ has a closed form, a convolution of exponentials, so that a delayed regulator costs one more bridge, and the simulator one more ODE. The delay on the side of the targets already exists: the mRNA memory, per class of targets. A priori only the total delay of an edge is identifiable; the part on the side of the regulator is identifiable because it is common to all its targets.
+
+\paragraph{Filtered nodes.} Delayed actions and hidden variables form a single class of nodes, which relax towards an input and differ by this input:
+\begin{center}
+\begin{tabular}{@{}p{0.45\textwidth}p{0.45\textwidth}@{}}
+\toprule
+Input & Node \\
+\midrule
+protein $P_r$ of an anchored regulator & delayed action~\eqref{eq:action} \\
+sigmoid $\sigma_h(z)$ of the core, small $a_h$ & hidden regulator~\eqref{eq:hidden} \\
+constant, large $a_h$ & meta-variable, such as the cell cycle \\
+\bottomrule
+\end{tabular}
+\end{center}
+
 \subsection{The objective: the coupling in the latent space}\label{sec:objective}
 
 The free-running fit alone does not recover the network: on the network FN8 (10 runs, on an earlier version of the code), a network learned from scratch with this fit reached an AUPR of $0.45$--$0.57$, against $0.75$ for \texttt{fit\_network}. A Sinkhorn divergence between simulated and observed cells only constrains marginals, whereas once an ancestor is chosen, the network term of the coupling requires the sigmoid to explain each gene of the cell. The objective therefore keeps the coupling, in the latent space.
@@ -202,7 +223,7 @@ With the cost~\eqref{eq:cost}, $p_{ij}$ is a product over the genes of $\sigma^{
 Extension & Component & Point of attention \\
 \midrule
 Stimulus, schedules & dynamics (exogenous part of $z$) & unchanged \\
-Proliferation, dilution & dynamics, masses of the coupling & marker genes are part of the data rather than a selection; in simulations, the rates must be functions of $z$ \\
+Proliferation, dilution & dynamics, masses of the coupling & marker genes are sensors rather than regulators (Section~\ref{sec:sensors}); in simulations, the rates must be functions of $z$ and of the sensors \\
 Model learning of $\sigma$ & decoder, family per target & little information on weakly expressed targets \\
 mRNA memory & decoder & $\sigma$ evaluated at several times for every target \\
 Network conditions, genes per condition & $\theta$ per condition & gene masks may become unnecessary; the core may differ between conditions \\
@@ -229,27 +250,165 @@ Masses, transitions, lineage & constraints on the coupling & unchanged \\
 \section{Stage 1: CardamomOT on all the genes}\label{sec:stage1}
 %======================================================================
 
-\paragraph{Candidates and core.} A prior gives a wide set of $C$ candidate regulators: expressed transcription factors, chromatin regulators, the regulators of the literature prior. The current gene selection only initialises the core. The core is the support of $\theta$: the candidates with at least one outgoing edge.
+\subsection{Roles of the genes}\label{sec:roles}
 
-\paragraph{One iteration.}
+The selection step writes a role for each gene in the data, as it writes the genes of each condition, and the inference reads these roles. Without roles, every gene is a regulator, which is the current model. A role is made of two attributes:
+\begin{itemize}[nosep]
+\item \texttt{regulator}: the gene may have outgoing edges;
+\item \texttt{protein\_tracked}: its protein is computed.
+\end{itemize}
+The \emph{candidate} regulators have both attributes. The \emph{sensors} only have the second: their proteins are used after the inference (Section~\ref{sec:sensors}), and they remain ordinary targets. The \emph{satellites} have neither. The \emph{core} is the set of candidates with at least one outgoing edge, that is, the support of $\theta$. The word core is used rather than kernel, which already names the Gibbs kernel of the OT and the memory kernel of the mRNA in the code. The lists given by the user, such as imposed regulators and sensors, go in the \texttt{gene\_lists} sheet of the workbook, with the queries.
+
+Part of the mechanism exists. The mask \texttt{ref\_network} multiplies $\theta$ and gives the allowed regulators of each target, so that setting the rows of the non-candidates to zero is enough for the fit.
+
+\subsection{The wide selection}\label{sec:wide}
+
+\paragraph{Candidates.} The candidates are the genes that may have a direct regulatory effect: transcription factors, chromatin regulators, the regulators of the literature prior, and the genes pointed to by external data, such as motifs, single-cell ATAC data or the multiome. A candidate must have separated modes, otherwise its protein is almost constant and absorbed by $\beta$. The separability of the modes after the fit of the mixture removes such candidates with no extra criterion.
+
+\paragraph{Universe.} The total number of genes can stay bounded by \texttt{n\_hvg\_selection}, but the most variable genes miss many transcription factors, which are often weakly expressed and weakly variable. The universe is therefore the union of the highly variable genes, the expressed candidates, the sensors, the queries and the perturbed genes. The candidates are filtered on a minimal expression rather than on their variability.
+
+\paragraph{Cap on the number of candidates.} The criteria of the current gene selection (entropy, differential expression, Steiner tree) point to the genes that carry the dynamics. What matters for a regulator is its explanatory power on the other genes. The global network that the gene selection already computes gives the outgoing edges of each candidate, and the sum of their probabilities is a score for the cap. The Steiner tree can still give the initial core.
+
+\paragraph{Priors on the edges.} Motifs and ATAC data give a prior from candidate to target, as in Dictys~\cite{wang2023dictys} or CellOracle~\cite{kamimoto2023dissecting}, which enters the mask of the edges with the weight of the literature prior. A chromatin regulator has no motif, so that a hard mask would exclude it: sources without motifs need a soft prior.
+
+\paragraph{A single place for the selection.} The gene selection writes the full, train and test data from the train cells only. The wide selection is a mode of the gene selection, or a function that it calls, so that a single script decides the genes.
+
+\subsection{One iteration}\label{sec:iteration}
+
 \begin{enumerate}[nosep]
 \item Coupling: every gene enters the network term of the cost~\eqref{eq:current-cost}; the proteins of each pair are only computed for the regulators of the core.
 \item Trajectories: on the pairs drawn from the coupling, the proteins of all $C$ candidates are computed. The cost is $n\,C$ rather than $n^2 C$, since the end states are already recomputed for the drawn pairs only.
-\item Fit: each target is regressed on the candidates, after a screening step~\cite{fan2008sure}, with the QUT penalty.
+\item Fit: each target is regressed on the candidates kept by a screening (Section~\ref{sec:entry}), with the QUT penalty.
 \item Core: the support of $\theta$ is the core of the next iteration. A candidate left out can come back, since its protein is still computed.
 \end{enumerate}
 The selection of the genes is then part of the inference.
 
-\paragraph{Computing time.} Per pair, the cost requires $K$ bridges and $\sum_g \nnz(\theta_g) \le GK$ terms of the sigmoids, instead of $G$ bridges and $G^2$ terms. The main code to write is a sparse sigmoid: the input of $\sigma$ currently runs over every regulator for each target. The mixture is fitted gene by gene, linearly in $G$.
+\paragraph{Computing time.} Per pair, the cost requires $K$ bridges and $\sum_g \nnz(\theta_g) \le GK$ terms of the sigmoids, instead of $G$ bridges and $G^2$ terms. The main code to write is a sparse sigmoid: the input of $\sigma$ currently runs over every regulator for each target, and should run over the allowed regulators of the target only. The fits need the screening: their subsample is at least ten times the number of parameters per target, so that $500$ candidates would require $5000$ states for each of the $G$ fits. The screening keeps a few tens of candidates per target. The mixture is fitted gene by gene, linearly in $G$.
 
 \paragraph{Weights of the satellites.} The fits are independent per target and the basins are updated gene by gene, so the satellites only act on the core through the coupling. Three consequences:
 \begin{itemize}[nosep]
 \item satellites enter the network term $B$ of the cost, and neither the mRNA nor the protein terms;
 \item the blocks must be normalised, otherwise the satellites overwhelm the mRNAs of the core;
-\item a satellite that depends on something outside the core pulls the trajectories in a wrong direction. Its weight in $B$ follows how well the core explains it (gain of likelihood against a model without regulators). Blocks of such satellites with correlated residuals show what the core is missing.
+\item a satellite that depends on something outside the core pulls the trajectories in a wrong direction. Its weight in $B$ follows how well the core explains it (gain of likelihood against a model without regulators). Blocks of such satellites with correlated residuals show what the core is missing (Section~\ref{sec:hidden-stage1}).
 \end{itemize}
 
 \paragraph{Lock-in.} The current core shapes the trajectories, and the trajectories can favour the genes that resemble it. This is the main risk of the first stage, and the reason for the tests of Section~\ref{sec:validation}: a true regulator removed from the initial core must come back, decoys must not stay, and the satellites must improve the core.
+
+\subsection{Entry of a candidate}\label{sec:entry}
+
+Let $n$ index the states of the trajectories, $c(n)$ be the real cell to which state $n$ is linked, and
+\[
+r_{gn} = \sigma_g(P_n) - \tau_{g\,c(n)}
+\]
+be the residuals of the current fit. In a lasso, an inactive regulator $s$ enters the fit of target $g$ if and only if $|z_{sg}| > \lambda_g$, where $z_{sg} = \sum_n r_{gn} P_{s,n}$ is the gradient of the cross-entropy with respect to the edge $s \to g$ (the KKT condition). The QUT~\cite{giacobino2017quantile} calibrates $\lambda_g$ on this very statistic under the null model. The entry therefore needs no separate criterion:
+\begin{itemize}[nosep]
+\item the diagnostic is a single matrix product, of the residuals (states by targets) with the proteins of the candidates (states by candidates);
+\item the same product gives the screening of the candidates of each target, as the strong rules of the lasso~\cite{tibshirani2012strong} or sure independence screening~\cite{fan2008sure}.
+\end{itemize}
+A core that changes at every iteration would destabilise the EM. A candidate enters on a strong score and leaves only after several weak iterations (hysteresis), and the core is frozen after a given iteration.
+
+\subsection{Promotion of a gene, with a possible delay}\label{sec:promotion}
+
+A satellite enters the core by the test of Section~\ref{sec:entry}, extended to its whole row and to a grid of delays. A refit with a criterion of BIC type on all the data confirms the promotion, and a test of temporal precedence separates the regulators from the co-targets. The same procedure gives the delayed actions~\eqref{eq:action} of the regulators of the core.
+
+\paragraph{Proteins of the satellites.} Each state of the trajectories is linked to a real cell, so that the modes of a satellite $s$ are known along each chain of ancestors, and the bridge gives its protein $P_s$ with the $d_1$ of the tables. Since $s$ has no learned switching time, the switch is placed at the middle of the interval. The cost is linear in the number of states times the number of satellites, computed by blocks. The delayed actions $A_s(d)$ are computed on a grid $d\Delta \in \{\infty, 2, 1, 0.5\}$, where $\infty$ is the protein itself; outside $d\Delta \approx 1$, the delay is not identifiable. Satellites without separated modes are excluded, since their protein is almost constant.
+
+\paragraph{Score of a row.} For each satellite $s$, delay $d$ and target $g$,
+\[
+z_{sg}(d) = \sum_n r_{gn}\, A_{s,n}(d), \qquad S_s(d) = \sum_g \big(|z_{sg}(d)| - \lambda_{sg}\big)_+ ,
+\]
+where $\lambda_{sg}$ is the QUT threshold of target $g$, weighted by the literature prior as in the current fits, with a harder threshold for genes outside the databases of regulators. The edge $s \to g$ would enter the lasso if $|z_{sg}| > \lambda_{sg}$. A promotion is a decision on all the edges of $s$, hence a score on its whole row. All the satellites and targets give one matrix product per delay.
+
+\paragraph{Calibration: a group QUT.} With \texttt{qut\_level} $= 0.5$, a target with no true regulator receives at least one false edge once in two. Counting violations per satellite would give many false promotions, over thousands of satellites and several delays. The threshold of promotion is the quantile of $\max_{s,d} S_s(d)$ under permutations of the states within each sample, the same permutation for all the targets, which accounts for the multiplicity of satellites and delays. Its level is stricter than for the edges, such as $0.95$, since a promotion changes the core. Each permutation costs one matrix product. Subsampling the states and keeping the poorly explained targets should keep the cost affordable; this remains to be measured.
+
+\paragraph{Precedence: regulator or co-target?} The main trap is a sibling: a gene regulated, like the targets, by a missing regulator $X$. It correlates with their residuals without regulating anything. A true regulator acts through its protein, hence with a delay. A sibling reflects the current state of $X$, like the other targets, so that it explains the residuals better by its mRNA at the same time than by its protein. The current mode $m_s$ of the satellite, at zero lag, is therefore added to the grid:
+\begin{itemize}[nosep]
+\item if a delayed protein wins, $s$ is a candidate regulator;
+\item if the mRNA at zero lag wins, $s$ is a co-target. It is not promoted, and the block of its siblings points to a hidden regulator, for which $s$ is an anchor gene (Section~\ref{sec:hidden-stage1}).
+\end{itemize}
+This is the central argument of CardamomOT, that the proteins lag behind the mRNAs, used as a criterion. When the protein of $s$ is fast ($d_1\Delta \gg 1$), protein and mRNA coincide and the test cannot decide; the prior then decides.
+
+\paragraph{Cascades: relay or delayed action?} If $s$ is regulated by a regulator $r$ of the core, the protein of $s$ and a delayed action of $r$ can explain the same residuals. A true relay transmits its own fluctuations, its bursts, whereas a delayed action of $r$ only transmits those of $r$. The cheaper explanation is tested first: the delayed action of $r$, then a refit, then the score of $s$ on the new residuals. If $s$ keeps a significant score, it is a relay to promote; otherwise the delayed action of $r$ suffices, with fewer parameters.
+
+\paragraph{Confirmation, one gene at a time.} The candidates are collinear, hence a greedy procedure:
+\begin{enumerate}[nosep]
+\item take the best pair $(s, d)$ above the group threshold;
+\item refit the targets concerned with the usual procedure (QUT, ridge, relaxed fit);
+\item keep the promotion if the gain of cross-entropy on all the data exceeds a penalty of BIC type, of one parameter per new edge, plus one if $d$ is finite;
+\item recompute the residuals and repeat, with at most a few promotions per diagnostic.
+\end{enumerate}
+The diagnostic runs after the burn-in, once the targets are stable (around \texttt{min\_n\_loops}), then every few iterations, until the core is frozen. A promoted gene becomes a regulator: its protein is tracked, and its bridges enter the coupling as soon as it has edges.
+
+\paragraph{Delayed actions of the core.} The delays of the regulators of the core are chosen on the same grid and with the same criterion, rather than by gradient, as in the model learning. The prior depends on the source: a transcription factor with a motif is direct by default, while a chromatin or signalling regulator may be delayed.
+
+\subsection{Hidden variables}\label{sec:hidden-stage1}
+
+All the correlation between genes must go through $z$ (Section~\ref{sec:framework}): a structure in the residuals that the observed regulators do not explain shows that something is missing from $z$. A hidden variable is detected on this structure, its state is estimated on its targets, and its dynamics decides what it is. In the first stage, this estimate per cell plays the role of the encoder.
+
+\paragraph{Detection.} The residuals are standardised, $\tilde r_{gn} = r_{gn} / \sqrt{\sigma_g(P_n)\,(1 - \sigma_g(P_n))}$, on the states of the trajectories and for all the genes. If $z$ is complete, they are independent from one gene to another. The first singular values of the matrix $\tilde r$ (states by genes) are given by a truncated SVD. The null distribution permutes the residuals of each gene independently within each sample, which removes the correlations between genes and keeps the marginals. A factor is kept if its singular value exceeds the quantile of the largest one under these permutations (parallel analysis~\cite{horn1965rationale}), at a strict level such as $0.95$. The permutations are within samples rather than within times: otherwise, a missing regulator that only varies between times would stay in the null and be invisible. The effects of the samples are already absorbed by the basals per sample.
+
+\paragraph{The cheaper explanations first.} For the leading residual factor, with scores $u$ per state and loadings $v$ per gene, the following explanations are tried in this order:
+\begin{enumerate}[nosep]
+\item an observed gene whose protein, possibly delayed, follows $u$: the promotion of Section~\ref{sec:promotion};
+\item the delayed action of a regulator of the core;
+\item a technical artefact: $u$ correlates with the depth, the mitochondrial fraction or the number of detected genes, or $v$ loads almost every gene with the same sign. This is a technical covariate, not a regulator, and it is not added to $z$. In scRNA-seq data, the first residual factor is often of this kind.
+\end{enumerate}
+A hidden variable is created only if none of these explanations holds. The siblings of Section~\ref{sec:promotion} lead here directly, as its anchor genes.
+
+\paragraph{State: a logistic factor with an offset.} With $\hat\eta_{gn}$ the logit of the current fit, kept fixed,
+\[
+\mathrm{logit}\ \sigma_g(n) = \hat\eta_{gn} + \theta_{hg}\, z_h\big(c(n)\big), \qquad z_h \in [0,1].
+\]
+Two steps alternate:
+\begin{itemize}[nosep]
+\item $\theta_{hg}$, target by target, with the usual procedure (QUT, ridge): only the targets above the threshold are kept, which makes the loadings sparse;
+\item $z_h(j)$, cell by cell, by a one-dimensional minimisation of the cross-entropy of its targets.
+\end{itemize}
+The SVD initialises both: $u$, rescaled to $[0,1]$, gives the states, and $v$ the targets. The scale and the origin of $z_h$ are absorbed by $\beta$ and $\theta$, and its sign is set by convention, for instance a majority of positive loadings. With a free state per cell, the number of parameters grows with the number of cells (the problem of Neyman and Scott~\cite{neyman1948consistent}), so that a criterion of BIC type on this fit always overfits. The permutation threshold of the detection decides whether the factor exists, not the BIC.
+
+\paragraph{Its dynamics decides what it is.} On the pairs $(i, j)$ drawn from the coupling, the transition~\eqref{eq:transition} is fitted, with $\sigma_h = \mathrm{logistic}(\beta_h + \Theta_h \cdot P_i)$ frozen over the interval, $d_{1,h}$ on the grid $d_{1,h}\Delta \in \{2, 1, 0.5\}$, and $\Theta_h$ with the QUT. Given the states, the parameters are few, and a criterion of BIC type applies. Three models are compared:
+\begin{center}
+\begin{tabular}{@{}p{0.33\textwidth}p{0.2\textwidth}p{0.38\textwidth}@{}}
+\toprule
+Winning model & Class & Role in the model \\
+\midrule
+memory (dependence on $z_h(i)$) and $\Theta_h$ significant & hidden regulator & node of the network, reachability term in the coupling~\eqref{eq:cost} \\
+$\Theta_h$ reduced to one delayed regulator & delayed action & replaced by $A_r$~\eqref{eq:action} \\
+neither memory nor dependence on the core, large $a_h$ & meta-variable (cell cycle, stress) & covariate per cell of the sigmoids, with no dynamics and no reachability term \\
+\bottomrule
+\end{tabular}
+\end{center}
+The reachability term of a hidden regulator is Gaussian for each pair, hence cheap.
+
+\paragraph{Smooth introduction and confirmation.} A weight $\omega$ multiplies the edges $\theta_{hg}$ and the reachability term, and rises from $0$ to $1$ over a few iterations; at $\omega = 0$, the model is exactly the model without the variable. Once $\omega = 1$, the variable is kept only if the score on all the data remains better under the criterion, and it can be removed if it no longer holds once the trajectories have adjusted. Hidden variables come one at a time, after the promotions of genes, with a cap of a few variables and a stricter level.
+
+\paragraph{Safeguards.}
+\begin{itemize}[nosep]
+\item Anchoring: a few targets of its own, three to five for instance, whose loadings pass the permutation threshold. Otherwise the variable is not identifiable.
+\item No duplicate: if $z_h$ correlates strongly ($|r| > 0.9$) with the protein, possibly delayed, of a regulator of the core, the two are merged. A hidden variable that replaces an anchored regulator is rejected.
+\item A lower bound on $a_h$, against the vanishing noise of Section~\ref{sec:risks}.
+\item The variable is judged on free-running simulation and on perturbations, never on reconstruction.
+\item Its name comes afterwards: enrichment of its targets, overlap with the regulon of an undetected transcription factor in CollecTRI~\cite{muller2023expanding}, or with the proliferation signatures. The name plays no role in the selection.
+\end{itemize}
+
+\subsection{Sensors}\label{sec:sensors}
+
+Sensors are genes whose proteins are needed after the inference, without being regulators: the signature genes of the proliferation rates, for the neural network of these rates.
+\begin{itemize}[nosep]
+\item Their proteins are computed after the loop, along the final trajectories and with the $d_1$ of the tables, since they do not influence the inference. They cost nothing in the loop.
+\item The role corrects an inconsistency: the proliferation markers are currently forced into the selection as ordinary genes, and are therefore regulators.
+\item In simulations, the network of the proliferation rates needs the proteins of the sensors, so that the simulator integrates them too: a linear ODE driven by their bursts.
+\end{itemize}
+A neural network of the degradation rates, based on known ligases and proteases, is a separate project, for two reasons. On snapshots, a degradation rate specific to each cell is confounded with production, and the only signal on $d_1$ is the tables and the free-running refinement: such a network would need a supervision, such as the $d_1$ per condition given by the refinement, or measured proteins. Moreover, an E3 ligase acts on specific substrates: this is a second network, from the ligases to the $d_1$ of their substrates, like the chromatin network of the multiome, rather than a global rate.
+
+\subsection{Implementation phases}\label{sec:phases}
+
+\begin{enumerate}[nosep]
+\item Phase A, without refactoring: the roles translated into zero rows of the mask of the edges; bridges and sigmoids restricted to the active regulators, with the input of $\sigma_g$ running over the allowed regulators of $g$ only; the proteins of the inactive candidates on the drawn pairs; the entry by the KKT condition, with the screening. The arrays of states by genes stay full, which limits the method to about $1000$ to $2000$ genes. This is enough for levels 1.1 to 1.4 on simulated data, with the extensions off.
+\item Phase B: promotion of satellites and delayed actions (level 1.5).
+\item Phase C, the move to scale: proteins stored as states by candidates and a sparse rectangular $\theta$; the mixture on thousands of genes; a report that summarises the satellites instead of plotting each gene.
+\item Phase D: hidden variables (level 1.6).
+\end{enumerate}
 
 %======================================================================
 \section{Stage 2: CardaVI}\label{sec:stage2}
@@ -269,7 +428,7 @@ Some of these are deliberate: the forcing by basins avoids the contraction of th
 
 \paragraph{Encoder.} The encoder is a free neural network. It belongs to the inference, not to the model: its form has no mechanistic meaning, and all the structure lies in the dynamics and the decoder. Its first role is to read the hidden variables in each cell, from their targets. It also applies to new cells. It could read the anchored proteins too, which would remove the chain of ancestors and let intervals be sampled independently, at the price of the memory that the chain carries; with the chain kept, the anchored proteins are those of CardamomOT, and so is the information they carry.
 
-\paragraph{Smooth introduction of the hidden variables.} A hidden variable starts with no outgoing edges, so that the model is exactly the model of the first stage. The weight of its edges then rises progressively, and it is kept only if it improves the score on all the data, with a penalty of BIC type. Its initial state comes from a block of satellites with correlated residuals, and a non-selected gene whose mRNA precedes the inferred state is a candidate identity, which can then be anchored.
+\paragraph{Hidden variables.} The first stage already detects, classifies and introduces hidden variables, with a state estimated cell by cell from the targets and a dynamics fitted afterwards on the drawn pairs (Section~\ref{sec:hidden-stage1}). In the second stage, the encoder replaces the estimate per cell and is trained on the objective~\eqref{eq:objective}, so that the state of a cell also depends on its ancestor through the reachability term. The detection, the classification and the confirmation stay those of the first stage.
 
 \paragraph{Discovery of the core.} In the first stage, the core is the support of $\theta$ given by the QUT penalty. If $\theta$ is learned by gradient, gates on the outgoing edges of each candidate (a hard-concrete relaxation of an $L_0$ penalty~\cite{louizos2018learning}) play the same role. Neither lifts the cap of Section~\ref{sec:cap}: among collinear candidates the choice is arbitrary. What can be claimed is a class of regulators, stable over several initialisations, rather than one gene.
 
@@ -284,6 +443,9 @@ Some of these are deliberate: the forcing by basins avoids the contraction of th
 \paragraph{Failure modes.}
 \begin{enumerate}[nosep]
 \item \emph{Lock-in of the core} (first stage, Section~\ref{sec:stage1}).
+\item \emph{Oscillation of the core.} Candidates that enter and leave from one iteration to the next destabilise the EM; hence the hysteresis and the freezing of Section~\ref{sec:entry}.
+\item \emph{Siblings taken for regulators.} The precedence test of Section~\ref{sec:promotion} cannot decide when $d_1\Delta \gg 1$, and the prior decides.
+\item \emph{Misspecification taken for a hidden variable.} A wrong family of $\sigma$ or a wrong mRNA delay also produces structured residuals. The model learning must have settled before the detection, and the cheaper explanations of Section~\ref{sec:hidden-stage1} must rule these errors out first.
 \item \emph{Start.} The encoder and the coupling depend on each other. As in the current loop, the coupling starts on the mRNA term, with the encoder frozen and the hidden variables closed, then moves to the network term.
 \item \emph{Hidden variables that cheat.} The network term does not constrain the dynamics of $z_h$, since $\hat z_{ij,h} = z_h(j)$ does not depend on $i$: everything rests on the reachability term. Flexible variables may also take over the signal of the anchored regulators.
 \item \emph{Vanishing noise.} In~\eqref{eq:cost}, a learned $a_h \to 0$ with a constant $z_h$ sets the first term of the reachability to zero while $\log v_h \to -\infty$: the cost is unbounded below. It takes a lower bound on $a_h$ or a stochastic encoder. Conversely, removing $\log v$ would make a large $a_h$ free.
@@ -305,14 +467,34 @@ Level & Question & Measurement \\
 1.2 & Is the core discovered? & true regulators kept and decoys removed, from a prior with decoys \\
 1.3 & Does the core escape lock-in? & a true regulator removed from the initial core comes back \\
 1.4 & Do the satellites improve the core? & recovery of the core against their number \\
+1.5 & Are missing regulators promoted, with the right delay? & promotions and delays in the scenarios below \\
+1.6 & Are hidden variables detected and classified? & classes and recovery in the scenarios below \\
 2.1 & Do the steps descend the same objective? & the objective along the iterations of the first stage \\
-2.2 & Can a hidden regulator be recovered? & its protein and its regulators, its mRNA removed \\
+2.2 & Does the encoder improve the hidden variables? & their states and their regulators, against the estimate per cell of the first stage \\
 2.3 & Does the model predict at scale? & free-running simulation, perturbations \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-Level 1.4 tests the central hypothesis, and level 2.2 is the decisive one for hidden variables. Level 2.3 includes Perturb-seq data, on which deep models do not outperform simple linear baselines~\cite{ahlmann2025deep}: a mechanistic model at the scale of the transcriptome would have a clear benchmark. A prospective validation, with perturbations predicted before they are tested, would complete it.
+\paragraph{Scenarios of level 1.5.}
+\begin{itemize}[nosep]
+\item A true regulator removed from the candidates is promoted with $d = \infty$.
+\item A regulator that acts through an unobserved intermediate is promoted with a finite $d$.
+\item In a cascade $r \to s \to$ targets, with $s$ outside the candidates, $s$ is promoted rather than a delayed action of $r$.
+\item The siblings of a removed regulator are classified as co-targets and not promoted.
+\item With no missing regulator, no promotion passes at the chosen level.
+\end{itemize}
+
+\paragraph{Scenarios of level 1.6.}
+\begin{itemize}[nosep]
+\item The mRNA of a known regulator is removed: a hidden regulator is detected, with its protein, its regulators and its targets.
+\item A static factor per cell acting on many genes, like a cell cycle, is classified as a meta-variable, with no edge in the network.
+\item An imperfect depth correction is classified as technical.
+\item With nothing missing, no factor passes, at the rate of false positives set by the level.
+\item A regulator whose siblings are satellites is removed: the result is a hidden variable anchored on the siblings, not the promotion of a sibling.
+\end{itemize}
+
+Level 1.4 tests the central hypothesis, and level 1.6 is the decisive one for hidden variables. Level 2.3 includes Perturb-seq data, on which deep models do not outperform simple linear baselines~\cite{ahlmann2025deep}: a mechanistic model at the scale of the transcriptome would have a clear benchmark. A prospective validation, with perturbations predicted before they are tested, would complete it.
 
 \tofill{results.}
 
@@ -328,6 +510,9 @@ Level 1.4 tests the central hypothesis, and level 2.2 is the decisive one for hi
 \item Does the difference between the two readings of $\sigma$ matter in practice?
 \item Does the dispersion signature of the direction of a switch survive in real data?
 \item Minibatch couplings are biased: how much, at the scale of the transcriptome?
+\item The cost of the group QUT of the promotions, at the scale of the transcriptome.
+\item The power of the precedence test on real data, where many proteins have a $d_1$ close to the scale of the time steps.
+\item The noise of the estimate per cell of a hidden variable with few targets.
 \end{itemize}
 
 \begin{thebibliography}{99}
@@ -411,6 +596,41 @@ V.~Chandrasekaran, P.~A.~Parrilo, A.~S.~Willsky.
 C.~Ahlmann-Eltze, W.~Huber, S.~Anders.
 \newblock Deep-learning-based gene perturbation effect prediction does not yet outperform simple linear baselines.
 \newblock \emph{Nature Methods}, 2025.
+
+\bibitem{giacobino2017quantile}
+C.~Giacobino, S.~Sardy, J.~Diaz-Rodriguez, N.~Hengartner.
+\newblock Quantile universal threshold.
+\newblock \emph{Electronic Journal of Statistics}, 11(2):4701--4722, 2017.
+
+\bibitem{tibshirani2012strong}
+R.~Tibshirani, J.~Bien, J.~Friedman, T.~Hastie, N.~Simon, J.~Taylor, R.~J.~Tibshirani.
+\newblock Strong rules for discarding predictors in lasso-type problems.
+\newblock \emph{Journal of the Royal Statistical Society: Series B}, 74(2):245--266, 2012.
+
+\bibitem{wang2023dictys}
+L.~Wang, N.~Trasanidis, T.~Wu, G.~Dong, M.~Hu, D.~E.~Bauer, L.~Pinello.
+\newblock Dictys: dynamic gene regulatory network dissects developmental continuum with single-cell multiomics.
+\newblock \emph{Nature Methods}, 20:1368--1378, 2023.
+
+\bibitem{kamimoto2023dissecting}
+K.~Kamimoto, B.~Stringa, C.~M.~Hoffmann, K.~Jindal, L.~Solnica-Krezel, S.~A.~Morris.
+\newblock Dissecting cell identity via network inference and in silico gene perturbation.
+\newblock \emph{Nature}, 614:742--751, 2023.
+
+\bibitem{horn1965rationale}
+J.~L.~Horn.
+\newblock A rationale and test for the number of factors in factor analysis.
+\newblock \emph{Psychometrika}, 30(2):179--185, 1965.
+
+\bibitem{neyman1948consistent}
+J.~Neyman, E.~L.~Scott.
+\newblock Consistent estimates based on partially consistent observations.
+\newblock \emph{Econometrica}, 16(1):1--32, 1948.
+
+\bibitem{muller2023expanding}
+S.~Müller-Dott, E.~Tsirvouli, M.~Vazquez, R.~O.~Ramirez~Flores, P.~Badia-i-Mompel, R.~Fallegger, D.~Türei, A.~Lægreid, J.~Saez-Rodriguez.
+\newblock Expanding the coverage of regulons from high-confidence prior knowledge for accurate estimation of transcription factor activities.
+\newblock \emph{Nucleic Acids Research}, 51(20):10934--10949, 2023.
 
 \end{thebibliography}
 

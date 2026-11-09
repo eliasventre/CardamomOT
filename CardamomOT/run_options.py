@@ -27,7 +27,6 @@ HARD_OPTIONS = {
 # Hard-to-calibrate options used by each step (the others are not accepted)
 STEP_OPTIONS = {
     'estimate_cell_depth': (),
-    'fit_population_anchors': (),
     'get_proliferation_rates': (),
     'split_dataset': (),
     'select_genes': ('prior',),

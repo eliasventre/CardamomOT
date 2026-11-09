@@ -1,7 +1,8 @@
 """
 estimate_cell_depth.py
 ----------------------
-First step of the pipeline: per-cell depth diagnostic and, if needed, depth factor s_i.
+Second step of the pipeline (after get_proliferation_rates): per-cell depth diagnostic and, if needed, depth
+factor s_i, and its association with the birth rate.
 
 Within a sample and a timepoint, cells differ in sequencing depth (capture, and cell size). A
 depth common to all genes of a cell acts like a hidden common regulator: it correlates all genes
@@ -17,6 +18,11 @@ NB(k s_i, c) ('burst_frequency') and the simulations draw counts with the s_i of
 otherwise the factor is kept but ignored (s_i = 1).
 With model.compute_depth_factor = False, nothing is computed: an existing obs['depth_factor'] is only
 read (summary printed) and never removed, and the previous diagnostic files are left as they are.
+In every case, with a depth factor and obs['proliferation_birth_rate'] (get_proliferation_rates), the association
+log s_i = log tau_i + beta b_i within the (sample, time) groups is estimated (growing cells hold more mRNA) and
+stored in uns['depth_growth'] (pooled, and per sample in ['per_sample']): with model.depth_growth_share = rho,
+the proteins of each cell are synthesised at g = exp(rho beta b) times the reference (beta of its sample), the
+mixture and the mRNA keeping s_i.
 
 Usage:
     python estimate_cell_depth.py -i <project_path>
@@ -25,7 +31,7 @@ Usage:
 Outputs:
     - cardamomOT/depth_diagnostic.csv: depth per group (cells, median counts, CV, s quantiles)
     - cardamomOT/depth_diagnostic.json: global indicators and decision
-    - Data/data.h5ad: obs['depth_factor'] (if applied)
+    - Data/data.h5ad: obs['depth_factor'] (if applied), uns['depth_growth'] (beta, se, r2, n_cells)
 """
 import sys; sys.path += ['../']
 import os
@@ -34,7 +40,7 @@ import numpy as np
 import anndata as ad
 
 from CardamomOT import NetworkModel, ensure_raw_counts, harmonize_obs, resolve_cell_type_obs
-from CardamomOT.inference.depth import MIN_GENES_DEPTH, library, depth_groups, diagnose_depth
+from CardamomOT.inference.depth import MIN_GENES_DEPTH, library, depth_groups, diagnose_depth, growth_association
 from CardamomOT.inference.depth_methods import compute_depth
 from CardamomOT.run_options import parse_step_options, configure
 
@@ -62,6 +68,45 @@ def doublet_check(adata):
     return out
 
 
+def growth_depth(target):
+    """Association beta of obs['depth_factor'] with the birth rate (get_proliferation_rates, run before) within the
+    (sample, time) groups, pooled and per sample (uns['depth_growth']['per_sample'][dataset_id]), for
+    depth_growth_share (removed without them). True if uns changed."""
+    had = target.uns.pop('depth_growth', None) is not None
+    obs = target.obs
+    if 'depth_factor' not in obs:
+        return had
+    if 'proliferation_birth_rate' not in obs:
+        print(f"{TAG} No obs['proliferation_birth_rate'] (get_proliferation_rates runs before this step): no "
+              f"association of the depth with the birth rate (depth_growth_share without effect)")
+        return had
+    times = obs['time'].values.astype(float) if 'time' in obs else np.zeros(len(obs))
+    samples = obs['dataset_id'].astype(str).values if 'dataset_id' in obs else np.full(len(obs), '0')
+    s, b = obs['depth_factor'].to_numpy(dtype=float), obs['proliferation_birth_rate'].to_numpy(dtype=float)
+    res = growth_association(s, b, depth_groups(times, samples, None))
+    if res is None:
+        print(f"{TAG} Birth rates constant within the (sample, time) groups: no association with the depth")
+        return had
+    # One beta per sample (dataset_id): a run on several samples uses that of each cell, as the runs of one sample;
+    # a sample without birth variation takes the pooled one
+    res['per_sample'] = {}
+    for u in np.unique(samples):
+        m = samples == u
+        r_u = growth_association(s[m], b[m], depth_groups(times[m], samples[m], None)) or dict(res, pooled=True)
+        r_u.pop('per_sample', None)
+        res['per_sample'][str(u)] = r_u
+        b_div = float(np.mean(b[m][b[m] > 0])) if np.any(b[m] > 0) else 0.0
+        print(f"{TAG} Depth vs birth rate of {u} within its times: log s = log tau + beta b, beta = "
+              f"{r_u['beta_raw']:.1f} +/- {r_u['se']:.1f} h (R² {r_u['r2']:.3f}, {r_u['n_cells']} cells)"
+              + (" (pooled: no birth variation)" if r_u.get('pooled') else "")
+              + (", floored at 0" if r_u['beta_raw'] < 0 else "")
+              + f"; mRNA content of its dividing cells (mean b {b_div:.4f} h^-1) x{np.exp(r_u['beta'] * b_div):.2f}")
+    target.uns['depth_growth'] = res
+    print(f"{TAG} Pooled over the samples: beta = {res['beta_raw']:.1f} +/- {res['se']:.1f} h; protein synthesis "
+          f"g = exp(depth_growth_share beta b) with the beta of the sample of each cell")
+    return True
+
+
 def main(argv):
     opts = parse_step_options(argv, 'estimate_cell_depth', __doc__)
     p = opts.p
@@ -84,6 +129,9 @@ def main(argv):
         else:
             print(f"{TAG} compute_depth_factor = False and no obs['depth_factor'] in Data/data.h5ad: no depth factor")
         doublet_check(target)
+        if growth_depth(target):
+            target.write(data_path)
+            print(f"{TAG} Saved {data_path}")
         return
     print(f"{TAG} The depth factor will be {use} by the following steps")
     src_path = complete_path if os.path.exists(complete_path) else data_path
@@ -95,6 +143,9 @@ def main(argv):
         json.dump(dict(estimated=False, applied=False, reason=f'{src.n_vars} genes < {MIN_GENES_DEPTH}',
                        predicted_doublets=doublet_check(target)),
                   open(os.path.join(out_dir, 'depth_diagnostic.json'), 'w'), indent=1)
+        if growth_depth(target):  # existing factor (not written by this step)
+            target.write(data_path)
+            print(f"{TAG} Saved {data_path}")
         return
     try:
         src = ensure_raw_counts(src, src_path)
@@ -160,7 +211,8 @@ def main(argv):
         print(f"{TAG} Previous obs['depth_factor'] of this step removed")
     elif not applied and 'depth_factor' in target.obs:
         print(f"{TAG} Warning: keeping the existing obs['depth_factor'] (not written by this step)")
-    if applied or ours:
+    changed = growth_depth(target)
+    if applied or ours or changed:
         target.write(data_path)
         print(f"{TAG} Saved {data_path}")
 

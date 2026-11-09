@@ -12,9 +12,9 @@ CardamomOT reads a single **AnnData** file (`h5ad` format). The required metadat
 | `adata.obs['cell_type']` | str | Cell type label (optional but recommended), used for DE gene selection |
 | `adata.obs['cell_type_selection']` | str | Optional override of `cell_type` for DE gene selection |
 | `adata.obs['cell_type_proliferation']` | str | Optional, only used with sheet `proliferation_rates` to anchor the literature proliferation estimate ([details](advanced.md)) |
-| `adata.obs['cell_type_transition']` | str | Optional, only used with sheet `transition_rates` to structure the OT ([details](advanced.md)) |
+| `adata.obs['cell_type_transition']` | str | Optional, only used with sheet `transition_rates` or `TRANSk` effects to constrain the OT ([details](advanced.md)) |
 
-`cell_type_proliferation` and `cell_type_transition` may differ (e.g. a finer grouping for proliferation). If only one of them is defined, it is used for both; if neither is, `cell_type` is used. Both anchorings are all-or-nothing: if any cell type is missing from the corresponding file, a warning is printed and the anchoring is skipped for all cells.
+`cell_type_proliferation` and `cell_type_transition` may differ (e.g. a finer grouping for proliferation). If only one of them is defined, it is used for both; if neither is, `cell_type` is used. Proliferation anchors missing a cell type of the data are skipped with a warning (literature estimate kept); a transition matrix missing a cell type is ignored with a warning (the sample then takes the default matrix, else none).
 | `adata.X` | matrix | Raw or normalised count matrix |
 
 Organise your project folder as follows:
@@ -34,11 +34,11 @@ every default applies; the pipeline never writes it):
 |---|---|
 | `model_parameters` | model and pipeline parameters, grouped by use, with their description (empty = default of `CardamomOT/model/base.py`; the command-line options `--stimulus`, `--prior`, `--mean-forcing`, `--force-basins`, `--temporal-basins` override it) |
 | `gene_lists` | genes of interest for the gene selection, signatures, named gene lists (RATE targets) |
-| `stimulus_inference_schedule`, `perturbation_inference` | stimulus schedule of the measured data (default rows, and rows with a `sample_id` for a sample's own schedule); perturbations of the measured data: KO / OV of samples, samples held out for validation (`remove_from_inference`, `reference_sample`), and (row `all`) possible targets `STIMk` and effects on proliferation `RATEk` of each inference stimulus |
+| `stimulus_inference_schedule`, `perturbation_inference` | stimulus schedule of the measured data (default rows, and rows with a `sample_id` for a sample's own schedule); perturbations of the measured data: KO / OV of samples, samples held out for validation (`remove_from_inference`, `reference_sample`), and (row `all`) possible targets `STIMk`, effects on proliferation `RATEk` and on the transitions `TRANSk` (also per sample) of each inference stimulus |
 | `stimulus_test_schedule` | stimulus schedule of the held-out cells and samples (`infer_test`; default: the inference schedule) |
 | `stimulus_simulation_schedule`, `perturbation_simulation` | schedules and in-silico perturbations (KO, OV, STIM, RATE) of the simulations |
 | `times` | timepoints used |
-| `proliferation_rates`, `population_sizes`, `transition_rates` | anchors of the population dynamics: net (and optionally birth / death) rates per cell type, population sizes, transition rates between types |
+| `proliferation_rates`, `transition_rates` | anchors of the population dynamics, used as given (made consistent with the data upstream): net (and optionally birth / death) rates per cell type, transition rates between types |
 
 Each sheet has its own description (`readme` sheet, and comments on the header cells).
 

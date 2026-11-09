@@ -11,7 +11,8 @@ Usage:
 
 Cells: log1p(counts / obs['depth_factor'] with use_depth_factor, else normalize_total), genes expressed in >= 10
 train cells, PCA (50 components) fitted on the train cells. Couplings between consecutive timepoints of each
-sample (growth: obs['proliferation_net_rate'] if present). With >= 2 network conditions (obs['network_condition']),
+sample (growth: rates of the cells over each interval, stimulus of the interval; transition constraint of the
+samples with transition_rates / TRANSk, as in the OT of CardamomOT). With >= 2 network conditions (obs['network_condition']),
 each condition is analysed apart, as if run alone (its genes, PCA, couplings, fate genes and drivers; column
 'condition' of fate_genes.csv and fate_drivers.csv). The report draws the velocities on the embedding
 of Data/data.h5ad: barycentric (descendants, else ancestors) in its PCA space, extended to the other cells
@@ -87,7 +88,7 @@ def main(argv):
     growth = (A.obs['proliferation_net_rate'].astype(float).values
               if 'proliferation_net_rate' in A.obs else None)
     print(f"[run_classical_OT] {int(fit.sum())} transported cells (of {A.n_obs}), {len(np.unique(samples[fit]))} "
-          f"sample(s); growth from obs['proliferation_net_rate']: {growth is not None}; depth factor: "
+          f"sample(s); growth from the proliferation rates: {growth is not None}; depth factor: "
           f"{bool(model.use_depth_factor and 'depth_factor' in A.obs)} (use_depth_factor)")
 
     # Network conditions (>= 2 values of obs['network_condition']): each one apart, as if run alone (its PCA, genes,
@@ -101,7 +102,9 @@ def main(argv):
     for c, rows in groups:
         X_c, genes_c, Z_c, blocks_c = classical_couplings(A if c is None else A[rows], fit[rows],
                                                           bool(model.use_depth_factor), int(model.classical_ot_max_cells),
-                                                          seed)
+                                                          seed, project=p,
+                                                          transition_weight=float(model.transition_constraint_weight),
+                                                          times_grid=times[fit])
         print(f"[run_classical_OT] {'' if c is None else f'Condition {c}: '}{len(genes_c)} genes, PCA "
               f"{Z_c.shape[1]} components")
         parts.append((c, rows, X_c, genes_c, blocks_c))

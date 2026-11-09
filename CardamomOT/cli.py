@@ -40,15 +40,8 @@ def _run_script(script: str, args: List[str]) -> int:
 
 def pipeline_steps(cfg, project=None) -> List[str]:
     """Steps of a run given the configured NetworkModel `cfg` (pipeline parameters) of `project`."""
-    steps = ['estimate_cell_depth']
-    # Population constraints (rates, transition rates, population sizes) corrected on the proportions of the types
-    from .inputs import load_transition_rates, population_sizes
-    has_constraints = project is not None and (load_transition_rates(project, fitted=False) is not None
-                                               or any(population_sizes(project)))
-    if cfg.estimate_proliferation_rates or has_constraints:
-        steps.append('fit_population_anchors')
-    if cfg.estimate_proliferation_rates:
-        steps.append('get_proliferation_rates')
+    # Proliferation rates first: the depth step estimates the association of the depth with the birth rate
+    steps = (['get_proliferation_rates'] if cfg.estimate_proliferation_rates else []) + ['estimate_cell_depth']
     # Classical OT on the train cells before the selection (wot_granger uses its couplings)
     steps += ['split_dataset'] + (['run_classical_OT'] if cfg.run_classical_OT else []) + ['select_genes']
     # The selection builds the literature prior only with literature_selection and a hard prior

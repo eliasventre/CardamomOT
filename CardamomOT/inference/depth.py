@@ -148,6 +148,31 @@ def diagnose_depth(X, lib, groups, times, cell_types=None, s=None, doublet=None,
     return per_group, out
 
 
+def growth_association(s, birth, groups):
+    """
+    Association of the depth factors s (N,) with the birth rates (N,) within the groups (sample, time):
+    log s_i = a_group + beta b_i + log tau_i, least squares on the values centred in each group. The part beta b of
+    the depth (mRNA content of growing cells, a per-cell s0) is not identifiable from the capture without spike-ins:
+    depth_growth_share sets the share of it attributed to biology. beta floored at 0 (growing cells with less mRNA:
+    taken as capture). Returns dict(beta, beta_raw, se, r2, n_cells), or None without birth variation.
+    """
+    s, b = np.asarray(s, dtype=float), np.asarray(birth, dtype=float)
+    ok = np.isfinite(s) & (s > 0) & np.isfinite(b)
+    y, x, grp = np.log(s[ok]), b[ok], np.asarray(groups)[ok]
+    for g in np.unique(grp):
+        m = grp == g
+        y[m] -= y[m].mean()
+        x[m] -= x[m].mean()
+    sxx = float(x @ x)
+    if sxx <= 1e-12 * max(len(x), 1):
+        return None
+    beta = float(x @ y) / sxx
+    res = y - beta * x
+    dof = max(len(y) - len(np.unique(grp)) - 1, 1)
+    return dict(beta=max(beta, 0.0), beta_raw=beta, se=float(np.sqrt(res @ res / dof / sxx)),
+                r2=float(1.0 - (res @ res) / max(float(y @ y), 1e-300)), n_cells=int(ok.sum()))
+
+
 def state_depth(depth_cells, real_idx):
     """Depth factor of each trajectory state: that of the real cell behind it (traj_real_idx; 1 if
     none). None without depth factors."""

@@ -18,6 +18,8 @@ Gamma increments with the mean and variance of the bursts, or their diffusion li
           dm = d0 (kon(P) - m) dt + sqrt(2 kon d0 / k1) dW,  dP = (d1 m - (d1 + b) P) dt, eps = d1 / d0;
           the observed mRNA (normalised as m) are then compared too, the modes alone not setting the mRNA speed d0;
           with mrna_dilution, d0 + b in place of d0 in the mRNA equation (same levels kon, d0 a pure decay rate)
+With the 'kappa' of a group (sample), the protein synthesis of each model is multiplied by g = exp(kappa b) (mRNA
+content of growing cells: d1 g kon, protein bursts g times larger, translation d1 g m).
 Bursty PDMP and its diffusion limit: Herbach et al. 2017 (BMC Syst. Biol.); free-running training of a neural
 SDE: Kidger et al. 2021 (ICML), with Sinkhorn divergences (Feydy et al. 2019, AISTATS; geomloss).
 """
@@ -50,13 +52,17 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                      qut_level=None, qut_reps=20, null_epochs=10, sink_scaling=0.9, mode_cost='ce',
                      ce_eps=0.05, init_weight=None, lr_rates=None, lr_decay=1.0, lr_min_frac=1.0, bptt=None,
                      adaptive=False, qut_reps_adaptive=10, null_epochs_adaptive=3, qut_cells=None,
-                     null_dev_weights=False):
+                     null_dev_weights=False, prolif_params=None, prolif_anchor=None, prolif_weight=1.0,
+                     lr_prolif=1e-3):
     """
     groups: one dict per sample s with
         'X' (T, n, G) trajectory states (starts of the windows; mode 'sde2' also 'M' (T, n, G) normalised mRNA
         and 'M_targets' list of T arrays of observed normalised mRNA),
         'targets' list of T arrays (n_t, G) of observed kon (None: time not observed; the modes, or their mean under
-        the posteriors: no draw, the simulated kon compared as it is), 'hard' (optional, as 'targets') the hard modes
+        the posteriors: no draw, the simulated kon compared as it is), 'w0' (optional, (T, n)) log weights of the
+        trajectory states as window starts (default 0), 'init_idx' (optional, (n0,)) row in 'targets' of the first
+        observed time of the cell of each initial slot of 'valid0' (default: the rows are those slots), 'hard'
+        (optional, as 'targets') the hard modes
         (basins) of the same cells, for the units / weights of null_dev_weights, 'wtargets' (optional, ordinal cost,
         list of T arrays (n_t, 2, G)) their expected warped targets (u1, u2) under the posteriors (soft targets),
         'k_lo', 'k_hi', 'k1' (G,),
@@ -64,12 +70,14 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         kinetics (network condition, 0 .. n_cond - 1: d1, eps and scale per condition),
         'start_ok' (T,) bool times observed for the sample (windows start only there and span its observed intervals,
         virtual states being copies),
-        'birth' f(P (n, G), kon (n, G), t, slots) -> (n,) birth rates of the dilution or None, re-evaluated at every
-        integration step (proliferation MLP),
-        'rate' f(P (n, G), t) -> (n,) or None: net rate of the branching weights, integrated along the steps (MLP),
+        'prolif' (or None): proliferation MLP of the sample, dict(fn: (P (W, n, G) tensor, tw (W,)) -> (birth, death)
+        (W, n) tensors differentiable in its parameters, dil / br: birth in the dilution / net rate b - delta in the
+        branching weights, lo / hi: bounds of its birth in the dilution), re-evaluated at every integration step,
         'nearest' f(P, kon, t, slots) -> (birth (n,) or None, net rate (n,) or None) or None: rates evaluated at the
-        start of each interval only and kept over it, added to those of 'birth' and 'rate' (rates of the nearest
-        trajectory states without the MLP; effects of the stimulus with an MLP of the natural rates),
+        start of each interval only and kept over it, added to those of 'prolif' (rates of the nearest
+        trajectory states without the MLP; effects of the stimulus with an MLP of the natural rates); kon at the
+        stimulus of the time of the start states ('stim_own' (T, ns), as their observed modes) for the window starts,
+        then the kon compared with the observed modes at the end of the previous interval (lagged, memory filter),
         'lag' (optional, (T - 1, K) hours per interval and class of targets) and 'lag_w' ((K, G) one-hot class of
         each gene): the observed modes of a target are compared with its kon at the proteins the lag of its class
         before each reached time (integration step nearest to it, the start of the interval at most).
@@ -130,6 +138,11 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
     each group, stimulus 'stim0' of the schedule) and the modes of their own cells (groups 'valid0' (n,) bool: slots
     of the observed cells at that time), with the weight of the kon term (init_weight): it sets the basal at the initial
     stimulus, hence the effect of the stimulus.
+    prolif_params: parameters of the proliferation MLPs of the groups ('prolif'), learned with the rest (branching
+    weights: gradient through the transport plans of the modes, the dual potentials in the weights; dilution: through
+    the simulated proteins; the MLP inputs, the simulated states, are detached), prolif_anchor() their anchor (torch
+    scalar, the pretraining loss of the MLPs on the trajectory states: net growth and prior birth / death), of weight
+    prolif_weight (Adam learning rate lr_prolif, that of its pretraining); None: MLP fixed.
     Returns (theta, basal, d1, eps, scale (n_cond, T - 1, G), history).
     """
     seed = 0 if seed is None else int(seed)  # no model seed: fixed draws
@@ -233,14 +246,17 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         conc = torch.clamp(rate * h / 2, min=1e-6)
         return torch.distributions.Gamma(conc, 1.0 / (2 * size)).rsample()
 
-    def run_interval(P, Mn, gi, tw, sl, Kb=None):
+    def run_interval(P, Mn, gi, tw, sl, Kb=None, Km=None):
         """Integration of the windows over their intervals [times[tw], times[tw + 1]] (n_sub steps each, exact
-        relaxation over a step); P, Mn (W, n, G), sl (W, n) trajectory slots of the cells. Birth rates of the
-        dilution re-evaluated on the current states (every step, or at the start of the interval), branching net
-        rate integrated along the steps (trapezoids). Kb (W, n, G) given (memory_filter): kon read on the mRNA,
-        relaxed towards kon at the d0 = d1 / eps of the model. Returns (P, Mn, s, increment of the log-weights (W, n),
-        proteins compared with the observed modes: P without lag, else the proteins (K, W, n, G) the lag of each class
-        before the end of each interval, Kb)."""
+        relaxation over a step); P, Mn (W, n, G), sl (W, n) trajectory slots of the cells. Birth rate of the dilution
+        and net rate of the branching: the proliferation MLP ('prolif', torch, differentiable in its parameters, inputs
+        the current states detached) at every step, the net rate b - delta integrated along the steps (trapezoids),
+        plus the rates of the nearest trajectory states ('nearest', constant over the interval). Kb (W, n, G) given
+        (memory_filter): kon read on the mRNA, relaxed towards kon at the d0 = d1 / eps of the model. Km (W, n, G): kon
+        of the start states matched with the trajectory states ('nearest'; default the kon of P at the stimulus of the
+        interval). Returns (P, Mn, s, increment of the log-weights (W, n) (tensor), proteins compared with the observed
+        modes: P without lag, else the proteins (K, W, n, G) the lag of each class before the end of each interval,
+        Kb)."""
         g = groups[gi]
         W = P.shape[0]
         d, e, s = rates_of(tw, g.get('cond', 0))
@@ -248,51 +264,61 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         k1 = tens[gi]['k1']
         h_np = (times[tw + 1] - times[tw]) / n_sub
         h = torch.tensor(h_np, dtype=f64)[:, None, None]
-        b = torch.zeros(P.shape[:2], dtype=f64)
-        rate_of = None if g['rate'] is None else \
-            (lambda X: np.stack([np.asarray(g['rate'](X[w], tw[w]), float) for w in range(W)]))
-        R_prev = None if rate_of is None else rate_of(P.detach().numpy())
-        dlogw = np.zeros(P.shape[:2])
+        b_const, R_const = (torch.zeros(P.shape[:2], dtype=f64) for _ in range(2))
+        dil = br = False
         if g.get('nearest') is not None:  # rates of the nearest trajectory states, constant over the interval
-            Pn, kn = P.detach().numpy(), kon_of(P, gi, s).detach().numpy()
+            Pn = P.detach().numpy()
+            kn = (kon_of(P, gi, s) if Km is None else Km).detach().numpy()
             out = [g['nearest'](Pn[w], kn[w], tw[w], sl[w]) for w in range(W)]
             if out[0][0] is not None:
-                b = torch.clamp(torch.tensor(np.stack([np.asarray(o[0], float) for o in out]), dtype=f64), min=0.0)
+                b_const, dil = torch.tensor(np.stack([np.asarray(o[0], float) for o in out]), dtype=f64), True
             if out[0][1] is not None:
-                dlogw = np.stack([np.asarray(o[1], float) for o in out]) * (times[tw + 1] - times[tw])[:, None]
+                R_const, br = torch.tensor(np.stack([np.asarray(o[1], float) for o in out]), dtype=f64), True
+        pf = g.get('prolif')
+        if pf is not None:
+            dil, br = dil or pf['dil'], br or pf['br']
+
+        def cell_rates(P_):
+            """(birth of the dilution, net rate of the branching) at the states P_."""
+            if pf is None:
+                return b_const, R_const
+            bm, dm = pf['fn'](P_.detach(), tw)
+            return bm.clamp(pf['lo'], pf['hi']) + b_const, bm - dm + R_const
+        b_cur, R_cur = cell_rates(P)
+        dlogw = torch.zeros(P.shape[:2], dtype=f64)
+        zero_b = torch.zeros(P.shape[:2], dtype=f64)
         keep = gmask.bool()
-        b_const = b.clone()
         lag = g.get('lag') if Kb is None else None
         hist = [P] if lag is not None else None  # states at the steps, for the lagged comparison
         for k in range(n_sub):
             kon = kon_of(P, gi, s)
             if Kb is not None and not mrna_dilution:  # mean mRNA (kon units) given the kon path: memory kernel of d0
                 Kb = kon + (Kb - kon) * torch.exp(-(d / e) * h)
-            if g['birth'] is not None:  # MLP birth at the current states (+ the constant part of 'nearest')
-                Pn, kn = P.detach().numpy(), kon.detach().numpy()
-                b = torch.clamp(b_const + torch.tensor(np.stack([np.asarray(g['birth'](Pn[w], kn[w], tw[w], sl[w]), float)
-                                                               for w in range(W)]), dtype=f64), min=0.0)
+            b = torch.clamp(b_cur, min=0.0) if dil else zero_b
             if Kb is not None and mrna_dilution:  # memory kernel of d0 + b (current birth rate)
                 Kb = kon + (Kb - kon) * torch.exp(-(d / e + b[..., None]) * h)
             dp = d + b[..., None]                     # protein decay with dilution
             decay_p = torch.exp(-dp * h)
+            # Protein synthesis factor of growing cells (scalar 1 without: same graph, bit-identical gradients)
+            gk = torch.exp(g['kappa'] * b)[..., None] if g.get('kappa') else 1.0
             if mode == 'sde2':
                 d0 = d / e + b[..., None] if mrna_dilution else d / e  # mRNA relaxation (mrna_dilution: d0 + b)
                 # mRNA bursts of rate kon k1 d0 and mean size 1 / k1 (normalised), proteins translated from them
                 Mn = torch.relu(Mn * torch.exp(-d0 * h) + bursts(kon * k1 * d0, scale_p / k1, h)) * gmask
-                P_new = P * decay_p + d * Mn * (1 - decay_p) / dp
+                P_new = P * decay_p + d * gk * Mn * (1 - decay_p) / dp
             elif mode == 'sde1':
-                # protein bursts of rate kon k1 d0 and mean size d1 / (d0 k1) = eps / k1
-                P_new = P * decay_p + bursts(kon * k1 * d / e, scale_p * e / k1, h) * (1 - decay_p) / (dp * h)
+                # protein bursts of rate kon k1 d0 and mean size d1 / (d0 k1) = eps / k1 (times g)
+                P_new = P * decay_p + bursts(kon * k1 * d / e, scale_p * e / k1 * gk, h) * (1 - decay_p) / (dp * h)
             else:
-                P_new = P * decay_p + d * scale_p * kon * (1 - decay_p) / dp
+                P_new = P * decay_p + d * gk * scale_p * kon * (1 - decay_p) / dp
             P = torch.relu(torch.where(keep, P_new, P))
             if hist is not None:
                 hist.append(P)
-            if rate_of is not None:  # branching: weights exp(int R) along the steps
-                R_new = rate_of(P.detach().numpy())
-                dlogw = dlogw + 0.5 * (R_prev + R_new) * h_np[:, None]
-                R_prev = R_new
+            if pf is not None or br:
+                b_new, R_new = cell_rates(P)
+                if br:  # branching: weights exp(int R) along the steps
+                    dlogw = dlogw + 0.5 * (R_cur + R_new) * h[..., 0]
+                b_cur, R_cur = b_new, R_new
         if hist is None:
             return P, Mn, s, dlogw, P, Kb
         k_lag = np.clip(np.rint(np.asarray(lag)[tw] / h_np[:, None]).astype(int), 0, n_sub)  # (W, K) steps
@@ -315,12 +341,13 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         their expected warped targets (n0, 2, G - ns)."""
         t_f = obs_t[gi][0]
         sl = np.flatnonzero(g['valid0']) if g.get('valid0') is not None else np.arange(len(g['targets'][t_f]))
-        wt = warped_targets(g, t_f, slice(None))
+        rows = g['init_idx'] if g.get('init_idx') is not None else slice(None)
+        wt = warped_targets(g, t_f, rows)
         if wt is not None:
             return sl, np.array(wt, dtype=float)
         lo, hi = g['k_lo'][ns:], g['k_hi'][ns:]
         pos = lambda k: np.clip((k - lo) / np.maximum(hi - lo, 1e-12), 0.0, 1.0)
-        return sl, pos(g['targets'][t_f][:, ns:])
+        return sl, pos(g['targets'][t_f][rows][:, ns:])
 
     def init_term(gi, g, full, copies=None):
         """Initial states (stimulus 'stim0') against the modes of their own cells, with the ground cost of the modes
@@ -387,7 +414,7 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         """Entropic OT (B batches) between sigma (B, N, Gt) of weights a (B, N) and targets tau (B, M, Gt) of weights
         b (B, M), ground cost the weighted network cost (cross-entropy, or the ordinal cost: sum of the cross-entropies
         of the two warps of group gi, both linear in their targets; gw (Gt,), mode_weights); value <pi, C>, gradient
-        pi."""
+        pi in C and the dual potential f in the weights a (envelope of the entropic OT: the branching weights)."""
         C = 0.0
         for sg, tg, wk in warped(gi, sig, tau):
             w_ = gw * wk
@@ -408,7 +435,7 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                 g_ = -e * torch.logsumexp((f[:, :, None] - Cd) / e + la[:, :, None], dim=1)
                 f = -e * torch.logsumexp((g_[:, None, :] - Cd) / e + lb[:, None, :], dim=2)
             pi = torch.exp((f[:, :, None] + g_[:, None, :] - Cd) / e + la[:, :, None] + lb[:, None, :])
-        return (pi * C).sum(dim=(1, 2))
+        return (pi * C).sum(dim=(1, 2)) + (f * (a - a.detach())).sum(dim=1)
 
     # null_dev_weights, per group, on the positions tau of the hard modes of its observed cells ('hard': the basins, as
     # the OT of fit_network; 'targets' without), all times together, as the last stage of ot_gene_weight_schedule: the
@@ -484,15 +511,24 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
             Mn = torch.tensor(g['M'][a_ok[:, None], slots], dtype=f64) if mode == 'sde2' else None
             # kon read on the mRNA (memory_filter): from the kon of the start states
             Kb = torch.tensor(g['K0'][a_ok[:, None], slots], dtype=f64) if memory_filter else None
-            logw = np.zeros(slots.shape)
+            # Log weights of the starts (observed population: 1 / multiplicity of the real cell of each state)
+            logw = torch.tensor(np.zeros(slots.shape) if g.get('w0') is None
+                                else np.asarray(g['w0'])[a_ok[:, None], slots], dtype=f64)
             stim = torch.tensor(g['stim'], dtype=f64)
+            Km = None  # kon of the start states matched with the trajectory states (nearest states)
+            if g.get('nearest') is not None:
+                with torch.no_grad():  # at the stimulus of their time (their observed modes); read on the mRNA
+                    P0 = P.clone()
+                    P0[..., :ns] = torch.tensor(g['stim_own'][a_ok], dtype=f64)[:, None, :]
+                    Km = Kb.clone() if Kb is not None else kon_of(P0, gi, rates_of(a_ok, g.get('cond', 0))[2])
             for k in range(int(L.max())):
                 if np.any(L <= k):  # finished windows leave the batch
                     keep = L > k
                     kt = torch.from_numpy(keep)
-                    P, slots, logw, a_ok, L = P[kt], slots[keep], logw[keep], a_ok[keep], L[keep]
+                    P, slots, logw, a_ok, L = P[kt], slots[keep], logw[kt], a_ok[keep], L[keep]
                     Mn = None if Mn is None else Mn[kt]
                     Kb = None if Kb is None else Kb[kt]
+                    Km = None if Km is None else Km[kt]
                     W = len(a_ok)
                     if cidx is not None:
                         cidx = cidx[keep]
@@ -504,11 +540,14 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                     Kb = None if Kb is None else Kb.detach()
                 P = P.clone()
                 P[..., :ns] = stim[tw][:, None, :]
-                P, Mn, s, dlogw, P_obs, Kb = run_interval(P, Mn, gi, tw, slots, Kb)
+                P, Mn, s, dlogw, P_obs, Kb = run_interval(P, Mn, gi, tw, slots, Kb, Km)
                 P = P.clone()
                 P[..., :ns] = stim[tw][:, None, :]
                 P_obs = P_obs.clone()
                 P_obs[..., :ns] = stim[tw][:, None, :]
+                if Km is not None:  # kon at the end of the interval, as compared with its observed modes (own stimulus)
+                    with torch.no_grad():
+                        Km = Kb.clone() if Kb is not None else kon_read(P_obs, gi, s)
                 logw = logw + dlogw
                 obs = [w for w in range(W) if g['targets'][tw[w] + 1] is not None and len(g['targets'][tw[w] + 1])]
                 if not obs:
@@ -521,7 +560,7 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                            if not full else np.arange(M) for w in obs]
                 Y = torch.tensor(np.stack([kon_targets(gv(w), tw[w] + 1, i) for w, i in zip(obs, sel)]),
                                  dtype=f64)
-                wts = torch.softmax(torch.tensor(logw[obs], dtype=f64), dim=1)
+                wts = torch.softmax(logw[obs], dim=1)
                 wv = torch.tensor([w_time[tw[w] + 1] for w in obs], dtype=f64)  # edge-effect weights
                 u = torch.full((len(obs), M), 1.0 / M, dtype=f64)
                 if Kb is not None:
@@ -548,7 +587,9 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                     nX, wf = g['X'].shape[1], [obs[j] for j in fin]
                     sel_p = [rng.choice(nX, M, replace=nX < M) if not full else np.arange(nX) for _ in wf]
                     Yp = torch.tensor(np.stack([g['X'][tw[w] + 1][i][:, ns:] for w, i in zip(wf, sel_p)]), dtype=f64)
-                    up = torch.full(Yp.shape[:2], 1.0 / Yp.shape[1], dtype=f64)
+                    up = torch.full(Yp.shape[:2], 1.0 / Yp.shape[1], dtype=f64) if g.get('w0') is None else \
+                        torch.softmax(torch.tensor(np.stack([np.asarray(g['w0'])[tw[w] + 1][i] for w, i in zip(wf, sel_p)]),
+                                                   dtype=f64), dim=1)  # reference states as the observed population
                     gp = sdp if g.get('gmask') is None else sdp / torch.tensor(g['gmask'][ns:], dtype=f64).clamp(min=1e-12)
                     loss = loss + prot_weight * sink(wts[fin], P[wf][..., ns:] / gp, up, Yp / gp).sum()
                 if mode == 'sde2' and w_term['mrna'] > 0:  # observed mRNA (same cells)
@@ -583,20 +624,24 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
     init_tg = [init_targets(gi, g) for gi, g in enumerate(groups)]
     n_obs = max(len(ob) for ob in obs_t)
     params = [p for p in (th, ba, ld, le, ls) if p.requires_grad]
+    pl = [] if prolif_params is None else [p for p in prolif_params if p.requires_grad]  # proliferation MLP
     H_max = max(1, n_obs - 1 if max_horizon is None else min(int(max_horizon), n_obs - 1))
     horizons = [1]  # geometric curriculum up to the whole time course
     while horizons[-1] < H_max:
         horizons.append(min(H_max, max(horizons[-1] + 1, int(np.ceil(horizons[-1] * horizon_growth)))))
     starts_of = lambda H: np.zeros(1, int) if first_start_only else np.arange(n_obs - H)  # ranks of the starts
 
-    def adam(net, rates):
-        """Adam on the learned network parameters (lr) and rates / scales (lr_rates)."""
+    def adam(net, rates, prolif=False):
+        """Adam on the learned network parameters (lr) and rates / scales (lr_rates); prolif: and on the parameters of
+        the proliferation MLP (lr_prolif)."""
         groups_ = [{'params': [p for p in net if p.requires_grad], 'lr': lr},
-                   {'params': [p for p in rates if p.requires_grad], 'lr': lr if lr_rates is None else lr_rates}]
+                   {'params': [p for p in rates if p.requires_grad], 'lr': lr if lr_rates is None else lr_rates},
+                   {'params': pl if prolif else [], 'lr': lr_prolif}]
         return torch.optim.Adam([pg for pg in groups_ if pg['params']])
 
-    def train(opt, n_ep, prox=None):
-        """Horizon curriculum (n_ep steps per horizon), proximal L1 step on theta after each step (prox)."""
+    def train(opt, n_ep, prox=None, prolif=False):
+        """Horizon curriculum (n_ep steps per horizon), proximal L1 step on theta after each step (prox); prolif: the
+        proliferation MLP learned too, with its anchor (prolif_weight x prolif_anchor())."""
         t_start = time.time()
         peak = [pg['lr'] for pg in opt.param_groups]
         hs = [H_max] if only_max_horizon else horizons
@@ -610,6 +655,8 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                     np.sort(rng.choice(starts, int(n_windows), replace=False))
                 opt.zero_grad()
                 loss = windows_loss(a_sel, H) + penalty()
+                if prolif and prolif_anchor is not None and prolif_weight > 0:
+                    loss = loss + prolif_weight * prolif_anchor().to(f64)
                 loss.backward()
                 opt.step()
                 if prox is not None:
@@ -633,7 +680,7 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                 P = rep(g['X'][t_f])
                 Mn = rep(g['M'][t_f]) if mode == 'sde2' else None
                 Kb = rep(g['K0'][t_f]) if memory_filter else None
-                logw = np.zeros((C, n))
+                logw = np.zeros((C, n)) if g.get('w0') is None else np.repeat(np.asarray(g['w0'])[t_f][None], C, axis=0)
                 tg = [[None] * T for _ in range(C)]
                 mt = [[None] * T for _ in range(C)] if mode == 'sde2' else None
 
@@ -661,7 +708,7 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                     P = P.clone()
                     P[..., :ns] = stim[tw][:, None, :]
                     P, Mn, s_, dlogw, P_obs, Kb = run_interval(P, Mn, gi, tw, sl, Kb)
-                    logw = logw + dlogw
+                    logw = logw + dlogw.numpy()
                     if g['targets'][t + 1] is None or not len(g['targets'][t + 1]):
                         continue
                     P_obs = P_obs.clone()
@@ -868,8 +915,9 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                 th.clamp_(min=0.0)
 
     hist = {'before': full_loss()}
-    if params:
-        train(adam([th, ba], [ld, le, ls]), epochs, prox=prox_l1 if lam_t is not None and learn_theta else None)
+    if params or pl:
+        train(adam([th, ba], [ld, le, ls], prolif=True), epochs,
+              prox=prox_l1 if lam_t is not None and learn_theta else None, prolif=bool(pl))
         if adaptive and free_theta and qut_level is not None and learn_theta:
             # Second pass: adaptive lasso on the support of the first one, at its QUT given the first pass
             w1 = np.abs(signed_theta().detach().numpy())
@@ -886,7 +934,7 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
             if verb:
                 print(f"[fit_free_running] adaptive lasso: {int((w1[..., ns:] > 0).sum())} edges of the first pass, "
                       f"QUT per target " + np.array2string(lam2[ns:], precision=4), flush=True)
-            train(adam([th, ba], [ld, le, ls]), epochs, prox=prox_l1)
+            train(adam([th, ba], [ld, le, ls], prolif=True), epochs, prox=prox_l1, prolif=bool(pl))
     hist['after'] = full_loss()
 
     full_t = lambda p, lo, hi: np.broadcast_to(np.exp(np.clip(p.detach().numpy(), lo, hi)), (n_cond, T1, G)).copy()
