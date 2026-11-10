@@ -846,17 +846,40 @@ def grid_weights_update(counts, alpha=GRID_ALPHA, alpha_ext=GRID_ALPHA_EXT):
 TRANSIT_EDGE = 4.0
 
 
-def transit_levels(n_modes, n, mid_logit=0.0):
-    """Positions (L,) of the levels of n_modes modes (0, a central mode expit(mid_logit) with three, 1) and of n
-    transition levels in each interval between adjacent modes, and their derivatives (L,) in mid_logit."""
+def transit_levels(n_modes, n, mid_logit=()):
+    """Positions (L,) of the levels of n_modes modes (0, the central modes expit(mid_logit) (n_modes - 2,) in
+    increasing order, 1) and of n transition levels in each interval between adjacent modes, and their derivatives
+    (L, n_modes - 2) in mid_logit."""
     f = np.arange(1, int(n) + 1) / (int(n) + 1)
-    if n_modes == 2:
-        return np.r_[0.0, expit(TRANSIT_EDGE * (2 * f - 1)), 1.0], np.zeros(int(n) + 2)
-    lo = expit(-TRANSIT_EDGE + (mid_logit + TRANSIT_EDGE) * f)
-    hi = expit(mid_logit + (TRANSIT_EDGE - mid_logit) * f)
-    m = expit(mid_logit)
-    return (np.r_[0.0, lo, m, hi, 1.0],
-            np.r_[0.0, lo * (1 - lo) * f, m * (1 - m), hi * (1 - hi) * (1 - f), 0.0])
+    J = max(int(n_modes) - 2, 0)
+    a = np.r_[-TRANSIT_EDGE, np.ravel(mid_logit)[:J], TRANSIT_EDGE]  # logits of the modes (extremes at -/+ edge)
+    pos, der = [0.0], [np.zeros(J)]
+    for i in range(J + 1):  # interval between the modes i and i + 1
+        u = expit(a[i] + (a[i + 1] - a[i]) * f)
+        du = np.zeros((len(f), J))
+        if i >= 1:
+            du[:, i - 1] = u * (1 - u) * (1 - f)
+        if i < J:
+            du[:, i] = u * (1 - u) * f
+        pos += list(u)
+        der += list(du)
+        if i < J:
+            m = expit(a[i + 1])
+            pos.append(m)
+            der.append(np.eye(J)[i] * m * (1 - m))
+    pos.append(1.0)
+    der.append(np.zeros(J))
+    return np.array(pos), np.array(der).reshape(len(pos), J)
+
+
+def central_starts(mid, n_modes):
+    """Positions (n_modes - 2,) of the central modes in MIDDLE_POS_BOUNDS, increasing: mid (sorted) if it holds one per
+    central mode, else evenly spaced between the extremes."""
+    J = max(int(n_modes) - 2, 0)
+    m = np.sort(np.atleast_1d(np.asarray(mid, dtype=float)))
+    if len(m) != J:
+        m = np.arange(1, J + 1) / (J + 1)
+    return np.clip(m, *MIDDLE_POS_BOUNDS)
 
 
 def transit_groups(n_levels, n):
@@ -907,9 +930,9 @@ def mixture_criterion(x, vect_t, levels, c, weights, s=None, criterion='icl', we
     """
     Selection criterion of a NB mixture of burst frequencies levels (K,), rate c, weights per time {t: (K,)} (or
     common), with transit transition levels per interval between adjacent modes (transit_groups): BIC = -2 loglik +
-    p log n, p = min(M, 2) + 1 + (n_groups - 1) + 1 if M >= 3, M modes (k_low, k_high, c; the masses of the modes and
+    p log n, p = min(M, 2) + 1 + (n_groups - 1) + M - 2, M modes (k_low, k_high, c; the masses of the modes and
     transitions, counted once since the weights of the times are pulled together by their Dirichlet prior, or once per
-    time with weights_per_time; the position of the central mode, unless fixed: free_mid = False); ICL (Biernacki, Celeux and Govaert 2000) = BIC + 2
+    time with weights_per_time; the positions of the M - 2 central modes, unless fixed: free_mid = False); ICL (Biernacki, Celeux and Govaert 2000) = BIC + 2
     entropy of the posteriors of the modes and transitions, which penalises overlapping levels, so that a gene that
     switches keeps two modes and levels are added only when the counts separate them; 'loglik': -2 loglik alone.
     Returns (criterion, posteriors).
@@ -927,7 +950,7 @@ def mixture_criterion(x, vect_t, levels, c, weights, s=None, criterion='icl', we
     grouped = post @ np.eye(groups.max() + 1)[groups]
     ent = -np.sum(grouped * np.log(np.maximum(grouped, 1e-300)))
     M = (K + int(transit or 0)) // (int(transit or 0) + 1)
-    p = min(M, 2) + 1 + int(M >= 3 and free_mid) + (grouped.shape[1] - 1) * n_w
+    p = min(M, 2) + 1 + max(M - 2, 0) * int(free_mid) + (grouped.shape[1] - 1) * n_w
     bic = float(-2 * np.sum(le) + p * np.log(len(x)))
     if criterion == 'loglik':
         return float(-2 * np.sum(le)), post
@@ -937,13 +960,14 @@ def mixture_criterion(x, vect_t, levels, c, weights, s=None, criterion='icl', we
 def fit_grid_mixture(x, vect_t, k_low, k_high, c, s=None, seuil=0.01, n_grid=2, n_em=300, tol=1e-8,
                      depth_model=None, c_max=None, n_transit=0, mid=0.5, mean_max=None, free_mid=True):
     """
-    Continuous model of the counts of one gene, from the modes of a start (k_low, k_high, c, position mid of the central
-    mode): x ~ NB(k_low + (k_high - k_low) sigma_l, c) at the depth s of the cell (depth_model), with weights per time
+    Continuous model of the counts of one gene, from the modes of a start (k_low, k_high, c, positions mid of the central
+    modes): x ~ NB(k_low + (k_high - k_low) sigma_l, c) at the depth s of the cell (depth_model), with weights per time
     (grid_weights_update), by EM on the weights and on (k_low, k_high, c) (M-step by L-BFGS on their logarithms, k_low
     floored at min(c / 2, k_high / 100) as in the CEM), on the distinct (time, count, depth) triples. n_grid = 2: the
-    extreme modes, sigma in {0, 1}. n_grid = 3: a central mode (a stable intermediate state) at a position sigma_m
-    learned in the M-step (start mid, within MIDDLE_POS_BOUNDS; free_mid = False: fixed at mid). n_transit > 0: the transitions between adjacent modes,
-    n_transit levels in each interval (transit_levels, moving with sigma_m), the mass of each transition per time spread
+    extreme modes, sigma in {0, 1}. n_grid >= 3: n_grid - 2 central modes (stable intermediate states) at increasing
+    positions sigma_m learned in the M-step (start mid, central_starts, within MIDDLE_POS_BOUNDS; free_mid = False:
+    fixed at mid). n_transit > 0: the transitions between adjacent modes,
+    n_transit levels in each interval (transit_levels, moving with the sigma_m), the mass of each transition per time spread
     evenly on its levels (transit_weights). mean_max: upper bound of the mean k_high / c of the high mode at the
     reference depth (high_mode_bound), None: no bound. Returns (levels, c, weights {t: (L,)}, posteriors (N, L),
     n_transit), or None for a constant gene. depth_model: set in the process that runs the fit (parallel workers),
@@ -955,9 +979,10 @@ def fit_grid_mixture(x, vect_t, k_low, k_high, c, s=None, seuil=0.01, n_grid=2, 
     if x.size == 0 or x.min() == x.max() or not k_high > k_low:
         return None
     n_transit = int(n_transit or 0)
-    free_mid = n_grid == 3 and free_mid
-    mid = float(np.clip(mid, *MIDDLE_POS_BOUNDS))
-    sig_of = lambda th: transit_levels(n_grid, n_transit, th[3] if free_mid else logit(mid))
+    J = max(int(n_grid) - 2, 0)
+    free_mid = J > 0 and free_mid
+    mid = central_starts(mid, n_grid)
+    sig_of = lambda th: transit_levels(n_grid, n_transit, th[3:] if free_mid else logit(mid))
     n_lev = len(sig_of(np.r_[0.0, 0.0, 0.0, logit(mid)])[0])
     groups = transit_groups(n_lev, n_transit)
     onehot = np.eye(groups.max() + 1)[groups]  # (L, n_groups)
@@ -981,8 +1006,8 @@ def fit_grid_mixture(x, vect_t, k_low, k_high, c, s=None, seuil=0.01, n_grid=2, 
         dK = -R * (psi(X + r) - psi(r) + np.log(rate) - np.log1p(rate)) * (su if bf else 1.0)
         drate = -R * (r / rate - (X + r) / (1 + rate)) * (1.0 if bf else 1.0 / su)
         grad = [np.sum(dK) * kl, np.sum(dK * sg) * dk, np.sum(drate) * cc]
-        if free_mid:  # logit of the position of the central mode (the transition levels move with it)
-            grad.append(np.sum(dK * dsg) * dk)
+        if free_mid:  # logits of the positions of the central modes (the transition levels move with them)
+            grad = np.r_[grad, np.sum(dK, axis=0) @ dsg * dk]
         return -np.sum(R * lp), np.array(grad)
 
     c_hi = 1.0 / seuil if c_max is None else min(1.0 / seuil, c_max)
@@ -990,7 +1015,7 @@ def fit_grid_mixture(x, vect_t, k_low, k_high, c, s=None, seuil=0.01, n_grid=2, 
     bounds = [(np.log(1e-8), np.log(1e5))] * 2 + [(np.log(seuil), np.log(c_hi))]
     if free_mid:
         th = np.r_[th, logit(mid)]
-        bounds.append(tuple(logit(MIDDLE_POS_BOUNDS)))
+        bounds += [tuple(logit(MIDDLE_POS_BOUNDS))] * J
     log_max = None if mean_max is None else np.log(mean_max)
 
     def on_bound(t):
@@ -1020,6 +1045,8 @@ def fit_grid_mixture(x, vect_t, k_low, k_high, c, s=None, seuil=0.01, n_grid=2, 
                 warnings.simplefilter('ignore', RuntimeWarning)
                 th = on_bound(minimize(neg_ll, th0, args=(R,), jac=True, method='SLSQP', bounds=bounds,
                                        constraints=[mean_con]).x)
+        if free_mid:  # central modes kept in increasing order
+            th[3:] = np.sort(th[3:])
         # Floor of the low level, as in the CEM: k_low >= min(c / 2, k_high / 100), k_high kept
         kl, dk, cc = np.exp(th[:3])
         floor = min(cc / 2, (kl + dk) / 100)

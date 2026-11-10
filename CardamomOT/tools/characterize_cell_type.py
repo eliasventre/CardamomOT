@@ -66,7 +66,7 @@ class SampleClassifiers:
         if sample_key not in adata.obs:
             print(f"[cell types] Warning: no obs['{sample_key}']: the classifier of the largest sample ({self.default}) is used")
             return run(self.default, None)
-        samples = adata.obs[sample_key].astype(str).values
+        samples = adata.obs[sample_key].astype(str).to_numpy(dtype=object)
         out = np.empty(len(samples), dtype=object)
         for s_ in np.unique(samples):
             m = samples == s_
@@ -182,12 +182,12 @@ def train_classifier(adata, label_key='cell_type', sample_key=SAMPLE_KEY, min_ce
                   f"1 / count^{float(balance):g})")
         return clf
 
-    y_all = adata.obs[label_key].astype(str).values
+    y_all = adata.obs[label_key].astype(str).to_numpy(dtype=object)
     if sample_key not in adata.obs or adata.obs[sample_key].astype(str).nunique() < 2:
         clf = fit(X_all, y_all)
         clf.cell_depth = bool(cell_depth)
         return clf
-    samples = adata.obs[sample_key].astype(str).values
+    samples = adata.obs[sample_key].astype(str).to_numpy(dtype=object)
     # Genes of each sample's condition (select_genes_per_condition): each classifier reads only them
     from ..condition_genes import row_mask
     gm = row_mask(adata, samples)
@@ -285,8 +285,8 @@ def predict_out_of_fold(adata, label_key='cell_type', sample_key=SAMPLE_KEY, n_f
     """
     import warnings
     from sklearn.model_selection import StratifiedKFold
-    y = adata.obs[label_key].astype(str).values
-    strata = y if sample_key not in adata.obs else adata.obs[sample_key].astype(str).values + '|' + y
+    y = adata.obs[label_key].astype(str).to_numpy(dtype=object)
+    strata = y if sample_key not in adata.obs else adata.obs[sample_key].astype(str).to_numpy(dtype=object) + '|' + y
     pred = np.empty(adata.n_obs, dtype=object)
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore', message='The least populated class')
@@ -295,7 +295,7 @@ def predict_out_of_fold(adata, label_key='cell_type', sample_key=SAMPLE_KEY, n_f
         clf = train_classifier(adata[tr], label_key=label_key, sample_key=sample_key, seed=seed, **kw)
         part = adata[te].copy()
         predict_cell_types(part, clf, label_key='_oof', sample_key=sample_key)
-        pred[te] = part.obs['_oof'].astype(str).values
+        pred[te] = part.obs['_oof'].astype(str).to_numpy(dtype=object)
     return pred
 
 
@@ -455,9 +455,9 @@ def identity_diagnostic(adata, draws, modes=None, label_key='cell_type', sample_
     X = adata.X.toarray() if hasattr(adata.X, 'toarray') else np.asarray(adata.X)
     X = X.astype(float)
     D = np.asarray(draws, dtype=float)
-    y = adata.obs[label_key].astype(str).values
-    smp = adata.obs[sample_key].astype(str).values if sample_key in adata.obs else np.full(len(y), '0')
-    times = adata.obs['time'].astype(str).values if 'time' in adata.obs else np.full(len(y), '0')
+    y = adata.obs[label_key].astype(str).to_numpy(dtype=object)
+    smp = adata.obs[sample_key].astype(str).to_numpy(dtype=object) if sample_key in adata.obs else np.full(len(y), '0')
+    times = adata.obs['time'].astype(str).to_numpy(dtype=object) if 'time' in adata.obs else np.full(len(y), '0')
     rng = np.random.default_rng(seed)
     versions = ['data (cross-validated)'] + (['data permuted within modes'] if modes is not None else []) + ['model draws']
     units = []

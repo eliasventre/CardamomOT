@@ -130,7 +130,8 @@ SHEETS = {
                    'TARGET:delta comma-separated, scaled by its schedule: TARGET = a cell type of '
                    'cell_type_proliferation (delta added to its rate of proliferation_rates, which is then the '
                    'rate without stimulus), or a gene list of gene_lists / GENE1+GENE2 / a gene (delta x mRNA '
-                   'signature score in [0, 1])'),
+                   'signature score in [0, 1]); the row of a sample: that sample only (replaces the row "all" for '
+                   'this stimulus)'),
          ('TRANS1', 'Effect of inference stimulus 1 on the transition rates (per hour), FROM>TO:delta comma-separated '
                     '(cell types of the transition grouping), scaled by its schedule and added to the transition_rates '
                     'of the sample (then the rates without stimulus; 0 without them): row "all" for every sample, the '
@@ -139,8 +140,8 @@ SHEETS = {
         'Perturbations of the measured data, used by the inference: genetic perturbations of samples (KO / OV), '
         'samples held out for validation (remove_from_inference, reference_sample), '
         'and the inference stimuli (row sample_id = all: targets STIMk, effects on proliferation RATEk and on the '
-        'transitions TRANSk, k = column of stimulus_inference_schedule; TRANSk may also be given in the row of a '
-        'sample). Empty: one stimulus, every gene a possible target, no effect on the rates.'),
+        'transitions TRANSk, k = column of stimulus_inference_schedule; RATEk and TRANSk may also be given in the '
+        'row of a sample). Empty: one stimulus, every gene a possible target, no effect on the rates.'),
     'perturbation_simulation': (
         [('KO', 'Knocked-out genes, comma-separated; GENE-X for a partial KO of X%'),
          ('OV', 'Over-expressed genes, comma-separated; GENE-X for a partial OV of X%'),
@@ -530,26 +531,31 @@ def export(wb, out_dir):
         _schedule_times(te, te_cols, os.path.join(out_dir, 'stimulus_schedule_test_times.txt'))
     _add_overrides(overrides, 'test', te_over, te_cols)
 
-    # Inference stimuli (row all of perturbation_inference): targets STIMk and rate effects RATEk
+    # Inference stimuli (row all of perturbation_inference): targets STIMk and rate effects RATEk (RATEk of the row of a
+    # sample: that sample only, replacing the row all for that stimulus)
     pi = read_sheet(wb, 'perturbation_inference')
     # Row of the inference stimuli: sample_id 'all' or empty (the rows of a sample carry its KO / OV, removal)
     is_all = (pi['sample_id'].map(_sample_label).str.lower().isin(['', 'all', 'nan', 'none'])
               if 'sample_id' in pi else pd.Series(True, index=pi.index))
-    lists, rates = {}, {}
-    for _, r in pi[is_all].iterrows():
+    from .tools.perturbations import parse_rate
+    lists, rates = {}, {'default': {}, 'samples': {}}
+    for i, r in pi.iterrows():
         for c in pi.columns:
             m = re.fullmatch(r'(STIM|RATE)(\d+)', str(c))
             if not m or _is_empty(r[c]):
                 continue
             k, cell = int(m.group(2)), str(_clean(r[c]))
             if m.group(1) == 'STIM':
+                if not is_all[i]:
+                    continue
                 # A gene list of gene_lists, else comma-separated genes
                 genes = _values(gl, cell) if cell in gl.columns else [g.strip() for g in re.split(r'[,\s]+', cell) if g.strip()]
                 lists.setdefault(k, []).extend(str(g) for g in genes)
             else:
-                from .tools.perturbations import parse_rate
-                rates.setdefault(k, []).extend(parse_rate(cell))
-    bad = sorted(k for k in set(lists) | set(rates) if k > n_inf)
+                dest = rates['default'] if is_all[i] else rates['samples'].setdefault(str(_clean(r['sample_id'])), {})
+                dest.setdefault(k, []).extend(parse_rate(cell))
+    rate_ks = set(rates['default']).union(*(set(v) for v in rates['samples'].values()))
+    bad = sorted(k for k in set(lists) | rate_ks if k > n_inf)
     if bad:
         print(f"[CardamomOT] Warning: perturbation_inference describes inference stimuli {bad} but "
               f"stimulus_inference_schedule has {n_inf} stimulus column(s): ignored")
@@ -558,11 +564,12 @@ def export(wb, out_dir):
         n = max(len(l) for l in cols)
         write('stimulus_targets.txt', '\n'.join('\t'.join(l[i] if i < len(l) else '' for l in cols)
                                                 for i in range(n)) + '\n')
-    rates = {k: v for k, v in rates.items() if k <= n_inf and v}
-    if rates:
+    keep = lambda d: {str(k): v for k, v in d.items() if k <= n_inf and v}
+    rates = {'default': keep(rates['default']),
+             'samples': {sid: keep(d) for sid, d in rates['samples'].items() if keep(d)}}
+    if rates['default'] or rates['samples']:
         import json
-        json.dump({str(k): v for k, v in rates.items()}, open(os.path.join(out_dir, 'stimulus_rates.json'), 'w'),
-                  indent=1)
+        json.dump(rates, open(os.path.join(out_dir, 'stimulus_rates.json'), 'w'), indent=1)
     # Effects of the inference stimuli on the transition rates (TRANSk): row all = every sample, row of a sample = that
     # sample only (replaces the row all for that stimulus)
     from .tools.perturbations import parse_transition

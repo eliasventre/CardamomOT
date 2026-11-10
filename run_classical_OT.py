@@ -70,7 +70,7 @@ def main(argv):
     if len(np.unique(times)) < 2:
         print("[run_classical_OT] Single timepoint: no transport, skipped")
         return
-    samples = A.obs['dataset_id'].astype(str).values if 'dataset_id' in A.obs else np.full(A.n_obs, '0')
+    samples = A.obs['dataset_id'].astype(str).to_numpy(dtype=object) if 'dataset_id' in A.obs else np.full(A.n_obs, '0')
     # Transported cells: those of CardamomOT's inference, i.e. obs['split'] of data.h5ad (split_dataset.py, which
     # runs just before; data_<split>.h5ad is written later by select_genes and may be from an earlier split)
     ref_path = os.path.join(p, 'Data', f'data_{model.split}.h5ad')
@@ -84,7 +84,7 @@ def main(argv):
         print(f"[run_classical_OT] Error: no data_{model.split}.h5ad nor obs['split']: run split_dataset.py and "
               "select_genes.py first")
         sys.exit(1)
-    labels = A.obs['cell_type'].astype(str).values if 'cell_type' in A.obs else None
+    labels = A.obs['cell_type'].astype(str).to_numpy(dtype=object) if 'cell_type' in A.obs else None
     growth = (A.obs['proliferation_net_rate'].astype(float).values
               if 'proliferation_net_rate' in A.obs else None)
     print(f"[run_classical_OT] {int(fit.sum())} transported cells (of {A.n_obs}), {len(np.unique(samples[fit]))} "
@@ -93,7 +93,7 @@ def main(argv):
 
     # Network conditions (>= 2 values of obs['network_condition']): each one apart, as if run alone (its PCA, genes,
     # couplings, fate genes and drivers); otherwise every cell together
-    conds = A.obs['network_condition'].astype(str).values if 'network_condition' in A.obs else np.full(A.n_obs, '')
+    conds = A.obs['network_condition'].astype(str).to_numpy(dtype=object) if 'network_condition' in A.obs else np.full(A.n_obs, '')
     names_c = list(np.unique(conds[fit]))
     groups = [(c, np.flatnonzero(conds == c)) for c in names_c] if len(names_c) >= 2 else [(None, np.arange(A.n_obs))]
     # log1p(normalised counts) of the genes expressed in >= 10 transported cells, PCA fitted on those cells,

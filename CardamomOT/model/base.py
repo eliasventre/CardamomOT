@@ -27,7 +27,7 @@ from scipy.special import logsumexp
 from ..config import resolve_cell_type_obs, CELL_TYPE_OBS_KEYS
 from ..inference.trajectory import ks_of, s1_of, s1_rows, inter_of, birth_alpha, prot_bridge, prot_bridge_end
 from ..inference.mixture import (_compute_nu_with_temporal_constraint, fit_grid_mixture, grid_weights_fixed, high_mode_bound,
-                                 mixture_criterion, transit_groups)
+                                 mixture_criterion, transit_groups, central_starts)
 from ..inference.network import (cost_any, cost_code, cost_curvature, cost_gene_weights, null_deviance, dist_term,
                                  _dist_loss_grad, learn_mixed_variances, ordinal_targets, ordinal_cost_w, lik_cost_any,
                                  onehot_levels, lik_null_deviance)
@@ -357,10 +357,10 @@ class NetworkModel:
         self.mixture_min_percentage = 5 # NB mixture: second start of each grid at the mixture_min_percentage and 100 - mixture_min_percentage percentiles of the non-zero counts (at the reference depth), the first being the modes of the initialization + hard_em + soft EM, the start of best likelihood being kept for each number of levels; and upper bound of the mean of the high mode: the value above which lie the mixture_min_percentage % highest cells of the gene, at the time where it is the highest (so that the high mode does not drift to the tail of the counts). 0: first start only, no bound
         self.criterion_weights_per_time = False # mixture_selection_criterion: False = the level weights counted once (permissive: the weights of the times are pulled together by their Dirichlet prior), True = once per time
         self.mixture_transit_nodes = 3 # >= 1: each number of modes is also a candidate with the transitions between adjacent modes, this many levels in each interval (regular on the logit scale of sigma, the mass of each transition per time spread evenly), kept by BIC against the modes alone, at the number of modes chosen; 0: modes only
-        self.mixture_selection_criterion = 'bic' # two or three modes (a central plateau) of each gene, NB alone: 'icl' = BIC + 2 x entropy of the posteriors (penalises overlapping modes: stringent on the plateaus), 'bic' = -2 loglik + p log n; one mode against more, and the transitions at the chosen number of modes, always by BIC
-        self.mixture_transit_selection = 'likelihood' # transitions at the chosen number of modes: 'likelihood' = kept whenever they increase the likelihood, 'bic' = kept when they lower the BIC (one parameter per transition)
-        self.mixture_central_position = None # three modes: position sigma of the central mode between the extremes, fixed (0.5: the middle); None: learned in the M-step within [0.05, 0.95]
-        self.max_grid_levels = 5 # 2 or 3: the mixture of each gene is the continuous model of the counts, NB of the burst frequency k_low + (k_high - k_low) sigma at the depth of the cell, sigma on two extreme modes and (3) a central mode at a position learned between them, with weights per time (fit_grid_mixture, from the modes of the initialization + hard_em + soft EM and from percentiles of the counts); its levels are the modes of the whole inference (basins, forcing, targets of the network); one mode against more is chosen per gene by BIC, two against three by mixture_selection_criterion, and the transitions between the modes (mixture_transit_nodes) by BIC.
+        self.mixture_selection_criterion = 'bic' # number of modes (2..max_grid_levels, central plateaus) of each gene, NB alone: 'icl' = BIC + 2 x entropy of the posteriors (penalises overlapping modes: stringent on the plateaus), 'bic' = -2 loglik + p log n; one mode against more, and the transitions at the chosen number of modes, always by BIC
+        self.mixture_transit_selection = 'bic' # transitions at the chosen number of modes: 'likelihood' = kept whenever they increase the likelihood, 'bic' = kept when they lower the BIC (one parameter per transition)
+        self.mixture_central_position = None # three modes: position sigma of the central mode between the extremes, fixed (0.5: the middle; more modes: evenly spaced central modes); None: learned in the M-step within [0.05, 0.95]
+        self.max_grid_levels = 5 # >= 2: the mixture of each gene is the continuous model of the counts, NB of the burst frequency k_low + (k_high - k_low) sigma at the depth of the cell, sigma on two extreme modes and up to max_grid_levels - 2 central modes at positions learned between them, with weights per time (fit_grid_mixture, from the modes of the initialization + hard_em + soft EM and from percentiles of the counts); its levels are the modes of the whole inference (basins, forcing, targets of the network); one mode against more is chosen per gene by BIC, the number of modes among 2..max_grid_levels by mixture_selection_criterion, and the transitions between the modes (mixture_transit_nodes) by BIC.
         self.dispersion_max = 9.0 # NB mixture: cap of the rate c of the counts NB(k, c) (Fano factor 1 + 1 / c at least 1 + 1 / dispersion_max), applied while fitting (initialisation, CEM, soft EM, levels of the grid): Poisson-like genes would otherwise drift towards c -> infinity at fixed k / c
         self.grid_network_precision_max = 100 # upper bound of the precision kappa of the network prior on the levels in the basin updates (kappa_estimation), estimated per sample and gene at each update for every gene of two levels or more, at least 1
         self.kappa_estimation = 'moments' # precision kappa of the network prior on the levels (basin updates, score 'marginal', fit_likelihood), per sample and gene, every gene of two levels or more included (a tempered Bernoulli for two levels), within [1, grid_network_precision_max]: 'moments' = moment matching, exp(-kappa C) taken as locally Gaussian (mean (1 / C'') / mean (level - sigma)^2; underestimates kappa for the ordinal prior); 'likelihood' = the kappa maximising the likelihood of the counts of the cells under the prior at the current sigma, sum_i log sum_l exp(ll_il) p(l | sigma_i; kappa) (grid in log kappa)
@@ -387,7 +387,7 @@ class NetworkModel:
         ## Infer network (single network: kon = sigmoid between the lowest and the highest mode of each gene)
         # Loop for the inference
         self.min_n_loops = 10 # minimal number of iterations in inference loops
-        self.fit_ot_cost = 'ordinal' # network term of the OT cost of the trajectories: 'ce' = cross-entropy KL(tau || sigma), genes weighted by w = 1 - k_low / k_high; 'euclidean' = 2 (sigma - tau)^2 (uniform resolution of the levels, while the cross-entropy resolves the extreme levels finely and the intermediate ones coarsely), genes weighted by w^2 (kon in units of the highest mode); 'ordinal' = cross-entropy through two monotone warps of [0, 1] sending the central main mode (three main modes) to 1 - 0.05 and 0.05, so that it is resolved as finely as the extreme modes (the cross-entropy with two main modes), genes weighted by w; with soft targets (one_hot_probas = False), against the expected warped targets of the levels E_q[T_k(tau_l)] (the network fit, the OT, the stopping errors, the score and the free-running fit: a cell split between the extreme modes is not taken for the central one); the stopping errors use the same cost and gene weights
+        self.fit_ot_cost = 'ordinal' # network term of the OT cost of the trajectories: 'ce' = cross-entropy KL(tau || sigma), genes weighted by w = 1 - k_low / k_high; 'euclidean' = 2 (sigma - tau)^2 (uniform resolution of the levels, while the cross-entropy resolves the extreme levels finely and the intermediate ones coarsely), genes weighted by w^2 (kon in units of the highest mode); 'ordinal' = cross-entropy through two monotone warps of [0, 1] sending the central main mode (three main modes; with more, the central one nearest to 1/2) to 1 - 0.05 and 0.05, so that it is resolved as finely as the extreme modes (the cross-entropy with two main modes), genes weighted by w; with soft targets (one_hot_probas = False), against the expected warped targets of the levels E_q[T_k(tau_l)] (the network fit, the OT, the stopping errors, the score and the free-running fit: a cell split between the extreme modes is not taken for the central one); the stopping errors use the same cost and gene weights
         self.fit_network_cost = 'ordinal' # data term of the network fit (and its QUT, and the 'ce' score of model_learning_score) and network prior on the levels of the basin updates (and the 'marginal' score), so that the EM is coherent: 'ce' = cross-entropy (logistic regression on tau, convex), prior exp(-kappa KL(tau_l || sigma)) ~ Binomial(kappa tau_l; kappa, sigma) (Bernoulli of sigma for two levels); 'euclidean' = 2 (sigma - tau)^2 (non-convex), Gaussian prior exp(-2 kappa (tau_l - sigma)^2); 'ordinal' = the ordinal cost of fit_ot_cost (non-convex), prior exp(-kappa ordinal(sigma, tau_l)), soft targets the expected warped levels; 'ordinal' not with mixed_effect_model_conditions
         self.fit_likelihood = False # False: the network fit on the targets (expected levels: EM with an approximate M-step beyond two levels); 'network': on the states with a real cell, the negative log-likelihood of its counts under the prior of fit_network_cost with the kappa of the basins (exact M-step: the 'marginal' score of the model learning), on the other states and on the nodes of the flow matching that of their target level, -log p(level | sigma) (same units); 'network+ot': also the network term of the OT of the trajectories (likelihood of the counts of each real cell at the end state of each trajectory; then the stopping errors too, the gene weights of the OT in fit_network_cost and their last stage on the null deviance of this likelihood; on the test set with the kappa of each sample at the end of the training); the costs of fit_network_cost / fit_ot_cost until min_n_loops; not with mixed_effect_model_conditions
         self.fit_network_balance = 0.5 # exponent gamma in [0, 1] of the balance of the main modes in the network fit (and its QUT): each state weighted by 1 / frequency^gamma of its main mode (nearest main mode of the mixture, a transitional state counting for its nearest one) in its sample, frequency floored at 0.05, mean weight 1 per sample, so that each main mode (with its nearest transitions, in their proportions) weighs frequency^(1 - gamma): 0 (False) = the frequencies of the data (maximum likelihood), 1 (True) = every main mode alike, between = differences compressed (not with mixed_effect_model_conditions)
@@ -399,17 +399,17 @@ class NetworkModel:
         self.batch_size_traj = 1024 # Maximum number of cells used per time point per sample for solving EOT problems in the inference.
         self.batch_size_traj_exp = 1024 # Target size of the real (experimental) cell batches matched against each reconstruction batch; decoupled from batch_size_traj so the OT target pool can stay well-sized even when batch_size_traj is kept small for cost.
         self.n_strata_traj = 10 # Real-cell batches are stratified by cell type if available, else by this number of k-means clusters (0 = uniform batches)
-        self.transition_constraint_weight = 0.25 # samples with transition_rates / TRANSk: their OT plans keep, for each source cell type, the split of its mass among the target types of the model of the types (rows of exp(G dt), G = transitions + net rates of the interval), by a KL penalty of weight w x typical excess cost, in the units of unbalanced_reg (trajectory OT: exponent fixed at every iteration as the target relaxation) and of growth_reg_source (growth pass: not annealed); w below them: a composition of the targets off the model goes mostly into the splits rather than into the target marginal or the growth (R_opt); inf: exact split, 0: no constraint (the growth of each type stays with the marginals)
+        self.transition_constraint_weight = 0.5 # samples with transition_rates / TRANSk: their OT plans keep, for each source cell type, the split of its mass among the target types of the model of the types (rows of exp(G dt), G = transitions + net rates of the interval), by a KL penalty of weight w x typical excess cost, in the units of unbalanced_reg (trajectory OT: exponent fixed at every iteration as the target relaxation) and of growth_reg_source (growth pass: not annealed); w below them: a composition of the targets off the model goes mostly into the splits rather than into the target marginal or the growth (R_opt); inf: exact split, 0: no constraint (the growth of each type stays with the marginals)
         self.unbalanced_reg = 10.0 # UOT relaxation of the target marginal if > 0: exponent f = reg_m / (reg_m + reg) of its value for reg_m = unbalanced_reg x typical excess cost and the entropic regularization of min_n_loops, fixed at every iteration; OT if 0. Higher = more constrained marginals (uncertainty of the proliferation rates)
         self.init_entropic_noise = 1.0 # Initial entropic regularization of the OT, relative to the typical excess cost of a pair (decreasing with the iteration)
         self.intensity_prior = 100 # mRNA term of the OT cost while n_iter <= intensity_prior (decreasing weight); < 1: random couplings at the first iteration, then network term only
         self.quant_samples = .95 # Quantile of cells number per sample to use for inference
         # Protein trajectories: forcing by the modes or the observed mRNA, scales
         self.inference_mrnas_direct = True # True: fit_network trajectories driven by the observed mRNA (shrunk modes, adaptive_shrinkage); False: by the modes only
-        self.mrna_bridge = False # True: proteins from the linear mRNA bridges between observed mRNAs (prot_bridge_end, d0 >= min_ratio d1); False: shrunk modes (adaptive_shrinkage)
+        self.mrna_bridge = True # True: proteins from the linear mRNA bridges between observed mRNAs (prot_bridge_end, d0 >= min_ratio d1); False: shrunk modes (adaptive_shrinkage)
         self.scale_proteins = 1 # Eventually rescale protein values (recommended:1-2)
         self.scale_mrnas = 100 # Eventually rescale mRNA values (recommended:100)
-        self.fact_simple = 2 # slight transformation for constrative modes in learning phase
+        self.fact_simple = 1 # slight transformation for constrative modes in learning phase
         # Inference of alpha = switch moment between each timepoint and modes
         self.alpha_threshold = .6 # max = 1, thershold for important transition to update alpha full
         self.n_pas = 25 # number of timesteps between timepoints for inference of alpha
@@ -894,7 +894,7 @@ class NetworkModel:
         self.growth_betas = {str(u): float(r['beta']) for u, r in dict(dg.get('per_sample', {})).items()} if used else {}
         self.growth_beta_pooled = float(dg['beta']) if used else 0.0
         self._growth_beta_cells = None if not used else self._growth_betas_of(
-            obs['dataset_id'].astype(str).values if 'dataset_id' in obs else np.full(len(obs), '0'))
+            obs['dataset_id'].astype(str).to_numpy(dtype=object) if 'dataset_id' in obs else np.full(len(obs), '0'))
         if obs is not None:
             if 'proliferation_net_rate' in obs:
                 self._prolif_net_rate = obs['proliferation_net_rate'].values.astype(float)
@@ -922,7 +922,7 @@ class NetworkModel:
                     self._nat_death_rate = np.maximum(obs['proliferation_death_rate_base'].to_numpy(dtype=float), 0.0)
             if 'lineage' in obs:
                 self._lineage_known = obs['lineage'].notna().values
-                self._lineage = obs['lineage'].astype(str).values
+                self._lineage = obs['lineage'].astype(str).to_numpy(dtype=object)
 
         if transition_effects and (transition_effects['default'] or transition_effects['samples']) \
                 and transition_rates is None:
@@ -1127,18 +1127,14 @@ class NetworkModel:
         c = np.ones(G_tot)
         n_components = 0
         max_levels = int(self.max_grid_levels)
-        if max_levels > 3:
-            if verb:
-                print(f"[CardamomOT] Warning: max_grid_levels = {max_levels}: at most 3 modes (two extremes and a central "
-                      "mode, with the transitions of mixture_transit_nodes between them); 3 used")
-            max_levels = 3
         # Modes before the grids: the masses of the mean-preserving assignment only serve the hard EM (the grids have theirs)
         em_kw = dict(max_iter_em=int(self.max_iter_softEM or 0), hard_em=self.hard_em,
                      preserve_mean_values=self.preserve_mean_values if self.hard_em else 0,
                      mean_forcing_em=self.mean_forcing_em if self.hard_em else 1.0, depth_model=self.depth_model,
                      dispersion_max=self.dispersion_max)
         kinetics = NegativeBinomialMixtureEM(min_components=2, max_components=2, **em_kw)
-        kinetics3 = NegativeBinomialMixtureEM(min_components=3, max_components=3, **em_kw)
+        kinetics_K = {K: NegativeBinomialMixtureEM(min_components=K, max_components=K, **em_kw)
+                      for K in range(3, max_levels + 1)}
         # One mode: always its maximum likelihood (the initialization alone would keep the lowest mode of the groups)
         single = NegativeBinomialMixtureEM(min_components=1, max_components=1,
                                            **dict(em_kw, max_iter_em=max(int(self.max_iter_softEM or 0), 100)))
@@ -1152,10 +1148,10 @@ class NetworkModel:
             fit_kw = dict(vect_t=vect_t, vect_celltypes=strata, seuil=self.seuil, s=depth,
                           batch_size_mixture=self.batch_size_mixture, strata=strata)
             # Number of modes (stable states), NB alone, by mixture_criterion on the soft likelihood: one mode against more
-            # by BIC, then two against three by mixture_selection_criterion (ICL: stringent on the plateaus); at that
+            # by BIC, then 2..max_grid_levels by mixture_selection_criterion (ICL: stringent on the plateaus); at that
             # number, the transitions between adjacent modes (mixture_transit_nodes) kept by mixture_transit_selection. Each number of modes
             # fitted by fit_grid_mixture from the modes of the initialization (+ CEM + soft EM) and from percentiles of the
-            # non-zero counts (best likelihood kept), three with a central mode at a learned position
+            # non-zero counts (best likelihood kept), the central modes at learned positions
             model = kinetics.fit(x, **fit_kw)
             modes = {}  # number of modes -> (levels, c, weights, posteriors, transition levels)
             score = lambda f, crit='bic': mixture_criterion(x, vect_t, f[0], f[1], f[2], s=depth, criterion=crit,
@@ -1177,17 +1173,18 @@ class NetworkModel:
                     best2 = best_of(2, [(k_lo, k_hi, c2, 0.5) for k_lo, k_hi in starts])
                     if best2 is not None:
                         modes[2] = best2
-                if max_levels >= 3:
-                    m3 = kinetics3.fit(x, **fit_kw)
-                    starts3 = [(k_lo, k_hi, c2, 0.5) for k_lo, k_hi in starts[1:]]
-                    if m3['n_components'] == 3:
-                        ks3 = np.sort(m3['ks'])
-                        starts3.insert(0, (ks3[0], ks3[-1], m3['c'], (ks3[1] - ks3[0]) / max(ks3[-1] - ks3[0], EPS)))
+                for K in range(3, max_levels + 1):
+                    mK = kinetics_K[K].fit(x, **fit_kw)
+                    even = central_starts((), K)
+                    startsK = [(k_lo, k_hi, c2, even) for k_lo, k_hi in starts[1:]]
+                    if mK['n_components'] == K:
+                        ksK = np.sort(mK['ks'])
+                        startsK.insert(0, (ksK[0], ksK[-1], mK['c'], (ksK[1:-1] - ksK[0]) / max(ksK[-1] - ksK[0], EPS)))
                     else:
-                        starts3.insert(0, (ks2[0], ks2[-1], c2, 0.5))
-                    best3 = best_of(3, starts3)
-                    if best3 is not None:
-                        modes[3] = best3
+                        startsK.insert(0, (ks2[0], ks2[-1], c2, even))
+                    bestK = best_of(K, startsK)
+                    if bestK is not None:
+                        modes[K] = bestK
                 if not modes and min_components <= 2:
                     modes[2] = (ks2, c2, model['pi'], model['resp'], 0)
             if min_components <= 1 or not modes:
@@ -1203,7 +1200,7 @@ class NetworkModel:
                 lv = best[0]
                 grid = fit_grid_mixture(x, vect_t, lv[0], lv[-1], best[1], s=depth, seuil=self.seuil, n_grid=K,
                                         c_max=self.dispersion_max, n_transit=n_tr,
-                                        mid=(lv[1] - lv[0]) / (lv[-1] - lv[0]), mean_max=mean_max, free_mid=free_mid)
+                                        mid=(lv[1:-1] - lv[0]) / (lv[-1] - lv[0]), mean_max=mean_max, free_mid=free_mid)
                 crit_tr = 'loglik' if self.mixture_transit_selection == 'likelihood' else 'bic'
                 if grid is not None and score(grid, crit_tr) < score(best, crit_tr):
                     best = grid
@@ -1286,7 +1283,7 @@ class NetworkModel:
 
     def _best_grid(self, x, vect_t, depth, K, starts, mean_max=None):
         """Grid of K levels (fit_grid_mixture, mean of the high mode at most mean_max) of best likelihood among the starts
-        (k_low, k_high, c, position of the central mode); None if none could be fitted."""
+        (k_low, k_high, c, positions of the central modes); None if none could be fitted."""
         best = None
         for k_lo, k_hi, c_s, mid in starts:
             fixed = self.mixture_central_position is not None
@@ -1733,7 +1730,8 @@ class NetworkModel:
 
     def _central_modes(self, ks, n):
         """Position tau (n, G_tot) of the central main mode of each gene in the samples 0..n-1 (mixtures ks, levels the
-        modes and the transit_nodes transitions between them), -1 without central mode: the cut of the ordinal cost."""
+        modes and the transit_nodes transitions between them; with several central modes, the one nearest to 1/2), -1
+        without central mode: the cut of the ordinal cost."""
         return np.stack([self._central_modes_of(ks_of(ks, k), k) for k in range(n)]) if n else \
             np.zeros((0, np.shape(ks)[-2]))
 
@@ -1746,8 +1744,10 @@ class NetworkModel:
         out = np.full(len(L), -1.0)
         for g in range(len(L)):
             step = int(n_tr[g]) + 1
-            if (L[g] + step - 1) % step == 0 and (L[g] + step - 1) // step == 3:  # three main modes
-                out[g] = float(sigmoid_target(ks_s[g, step], ks_s[g, 0], ks_s[g].max()))
+            n_main = (L[g] + step - 1) // step
+            if (L[g] + step - 1) % step == 0 and n_main >= 3:  # central main modes: every step-th level inside
+                tau = sigmoid_target(ks_s[g, step:(n_main - 1) * step:step], ks_s[g, 0], ks_s[g].max())
+                out[g] = float(tau[np.argmin(np.abs(tau - 0.5))])
         return out
 
     def _n_central(self, ks):
@@ -2263,14 +2263,16 @@ class NetworkModel:
         return pd.DataFrame(rows)
 
 
-    def adaptive_shrinkage(self, x, mu, fact=2, p=2, raw=False):
-        """Modes mu shrunk towards the observed x (scaled); the modes only without inference_mrnas_direct (raw: always shrunk)."""
+    def adaptive_shrinkage(self, x, mu, fact=3, p=2, raw=False):
+        """Modes mu shrunk towards the observed x (scaled); the modes only without inference_mrnas_direct (raw: always shrunk).
+        Tolerance fact below the mode, fact_up above it (recent bursts, not yet in the protein, pulled to the mode)."""
         if not (self.inference_mrnas_direct or raw):
             return mu * self.scale_proteins
         d = x - mu
-        alpha = (np.abs(d) / (fact * (EPS + mu)))**p
+        tol = np.where(d > 0, 1/fact, fact)
+        alpha = (np.abs(d) / (tol * (EPS + mu)))**p
         weight = alpha / (1 + alpha)
-        res = x * (1 - weight) + mu * weight
+        res = (x / self.fact_simple) * (1 - weight) + mu * weight
         return res * self.scale_proteins
     
     

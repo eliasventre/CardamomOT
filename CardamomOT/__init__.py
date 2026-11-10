@@ -56,6 +56,13 @@ from .config import (
 # Package version
 __version__ = "2.0.0"
 
+# pandas 3 changes the string columns of obs (pandas arrays, not numpy): CardamomOT is tested with pandas 2
+import warnings as _warnings
+import pandas as _pd
+if int(_pd.__version__.split('.')[0]) >= 3:
+    _warnings.warn(f"CardamomOT is tested with pandas < 3 (found {_pd.__version__}); some steps may fail: "
+                   "pip install 'pandas<3' (or pip install -e . again in the CardamomOT folder)", stacklevel=2)
+
 # Initialize logging with default configuration
 logger = get_logger(__name__)
 

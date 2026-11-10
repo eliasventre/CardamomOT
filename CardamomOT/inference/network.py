@@ -1888,7 +1888,7 @@ def refine_inference(y_samples, y_prot, y_prot_mod, y_target, inter, basal, thet
     X_flat = np.r_[np.ones(G), np.clip(basal, -_basal_bound(G), _basal_bound(G))]
 
     # Corrections: interactions in [0, 2] (selection, little expansion); basals free within their capacity
-    max_bounds = 100
+    max_bounds = 3
     bounds = [(0, max_bounds)] * G
     if not final and hard_forcing_ref:
         r_plus = min(max_bounds, 1 + ref_constraint_pct / max(EPS, (1 - ref_constraint_pct)))

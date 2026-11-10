@@ -266,26 +266,28 @@ def stimulus_parts(adata_target, adata_score, p):
     """
     Effects of the inference stimuli (RATEk) on the cells of adata_target, None without any: (n_k, values of the
     stimuli at the time of each cell (n, n_k) in the schedule of its sample (stimulus_rates.state_values: test
-    schedule for the samples removed from the inference), cell types, their obs key, {k: ({type: delta}, [(signature,
-    delta)])}, {signature: (n,) score on the mRNA of the scored cells}).
+    schedule for the samples removed from the inference), cell types, their obs key, {sample: {k: ({type: delta},
+    [(signature, delta)])}} (effects of the sample: row all, or its own rows), {signature: (n,) score on the mRNA of
+    the scored cells}, sample of each cell (n,)).
     """
     from CardamomOT.stimulus_rates import load_effects, state_values, split_effects, signature_scores
     obs = adata_target.obs
-    effects = load_effects(p)
-    if not effects:
+    samples = obs['dataset_id'].astype(str).to_numpy() if 'dataset_id' in obs else np.array(['0'] * len(obs))
+    effects = {s: load_effects(p, s) for s in np.unique(samples)}
+    if not any(effects.values()):
         return None
-    n_k = max(effects)
+    n_k = max(k for e in effects.values() for k in e)
     U = state_values(p, obs, n_k)[:, :n_k]
     ct_key = resolve_cell_type_obs(adata_target, 'proliferation')
     labels = obs[ct_key].astype(str).to_numpy() if ct_key else np.array([''] * len(obs))
-    parts = split_effects(effects, np.unique(labels) if ct_key else [])
-    targets = [target for _, sig in parts.values() for target, _ in sig]
+    parts = {s: split_effects(e, np.unique(labels) if ct_key else []) for s, e in effects.items()}
+    targets = [target for ps in parts.values() for _, sig in ps.values() for target, _ in sig]
     scores = {}
     if targets:
         score_cells = adata_score[adata_target.obs_names]
         scores = signature_scores(score_cells.X, list(adata_score.var_names), targets, p,
                                   normalize=score_cells.n_vars >= MIN_GENES_SCORING)
-    return n_k, U, labels, ct_key, parts, scores
+    return n_k, U, labels, ct_key, parts, scores, samples
 
 
 def induced_rates(adata, p):
@@ -296,18 +298,21 @@ def induced_rates(adata, p):
     sp = stimulus_parts(adata, adata, p)
     if sp is None:
         return ind_b, ind_d
-    _, U, labels, _, parts, scores = sp
-    for k, (ct, sig) in parts.items():
-        for c, d in ct.items():
-            (ind_b if d > 0 else ind_d)[:] += U[:, k - 1] * abs(d) * (labels == c)
-        for target, d in sig:
-            (ind_b if d > 0 else ind_d)[:] += U[:, k - 1] * abs(d) * scores[target]
+    _, U, labels, _, parts, scores, samples = sp
+    for s, ps in parts.items():
+        ms = samples == s
+        for k, (ct, sig) in ps.items():
+            for c, d in ct.items():
+                (ind_b if d > 0 else ind_d)[:] += U[:, k - 1] * abs(d) * ((labels == c) & ms)
+            for target, d in sig:
+                (ind_b if d > 0 else ind_d)[:] += U[:, k - 1] * abs(d) * scores[target] * ms
     return ind_b, ind_d
 
 
 def add_stimulus_effects(adata_target, adata_score, p):
     """
-    Effects of the inference stimuli on the rates (RATEk of perturbation_inference, row all): the rates computed so
+    Effects of the inference stimuli on the rates (RATEk of perturbation_inference: row all, or the rows of the sample
+    of each cell): the rates computed so
     far (anchors of proliferation_rates) are those without stimulus. The rates of a cell are those of its state at its
     own time t: it gets u_k(t) * effect, u_k(t) being the value of stimulus k at t in the schedule of its sample (0 for
     the untreated cells; for the samples removed from the inference, the schedule of their validation,
@@ -325,15 +330,15 @@ def add_stimulus_effects(adata_target, adata_score, p):
     stale = [c for c in obs.columns if c.startswith('proliferation_stimulus_') or
              (c.startswith('proliferation_') and c.endswith('_rate_base'))]
     if stale:
-        obs.drop(columns=stale, inplace=True)
+        adata_target.obs = obs.drop(columns=stale)
+        obs = adata_target.obs
     sp = stimulus_parts(adata_target, adata_score, p)
     if sp is None or 'proliferation_net_rate' not in adata_target.obs:
         return
-    n_k, U, labels, ct_key, parts, scores = sp
+    n_k, U, labels, ct_key, parts, scores, samples = sp
     base = obs['proliferation_net_rate'].to_numpy(dtype=float)
     times = obs['time'].to_numpy(dtype=float) if 'time' in obs else np.zeros(len(obs))
     tu = np.sort(np.unique(times))
-    samples = obs['dataset_id'].astype(str).to_numpy() if 'dataset_id' in obs else np.array(['0'] * len(obs))
     # Effect of each stimulus per unit of its value on each cell: birth part (positive deltas) and death part
     # (negative deltas, pure death)
     if 'proliferation_birth_rate' not in obs:  # no signatures: birth = max(net, 0) (negligible death)
@@ -354,17 +359,20 @@ def add_stimulus_effects(adata_target, adata_score, p):
     sh_b, sh_d = share(b0), share(d0)
     eb, ed = np.zeros((len(obs), n_k)), np.zeros((len(obs), n_k))
     kind = lambda d: 'birth' if d > 0 else 'death' if d < 0 else 'no effect'
-    for k, (ct, sig) in parts.items():
-        for c, d in ct.items():
-            if d > 0:
-                eb[:, k - 1] += d * (labels == c) * sh_b
-            else:
-                ed[:, k - 1] += -d * (labels == c) * sh_d
-            print(f"{prefix} Stimulus {k}: {d:+g} h^-1 on '{c}' ({ct_key}), scaled by its schedule ({kind(d)}"
-                  + (f", shared in proportion to the {kind(d)} rate of the cells)" if d else ")"))
-        for target, d in sig:
-            (eb if d > 0 else ed)[:, k - 1] += abs(d) * scores[target]
-            print(f"{prefix} Stimulus {k}: {target} {d:+g} h^-1 at maximal mRNA score ({kind(d)})")
+    for s, ps in parts.items():
+        ms = samples == s
+        tag = f" in {s}" if len(parts) > 1 else ""
+        for k, (ct, sig) in ps.items():
+            for c, d in ct.items():
+                if d > 0:
+                    eb[:, k - 1] += d * ((labels == c) & ms) * sh_b
+                else:
+                    ed[:, k - 1] += -d * ((labels == c) & ms) * sh_d
+                print(f"{prefix} Stimulus {k}{tag}: {d:+g} h^-1 on '{c}' ({ct_key}), scaled by its schedule ({kind(d)}"
+                      + (f", shared in proportion to the {kind(d)} rate of the cells)" if d else ")"))
+            for target, d in sig:
+                (eb if d > 0 else ed)[:, k - 1] += abs(d) * scores[target] * ms
+                print(f"{prefix} Stimulus {k}{tag}: {target} {d:+g} h^-1 at maximal mRNA score ({kind(d)})")
     for k in range(n_k):
         obs[f'proliferation_stimulus_birth_{k + 1}'] = eb[:, k]
         obs[f'proliferation_stimulus_death_{k + 1}'] = ed[:, k]
@@ -398,7 +406,7 @@ def read_anchors(adata, prolif_path, fallback):
     user_rates = read_proliferation_rates(prolif_path)
     if isinstance(prolif_path, dict):
         prolif_path = 'the anchors of the sample'
-    labels = adata.obs[celltype_col].astype(str).values
+    labels = adata.obs[celltype_col].astype(str).to_numpy(dtype=object)
     # Cell types matched case-insensitively
     by_lower = {k.lower(): v for k, v in user_rates.items() if v.get('net') is not None}
     user_rates = {c: by_lower[c.lower()] for c in sorted(set(labels)) if c.lower() in by_lower}

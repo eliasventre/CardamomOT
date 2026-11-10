@@ -126,7 +126,7 @@ def main(argv):
         model._stim_schedule = model._build_stimulus_schedule(np.sort(np.unique(model.times_data)), stim_sched)
         model._set_interval_rates(adata.obs['time'].values.astype(float) if 'time' in adata.obs
                                   else np.zeros(adata.n_obs),
-                                  adata.obs['dataset_id'].astype(str).values if 'dataset_id' in adata.obs
+                                  adata.obs['dataset_id'].astype(str).to_numpy(dtype=object) if 'dataset_id' in adata.obs
                                   else np.full(adata.n_obs, '0'))
         # Net growth of the states: R_opt of the growth pass, or the prior rates (use_recomputed_proliferation)
         model.R_states = load_state_growth(os.path.join(p, 'cardamomOT'), model.use_recomputed_proliferation)

@@ -257,7 +257,7 @@ def harmonize_obs(adata, min_ratio: float = 0.8) -> Dict[str, str]:
                 print(f"[CardamomOT] obs '{key}' absent; ambiguous candidates {[c for c, _ in best[:3]]}, none renamed")
                 continue
             col = best[0][0]
-            adata.obs.rename(columns={col: key}, inplace=True)
+            adata.obs = adata.obs.rename(columns={col: key})
             renamed[col] = key
             print(f"[CardamomOT] obs '{col}' renamed '{key}' (expected by CardamomOT)")
     return renamed
@@ -322,8 +322,8 @@ def inference_schedule_times(data_dir, kind='inference'):
 def inference_schedule(data_dir, times=None):
     """
     Rows (one per sorted timepoint of `times`, n_stimuli columns) of the inference schedule: each timepoint takes the
-    row of the last time of the schedule at or before it (the first row before it) when the workbook gives the times of
-    its rows, else row k goes to the k-th timepoint. The rows of the file without times; None without schedule.
+    row of its time of the schedule, else of the next one (the value over the interval that ends there,
+    schedules.right_index) when the workbook gives the times of its rows, else row k goes to the k-th timepoint. The rows of the file without times; None without schedule.
     """
     path = find_stimulus_schedule(data_dir)
     if path is None:

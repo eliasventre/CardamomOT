@@ -34,7 +34,7 @@ every default applies; the pipeline never writes it):
 |---|---|
 | `model_parameters` | model and pipeline parameters, grouped by use, with their description (empty = default of `CardamomOT/model/base.py`; the command-line options `--stimulus`, `--prior`, `--mean-forcing`, `--force-basins`, `--temporal-basins` override it) |
 | `gene_lists` | genes of interest for the gene selection, signatures, named gene lists (RATE targets) |
-| `stimulus_inference_schedule`, `perturbation_inference` | stimulus schedule of the measured data (default rows, and rows with a `sample_id` for a sample's own schedule); perturbations of the measured data: KO / OV of samples, samples held out for validation (`remove_from_inference`, `reference_sample`), and (row `all`) possible targets `STIMk`, effects on proliferation `RATEk` and on the transitions `TRANSk` (also per sample) of each inference stimulus |
+| `stimulus_inference_schedule`, `perturbation_inference` | stimulus schedule of the measured data (default rows, and rows with a `sample_id` for a sample's own schedule); perturbations of the measured data: KO / OV of samples, samples held out for validation (`remove_from_inference`, `reference_sample`), and (row `all`) possible targets `STIMk`, effects on proliferation `RATEk` and on the transitions `TRANSk` (both also per sample) of each inference stimulus |
 | `stimulus_test_schedule` | stimulus schedule of the held-out cells and samples (`infer_test`; default: the inference schedule) |
 | `stimulus_simulation_schedule`, `perturbation_simulation` | schedules and in-silico perturbations (KO, OV, STIM, RATE) of the simulations |
 | `times` | timepoints used |

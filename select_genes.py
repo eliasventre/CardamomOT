@@ -71,7 +71,7 @@ def perturbed_genes(p, names=None):
     the genes of the RATE signatures of the inference stimuli)."""
     from CardamomOT.tools.perturbations import (find_perturbation_file, load_perturbations, combo_genes,
                                                 rate_target_genes)
-    from CardamomOT.stimulus_rates import load_effects
+    from CardamomOT.stimulus_rates import all_effects
     genes = []
 
     def signature_genes(target):
@@ -90,7 +90,7 @@ def perturbed_genes(p, names=None):
             for effects in combo.get('RATE', {}).values():
                 for target, _ in effects:
                     genes += signature_genes(target)
-    for effects in load_effects(p).values():
+    for effects in (e for es in all_effects(p) for e in es.values()):
         for target, _ in effects:
             genes += signature_genes(target)
     path = os.path.join(input_dir(p), 'KO_OV_inference.txt')
@@ -149,7 +149,7 @@ def main(argv):
     except (FileNotFoundError, ValueError) as e:
         print(f"[select_genes] Error: {e}")
         sys.exit(1)
-    split = adata.obs['split'].astype(str).values
+    split = adata.obs['split'].astype(str).to_numpy(dtype=object)
     if (cfg.split == 'full') != ('full' in set(split)):
         print(f"[select_genes] Error: obs['split'] does not match split = '{cfg.split}': rerun split_dataset.py")
         sys.exit(1)
@@ -269,7 +269,7 @@ def main(argv):
         if model.select_genes_per_condition and len(conds) >= 2:
             # One selection per network condition, as if CardamomOT were run on each one (consensus of its samples)
             condition_sets, reports = {}, []
-            nc = ad_fit.obs['network_condition'].astype(str).values
+            nc = ad_fit.obs['network_condition'].astype(str).to_numpy(dtype=object)
             for c in conds:
                 print(f"[select_genes] Condition {c}: selection on its {int(np.sum(nc == c))} cells")
                 sel_c, rep_c, net_c, _ = run(ad_fit[nc == c].copy(), 'consensus' if combo_set == 'auto' else combo_set,
@@ -338,7 +338,7 @@ def main(argv):
                 fz = np.load(fate_path, allow_pickle=True)
                 if np.array_equal(fz['obs_names'].astype(str), adata.obs_names.values.astype(str)):
                     t_all = adata.obs['time'].astype(float).values
-                    s_all = (adata.obs['dataset_id'].astype(str).values if 'dataset_id' in adata.obs
+                    s_all = (adata.obs['dataset_id'].astype(str).to_numpy(dtype=object) if 'dataset_id' in adata.obs
                              else np.full(adata.n_obs, '0'))
                     tr = d['transported'].astype(bool)
                     last = np.zeros(adata.n_obs, bool)

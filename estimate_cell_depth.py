@@ -55,7 +55,7 @@ def doublet_check(adata):
     out = dict(n=int(flag.sum()), fraction=float(flag.mean()))
     ct_key = resolve_cell_type_obs(adata, 'selection')
     if ct_key and flag.any():
-        cts = adata.obs[ct_key].astype(str).values
+        cts = adata.obs[ct_key].astype(str).to_numpy(dtype=object)
         out['by_cell_type'] = {c: float(flag[cts == c].mean()) for c in np.unique(cts)}
     if out['n']:
         detail = ', '.join(f"{c}: {v * 100:.1f}%" for c, v in out.get('by_cell_type', {}).items())
@@ -81,7 +81,7 @@ def growth_depth(target):
               f"association of the depth with the birth rate (depth_growth_share without effect)")
         return had
     times = obs['time'].values.astype(float) if 'time' in obs else np.zeros(len(obs))
-    samples = obs['dataset_id'].astype(str).values if 'dataset_id' in obs else np.full(len(obs), '0')
+    samples = obs['dataset_id'].astype(str).to_numpy(dtype=object) if 'dataset_id' in obs else np.full(len(obs), '0')
     s, b = obs['depth_factor'].to_numpy(dtype=float), obs['proliferation_birth_rate'].to_numpy(dtype=float)
     res = growth_association(s, b, depth_groups(times, samples, None))
     if res is None:
@@ -167,7 +167,7 @@ def main(argv):
     times = src.obs['time'].values.astype(float) if 'time' in src.obs else np.zeros(src.n_obs)
     samples = src.obs['dataset_id'].values if 'dataset_id' in src.obs else None
     ct_key = resolve_cell_type_obs(src, 'selection')
-    cts = src.obs[ct_key].astype(str).values if ct_key else None
+    cts = src.obs[ct_key].astype(str).to_numpy(dtype=object) if ct_key else None
     lib = library(src.X)
     # s_i estimated within (sample, time) groups, or (sample, time, cell type) if depth_by_cell_type
     # (circular: cell types derive from expression); the diagnostic always uses the finest groups

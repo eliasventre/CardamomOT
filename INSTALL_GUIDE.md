@@ -147,6 +147,12 @@ CardamomOT requires Python 3.8 or higher. Check your version:
 python --version
 ```
 
+### pandas 3 errors
+CardamomOT requires pandas < 3 (pandas 3 changes the string columns of `obs`, e.g. `NotImplementedError: can only perform ops with 1-d structures`); a warning is printed at import otherwise. In an existing environment:
+```bash
+pip install "pandas<3"   # or: pip install -e . again in the CardamomOT folder
+```
+
 ### Numba TBB backend not available
 If you see `ValueError: No threading layer could be loaded`, install Numba and threading runtimes from conda-forge in your active env:
 ```bash

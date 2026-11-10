@@ -220,8 +220,9 @@ def combo_genes(combo):
 def perturbation_schedule(columns, times, k, times_ref=None):
     """
     Value of perturbation stimulus k (1-based) at each simulated time: column k of `columns` (the
-    perturbation part of a simulation schedule, config.simulation_schedule), the row of the last reference
-    time <= t (times_ref; None = one row per sorted simulated time), default 0 at the first time and 1 after.
+    perturbation part of a simulation schedule, config.simulation_schedule), the row of its reference time, else of
+    the next one (schedules.right_index; times_ref, None = one row per sorted simulated time), default 0 at the first
+    time and 1 after.
     Missing rows hold the last value; extra rows are ignored with a warning. Returns a function t -> value.
     """
     times = np.sort(np.asarray(times, dtype=float))
@@ -234,4 +235,5 @@ def perturbation_schedule(columns, times, k, times_ref=None):
               f"rows beyond ignored")
         vals = vals[:len(ref)]
     ref = ref[:len(vals)]
-    return lambda t: float(vals[max(0, int(np.searchsorted(ref, float(t) + 1e-9, side='right')) - 1)])
+    from ..schedules import right_index
+    return lambda t: float(vals[right_index(ref, t)])

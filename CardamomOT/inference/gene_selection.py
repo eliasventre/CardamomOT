@@ -73,7 +73,7 @@ def de_groups(adata, genes, cell_type_key=None, sample_key='dataset_id', depth=N
     else:
         full.X = full.X / np.asarray(depth, dtype=np.float32)[:, None]
     sc.pp.log1p(full)
-    smp = full.obs[sample_key].astype(str).values if sample_key in full.obs else np.zeros(full.n_obs).astype(str)
+    smp = full.obs[sample_key].astype(str).to_numpy(dtype=object) if sample_key in full.obs else np.zeros(full.n_obs).astype(str)
     multi = len(np.unique(smp)) > 1
     scores, padj = {}, {}
     keys = [(cell_type_key, cell_type_key)] if cell_type_key else []
@@ -544,7 +544,7 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
     times = adata.obs['time'].values.astype(float) if 'time' in adata.obs else np.zeros(adata.n_obs)
     tu = np.sort(np.unique(times))
     # Samples (obs[sample_key]): selection before the integration, so dynamics are scored within each sample
-    smp = adata.obs[sample_key].astype(str).values if sample_key in adata.obs else np.full(adata.n_obs, '0')
+    smp = adata.obs[sample_key].astype(str).to_numpy(dtype=object) if sample_key in adata.obs else np.full(adata.n_obs, '0')
     samples = list(np.unique(smp))
     multi = len(samples) > 1
     dyn = [s_ for s_ in samples if len(np.unique(times[smp == s_])) >= 2]  # samples with a dynamics
@@ -560,7 +560,7 @@ def select_genes(adata, queries, num_max_genes, n_query=20, n_entropy=10, stim=N
     if depth is not None:
         X = X / depth[sub, None].astype(np.float32)
     t_sub, s_sub = times[sub], smp[sub]
-    cts = adata.obs[cell_type_key].astype(str).values if cell_type_key else None
+    cts = adata.obs[cell_type_key].astype(str).to_numpy(dtype=object) if cell_type_key else None
     if verb:
         print(f"[gene_selection] Universe: {len(u_names)} genes (protein-coding, no mito/ribo, >= 3 cells); "
               f"gene scores on {len(sub)} cells (<= {n_cells_entropy} per time"

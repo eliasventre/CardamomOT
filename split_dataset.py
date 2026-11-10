@@ -79,7 +79,7 @@ def main(argv):
     harmonize_obs(obs)  # obs names close to the expected ones, read without renaming those of data.h5ad
     obs = obs.obs
     times = obs['time'].astype(float).values if 'time' in obs else np.zeros(adata.n_obs)
-    samples = obs['dataset_id'].astype(str).values if 'dataset_id' in obs else np.zeros(adata.n_obs, str)
+    samples = obs['dataset_id'].astype(str).to_numpy(dtype=object) if 'dataset_id' in obs else np.zeros(adata.n_obs, str)
 
     # Samples held out of the inference (remove_from_inference): every cell in test
     removed = np.zeros(adata.n_obs, bool)

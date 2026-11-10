@@ -1,8 +1,8 @@
 """
 Effects of the inference stimuli on the net proliferation rate.
 
-Given in the RATEk columns of the row sample_id = all of the perturbation_inference sheet, as
-TARGET:delta entries (per hour):
+Given in the RATEk columns of the row sample_id = all of the perturbation_inference sheet (the row of a sample: that
+sample only, replacing the row all for that stimulus), as TARGET:delta entries (per hour):
 - TARGET = a cell type of cell_type_proliferation: delta is added to the rate of this cell type in
   proliferation_rates, which is then the rate WITHOUT the stimulus;
 - otherwise a gene list of gene_lists, GENE1+GENE2..., or a gene: delta x signature score, the score
@@ -29,12 +29,30 @@ from .inputs import input_dir
 MIN_GENES_SCORING = 10000
 
 
-def load_effects(project):
-    """{k (1-based inference stimulus): [(target, delta)]} of the project, {} if none."""
+def _read_effects(project):
+    """(row all {k: [(target, delta)]}, {sample: {k: [(target, delta)]}}) of stimulus_rates.json, empty if none."""
     path = os.path.join(input_dir(project), 'stimulus_rates.json')
     if not os.path.exists(path):
-        return {}
-    return {int(k): [(str(t), float(d)) for t, d in v] for k, v in json.load(open(path)).items()}
+        return {}, {}
+    d = json.load(open(path))
+    parse = lambda e: {int(k): [(str(t), float(x)) for t, x in v] for k, v in e.items()}
+    return parse(d.get('default', {})), {str(s): parse(e) for s, e in d.get('samples', {}).items()}
+
+
+def load_effects(project, sample=None):
+    """{k (1-based inference stimulus): [(target, delta)]} of the project ({} if none): the row all, with sample the
+    rows of that sample replacing it stimulus by stimulus."""
+    default, per = _read_effects(project)
+    out = dict(default)
+    if sample is not None:
+        out.update(per.get(str(sample), {}))
+    return out
+
+
+def all_effects(project):
+    """Every effect set of the project (row all and rows of the samples), [{k: [(target, delta)]}]."""
+    default, per = _read_effects(project)
+    return [default] + list(per.values())
 
 
 def schedule_values(project, times_sorted, n_stimuli=None):

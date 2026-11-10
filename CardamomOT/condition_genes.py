@@ -26,8 +26,8 @@ def sample_conditions(obs):
     """{dataset_id: network_condition} of the cells of obs (one condition per sample; '0' without columns)."""
     if 'dataset_id' not in obs:
         return {'0': str(obs['network_condition'].iloc[0]) if 'network_condition' in obs and len(obs) else '0'}
-    sid = obs['dataset_id'].astype(str).values
-    cond = obs['network_condition'].astype(str).values if 'network_condition' in obs else np.full(len(sid), '0')
+    sid = obs['dataset_id'].astype(str).to_numpy(dtype=object)
+    cond = obs['network_condition'].astype(str).to_numpy(dtype=object) if 'network_condition' in obs else np.full(len(sid), '0')
     return {s: str(cond[np.flatnonzero(sid == s)[0]]) for s in np.unique(sid)}
 
 
@@ -92,7 +92,7 @@ def mask_stage(A, data, model_draws=True):
         return A
     A.uns[KEY] = sets
     if model_draws and 'dataset_id' in A.obs:
-        m = row_mask(data, A.obs['dataset_id'].astype(str).values, genes=A.var_names)
+        m = row_mask(data, A.obs['dataset_id'].astype(str).to_numpy(dtype=object), genes=A.var_names)
         X = A.X.toarray() if hasattr(A.X, 'toarray') else np.array(A.X, dtype=float)
         X[~m] = 0
         A.X = X

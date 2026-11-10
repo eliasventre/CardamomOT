@@ -228,7 +228,7 @@ def classical_couplings(A, fit, use_depth, max_cells=5000, seed=0, min_cells=10,
     import scanpy as sc
     from .embedding import log_normalised
     times = A.obs['time'].astype(float).values if 'time' in A.obs else np.zeros(A.n_obs)
-    samples = A.obs['dataset_id'].astype(str).values if 'dataset_id' in A.obs else np.full(A.n_obs, '0')
+    samples = A.obs['dataset_id'].astype(str).to_numpy(dtype=object) if 'dataset_id' in A.obs else np.full(A.n_obs, '0')
     idx = np.flatnonzero(fit)
     obs_fit = A.obs.iloc[idx]   # transported cells: rates and types as in CardamomOT
     grid = np.unique(times[idx]) if times_grid is None else np.unique(times_grid)
@@ -246,7 +246,7 @@ def classical_couplings(A, fit, use_depth, max_cells=5000, seed=0, min_cells=10,
         from ..inference.transition_constraint import TypeTransitions
         col = resolve_cell_type_obs(A, 'transition')
         if col is not None:
-            lab = obs_fit[col].astype(str).values
+            lab = obs_fit[col].astype(str).to_numpy(dtype=object)
             transitions = TypeTransitions(project, np.unique(lab), grid)
             types = np.searchsorted(transitions.labels, lab)
     X = log_normalised(A, use_depth)
@@ -311,7 +311,7 @@ def trajectory_preservation(A, genes, Z_full, blocks_full, fit, use_depth, max_c
     Jensen-Shannon distance of the cell-type fate distributions (0 = same transitions; needs obs['cell_type']).
     Baseline: n_random random sets of as many genes. Returns a dict.
     """
-    labels = A.obs['cell_type'].astype(str).values if 'cell_type' in A.obs else None
+    labels = A.obs['cell_type'].astype(str).to_numpy(dtype=object) if 'cell_type' in A.obs else None
     V_full = _velocity(Z_full, blocks_full)
 
     def score(gs):

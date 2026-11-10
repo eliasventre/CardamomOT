@@ -17,6 +17,13 @@ import numpy as np
 KINDS = ('inference', 'simulation', 'test')
 
 
+def right_index(times, t):
+    """Row of a schedule (rows at the sorted times) at time t: its own row at a time of the schedule, else the row of
+    the next time, i.e. the value over the interval that ends there (a stimulus switched on at t1 acts from t0+); the
+    first row before the first time, the last after the last one."""
+    return min(int(np.searchsorted(np.asarray(times, dtype=float), float(t) - 1e-9)), len(times) - 1)
+
+
 class StimulusSchedule(dict):
     """
     Default schedule {t: values (n_stimuli,)} (the former dict, unchanged for code that indexes it)
@@ -29,7 +36,8 @@ class StimulusSchedule(dict):
         super().__init__(default)
         self.overrides = dict(overrides or {})
         self.sample_names = [str(s) for s in sample_names] if sample_names is not None else None
-        self._times = np.sort(np.array(list(default.keys()), dtype=float))
+        self._keys = sorted(default.keys(), key=float)
+        self._times = np.array(self._keys, dtype=float)
 
     def name(self, sample):
         if sample is None:
@@ -42,22 +50,23 @@ class StimulusSchedule(dict):
     def has_overrides(self):
         return bool(self.overrides)
 
+    def default_at(self, t):
+        """Values of the default schedule at time t (right_index between its times)."""
+        return np.asarray(self[self._keys[right_index(self._times, t)]], dtype=float)
+
     def at(self, t, sample=None):
-        """Values at time t for a sample (default schedule if it has no override)."""
+        """Values at time t for a sample (default schedule if it has no override), right_index between the times."""
         name = self.name(sample)
         if name is None or name not in self.overrides:
-            return np.asarray(self[t], dtype=float)
+            return self.default_at(t)
         times, vals = self.overrides[name]
-        if times is None:
-            i = int(np.searchsorted(self._times, float(t) - 1e-9))
-        else:
-            i = int(np.searchsorted(np.asarray(times, dtype=float), float(t) + 1e-9, side='right')) - 1
-        return np.asarray(vals[min(max(i, 0), len(vals) - 1)], dtype=float)
+        i = right_index(self._times if times is None else times, t)
+        return np.asarray(vals[min(i, len(vals) - 1)], dtype=float)
 
     def per_cell(self, t, samples):
         """(n, n_stimuli) values at time t for cells of the given samples."""
         samples = np.asarray(samples)
-        out = np.tile(np.asarray(self[t], dtype=float), (len(samples), 1))
+        out = np.tile(self.default_at(t), (len(samples), 1))
         if self.overrides:
             for s in np.unique(samples):
                 if self.name(s) in self.overrides:
@@ -121,21 +130,22 @@ def simulation_overrides(project, n_stimuli):
 
 
 def override_function(override, times, k):
-    """t -> value of column k (1-based) of an override (rows on the sorted `times` without time column)."""
+    """t -> value of column k (1-based) of an override (rows on the sorted `times` without time column; right_index
+    between them)."""
     t_ov, vals = override
     if vals.shape[1] < k:
         return None
     col = np.asarray(vals, dtype=float)[:, k - 1]
     tt = np.sort(np.asarray(times if t_ov is None else t_ov, dtype=float))
-    return lambda t: float(col[min(max(int(np.searchsorted(tt, float(t) + 1e-9, side='right')) - 1, 0), len(col) - 1)])
+    return lambda t: float(col[min(right_index(tt, t), len(col) - 1)])
 
 
 def step_rows(values, times_ref, times):
-    """Rows of values (one per sorted times_ref, the last repeated) at the times: each takes the row of the last
-    reference time <= it (the first before it), as the simulation schedules."""
+    """Rows of values (one per sorted times_ref, the last repeated) at the times: each takes the row of its reference
+    time, else of the next one (right_index: the value over the interval that ends there)."""
     values = np.atleast_2d(np.asarray(values, dtype=float))
     ref = np.sort(np.asarray(times_ref, dtype=float))
-    idx = np.searchsorted(ref, np.asarray(times, dtype=float) + 1e-9, side='right') - 1
+    idx = np.array([right_index(ref, t) for t in np.atleast_1d(np.asarray(times, dtype=float))], dtype=int)
     return values[np.clip(idx, 0, min(len(ref), len(values)) - 1)]
 
 
@@ -144,7 +154,8 @@ def held_out_schedule(project, n_stimuli, train_times, times):
     Schedule of the samples removed from the inference (remove_from_inference), as in their validation
     (infer_test.validation_pass): StimulusSchedule on the training times and `times`, default rows of
     stimulus_test_schedule (else of the inference schedule) as a step function, at the times of their rows when the
-    workbook gives them, else on the training times, with the test overrides (else the inference ones) of the samples
+    workbook gives them, else on the training times (right_index between them), with the test overrides (else the
+    inference ones) of the samples
     (without time column: on the training times, whatever `times`); read with at(t, sample).
     """
     from .config import inference_schedule_times

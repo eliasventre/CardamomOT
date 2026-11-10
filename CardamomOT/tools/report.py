@@ -124,7 +124,7 @@ def _with_predicted(props, data, categories, name='Data'):
 
 def _proportions_by_time(adata, categories, key=LABEL_KEY):
     df = pd.DataFrame({'time': pd.to_numeric(adata.obs['time']).values,
-                       'ct': adata.obs[key].astype(str).values})
+                       'ct': adata.obs[key].astype(str).to_numpy(dtype=object)})
     tab = pd.crosstab(df['time'], df['ct'], normalize='index') * 100
     return tab.reindex(columns=categories).fillna(0.0)
 
@@ -204,7 +204,7 @@ def _sample_labels(A, idx=None, key='dataset_id'):
     """Sample of the cells of A (idx), or None with fewer than two samples."""
     if A is None or key not in A.obs or A.obs[key].astype(str).nunique() < 2:
         return None
-    lab = A.obs[key].astype(str).values
+    lab = A.obs[key].astype(str).to_numpy(dtype=object)
     return lab if idx is None else lab[idx]
 
 
@@ -465,7 +465,7 @@ class _ReportData:
             # annotated labels differ from them by the errors of the classifier); Reference: those of its real cells
             D_ = self.stages['Data']
             D_.obs[LABEL_PRED] = pd.Categorical(predict_out_of_fold(D_, label_key=LABEL_KEY, **clf_kw))
-            ref = reference_labels(self.stages['Reference'], D_.obs[LABEL_PRED].astype(str).values)
+            ref = reference_labels(self.stages['Reference'], D_.obs[LABEL_PRED].astype(str).to_numpy(dtype=object))
             if ref is not None:
                 self.stages['Reference'].obs[LABEL_KEY] = pd.Categorical(ref)
         else:
@@ -662,7 +662,7 @@ class _ReportData:
         return t if idx is None else t[idx]
 
     def labels(self, A, idx=None):
-        lab = A.obs[LABEL_KEY].astype(str).values
+        lab = A.obs[LABEL_KEY].astype(str).to_numpy(dtype=object)
         return lab if idx is None else lab[idx]
 
 
@@ -733,9 +733,9 @@ def _data_umap_page(pdf, R, seed=0, genes=None):
     E, obs = data_embedding(R.p, seed=seed, depth=R.depth_emb, method=R.emb_method, genes=genes)
     coords = E['emb']
     times = pd.to_numeric(obs['time']).values if 'time' in obs else np.zeros(len(obs))
-    samples = obs['dataset_id'].astype(str).values if 'dataset_id' in obs else None
+    samples = obs['dataset_id'].astype(str).to_numpy(dtype=object) if 'dataset_id' in obs else None
     multi = samples is not None and len(np.unique(samples)) > 1
-    ct = obs[LABEL_KEY].astype(str).values if LABEL_KEY in obs else None
+    ct = obs[LABEL_KEY].astype(str).to_numpy(dtype=object) if LABEL_KEY in obs else None
     panels = ['time'] + (['sample'] if multi else []) + (['cell type'] if ct is not None else [])
     order = np.random.default_rng(seed).permutation(len(coords))  # no category drawn on top of the others
     size = float(np.clip(30000 / len(coords), 0.3, 6))
@@ -957,7 +957,7 @@ def _classical_ot_pages(pdf, R, seed=0):
                                 "run_classical_OT.py; needs obs['cell_type'])")
     E, obs = data_embedding(R.p, seed=seed, depth=R.depth_emb, method=R.emb_method)
     times = pd.to_numeric(obs['time']).values if 'time' in obs else np.zeros(len(obs))
-    labels = obs[LABEL_KEY].astype(str).values
+    labels = obs[LABEL_KEY].astype(str).to_numpy(dtype=object)
     cats = sorted(np.unique(labels))
     cmap = R.color_map if R.color_map and set(cats) <= set(R.color_map) else _cell_type_colors(cats)
     tr, fg = pd.read_csv(tr_path), pd.read_csv(fg_path)
@@ -1008,7 +1008,7 @@ def _cardamom_transition_page(pdf, R):
         keep = {names.index(x) for x in R.samples if x in names}  # blocks are indexed by sorted dataset_id
         blocks = [b for b in blocks if int(b['sample']) in keep]
         in_cond = R.cell_mask
-    labels = A.obs[LABEL_KEY].astype(str).values
+    labels = A.obs[LABEL_KEY].astype(str).to_numpy(dtype=object)
     times = pd.to_numeric(A.obs['time']).values
     tr = transitions(blocks, labels)
     tr = pd.concat([tr, pooled_transitions(tr)], ignore_index=True)
@@ -1113,7 +1113,7 @@ def _teaser_fields(R, seed=0):
                          cell_samples=F['cell_samples'][m], intervals=sorted(iv_samples), interval_samples=iv_samples)
         return R._teaser
     E, obs = data_embedding(R.p, seed=seed, depth=R.depth_emb, method=R.emb_method)
-    labels = obs[LABEL_KEY].astype(str).values if LABEL_KEY in obs else None
+    labels = obs[LABEL_KEY].astype(str).to_numpy(dtype=object) if LABEL_KEY in obs else None
     cats = sorted(np.unique(labels)) if labels is not None else []
     cmap = R.color_map if R.color_map and set(cats) <= set(R.color_map) else _cell_type_colors(cats)
     times = pd.to_numeric(obs['time']).values if 'time' in obs else np.zeros(len(obs))
@@ -1130,7 +1130,7 @@ def _teaser_fields(R, seed=0):
     iv_samples = {}
     for k, a, b in {(int(k), float(a), float(b)) for k, a, b in zip(cp['sample'], cp['t_from'], cp['t_to'])}:
         iv_samples.setdefault((a, b), []).append(names[min(k, len(names) - 1)])
-    cell_samples = obs['dataset_id'].astype(str).values if 'dataset_id' in obs else np.full(len(obs), '0')
+    cell_samples = obs['dataset_id'].astype(str).to_numpy(dtype=object) if 'dataset_id' in obs else np.full(len(obs), '0')
     R._teaser = dict(E=E, obs=obs, labels=labels, cmap=cmap, times=times, fields=fields, cell_samples=cell_samples,
                      intervals=sorted(iv_samples), interval_samples={iv: sorted(ss) for iv, ss in iv_samples.items()})
     return R._teaser
@@ -1285,7 +1285,7 @@ def _mode_shuffle(ref_stage, beta_stage, X, rng):
     if 'kon' not in beta_stage.layers or beta_stage.n_obs != ref_stage.n_obs or X.shape[0] != ref_stage.n_obs:
         return None
     kon = _dense(beta_stage.layers['kon']).astype(float)
-    smp = (ref_stage.obs['dataset_id'].astype(str).values if 'dataset_id' in ref_stage.obs
+    smp = (ref_stage.obs['dataset_id'].astype(str).to_numpy(dtype=object) if 'dataset_id' in ref_stage.obs
            else np.zeros(ref_stage.n_obs, dtype=str))
     base = np.unique(np.char.add(np.char.add(smp.astype(str), '|'),
                                  pd.to_numeric(ref_stage.obs['time']).values.astype(str)), return_inverse=True)[1]
@@ -1587,7 +1587,7 @@ def _validation_page(pdf, R, r):
                 bars.append((f'Data {ref} (predicted)', ref_data, LABEL_PRED))
         for i, (lab, A, key) in enumerate(bars):
             t = R.times(A)
-            all_labs = A.obs[key].astype(str).values
+            all_labs = A.obs[key].astype(str).to_numpy(dtype=object)
             labs = all_labs[np.isclose(t, t_last)] if np.any(np.isclose(t, t_last)) else all_labs
             bottom = 0.0
             for cat in R.categories:
@@ -1783,7 +1783,7 @@ def _integration_page(pdf, R, rep, sample_key='dataset_id'):
 
     if 'counts_raw' in A.layers and sample_key in A.obs and R.condition_genes is None:  # common gene space only
         idx = _time_subsample(pd.to_numeric(A.obs['time']).values, R.n_umap, R.rng)
-        lab = A.obs[sample_key].astype(str).values[idx]
+        lab = A.obs[sample_key].astype(str).to_numpy(dtype=object)[idx]
         s_i = (A.obs['depth_factor'].to_numpy(dtype=float)[idx, None]
                if (R.depth_emb and 'depth_factor' in A.obs) else 1.0)
         for j, (X, title) in enumerate([(A.layers['counts_raw'], 'Raw counts'), (A.X, 'Integrated counts')]):
@@ -2223,7 +2223,7 @@ class _Dynamics:
         R_prior = load('data_R_prior.npy')  # same rates per trajectory state (virtual states: rate of their interval)
         self.prior = (R_prior.astype(float) if R_prior is not None and len(R_prior) == len(self.times)
                       else self._per_state(self.prior_cells))
-        self.ct = self._per_state(obs[LABEL_KEY].astype(str).values, fill='') if R.has_ct else None
+        self.ct = self._per_state(obs[LABEL_KEY].astype(str).to_numpy(dtype=object), fill='') if R.has_ct else None
 
         # Growth: OT pass (rate over the next interval) and proliferation MLP R(P)
         # Net growth of the states used after the inference: R_opt of the growth pass, or the prior rates
@@ -2493,7 +2493,7 @@ def _proliferation_pages(pdf, R, D):
     # Cell types of the proliferation anchors: cell_type_proliferation, else cell_type_transition, else cell_type
     pkey = resolve_cell_type_obs(R.adata_data, 'proliferation')
     if pkey is not None:
-        p_cells = R.adata_data.obs[pkey].astype(str).values
+        p_cells = R.adata_data.obs[pkey].astype(str).to_numpy(dtype=object)
         p_cats = R.categories if pkey == LABEL_KEY else sorted(set(p_cells))
         p_cmap = R.color_map if pkey == LABEL_KEY else _cell_type_colors(p_cats)
         p_states = D.ct if pkey == LABEL_KEY else D._per_state(p_cells, fill='')
@@ -2696,7 +2696,7 @@ def _proliferation_pages(pdf, R, D):
         if sim_lab is not None:
             obs_d = R.stages['Data'].obs  # rows of R.adata_data
             if LABEL_PRED in obs_d:
-                props['data (predicted)'] = _props(obs_d[LABEL_PRED].astype(str).values, t_obs)
+                props['data (predicted)'] = _props(obs_d[LABEL_PRED].astype(str).to_numpy(dtype=object), t_obs)
             props['simulation'] = _props(sim_lab, t_sim)
         styles = {'data': ('-', 2.0), 'data (predicted)': ('-', 0.8), 'trajectories': (':', 1.2),
                   'simulation': ('-.', 1.0)}
@@ -2877,7 +2877,7 @@ def _dilution_page(pdf, R, D):
     # C: birth rates per cell type, prior vs regressed on the states (MLP)
     ax = fig.add_subplot(gs[1, 1])
     key = 'cell_type_proliferation' if 'cell_type_proliferation' in R.adata_data.obs else LABEL_KEY
-    labels = D._per_state(R.adata_data.obs[key].astype(str).values, fill='') if key in R.adata_data.obs else None
+    labels = D._per_state(R.adata_data.obs[key].astype(str).to_numpy(dtype=object), fill='') if key in R.adata_data.obs else None
     if labels is not None:
         cats = [c for c in sorted(set(labels)) if c]
         pos = np.arange(len(cats))
@@ -3018,7 +3018,7 @@ def _velocity_pages(pdf, R, D, k_top=8):
         if key == 'cell_type':
             labels, cmap_ct = (D.ct[idx] if D.ct is not None else None), R.color_map
         elif key in obs:
-            per_state = D._per_state(obs[key].astype(str).values, fill='')
+            per_state = D._per_state(obs[key].astype(str).to_numpy(dtype=object), fill='')
             if per_state is None:
                 continue
             labels = per_state[idx]
