@@ -1,0 +1,713 @@
+\documentclass[10pt]{article}
+
+\usepackage{amsbsy, amsfonts, amssymb, amsmath, dsfont}
+\usepackage{paralist}
+\usepackage{url}
+\usepackage{caption, graphicx, subfig, color,subcaption}
+\usepackage[text={6.75in,9.5in},centering,letterpaper]{geometry}
+\usepackage[numbers, comma, square, sort&compress]{natbib}
+\usepackage[hypertexnames=false, urlcolor=blue, colorlinks=true, linkcolor=blue, citecolor=blue]{hyperref}
+\usepackage[mathlines]{lineno}
+\usepackage{mathtools}
+\linenumbers
+\usepackage{sidecap}  % in your preamble
+% layout
+\usepackage{booktabs}
+\usepackage[hypertexnames=false, urlcolor=blue, colorlinks=true, linkcolor=blue, citecolor=blue]{hyperref}
+\usepackage[mathlines]{lineno}
+\usepackage{tikz}
+\usepackage{booktabs}
+\usetikzlibrary{positioning,calc}
+
+\setlength{\parskip}{1.0ex plus0.2ex minus0.2ex}
+\setlength{\parindent}{0.0in}
+\renewcommand{\baselinestretch}{1.2}
+\graphicspath{{pdf/}}
+\pdfminorversion=7
+
+\newtheorem{Lemma}{Lemma}[section]
+\newtheorem{Corollary}[Lemma]{Corollary}
+\newtheorem{Definition}[Lemma]{Definition}
+\newtheorem{Hypothesis}{Hypothesis}
+\newtheorem{Proposition}[Lemma]{Proposition}
+\newtheorem{Remark}[Lemma]{Remark}
+\newtheorem{Theorem}{Theorem}
+
+\newenvironment{Proof}[1][.]%
+ {\begin{trivlist}\item[]\textbf{Proof#1 }}%
+ {\hspace*{\fill}$\rule{0.3\baselineskip}{0.35\baselineskip}$\end{trivlist}}
+
+\newenvironment{Acknowledgment}%
+ {\begin{trivlist}\item[]\textbf{Acknowledgments.}}{\end{trivlist}}
+% figures
+
+\setlength{\unitlength}{1in}
+\captionsetup{margin=0.2in, font=small, labelfont=up, textfont=it}
+\renewcommand{\topfraction}{0.85}
+\renewcommand{\bottomfraction}{0.85}
+\renewcommand{\textfraction}{0.15}
+\renewcommand{\floatpagefraction}{0.7}
+
+\usepackage{amsmath}
+\usepackage[mathlines]{lineno}
+\usepackage{etoolbox}
+
+% Make the starters robust and force horizontal mode when they begin a paragraph
+\robustify\textbf
+\pretocmd{\textbf}{\leavevmode}{}{}
+
+% \robustify\noindent
+\pretocmd{\noindent}{\leavevmode}{}{}
+
+% If you use \emph or \textit at paragraph start, add them too:
+% \robustify\emph
+% \pretocmd{\emph}{\leavevmode}{}{}
+
+\linenumbers   % after 
+
+% environments
+
+
+% counters
+
+\renewcommand{\labelenumi}{(\roman{enumi})}
+\makeatletter\@addtoreset{equation}{section}\makeatother
+\renewcommand{\theequation}{\arabic{section}.\arabic{equation}}
+
+\renewcommand{\theLemma}{\arabic{section}.\arabic{Lemma}}
+\renewcommand{\theCorollary}{\arabic{section}.\arabic{Corollary}}
+\renewcommand{\theDefinition}{\arabic{section}.\arabic{Definition}}
+\renewcommand{\theHypothesis}{(H\arabic{Hypothesis})}
+\renewcommand{\theProposition}{\arabic{section}.\arabic{Proposition}}
+\renewcommand{\theRemark}{\arabic{section}.\arabic{Remark}}
+\renewcommand{\theTheorem}{\arabic{Theorem}}
+
+% definitions
+
+\def\Re{\mathop\mathrm{Re}\nolimits}    % real part
+\def\Im{\mathop\mathrm{Im}\nolimits}    % imaginary part
+
+\def\Ke{\mathop\mathrm{N}\nolimits}
+\def\Rg{\mathop\mathrm{Rg}\nolimits}
+
+\def\Prob{\mathop\mathrm{Prob}\nolimits}
+\def\sign{\mathop\mathrm{sgn}\nolimits}
+\def\ev{\mathop\mathrm{ev}\nolimits}
+\def\argmax{\mathop\mathrm{arg~max}}
+
+\newcommand{\C}{\mathbb{C}}             % complex numbers
+\newcommand{\N}{\mathbb{N}}             % natual numbers
+\newcommand{\R}{\mathbb{R}}             % reals
+\newcommand{\Z}{\mathbb{Z}}             % integers
+
+\newcommand{\rmO}{\mathrm{O}}           % Landau O
+\newcommand{\rmo}{\mathrm{o}}           % Landau o
+\newcommand{\rmd}{\mathrm{d}}           % derivatives
+\newcommand{\rme}{\mathrm{e}}           % Euler constant
+\newcommand{\rmi}{\mathrm{i}}           % imaginary unit
+
+% revision
+
+% \newcommand{\changed}[1]{\textcolor{red}{#1}}
+
+\newcommand{\wz}{\color{blue}}
+\newcommand{\evr}{\color{red}}
+
+% document
+
+\begin{document}
+
+\title{Joint inference of trajectories and GRN of a mechanistic model of gene expression without time}
+\author{Elias Ventre, Wenjun Zhao}
+
+\maketitle
+
+% \begin{abstract}
+% TBD
+% \end{abstract}
+
+% \section{Model formulation}
+
+% We observe gene expression counts 
+% \[
+% x_{c,g} \in \mathbb{N},
+% \qquad
+% c = 1,\dots,C,\quad g = 1,\dots,G,
+% \]
+% together with an assigned time label $t_c \in \{1,\dots,T\}$ for each cell $c$.
+% The model proceeds in two stages: (i) inference of bursting kinetics for each gene, 
+% and (ii) inference of a regulatory network that explains the probability that a
+% gene is in the transcriptionally active (ON) state. 
+
+
+% First, we describe the pipeline identifying the full model based on the observation from CARDAMOM \cite{Ventre2023}. Then we discuss the possibility to extend it to the scenario where $t_c$ is not fully observed (though the first bin is typically known), inspired by \cite{Zhou2025}.
+
+% % ---------------------------------------------------------
+% \subsection{Kinetic model (Gamma--Poisson bursting)}
+% For each gene $g$ and each time bin $t$, the count distribution is assumed to follow
+% a Gamma--Poisson (negative binomial) model
+% \[
+% x_{c,g} \mid t_c = t 
+% \;\sim\;
+% \mathrm{GammaPoisson}(a_{g,t},\, b_g),
+% \]
+% where $a_{g,t}$ is a time--dependent burst frequency and $b_g$ is a 
+% gene--specific burst size parameter.  
+% The log-likelihood for gene $g$ is
+% \[
+% \ell_g(a_{g,1:T},b_g)
+% =\sum_{t=1}^T \sum_{c:\,t_c=t}
+% \log p(x_{c,g}\mid a_{g,t}, b_g),
+% \]
+% with
+% \[
+% \log p(x\mid a,b)
+% =
+% \log\Gamma(a+x)-\log\Gamma(a)-\log(x!)
+% + a\log b - (a+x)\log(b+1).
+% \]
+% The parameters $\{a_{g,t}\}_{t=1}^T$ and $b_g$ are estimated by maximizing 
+% $\ell_g$ using Newton updates.
+
+% {\wz{We briefly discussed the possibility to change it to accommodate datasets that don't follow the negative binomial distribution.}}
+% {\evr{Not sure it's relevant, as the mechanistic model produces and need NB distribution. The only relevant modification would be to consider a additional layer, like measurement noise that is not Poissonian or zero-inflated NB to take into account in the model's parameters inference.}}
+% % ---------------------------------------------------------
+% \subsection{Discretization of bursting states}
+% For each gene $g$, we define two kinetic basins
+% \[
+% a_{g,\min} = \min_t a_{g,t}, 
+% \qquad 
+% a_{g,\max} = \max_t a_{g,t}.
+% \]
+% Each cell is then assigned a binary bursting state
+% \[
+% \mathrm{kon}_{c,g} \in \{0,1\},
+% \]
+% by selecting the basin that yields the larger Gamma--Poisson likelihood.
+% Thus $\mathrm{kon}_{c,g}=1$ denotes that gene $g$ is inferred to be in the
+% high-burst (ON) state in cell $c$.
+
+% Let $\mathbf{K} = (\mathrm{kon}_{c,g})$ be the resulting ON/OFF matrix.
+
+% % ---------------------------------------------------------
+% \subsection{Network model for ON-probability}
+% The regulatory network specifies how the ON-probability of a target gene $j$
+% depends on the activity of all genes in the same cell.
+% Define a normalized expression vector $\mathbf{y}_c \in \mathbb{R}^G$ 
+% for each cell.
+% For gene $j$ we introduce parameters
+% \[
+% \theta_{j,0} \in \mathbb{R},
+% \qquad
+% \theta_{j,i} \in \mathbb{R}
+% \quad (i=1,\dots,G),
+% \]
+% which represent the basal activity and regulatory influences, respectively.
+% Let $k_{0,j} \in [0,1]$ denote a gene-specific baseline ON-probability.
+
+% The model predicts the bursting probability of gene $j$ in cell $c$ as
+% \[
+% \widehat{k}_{\mathrm{on}}(c,j)
+% =
+% k_{0,j}
+% +
+% (1-k_{0,j})\,
+% \sigma\!\left(\theta_{j,0} + \sum_{i=1}^G \theta_{j,i} y_{c,i}\right),
+% \]
+% where $\sigma(z)=1/(1+e^{-z})$ is the logistic function.
+
+% The collection of parameters 
+% \[
+% \Theta = (\theta_{j,i})_{j,i=1}^G
+% \quad\text{and}\quad
+% \mathbf{b} = (\theta_{j,0})_{j=1}^G
+% \]
+% constitutes the gene regulatory network.
+
+% % ---------------------------------------------------------
+% \subsection{Objective function for network inference}
+
+% For each target gene $j$ and time bin $t$, 
+% we estimate $\theta_{j,\cdot}$ by minimizing a least-squares loss that compares
+% the predicted ON-probability to the observed binary state:
+% \[
+% \mathcal{L}_{j,t}(\theta_{j,\cdot})
+% =
+% \sum_{c:\, t_c=t}
+% \left(
+% \widehat{k}_{\mathrm{on}}(c,j)
+% -
+% \mathrm{kon}_{c,j}
+% \right)^2
+% +
+% \mathcal{R}_{j,t}(\theta_{j,\cdot}),
+% \]
+% where $\mathcal{R}_{j,t}$ is a regularizer consisting of smoothed 
+% $\ell_1$ penalties and temporal smoothness penalties that encourage:
+
+% \begin{itemize}
+%     \item sparsity of regulatory interactions,
+%     \item small deviations from the parameters estimated at neighboring time bins,
+%     \item separate control for diagonal and off-diagonal interactions.
+% \end{itemize}
+
+% The parameters for gene $j$ at time $t$ are obtained via
+% \[
+% \theta_{j,\cdot}^{(t)}
+% =
+% \arg\min_{\theta} \;
+% \mathcal{L}_{j,t}(\theta).
+% \]
+
+% % ---------------------------------------------------------
+% \subsection{Output}
+% After optimization across all genes and time bins, the method returns:
+% \begin{itemize}
+%     \item the estimated interaction matrix
+%     \[
+%     \mathrm{inter}[j,i] = \theta_{j,i},
+%     \]
+%     \item the basal activity vector
+%     \[
+%     \mathrm{basal}[j] = \theta_{j,0},
+%     \]
+%     \item time-resolved interaction matrices 
+%     $\mathrm{inter}_t[t,j,i]$,
+%     \item time of strongest parameter change for each edge.
+% \end{itemize}
+% Together, these represent the regulatory network of inferred genes.
+
+% \subsection{In absence of time component}
+
+% The naive way of fitting time points and the GRN at the same time, is to alternatively (1) reassign time points based on GRN, (2) fit the kinetic model and bursting states, and (3) fit the network. 
+
+% \clearpage
+
+
+
+
+
+
+\section{Model formulation}
+
+We consider a dataset of single-cell gene expression counts
+\[
+x_{c,g} \in \mathbb{N},
+\qquad
+c = 1,\dots,C,\quad g = 1,\dots,G,
+\]
+obtained from a single ``static'' experiment, where cells are sampled once but are assumed to lie along one or several underlying developmental trajectories. Unlike classical time-course designs, no explicit capture time is available for individual cells, although in many settings an initial cell population (root or early progenitors) can be identified from biological knowledge or marker-based annotation. Our goal is to jointly reconstruct (i) a low-dimensional temporal coordinate (pseudotime or process time) for each cell, (ii) a collection of hidden protein trajectories consistent with mechanistic transcriptional bursting, and (iii) a directed, signed gene regulatory network (GRN) that drives these dynamics. 
+
+The starting point is the mechanistic framework introduced in CARDAMOM and generalized in CardamomOT, where gene expression is modeled by a two-state transcriptional bursting process embedded in a GRN, and temporal snapshots are linked by mechanistic optimal transport between timepoints. In the original CardamomOT formulation, time labels are known for each snapshot, and GRN parameters and protein trajectories are inferred by an EM-like procedure alternating between (i) trajectory reconstruction via GRN-driven optimal transport and (ii) GRN calibration against mechanistic burst frequencies.  Here, we adapt this framework to the case where only an initial subset of cells is temporally anchored, and all remaining cells must be ordered along trajectories and assigned effective times, in the spirit of recent pseudotime–GRN approaches such as scPN. \cite{Zhou2025}
+
+\subsection{Mechanistic bursting model with hidden proteins}
+
+At the single-cell level, cellular dynamics are described by the coupled evolution of mRNA and protein levels for each gene. We adopt the same hybrid mechanistic model as in CardamomOT, based on a bursty two-state promoter with GRN-dependent activation rate.  For each gene $i=1,\dots,G$, let $M_i(t)$ and $P_i(t)$ denote its mRNA and protein levels in a given cell at (continuous) time $t$. The biological model reads
+\[
+\begin{aligned}
+&\text{Promoter:} &&\text{OFF} \;\xrightleftharpoons[k_{\mathrm{off},i}]{k_{\mathrm{on},i}(P(t))}\; \text{ON},\\
+&\text{mRNA:} &&\frac{d M_i}{dt} = s_{0,i} \,\mathbf{1}_{\{\text{promoter ON}\}} - d_{0,i} M_i,\\
+&\text{protein:} &&\frac{d P_i}{dt} = s_{1,i} M_i - d_{1,i} P_i,
+\end{aligned}
+\]
+where $s_{0,i}, s_{1,i}$ are transcription and translation rates, $d_{0,i}, d_{1,i}$ are degradation rates, and $k_{\mathrm{on},i}(P)$ encodes the effect of the GRN on promoter activation.  Following previous work, we assume that regulation acts primarily through changes in burst frequency, and that $k_{\mathrm{off},i}$ is independent of $P$. 
+
+The GRN is encoded by a matrix $\Theta = (\theta_{i,j})_{1\leq i,j\leq G}$ and basal activities $(\theta_{i,0})_{i=1}^G$. For each gene $i$, the activation rate is modeled as a sigmoidal function of the protein vector $P$,
+\[
+k_{\mathrm{on},i}(P) 
+= k_{0,i} + \bigl(k_{1,i}-k_{0,i}\bigr)\,\sigma\!\left(\theta_{i,0} + \sum_{j=1}^G \theta_{i,j} P_j\right),
+\qquad
+\sigma(z)=\frac{1}{1+\mathrm{e}^{-z}},
+\]
+where $k_{0,i}$ and $k_{1,i}$ denote minimal and maximal burst frequencies. 
+
+In the ``bursty'' regime where promoter switching and mRNA degradation are fast relative to protein dynamics, the conditional distribution of $M_i$ given $P$ is well approximated by a Negative Binomial (NB) distribution with shape parameter proportional to $k_{\mathrm{on},i}(P)$ and a gene-specific burst size parameter.  As in CardamomOT, this motivates a quasistationary statistical model in which, at each effective time, the observed counts for gene $i$ are drawn from a finite mixture of NB components corresponding to discrete promoter-activity basins.  The hidden protein variables $P$ then follow a deterministic limit,
+\[
+\frac{dP_i}{dt} = d_{1,i}\Bigl(\frac{k_{\mathrm{on},i}(P)}{k_{1,i}} - P_i\Bigr),
+\]
+after appropriate rescaling, which provides a mechanistic backbone for trajectory reconstruction. 
+
+\subsection{Statistical mixture model and bursting states}
+
+Given the static count matrix $(x_{c,g})$, we first fit, for each gene $g$, a Negative Binomial mixture model across all cells, in the same way as in the preprocessing step of CardamomOT.  Specifically, for each gene $g$ we estimate a mixture
+\[
+x_{c,g} \sim \sum_{z\in\mathcal{Z}_g} \pi_{g,z} \,\mathrm{NB}(a_{g,z}, b_g),
+\]
+where $b_g$ is a gene-specific burst size parameter and the components indexed by $z\in\mathcal{Z}_g$ approximate distinct burst-frequency basins.  From the fitted mixture, we identify gene-wise minimal and maximal burst frequencies and calibrate
+\[
+k_{0,g} = d_{0,g} \,\min_{z} a_{g,z},
+\qquad
+k_{1,g} = d_{0,g} \,\max_{z} a_{g,z},
+\]
+as in the time-course setting, using prior or literature-based information on $d_{0,g}$. 
+
+For each cell $c$ and gene $g$, we obtain the posterior probabilities $\Pr(Z_{c,g}=z)$ over basins $z\in\mathcal{Z}_g$, and define an initial discretization of bursting states by
+\[
+\mathrm{k}_{c,g}^{\mathrm{mix}} = a_{g, \arg\max_{z\in\mathcal{Z}_g} \Pr(Z_{c,g}=z)}.
+\]
+
+
+\section{Mechanistic GRN and trajectory inference with known time labels}
+
+Before turning to the static setting, we briefly recall how the same mechanistic framework extends the Reference Fitting paradigm \cite{zhang2024joint} for temporal snapshots, as implemented in CardamomOT.  In the time-course case, cells are sampled at known timepoints $t_1<\dots<t_N$, and the goal is to reconstruct hidden protein trajectories and a GRN that jointly explain the sequence of empirical distributions $\{\mathcal{P}_t\}_{t_1,\dots,t_N}$ of mRNA counts.  
+
+CardamomOT proceeds in three conceptual steps: (i) fit NB mixtures at each timepoint to obtain basin labels and burst modes; (ii) reconstruct protein trajectories between consecutive snapshots using a GRN-driven optimal transport (OT) problem with mechanistic cost; and (iii) update the GRN parameters to align $k_{\mathrm{on},i}(P)$ with mixture-derived burst frequencies, iterating until convergence.  This construction parallels linear Reference Fitting approaches based on Ornstein–Uhlenbeck dynamics, but replaces the linear Gaussian prior with a non-linear mechanistic model that explicitly accounts for transcriptional bursting and hidden proteins. 
+
+\subsection{GRN-driven optimal transport between timepoints}
+
+For each pair of consecutive timepoints $(t_j,t_{j+1})$, CardamomOT reconstructs protein trajectories by solving a regularized OT problem between the empirical distributions of cells at these times.  Given a current GRN $\Theta$, the method first constructs GRN-consistent candidate protein endpoints $P_{c\to c'}$ by interpolating mRNA states along mechanistic flows and by integrating the protein dynamics between $t_j$ and $t_{j+1}$.  It then defines a GRN-based cost
+\begin{equation}
+    C_j(c,c') = \mathrm{loss}\bigl(k_{\mathrm{on}}(P_{c\to c'}),\;k^{\mathrm{mix}}_{c'}\bigr),
+    \label{mechanistic_cost}
+\end{equation}
+which compares the bursting modes predicted by the GRN at the candidate endpoint to the mixture-derived modes assigned to cell $c'$ at time $t_{j+1}$. 
+
+The OT coupling $\gamma_j$ between cells at $t_j$ and $t_{j+1}$ is obtained as the minimizer of an entropically regularized OT problem,
+\[
+\gamma_j = \arg\min_{\gamma \in \Pi(\mathcal{P}_{t_j},\mathcal{P}_{t_{j+1}})}
+\sum_{c,c'} C_j(c,c')\,\gamma(c,c')
++
+\varepsilon\,\mathrm{KL}(\gamma \,\Vert\, \mathcal{P}_{t_j}\otimes \mathcal{P}_{t_{j+1}}),
+\]
+where $\Pi(\cdot,\cdot)$ denotes the set of couplings with prescribed marginals.  Sampling descendant cells according to $\gamma_j$ yields a set of protein trajectories consistent with the GRN and the mechanistic model. 
+
+\subsection{Global GRN update and EM-like iteration}
+
+Given reconstructed protein trajectories $\{P_c(t)\}$, the GRN parameters are updated by minimizing a global loss that enforces agreement between model-implied burst rates and mixture-derived burst frequencies across all times and cells,
+\[
+\Theta^{\mathrm{new}} = \arg\min_{\Theta} 
+\sum_{c,i} \mathrm{loss}\bigl(k_{\mathrm{on},i}(P_c(t(c))),\,k^{\mathrm{mix}}_{c,i}\bigr)
++ \lambda \,\mathcal{R}(\Theta),
+\]
+where $\mathcal{R}$ is a sparsity-inducing penalty that can incorporate prior knowledge about regulatory interactions.  An additional OT-based step updates the assignment of cells to bursting basins under the current GRN, yielding refined basin labels and mixture parameters. 
+
+These steps are iterated until convergence, resulting in a GRN, a set of hidden protein trajectories, and mechanistic parameters that define a generative model able to reproduce the observed temporal snapshots (see Figure \ref{figure1} for the description of the complete framework).  This ``mechanistic Reference Fitting'' has been shown to outperform purely linear approaches in both GRN recovery and trajectory reconstruction.
+
+\begin{figure}
+\centering
+\fbox{\includegraphics[width=.82\textwidth]{figure1.pdf}}
+    \caption{Description of the CardamomOT's framework.}
+    \label{figure1}
+\end{figure}
+
+\section{Mechanistic GRN and trajectory inference without time labels}
+
+We now consider the static setting where only a single snapshot of cells is available, together with the identification of an initial subset $\mathcal{C}_0\subset\{1,\dots,C\}$ corresponding to early progenitors or root cells. In this context, the tasks of pseudotime inference, trajectory reconstruction, and GRN learning must be performed jointly. Existing approaches such as scPN address this problem under a piecewise linear ODE model for gene expression, combining pseudotime inference and linear GRN estimation via an EM-like procedure that alternates between (i) reordering cells by solving a Traveling Salesman Problem (TSP) in expression space and (ii) updating linear connectivity matrices by regression \cite{Zhou2025}. 
+
+Our goal is to extend CardamomOT to this setting by replacing snapshot-to-snapshot OT with a partial OT scheme from an initial source population to the full set of cells, while retaining the mechanistic bursting model and hidden protein trajectories. The resulting framework should be able to simultaneously infer: (i) a per-cell pseudotime, (ii) a GRN-driven velocity field in protein and mRNA space, and (iii) a directed mechanistic GRN, in direct analogy with the scPN outputs but under a non-linear, biologically grounded dynamical model. 
+
+\subsection{Option 1: Partial OT from an initial population}
+\label{sec:partialOT}
+
+We assume that the initial cell population $\mathcal{C}_0$ is known or estimated (for instance from marker genes or prior biological knowledge). We denote by $\mathcal{U}_0 = \{1,\dots,C\}\setminus \mathcal{C}_0$ the set of unexplained cells and initialize all cells in $\mathcal{C}_0$ at pseudotime $\tau=0$. Our key modeling choice is to construct trajectories iteratively by repeatedly solving a partial OT problem from the current frontier $\mathcal{C}_k$ to a subset of cells selected from the unexplained pool $\mathcal{U}_k$, using a GRN-based mechanistic cost analogous to the CardamomOT time-course setting. 
+
+At iteration $k$:
+\begin{enumerate}
+    \item \textbf{Candidate protein endpoints.}
+    For each source cell $c\in\mathcal{C}_k$ with current protein state $P_c$ and effective time $\tau_c$, we consider candidate descendants among cells in $\mathcal{U}_k$. For a given candidate target $c'\in\mathcal{U}_k$ and a proposed time increment $\Delta\tau$, we use a PDMP bridge formula
+    from $P_c$ over $[\tau_c,\tau_c+\Delta\tau]$ under the current GRN, and given $M_{c}, M_{c'}$ and obtain a candidate endpoint $P_{c\to c'}(\tau_c+\Delta\tau)$. 
+    
+    \item \textbf{Mechanistic cost.}
+    From the NB mixture fitted in the preprocessing step, each candidate target cell $c'$ is associated with a vector of bursting modes $k^{\mathrm{mix}}_{c'}$. We define a mechanistic cost
+    \[
+    C_k(c,c') = \mathrm{loss}\bigl(k_{\mathrm{on}}(P_{c\to c'}),\,k^{\mathrm{mix}}_{c'}\bigr)
+    +
+    \alpha\,\mathrm{geom}(x_c,x_{c'}),
+    \]
+    where the first term enforces consistency between GRN-driven burst rates and mixture-derived modes, and the second term optionally penalizes large jumps (typically we can use a distance between $k^{\mathrm{mix}}_{c'}$ and $k^{\mathrm{mix}}_{c}$). In CardamomOT, $\alpha$ decreases at each iteration of the full iterative framework.
+    
+    \item \textbf{Partial OT coupling.}
+    We solve a regularized \emph{partial} OT problem between the current frontier $\mathcal{C}_k$ and the unexplained pool $\mathcal{U}_k$, allowing only a fraction of the total mass to be transported. Concretely, we seek a coupling $\gamma_k$ that minimizes
+    \[
+    \sum_{c\in\mathcal{C}_k}\sum_{c'\in\mathcal{U}_k} C_k(c,c')\,\gamma_k(c,c')
+    + \varepsilon\,\mathrm{KL}(\gamma_k\Vert \mu_{\mathcal{C}_k}\otimes\mu_{\mathcal{U}_k}),
+    \]
+    under marginal constraints that enforce
+    \[
+    \sum_{c'}\gamma_k(c,c') \leq \mu_{\mathcal{C}_k}(c),\qquad
+    \sum_{c}\gamma_k(c,c') \leq \mu_{\mathcal{U}_k}(c'),
+    \]
+    and a global constraint on the transported mass 
+    $\sum_{c,c'}\gamma_k(c,c') = \beta_k$, where $\beta_k$ controls how many new cells are incorporated at iteration $k$. 
+    This partial OT formulation allows some cells in $\mathcal{U}_k$ to remain unexplained until later iterations, thereby accommodating branching trajectories and heterogeneous progression speeds. 
+\end{enumerate}
+
+Cells $c'\in\mathcal{U}_k$ receiving non-zero mass under $\gamma_k$ are assigned a new pseudotime $\tau_{c'} = \tau_c + \Delta\tau$ (with an appropriate aggregation rule if multiple ancestors contribute), and their protein state is set to $P_{c'} = P_{c\to c'}$. We then update
+\[
+\mathcal{C}_{k+1} = \{c' \sim \gamma_k(c,\cdot),\, c \in \mathcal{C}_{k}\},\qquad
+\mathcal{U}_{k+1} = \mathcal{U}_k \setminus \mathcal{C}_{k+1},
+\]
+with eventually an additional \emph{phantom component} such that when $\gamma_k(c,\cdot)$ samples this phantom component we consider $c$ has no descendant at this time (thus, the hyperparameters $\beta_k$ is key to determine the number of steps that are going to be necessary), and continue until all cells have been assigned. This construction yields a family of GRN-driven trajectories that start from the initial population and cover all cells, together with a per-cell pseudotime. 
+
+\subsection{Option 2: TSP-based trajectory inference with path-dependent costs}
+
+While partial OT provides a natural flow-based extension of CardamomOT, an alternative inspired by scPN consists in directly adapting the TSP framework to our mechanistic setting. In scPN, the TSP cost between cells depends only on their local states $(x_i,Ax_i)$ and local velocities under a fixed linear GRN $A$, enabling efficient 2-opt heuristics that locally improve a tour permutation \cite{Zhou2025}. In our case, however, the ``distance'' between consecutive cells $c_k,c_{k+1}$ in a candidate trajectory order must account for the full protein dynamics: given $P_{c_k}$ at position $k$, we integrate the GRN-driven process
+over a small $\Delta\tau$ through the approximate PDMP bridge formula to obtain candidate endpoint $P_{c_k\to c_{k+1}}(\tau_k+\Delta\tau)$, then define
+\[
+\mathrm{dist}(c_k,c_{k+1}) = \mathrm{loss}\bigl(k_{\mathrm{on}}(P_{c_k\to c_{k+1}}),\;k^{\mathrm{mix}}_{c_{k+1}}\bigr).
+\]
+The total tour length then becomes
+\[
+\ell_{\mathrm{TSP}} = \sum_{k=1}^{T-1} \mathrm{dist}(c_k,c_{k+1}),
+\]
+where protein states $P_{c_k}$ are obtained by propagating the dynamics sequentially along the current tour from the root cells $\mathcal{C}_0$.
+
+Unlike classical TSPs with static edge costs as in \cite{Zhou2025}, this defines a \emph{path-dependent} tour cost: an inversion of segment $(c_a,\dots,c_b)$ requires re-propagating protein states from $c_a$ through the inverted subsequence to recompute downstream distances. Fortunately, our explicit PDMP bridge provides a rapid forward map $P_c\mapsto P_{c\to c'}$, making such local re-propagations computationally tractable even for thousands of cells. Standard 2-opt moves---selecting pairs $(a,b)$ and testing whether reversing $(c_{a+1},\dots,c_b)$ reduces $\ell_{\mathrm{TSP}}$---can thus be applied exactly, with complexity scaling linearly in tour length per move rather than quadratically. This yields a ``mechanistic TSP'' heuristic that directly optimizes trajectory order under the full non-linear GRN dynamics, bypassing the need for discrete time batches in partial OT.
+
+\paragraph{Possible limitations of path-dependent TSP optimization}
+
+While computationally feasible, the path-dependent TSP introduces several challenges absent from metric TSPs or linear scPN costs. First, the effective ``distance'' $\mathrm{dist}(c,c')$ lacks metric properties: it is generally asymmetric, may violate triangle inequality, and depends non-locally on the full ancestral trajectory from $\mathcal{C}_0$ to $c$. Standard TSP heuristics thus lack theoretical convergence guarantees, and local minima may reflect model misspecification (kinetic rates, $\Delta\tau$ choice, bursting assumptions) rather than true trajectory structure. Second, the optimization landscape is highly non-convex due to the sequential propagation: small upstream changes cascade through the entire tour, potentially destabilizing convergence. 
+
+In practice, these risks may suggest hybrid strategies: initialize with partial OT to identify global time progression and get meaningful protein vectors, followed by few 2-opt iterations to identify accurate pseudotime and "continuous" trajectories if it's what is expected. Such combinations could leverage the respective strengths of permutation-based ordering and flow-based trajectory reconstruction.
+{\wz Yes this I agree. For partial OT, in case of a large unexplained pool, we can restrict the transport target to some kind of nearest neighborhood of current time point. }
+
+
+\subsection{Limitations of the scPN approach and possible improvements}
+
+While scPN offers an elegant EM-like coupling between pseudotime and GRN inference,
+its architecture for multi-branch datasets exposes several structural limitations that
+motivate the mechanistic extension developed here.
+
+\paragraph{Topology is entirely determined by pre-clustering.}
+In the multi-branch setting, scPN applies the Leiden algorithm to partition cells into
+clusters \emph{before} any pseudotime or GRN estimation.  The TSP is then solved
+independently within each cluster, and the global branching topology is reconstructed
+post-hoc by building a Minimum Spanning Tree (MST) on cluster centroids in embedding
+space \cite{Zhou2025}.  As a consequence, the topology of the inferred trajectories
+is fully determined by the initial clustering resolution and not by the iterative
+EM algorithm itself.  Any comparison of scPN against methods such as Slingshot or
+Monocle3 on multi-branch datasets therefore reduces, in large part, to a comparison
+of clustering strategies rather than of the underlying EM or TSP components.  In
+particular, errors or ambiguities in the Leiden partition propagate irreversibly to
+the trajectory structure, since the MST step is not revisited during the EM
+iterations.
+
+\paragraph{One GRN per cluster, with no inter-cluster coherence.}
+The piecewise linear model of scPN assigns a separate connectivity matrix $A^k$ to
+each cluster region $R_k$, estimated by local regression on the cells belonging to
+that cluster alone \cite{Zhou2025}.  While this captures cluster-specific regulatory
+programs, it discards any information shared across branches and precludes a unified
+mechanistic description of how gene regulation transitions at bifurcation points.
+A natural improvement within the scPN framework would be to retain the TSP-based
+local ordering per cluster, but to perform the M-step \emph{globally}: given the
+full set of reconstructed pseudotimes across all clusters, one could fit a single
+(or smoothly varying) GRN by pooling all cells and weighting each cell's contribution
+by a cluster-specific factor,
+\[
+    \Theta^{\mathrm{new}} = \arg\min_{\Theta}
+    \sum_{k=1}^{m} \sum_{c \in R_k}
+    w_k\, \mathrm{loss}\bigl(k_{\mathrm{on}}(P_c;\Theta),\, k^{\mathrm{mix}}_{c}\bigr)
+    + \lambda\,\mathcal{R}(\Theta).
+\]
+This would allow the network to reflect both branch-specific regulatory logic and
+shared upstream regulation, a distinction that is biologically meaningful at
+bifurcation events.
+
+\paragraph{Improving global dynamics before MST via partial OT.}
+A further limitation is that the MST connecting cluster centroids relies solely on
+distances in a static embedding (e.g.\ UMAP), without incorporating any dynamical
+information about how cells transition between states.  One could instead use the
+partial OT framework described in Section~\ref{sec:partialOT} to transport mass
+from the initial population $\mathcal{C}_0$ across clusters in a GRN-consistent
+manner, thereby defining mechanistic inter-cluster distances that reflect actual
+transition costs rather than geometric proximity in a reduced embedding.  The MST
+could then be built on these OT-based inter-cluster distances, yielding a topology
+that is informed by the regulatory model and not merely by the imputed geometry.
+This hybrid strategy would preserve the computational simplicity of MST-based
+branching while grounding the trajectory structure in mechanistic dynamics.
+
+\subsection{Option 3: Palantir-inspired pseudotime with mechanistic graph distances}
+\label{sec:palantir}
+
+\textcolor{blue}{[Elias's Pick!]}
+
+Beyond MST+TSP approaches, a third family of trajectory inference methods constructs
+pseudotime as an iteratively refined shortest-path distance in a cell graph, as
+exemplified by Palantir \cite{Setty2019}.  We describe the original Palantir
+algorithm in detail, then propose how it can be extended to the mechanistic setting.
+
+\subsubsection{The Palantir algorithm}
+
+Palantir constructs cell pseudotime in four main steps \cite{Setty2019}.
+
+\textbf{(i) Diffusion map embedding.}
+Starting from a $k$-nearest-neighbor (KNN) graph on the raw or PCA-reduced expression
+matrix, Palantir computes a row-normalized Markov transition matrix $M$ and applies
+an eigendecomposition to obtain \emph{multiscale diffusion components}
+$\Phi = (\phi_1,\phi_2,\dots)$, where each $\phi_l$ is an eigenvector of $M$ weighted
+by its eigenvalue $\lambda_l^t$ at a chosen diffusion time $t$.  This embedding
+provides a low-dimensional coordinate system that captures the continuous manifold
+structure of the differentiation landscape, while attenuating noise and bridging
+across sparse sampling regions.
+
+\textbf{(ii) KNN graph and initial shortest-path pseudotime.}
+A KNN graph is constructed in the multiscale diffusion space $\Phi$, and
+shortest-path distances from a user-specified \emph{root cell} $c_0 \in \mathcal{C}_0$
+to all other cells are computed via Dijkstra's algorithm, with edge weights set to
+Euclidean distances in $\Phi$.  This yields an initial pseudotime
+$\tau^{(0)}_c = d_{\Phi}(c_0, c)$ for each cell $c$.
+
+\textbf{(iii) Waypoint sampling and consensus pseudotime.}
+A set of $W$ waypoints $\mathcal{W} \subset \{1,\dots,C\}$ is selected by
+\emph{max-min sampling}: cells are iteratively added to $\mathcal{W}$ so as to
+maximize the minimum distance to already-selected waypoints, ensuring uniform
+coverage of the differentiation landscape.  For each waypoint $w \in \mathcal{W}$,
+the shortest-path distances $d(c,w)$ from all cells to $w$ are computed in the KNN
+graph.  A \emph{perspective matrix} is then constructed by aligning, for each $w$,
+the distance profile $d(\cdot,w)$ to the initial pseudotime ordering $\tau^{(0)}$.
+The consensus pseudotime is obtained as a waypoint-weighted average,
+\[
+    \tau_c = \sum_{w \in \mathcal{W}} \hat{w}_c \cdot \bigl[d(c_0, w) + d(w, c)\bigr],
+\]
+where the weights $\hat{w}_c$ are inversely proportional to $d(c,w)$ and normalized
+to sum to one, so that the waypoints nearest to cell $c$ contribute most strongly to
+its pseudotime.  This step is iterated until the pseudotime assignment converges
+\cite{Setty2019}.
+
+\textbf{(iv) Terminal state identification and fate probabilities.}
+The Markov chain on the KNN graph is rendered \emph{absorbing} by converting
+identified terminal states---cells that are extrema of diffusion components and
+outliers in the chain's stationary distribution---into absorbing states with no
+outgoing transitions.  For each cell $c$, Palantir integrates all possible random
+walks from $c$ to each terminal absorbing state and returns a vector of
+\emph{branch probabilities}; the entropy of this vector defines the cell's
+\emph{differentiation potential}.
+
+\subsubsection{Mechanistic Palantir: GRN-adaptive graph distances}
+\label{sec:mech-palantir}
+
+We now propose an adaptation of the Palantir scheme to our mechanistic bursting
+framework, replacing the diffusion-map embedding with a biologically grounded
+distance derived from the GRN and burst kinetics.
+
+\paragraph{No diffusion map: working in burst-mode space.}
+In our setting, cells are already characterized by the burst-mode vector
+$k^{\mathrm{mix}}_c = (k^{\mathrm{mix}}_{c,1},\dots,k^{\mathrm{mix}}_{c,G}) \in \R^G$,
+estimated from the NB mixture preprocessing step.  Since $G$ is of the order of a
+few hundred selected genes, this space is low-dimensional enough to build a KNN graph
+directly, without requiring a further manifold embedding.  We therefore skip the
+diffusion map and construct the KNN graph in burst-mode space, which carries a direct
+mechanistic interpretation: two cells are neighbors if their inferred
+promoter-activity profiles are similar, irrespective of the raw count magnitudes.
+
+\paragraph{GRN-adaptive edge weights via mechanistic cost.}
+A key limitation of standard KNN-based pseudotime methods is that edge weights are
+purely geometric and carry no information about the directionality or regulatory
+plausibility of transitions.  We propose to assign to each directed edge $(c \to c')$
+in the KNN graph a \emph{mechanistic weight}
+\[
+d_{\Theta}(c,c')
+=
+\alpha\,\bigl\|\log(\frac{1 + M_{c'}}{1 + M_c}\bigr)\|_2 +
+\sum_{g=1}^G 
+\begin{cases}
+0,
+& \text{if } k^{\mathrm{mix}}_{c,g} =  
+k^{\mathrm{mix}}_{c',g},\\[0.3em]
+1 - \sigma\!\left(\theta_{0,g} + \sum_{j=1}^G \theta_{j, g}\,k^{\mathrm{mix}}_{c,j}\right),
+& \text{if } k^{\mathrm{mix}}_{c',g} > k^{\mathrm{mix}}_{c,g},\\[0.3em]
+\sigma\!\left(\theta_{0,g} + \sum_{j=1}^G \theta_{j, g}\,k^{\mathrm{mix}}_{c,j}\right),
+& \text{if } k^{\mathrm{mix}}_{c',g} < k^{\mathrm{mix}}_{c,g}.
+\end{cases}
+\]
+Note that we don't use directly the mechanistic cost described in \eqref{mechanistic_cost} to build the KNN graph because this distance has to be constructed independently of the trajectories leading to $c$, which is not the case of the quantity $P_{c}$. This distance
+favors transitions that are (i) either kinetically consistent with the current GRN (an edge
+$(c \to c')$ is cheap if the GRN pushes $c$ to $c'$) or (ii) small (as timesteps are small, cells are likely to not change their burst modes between two timepoints). Intuitively, it will give "more edges of small weights" than a weight associated to the cost \eqref{mechanistic_cost} because as we don't know the value of $P_c$, we don't know which of (i) or (ii) will be realized.
+
+\paragraph{Dijkstra shortest-path pseudotime.}
+This time, we use a fully mechanistic cost to define 
+a GRN-adaptive weights $w_\Theta(c,c')$:
+\[
+    w_{\Theta}(c,c')
+    =
+    \mathrm{loss}\bigl(k_{\mathrm{on}}(P_{c \to c'};\Theta),\, k^{\mathrm{mix}}_{c'}\bigr)
+    +
+    \alpha\,\bigl\|k^{\mathrm{mix}}_{c'} - k^{\mathrm{mix}}_{c}\bigr\|_2,
+\]
+where $P_{c \to c'}$ is the candidate protein endpoint obtained from the PDMP bridge
+formula by integrating the GRN dynamics from the state of cell $c$ over a small
+increment $\Delta\tau$ (as in Options 1 and 2 above), and the second term provides
+a geometric regularization analogous to the cost used in CardamomOT.  This weight
+penalizes transitions that are kinetically inconsistent with the current GRN: an edge
+$(c \to c')$ is cheap only if the GRN predicts that the protein state reachable from
+$c$ in one step closely matches the promoter-activity profile of $c'$.
+
+we run Dijkstra's algorithm from
+the root population $\mathcal{C}_0$ to obtain an initial pseudotime
+\[
+    \tau^{(0)}_c
+    =
+    \min_{c_0 \in \mathcal{C}_0}\, d_{w_\Theta}(c_0, c),
+\]
+where $d_{w_\Theta}(c_0,c)$ is the shortest-path distance in the directed,
+GRN-weighted KNN graph.  This is the direct mechanistic analogue of Palantir step
+(ii), with diffusion distances replaced by mechanistic transport costs.
+
+\paragraph{Waypoint consensus and iterative refinement.}
+Waypoints $\mathcal{W}$ are sampled by max-min selection in burst-mode space exactly
+as in Palantir.  The consensus pseudotime is then computed following the
+perspective-matrix scheme, with all distances evaluated under $w_\Theta$ in place of
+diffusion distances.  The resulting pseudotime $\tau_c$ is by construction aligned
+with the mechanistic cost structure and naturally encodes the regulatory difficulty
+of transitioning from root to each cell.
+
+\paragraph{Terminal states, branch probabilities, and trajectory reconstruction.}
+Terminal states are identified as in Palantir: cells that are outliers in the
+stationary distribution of the directed Markov chain on the GRN-weighted KNN graph.
+The absorbing Markov chain formalism then yields branch probabilities for each cell,
+which can be used to assign cells to lineages.  Cells assigned to each lineage define
+a directed path in the KNN graph; forward-propagating the PDMP dynamics along these
+paths yields updated protein trajectories $\{P_c\}$ consistent with the current GRN.
+
+
+\subsection{Joint inference of pseudotime and GRN}
+
+As in CardamomOT and in EM-like approaches such as scPN, the GRN and the trajectories are learned jointly by alternating between a ``trajectory'' step (partial OT and/or mechanistic TSP) and a ``network'' step. 
+
+\paragraph{Trajectory / E-step (mechanistic partial OT or TSP).}  
+Given a current GRN $\Theta$ and NB mixture parameters, we reconstruct protein trajectories and pseudotimes by:
+\begin{enumerate}
+    \item initializing protein states $P_c$ using the equilibrium value of the deterministic limit for cells in $\mathcal{C}_0$ (e.g.\ from NB modes or prior information) and setting $\tau_c=0$;
+    \item iterating the mechanistic partial OT procedure until all cells are assigned a pseudotime label and a protein state and/or TSP procedure described above.
+\end{enumerate}
+
+\paragraph{Network / M-step (mechanistic regression).}  
+Given reconstructed protein trajectories $\{P_c\}$ and updated basin labels, we update the GRN parameters by minimizing a global mechanistic loss,
+\[
+\Theta^{\mathrm{new}} = \arg\min_{\Theta}
+\sum_{c,i} \mathrm{loss}\bigl(k_{\mathrm{on},i}(P_c),\,k^{\mathrm{mix}}_{c,i}\bigr)
++ \lambda \,\mathcal{R}(\Theta),
+\]
+where $\mathcal{R}$ enforces sparsity and can incorporate prior knowledge (e.g.\ TF–target masks from databases such as ChEA or motif-based priors), as in CardamomOT and scPN.  Unlike purely linear methods, the regression is performed on non-linear sigmoidal functions of $P$, yielding a GRN that is directly interpretable within the mechanistic bursting model.
+
+
+\paragraph{Basins update}  
+Recomputing basin assignments for all cells under the current GRN by solving a GRN-constrained OT problem in basin space, analogous to the basin update in CardamomOT (see figure \ref{figure1}). 
+
+\paragraph{Iterative scheme.}  
+The three steps above are iterated until convergence of both the GRN and the pseudotime assignments. In analogy with CardamomOT, we expect a small number of iterations to be sufficient in practice to stabilize trajectories and network structure, provided that an informative initial NB mixture and root population are available.  The resulting model provides:
+\begin{itemize}
+    \item a per-cell pseudotime and a GRN-driven velocity field in protein and mRNA space;
+    \item a directed, signed GRN consistent with mechanistic transcriptional bursting;
+    \item a calibrated generative model capable of simulating pseudotime-ordered single-cell datasets and in silico perturbations from static input data.
+\end{itemize}
+
+\section{Data}
+
+Example: BN8 \cite{Ventre2023}. To make more: consider inverse problem such that the dynamical system has 3 well-separated equilibrium states. Material to think about.
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=0.4\linewidth]{Figures/BN8.pdf}
+    \includegraphics[width=0.4\linewidth]{Figures/velocity_BN8.pdf}
+    \caption{An example on data with more than one branches. }
+    \label{fig:HN8}
+\end{figure}
+
+
+
+
+\bibliographystyle{alpha}
+\bibliography{sample}
+
+\end{document}

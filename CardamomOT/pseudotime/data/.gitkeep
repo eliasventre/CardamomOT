@@ -1,0 +1,2 @@
+Simulated pseudotime datasets are written here, one folder per network
+(CN5, BN8, FN8) -- see ../README.md and ../simulate_pseudotime_data.py.
