@@ -81,3 +81,15 @@ docs/_build/
 results_article/figures/figure4_timescale/*
 results_article/figures/figure4_dropout/*
 
+
+# Research folders kept locally only (article, benchmarks, notes, side projects)
+results_article/
+article/
+notes_GATreg/
+projet_modellearning/
+project_multiomic/
+CardaVI/
+utils/*
+!utils/assign_time.ipynb
+!utils/old_to_new/
+run_pipeline.sh
