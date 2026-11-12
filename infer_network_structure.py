@@ -417,6 +417,20 @@ def main(argv):
     np.save(os.path.join(cardamom_dir, 'inter_t'), model.inter_t)
     np.save(os.path.join(cardamom_dir, 'basal_tmp'), model.basal_tmp)
     np.save(os.path.join(cardamom_dir, 'inter_tmp'), model.inter_tmp)
+    # EBIC selection of the regulators (network_bic_pruning): one row per target (and condition fitted apart)
+    bic_path = os.path.join(cardamom_dir, 'network_bic_selection.csv')
+    bic_tab = getattr(model, 'network_bic_table', None)
+    if bic_tab:
+        import pandas as pd
+        pd.DataFrame([{'target': genes_list[r['target']], 'condition': r['condition'],
+                       'n_candidates': r['n_candidates'], 'k': r['k'],
+                       'kept': ';'.join(genes_list[j] for j in r['kept']),
+                       'path_k': ';'.join(str(k) for k, _, _ in r['scores']),
+                       'path_deviance': ';'.join(f'{d:.4g}' for _, d, _ in r['scores']),
+                       'path_ebic': ';'.join(f'{e:.4g}' for _, _, e in r['scores'])} for r in bic_tab]
+                     ).to_csv(bic_path, index=False)
+    elif os.path.exists(bic_path):
+        os.remove(bic_path)
     # Families of the GRN sigma (model_learning_grn), used by every later step; removed otherwise (logistic)
     from CardamomOT.inference.sigma import save_sigma_spec_grn
     save_sigma_spec_grn(cardamom_dir, model._spec_grn())

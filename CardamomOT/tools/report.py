@@ -2956,14 +2956,14 @@ def _velocity_pages(pdf, R, D, k_top=8):
     vM_meca = np.where(mask, vM_meca, 0.0)
     # Proteins: mechanistic velocity d1·g·u − (d1 + b)·P (dilution at the birth rate b of the simulations, synthesis
     # factor g = exp(kappa b)) and along trajectories; u = targets of the fit_network trajectories: kon(P) shrunk
-    # towards the mRNA × s1 (inference_mrnas_direct without bridges, s1 = fact_simple c / k1), else kon(P)
+    # towards the mRNA × s1 (inference_mrnas_direct without bridges, s1 = c / k1), else kon(P); both at scale_proteins
     vP_traj = D.trajectory_velocity(D.P)
     dP_traj = D.trajectory_velocity(D.P, rate=False)
     b_sim = None if D.birth_sim is None else np.nan_to_num(D.birth_sim)[:, None]
     dil = 0.0 if b_sim is None else b_sim * D.P
     g = 1.0 if b_sim is None else np.exp(D.kappa_states()[:, None] * b_sim)
-    u = kon if R.mrna_shrinkage is None else \
-        R.mrna_shrinkage(D.rna_ref * (R.fact_simple / np.maximum(scale_m, 1e-12)), kon)
+    u = R.scale_proteins * kon if R.mrna_shrinkage is None else \
+        R.mrna_shrinkage(D.rna_ref / np.maximum(scale_m, 1e-12), kon)
     vP_meca = _per_time_scale(d1 * (g * u - D.P) - dil, vP_traj, D.times)
 
     growth = D.R_learned[idx] if D.R_learned is not None else None
@@ -3082,7 +3082,7 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
                     top_targets=10, seed=0, depth_embeddings=True, embedding_method_visualization='umap',
                     protein_dilution=True, classifier_method='random_forest', classifier_balance=0.5, select_genes=False,
                     use_recomputed_proliferation=True, simulation_model='ode', mrna_dilution=False, scale_proteins=1.0,
-                    n_growth_nodes=5, mrna_shrinkage=None, fact_simple=2.0, depth_growth_share=0.0):
+                    n_growth_nodes=5, mrna_shrinkage=None, depth_growth_share=0.0):
     """Write the final multi-page PDF report of a CardamomOT run.
 
     Parameters
@@ -3118,11 +3118,11 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
         mRNA diluted at the birth rate too (with protein_dilution): mRNA half-lives on the dilution page.
     scale_proteins, n_growth_nodes : float, int
         Protein level of a kon of 1 (stimulus columns of the trajectories) and quadrature nodes of the integral of the
-        proliferation MLP along the paths, as in the model.
-    mrna_shrinkage, fact_simple : callable or None, float
+        proliferation MLP along the paths, as in the model (protein targets of the velocity field x scale_proteins).
+    mrna_shrinkage : callable or None
         adaptive_shrinkage of the model (x = mRNA × s1, mu = kon) when its fit_network trajectories are driven by the
         shrunk mRNA (inference_mrnas_direct without mrna_bridge): protein targets of the mechanistic field, with
-        s1 = fact_simple c / k1; None: kon(P).
+        s1 = c / k1; None: kon(P).
     depth_growth_share : float
         Share rho of the association beta of the depth factors with the birth rate (data_state_rates.npz) in the
         synthesis factor g = exp(rho beta b) of the proteins, as in the model.
@@ -3149,7 +3149,7 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
     R.simulation_model = str(simulation_model)
     R.use_recomputed_proliferation = bool(use_recomputed_proliferation)
     R.scale_proteins, R.n_growth_nodes = float(scale_proteins), int(n_growth_nodes)
-    R.mrna_shrinkage, R.fact_simple = mrna_shrinkage, float(fact_simple)
+    R.mrna_shrinkage = mrna_shrinkage
     R.depth_growth_share = float(depth_growth_share)
 
     inter = load_network_array(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))

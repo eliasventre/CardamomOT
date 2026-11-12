@@ -367,8 +367,8 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
                             g_end=np.zeros(0)) -> np.ndarray:
     """
     OT cost between n1 trajectory ends and n2 real cells: w A + (1 - w) [(1 - 1/G) B + (1/G) P], with
-    A = |Δ mRNA s1|² (mRNA in kon units, as the modes and proteins: k_z / k1 at the mean of mode z, up to the
-    constant fact_simple), B = network term, P = |Δ protein|², A and P brought to the median of B over the (n1, n2) pairs
+    A = |Δ mRNA s1|² (mRNA in kon units, as the modes and proteins: k_z / k1 at the mean of mode z),
+    B = network term, P = |Δ protein|², A and P brought to the median of B over the (n1, n2) pairs
     (the OT regularizations are relative to the cost, see estimate_trajectories_given_model), and w = weight_fixed if >= 0, else decreasing with n_iter while n_iter <= intensity_prior.
     At the first training pass (n_iter = 1, weight_fixed < 0) with intensity_prior < 1, the cost is zero (random
     couplings). b_init (n1,), b_end (n2,): birth
@@ -412,7 +412,7 @@ def my_otdistance(vect_kon_init, vect_kon_end, vect_prot_init, vect_rna_init, ve
     cost_rna = np.zeros((n1, n2))
     cost_net = np.zeros((n1, n2))
     cost_prot = np.zeros((n1, n2))
-    # mRNA in kon units (s1 = fact_simple c / k1 of the sample)
+    # mRNA in kon units (s1 = c / k1 of the sample)
     kon_rna_end = vect_rna_end * s1
     kon_rna_init = vect_rna_init * s1
 
