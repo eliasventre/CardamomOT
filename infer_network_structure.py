@@ -421,7 +421,6 @@ def main(argv):
     bic_path = os.path.join(cardamom_dir, 'network_bic_selection.csv')
     bic_tab = getattr(model, 'network_bic_table', None)
     if bic_tab:
-        import pandas as pd
         pd.DataFrame([{'target': genes_list[r['target']], 'condition': r['condition'],
                        'n_candidates': r['n_candidates'], 'k': r['k'],
                        'kept': ';'.join(genes_list[j] for j in r['kept']),

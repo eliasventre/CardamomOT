@@ -418,12 +418,14 @@ class NetworkModel:
         self.qut_n_perm = 20 # network fits: permutations of the target per fit for the quantile universal threshold
         self.network_ridge = 20 # network fits: Gaussian prior on the effect of each edge on the logit (w theta sd of the regulator), sd 2 logit(1 - 1/network_ridge); bounds the edges of nearly separable targets
         self.network_relaxed = True # network fits: refinement without penalty (relaxed lasso): the first fit (QUT + ridge) sets the support and signs, the refinement re-estimates the effects on it without the L1 shrinkage, keeping the ridge (network_ridge) and the bounds; False: adaptive lasso at its own QUT
-        self.max_bound = 3 # network fits: corrections c_e of the refinement (theta_e = c_e theta_tmp_e) in [0, bound]; bound = _refine_max_bound(n_iter) along the loops, this value as its floor and in the other fits
-        self.refine_max_bound = 3 # network fits: corrections c_e of the refinement (theta_e = c_e theta_tmp_e) in [0, bound]; bound = _refine_max_bound(n_iter) along the loops, this value as its floor and in the other fits
+        self.max_bound = 3 # network fits, adaptive-lasso refinement (network_relaxed False): corrections c_e (theta_e = c_e theta_tmp_e) in [0, max_bound] along the loops (_refine_max_bound)
+        self.refine_max_bound = 3 # network fits, relaxed refinement (network_relaxed True) and every fit out of the loops (final refit): corrections c_e (theta_e = c_e theta_tmp_e) in [0, refine_max_bound]
         self.network_bic_pruning = True # end of fit_network: regulators of each target selected by an extended BIC along the path of their strengths (|theta| sd of the regulator), refits without L1 on the k strongest; the strongest always kept; refine_network_degradations keeps this support
         self.network_bic_in_loop = True # network_bic_pruning: also after every network update of the EM loop from min_n_loops + 1 on (trajectories, basins and alphas then built on the pruned network); the final pass is kept
         self.network_bic_gamma = 1.0 # network_bic_pruning: EBIC term 2 gamma log(candidates) per edge, on top of log(real cells)
-        self.network_bic_min_gain = 0.05 # network_bic_pruning: a group of regulators enters only if it brings at least this share of the deviance gain from the strongest group to all candidates (effect size; the EBIC alone keeps small shortcuts at large n)
+        self.network_bic_min_gain = 0.2 # network_bic_pruning: a group of regulators enters only if it brings at least min_gain / m of the deviance gain from the strongest group to the best point of the path, m = min(sqrt(genes), network_bic_max_regulators) the expected regulators per gene (effect size; the EBIC alone keeps small shortcuts at large n)
+        self.network_bic_max_regulators = 20 # network_bic_pruning: cap of the expected regulators per gene m in the effect-size threshold (the in-degree saturates in large networks)
+        self.network_bic_swap = 0.8 # network_bic_pruning: where the next regulator of the path is at least this fraction as strong as the last one kept (ambiguous order), it is also tried in its place (0: off)
         self.network_bic_tie = 0.01 # network_bic_pruning: regulators whose strengths (effect on the logit) are less than this apart enter or leave together (chains split into pairs)
         self.batch_size_network = 100 # Cells per network sub-sample (stratified by time and sample); raised to 10 x the parameters of a target-gene fit if lower; None = that floor
         self.n_network_fits = 10 # Theta = mean of min(n_network_fits, 1 + n_states // batch_size) fits on disjoint subsamples, at every network update
@@ -442,7 +444,7 @@ class NetworkModel:
         # GRN: regulation function sigma of the burst frequency
         self.model_learning_grn = True # True: the family of the GRN regulation function sigma of each target gene is selected in fit_network among model_learning_link x model_learning_phi, and sigma_spec_grn (saved as cardamomOT/sigma_spec_grn.npy) is used by every later step; False: logistic of a linear input for every gene (default model, sigma_spec_grn ignored)
         self.model_learning_link = ['logistic'] # with model_learning_grn: candidate links of sigma (logistic only for now)
-        self.model_learning_phi = ['identity','herbach'] # with model_learning_grn: candidate transformations of the regulators, phi(P) = P ('identity', sigmoid of a linear input, not a default candidate: within 0.09-0.14 of the Herbach type of m = 2 on [0, Pbar], and unbounded beyond Pbar), log(1 + P / kappa) (Hill type, graded) or the Herbach type (saturating, 0 at P = 0, theta at saturation, Hill transition of coefficient m around the threshold s halfway between its low and high protein levels; form set by model_learning_herbach_form; one candidate per m of model_learning_herbach_m); a single link and phi (and m): that family is forced for every gene and the whole pipeline (no selection, no extra cost), e.g. ['logarithm'] for Hill functions; 'logarithm' is not a default candidate, as it matches the Herbach type of m = 1 on [0, Pbar] within 0.04-0.08
+        self.model_learning_phi = ['herbach'] # with model_learning_grn: candidate transformations of the regulators, phi(P) = P ('identity', sigmoid of a linear input, not a default candidate: within 0.09-0.14 of the Herbach type of m = 2 on [0, Pbar], and unbounded beyond Pbar), log(1 + P / kappa) (Hill type, graded) or the Herbach type (saturating, 0 at P = 0, theta at saturation, Hill transition of coefficient m around the threshold s halfway between its low and high protein levels; form set by model_learning_herbach_form; one candidate per m of model_learning_herbach_m); a single link and phi (and m): that family is forced for every gene and the whole pipeline (no selection, no extra cost), e.g. ['logarithm'] for Hill functions; 'logarithm' is not a default candidate, as it matches the Herbach type of m = 1 on [0, Pbar] within 0.04-0.08
         self.herbach_threshold_sd = 1.0 # exact Herbach targets: the threshold s_ij of each edge is learned in the refinement of the network fits (Gaussian prior of this sd on log s_ij around the threshold s_j of the regulator, s_ij within [0.01, 2] x Pbar), a lower threshold lifting the repression bound -log(1 + (Pbar / s_ij)^m) of a fixed one; self-regulations keep theirs; None / 0: thresholds fixed at s_j. The approximate form keeps s_j (linear in theta, its threshold would mimic m)
         self.model_learning_herbach_form = ['approximate'] # with model_learning_grn: forms of the Herbach candidates, 'approximate' = linear in theta, phi(P) = Pbar h(P / s) / h(Pbar / s), h(x) = x^m / (1 + x^m) (theta times a Hill step: the contribution of Herbach et al. to first order in theta), or 'exact' = psi(t, P / s) = log((1 + e^t (P/s)^m) / (1 + (P/s)^m)), nonlinear in theta (theta Pbar = its effect at the high mode); the first form is the base form, with which m is selected in [model_learning_start, model_learning_freeze); with a second form, a form window of the same length follows, in which each target compares its base family (m*) with the second form at m* (and its neighbours with model_learning_form_neighbours) (BIC of the learned thresholds, model_learning_threshold_bic); the current family of each target sets sigma everywhere
         self.model_learning_form_neighbours = False # with model_learning_grn, form window: the second Herbach form is tried at the m* of the target only (False) or also at the neighbours of m* in model_learning_herbach_m (True: up to two more fits per update)
@@ -1531,8 +1533,8 @@ class NetworkModel:
         self._log_mixed_tau(verb)
 
     def _refine_max_bound(self, n_iter):
-        """Bound of the refinement corrections at iteration n_iter of the loops: max(refine_max_bound,
-        min_n_loops - n_iter) (wide at the start, refine_max_bound from the end of the ramp on)."""
+        """Bound of the refinement corrections in the loops: refine_max_bound with the relaxed refinement
+        (network_relaxed), max_bound with the adaptive lasso (n_iter: iteration of the loop, unused by this rule)."""
         if not self.network_relaxed:
             return float(self.max_bound)
         return float(self.refine_max_bound)
@@ -1540,7 +1542,7 @@ class NetworkModel:
     def _bic_prune_network(self, rows, y_samples, targets, y_prot, ks, basal, inter, inter_tmp, samples_id, y_real,
                            basal_ref, inter_ref, hard_forcing_ref, ref_constraint_pct, y_prot_mem=None, verb=True):
         """network_bic_pruning: regulators of each target selected by an extended BIC (bic_prune_gene) on the states rows,
-        n = the real cells behind them; selections in self.network_bic_table. Returns (basal, inter, inter_tmp), the
+        with the data term of the network fits (row weights of fit_network_balance), n = the real cells behind them; selections in self.network_bic_table. Returns (basal, inter, inter_tmp), the
         pruned edges also removed from inter_tmp."""
         self.network_bic_table = None
         if not self.network_bic_pruning:
@@ -1551,10 +1553,13 @@ class NetworkModel:
         rows = np.asarray(rows)
         rr = np.asarray(y_real)[rows]
         ratio = len(np.unique(rr[rr >= 0])) / max(len(rows), 1)
+        # Expected regulators per gene: sqrt of the genes (largest gene set of a condition), capped
+        n_genes = np.shape(inter)[-1] - self.n_stimuli if self.gene_mask is None else \
+            int(np.asarray(self.gene_mask, dtype=bool)[:, self.n_stimuli:].sum(axis=1).max())
+        m_exp = float(np.clip(np.sqrt(max(n_genes, 1)), 1.0, self.network_bic_max_regulators))
         mb, self._max_bound_now = getattr(self, '_max_bound_now', None), None  # refits within refine_max_bound
         pkw = self._penalty_kw(ks, y_real, targets, y_samples)
         self._max_bound_now = mb
-        pkw.update(network_balance=False, balance_transit=None)  # unweighted likelihood
         fit = inference_network_multi(
             [rows], y_samples, targets, y_prot, None, ks, n_stimuli=self.n_stimuli, samples_id=samples_id,
             ref_network=self.ref_network, basal_init=basal, inter_init=inter, basal_ref=basal_ref, inter_ref=inter_ref,
@@ -1563,14 +1568,14 @@ class NetworkModel:
             seuil_min_network_intensity=self.seuil_min_network_intensity,
             sample_conditions=self.sample_conditions, condition_pen=self.network_condition_pen,
             gene_mask=self.gene_mask, sigma_spec_grn=self._spec_grn(), y_prot_mem=y_prot_mem,
-            bic_prune=dict(ratio=ratio, gamma=self.network_bic_gamma, tie=self.network_bic_tie,
-                           min_gain=self.network_bic_min_gain), **pkw)[0]
+            bic_prune=dict(ratio=ratio, gamma=self.network_bic_gamma, tie=self.network_bic_tie, swap=self.network_bic_swap,
+                           min_gain=self.network_bic_min_gain / m_exp), **pkw)[0]
         self.network_bic_table = fit[5]
         if verb:
             n_c = sum(r['n_candidates'] for r in fit[5])
             n_k = sum(r['k'] for r in fit[5])
             print(f"[fit_network] network_bic_pruning: {n_k} edges kept out of {n_c} "
-                  f"(n = {ratio * len(rows):.0f} real cells)")
+                  f"(n = {ratio * len(rows):.0f} real cells, min gain {self.network_bic_min_gain / m_exp:.3f})")
         basal_new, inter_new = fit[0], fit[1]
         if np.ndim(inter) == 3 and np.ndim(inter_new) == 2:
             inter_new = np.repeat(inter_new[None], np.shape(inter)[0], axis=0)
@@ -2349,7 +2354,7 @@ class NetworkModel:
         highest one."""
         if not (self.inference_mrnas_direct or raw):
             return mu * self.scale_proteins
-        weight = 1 / (1 + (1 / (EPS + np.abs(x - mu)))**2)
+        weight = 1 / (1 + (mu / (EPS + np.abs(x - mu)))**2)
         res = x * (1 - weight) + mu * weight
         if levels is not None:
             lo, hi, lv = self._mode_bands(mu, levels)

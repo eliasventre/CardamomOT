@@ -2155,18 +2155,25 @@ def _bic_groups(order, score, tie):
 
 
 def bic_prune_gene(y_samples, y_prot, y_target, inter, basal, theta_ref, G, g, n_samples, ref_network, cond, ridge,
-                   seuil_min_network_intensity, max_bound, bic):
+                   seuil_min_network_intensity, bic):
     """
     Sparsity of the regulators of target g by an extended BIC along the path of their strengths: regulators kept
     (|theta| >= seuil_min_network_intensity, out of self-regulation and signed priors, always kept) sorted by
     |theta_j| sd(Y_j) (effect on the logit), grouped when less than bic['tie'] apart (_bic_groups); the network refitted
-    without L1 (refine_inference, ridge and bounds kept) on the first groups, from one group to all of them, scored by
-    EBIC = deviance + k (log n + 2 gamma log K) (k edges, K candidates, n = bic['ratio'] x rows: real cells behind the
-    states; deviance 2 x the negative log-likelihood of the data term, n log(mean cost) for the euclidean cost).
+    without L1 (refine_inference, ridge kept) on the first groups, from one group to all of them, with corrections in
+    [0, S / S_A] (S, S_A: sums of the strengths of the candidates and of the kept ones: the kept regulators may take
+    over the regulation of the removed ones in proportion to their strengths; 1 with every candidate, the network
+    already refined); where the order is ambiguous (next group at least bic['swap'] times as strong as the last one),
+    the point with the next group in place of the last one is refitted too and the better EBIC kept,
+    scored by EBIC = deviance + k (log n + 2 gamma log K) (k edges, K candidates, n = bic['ratio'] x rows: real cells
+    behind the states; deviance 2 x the negative log-likelihood of the data term with the row weights of the fit
+    (fit_network_balance, mean 1 per sample), n log(mean cost) for the euclidean cost).
     Effect size (bic['min_gain']): the path stops before the first group whose deviance gain is below min_gain times
-    the total gain from the first group to all candidates (significance alone keeps the small shortcuts at large n).
-    The first group is always kept. Returns (inter, basal, info): the refit of the best path point (inter and basal
-    unchanged if it keeps every candidate), info = dict(n_candidates, k, kept (indices), scores [(k, deviance, EBIC)]).
+    the total gain from the first group to the best point of the path (significance alone keeps the small shortcuts at
+    large n; the points are not nested, their bounds differing).
+    The first group is always offered. Returns (inter, basal, info): the refit of the best path point (inter and basal
+    unchanged if it keeps every candidate), info = dict(n_candidates, k, kept (indices): the regulators left by that
+    refit (one offered may get a correction of 0), scores [(k offered, deviance, EBIC)]).
     """
     ys = np.asarray(y_samples).astype(int)
     inter = np.asarray(inter, dtype=float)
@@ -2185,28 +2192,45 @@ def bic_prune_gene(y_samples, y_prot, y_target, inter, basal, theta_ref, G, g, n
         return inter, basal, info
     n = max(float(bic.get('ratio', 1.0)) * len(ys), 2.0)
     pen = np.log(n) + 2 * float(bic.get('gamma', 0.5)) * np.log(K)
-    path, on = [], keep.copy()
-    for grp in groups:
-        on[grp] = True
-        k = int(on[order].sum())
+    s_tot = float(np.sum(score[order]))
+    swap = float(bic.get('swap', 0.0))
+
+    def point(sel):
+        # Refit on the regulators sel (self-regulation and signed priors kept): (EBIC, k, inter, basal, deviance, sel)
+        on = keep.copy()
+        on[sel] = True
+        s_on = float(np.sum(score[sel]))
         it, b, _ = refine_inference(ys, y_prot, None, y_target, inter * on, np.array(basal, dtype=float), theta_ref,
                                     G, g, n_samples, 0.0, weight_flow_matching=0.0, final=0, ref_network=ref_network,
                                     seuil_min_network_intensity=seuil_min_network_intensity, cond=cond, ridge=ridge,
-                                    max_bound=max_bound)
+                                    max_bound=s_tot / s_on if s_on > 0 else 1.0)
         loss = _loss_grad_elem(_row_sigma(b, it, cond, y_prot, ys), y_target, grad=False)[0]
         dev = n * np.log(max(float(np.mean(loss)), EPS)) if (_MODE == 1 and not _LIK) else \
             2 * n / len(ys) * float(np.sum(loss))
-        info['scores'].append((k, dev, dev + k * pen))
-        path.append((dev + k * pen, k, it, b, dev))
+        return dev + len(sel) * pen, len(sel), it, b, dev, np.asarray(sel, dtype=int)
+
+    path = []
+    for i in range(len(groups)):
+        sel = [j for grp in groups[:i + 1] for j in grp]
+        pt = point(sel)
+        # Ambiguous order (next group at least swap x as strong): the next group in place of the last one too
+        if swap > 0 and i + 1 < len(groups) and \
+                score[groups[i + 1]].max() >= swap * score[groups[i]].max():
+            alt = point([j for grp in groups[:i] + [groups[i + 1]] for j in grp])
+            if alt[0] < pt[0]:
+                pt = alt
+        info['scores'].append((pt[1], pt[4], pt[0]))
+        path.append(pt)
     # Effect size: groups admitted while each brings at least min_gain of the total gain, then the best EBIC
-    total, n_ok = path[0][4] - path[-1][4], 1
+    total, n_ok = path[0][4] - min(pt[4] for pt in path), 1
     while n_ok < len(path) and total > 0 and \
             path[n_ok - 1][4] - path[n_ok][4] >= float(bic.get('min_gain', 0.0)) * total:
         n_ok += 1
-    _, k, it, b, _ = min(path[:n_ok], key=lambda x: x[0])
-    info['k'], info['kept'] = k, order[:k]
+    _, k, it, b, _, sel = min(path[:n_ok], key=lambda x: x[0])
     if k == K:
         return inter, basal, info
+    left = sel[np.abs(it).reshape(-1, G).max(axis=0)[sel] >= seuil_min_network_intensity]
+    info['k'], info['kept'] = len(left), left
     return it, b, info
 
 
@@ -2350,7 +2374,7 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
             [theta_ref[:n_rows].reshape(C, G).mean(axis=0), theta_ref[n_rows:]])
         inter, basal, info = bic_prune_gene(y_samples, y_prot, y_target, inter0, basal0, ref_b, G, g, n_samples,
                                             ref_network, cond, common['ridge'], seuil_min_network_intensity,
-                                            max_bound, bic_prune)
+                                            bic_prune)
         if act is not None and cond is not None:
             inter = inter * act
         if flat.any():
