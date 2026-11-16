@@ -53,7 +53,7 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                      ce_eps=0.05, init_weight=None, lr_rates=None, lr_decay=1.0, lr_min_frac=1.0, bptt=None,
                      adaptive=False, qut_reps_adaptive=10, null_epochs_adaptive=3, qut_cells=None,
                      null_dev_weights=False, prolif_params=None, prolif_anchor=None, prolif_weight=1.0,
-                     lr_prolif=1e-3):
+                     lr_prolif=1e-3, export_states=False):
     """
     groups: one dict per sample s with
         'X' (T, n, G) trajectory states (starts of the windows; mode 'sde2' also 'M' (T, n, G) normalised mRNA
@@ -143,6 +143,11 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
     the simulated proteins; the MLP inputs, the simulated states, are detached), prolif_anchor() their anchor (torch
     scalar, the pretraining loss of the MLPs on the trajectory states: net growth and prior birth / death), of weight
     prolif_weight (Adam learning rate lr_prolif, that of its pretraining); None: MLP fixed.
+    export_states: history['states'], the trajectories of the fitted model at each observed time (one window per group
+    from its first observed time to its last one, full draws, as the final loss; and the initial states): list of
+    dict(gi (group), t (time index), P (n, G) simulated proteins, kon (n, G) their targets, the observed kon
+    transported on them by the plan of the comparison (barycentric projection; initial states: the modes of their own
+    cells), w (n,) branching weights (sum 1)).
     Returns (theta, basal, d1, eps, scale (n_cond, T - 1, G), history).
     """
     seed = 0 if seed is None else int(seed)  # no model seed: fixed draws
@@ -410,11 +415,28 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
             (warp_t(as_t(tau), m, a1, b1), warp_t(as_t(tau), m, a2, b2))
         return [(warp_t(sig, m, a1, b1), t1, 1.0), (warp_t(sig, m, a2, b2), t2, ordp[gi]['has_t'])]
 
-    def ot_ce(a, sig, b, tau, gw, gi=0):
+    def entropic_plan(la, lb, Cd, e_min):
+        """(plan (B, N, M), dual potential f (B, N)) of the entropic OT of log weights la (B, N), lb (B, M) and cost Cd
+        (B, N, M), regularisation annealed down to e_min."""
+        f, g_ = torch.zeros_like(la), torch.zeros_like(lb)
+        e = max(float(Cd.max()), e_min)
+        while True:
+            g_ = -e * torch.logsumexp((f[:, :, None] - Cd) / e + la[:, :, None], dim=1)
+            f = -e * torch.logsumexp((g_[:, None, :] - Cd) / e + lb[:, None, :], dim=2)
+            if e <= e_min:
+                break
+            e = max(e * sink_scaling, e_min)
+        for _ in range(20):
+            g_ = -e * torch.logsumexp((f[:, :, None] - Cd) / e + la[:, :, None], dim=1)
+            f = -e * torch.logsumexp((g_[:, None, :] - Cd) / e + lb[:, None, :], dim=2)
+        return torch.exp((f[:, :, None] + g_[:, None, :] - Cd) / e + la[:, :, None] + lb[:, None, :]), f
+
+    def ot_ce(a, sig, b, tau, gw, gi=0, plan=False):
         """Entropic OT (B batches) between sigma (B, N, Gt) of weights a (B, N) and targets tau (B, M, Gt) of weights
         b (B, M), ground cost the weighted network cost (cross-entropy, or the ordinal cost: sum of the cross-entropies
         of the two warps of group gi, both linear in their targets; gw (Gt,), mode_weights); value <pi, C>, gradient
-        pi in C and the dual potential f in the weights a (envelope of the entropic OT: the branching weights)."""
+        pi in C and the dual potential f in the weights a (envelope of the entropic OT: the branching weights); plan:
+        the optimal plan pi (B, N, M) instead."""
         C = 0.0
         for sg, tg, wk in warped(gi, sig, tau):
             w_ = gw * wk
@@ -422,19 +444,9 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
             C = C - (ls @ (w_ * tg).transpose(1, 2) + l1s @ (w_ * (1 - tg)).transpose(1, 2))  # (B, N, M)
         la, lb = torch.log(a.clamp(min=1e-300)), torch.log(b)
         with torch.no_grad():
-            Cd = C.detach()
-            f, g_ = torch.zeros_like(la), torch.zeros_like(lb)
-            e = max(float(Cd.max()), ce_eps)
-            while True:
-                g_ = -e * torch.logsumexp((f[:, :, None] - Cd) / e + la[:, :, None], dim=1)
-                f = -e * torch.logsumexp((g_[:, None, :] - Cd) / e + lb[:, None, :], dim=2)
-                if e <= ce_eps:
-                    break
-                e = max(e * sink_scaling, ce_eps)
-            for _ in range(20):
-                g_ = -e * torch.logsumexp((f[:, :, None] - Cd) / e + la[:, :, None], dim=1)
-                f = -e * torch.logsumexp((g_[:, None, :] - Cd) / e + lb[:, None, :], dim=2)
-            pi = torch.exp((f[:, :, None] + g_[:, None, :] - Cd) / e + la[:, :, None] + lb[:, None, :])
+            pi, f = entropic_plan(la, lb, C.detach(), ce_eps)
+        if plan:
+            return pi
         return (pi * C).sum(dim=(1, 2)) + (f * (a - a.detach())).sum(dim=1)
 
     # null_dev_weights, per group, on the positions tau of the hard modes of its observed cells ('hard': the basins, as
@@ -467,12 +479,13 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
         w = np.ones(G - ns) if g.get('gmask') is None else np.asarray(g['gmask'][ns:], dtype=float)
         return torch.tensor(w * w_dev[gi] / 2 if null_dev_weights else w / 4, dtype=f64)
 
-    def windows_loss(p_sel, H, full=False, copies=None):
+    def windows_loss(p_sel, H, full=False, copies=None, collect=None):
         """Mean loss of the windows starting at the observed times of rank p_sel of each group and spanning H of its
         observed intervals (all of them if fewer), all windows of a group in one batch: one batched Sinkhorn per
         interval (targets resampled to a common size; full: fixed draws of the targets). copies (C,) targets: every
         window repeated as C null copies (the copy c with the column copies[c] of the null model nctx, against the
-        draws g['copy_draws'][c] when present); sum over the copies of their mean losses."""
+        draws g['copy_draws'][c] when present); sum over the copies of their mean losses. collect (list): the simulated
+        states of each comparison appended, with the observed kon transported on them (export_states)."""
         loss, n_terms = 0.0, 0
         C = 1 if copies is None else len(copies)
         for gi, g in enumerate(groups):
@@ -597,6 +610,23 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                                       dtype=f64)
                     gm_ = units(gi, g, mrna=True)
                     loss = loss + w_term['mrna'] * (wv * sink(wts, Mn[obs][..., ns:] / gm_, u, Ym / gm_)).sum()
+                if collect is not None:  # simulated states and the observed kon transported on them by the plan
+                    with torch.no_grad():
+                        lo, hi = tens[gi]['k_lo'][ns:], tens[gi]['k_hi'][ns:]
+                        span = torch.clamp(hi - lo, min=1e-12)
+                        if mode_cost != 'euclidean':
+                            pi = ot_ce(wts, ((kon_c - lo) / span).clamp(0.0, 1.0), u,
+                                       ((Y - lo) / span).clamp(0.0, 1.0), mode_weights(gi, g), gi, plan=True)
+                        else:
+                            gk = units(gi, g)
+                            Cd = 0.5 * (((kon_c[:, :, None, :] - Y[:, None, :, :]) / gk) ** 2).sum(-1)
+                            pi = entropic_plan(torch.log(wts.clamp(min=1e-300)), torch.log(u), Cd, blur ** 2)[0]
+                        bary = (pi @ Y) / pi.sum(-1, keepdim=True).clamp(min=1e-300)
+                    for j, w in enumerate(obs):
+                        kon_full = np.zeros((bary.shape[1], G))
+                        kon_full[:, ns:] = bary[j].numpy()
+                        collect.append(dict(gi=gi, t=int(tw[w] + 1), P=P[w].detach().numpy().copy(), kon=kon_full,
+                                            w=wts[j].detach().numpy().copy()))
                 n_terms += float(wv.sum()) / C
         nctx['cols'] = None
         return loss / max(n_terms, 1)
@@ -936,6 +966,25 @@ def fit_free_running(groups, times, ns, theta, basal, d1, eps, scale, mode='sde1
                       f"QUT per target " + np.array2string(lam2[ns:], precision=4), flush=True)
             train(adam([th, ba], [ld, le, ls], prolif=True), epochs, prox=prox_l1, prolif=bool(pl))
     hist['after'] = full_loss()
+    if export_states:  # trajectories of the fitted model at each observed time, with their transported targets
+        states = []
+        st = torch.get_rng_state()
+        torch.manual_seed(seed + 1)
+        with torch.no_grad():
+            windows_loss([0], T1, full=True, collect=states)
+        torch.set_rng_state(st)
+        for gi, g in enumerate(groups):  # initial states against the modes of their own cells
+            if not len(obs_t[gi]):
+                continue
+            t_f = obs_t[gi][0]
+            sl = init_tg[gi][0]
+            rows = g['init_idx'] if g.get('init_idx') is not None else slice(None)
+            P0 = np.array(g['X'][t_f][sl], dtype=float)
+            P0[:, :ns] = np.asarray(g['stim0'], dtype=float)
+            kon0 = np.array(g['targets'][t_f][rows], dtype=float)
+            kon0[:, :ns] = 0.0
+            states.append(dict(gi=gi, t=int(t_f), P=P0, kon=kon0, w=np.full(len(P0), 1.0 / max(len(P0), 1))))
+        hist['states'] = states
 
     full_t = lambda p, lo, hi: np.broadcast_to(np.exp(np.clip(p.detach().numpy(), lo, hi)), (n_cond, T1, G)).copy()
     theta_new = signed_theta().detach().numpy()

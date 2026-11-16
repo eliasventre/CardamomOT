@@ -15,7 +15,8 @@ the most recent cardamomOT/adata_sim_stim*_prior*.h5ad (fallback: model defaults
 Required input files:
     - Data/data_<split>.h5ad: observed data (obs['time'], optionally obs['cell_type'])
     - cardamomOT/adata_{rna_traj,beta,theta,sim}_stim*_prior*.h5ad: from check_sim_to_data.py
-    - cardamomOT/inter_simul.npy: inferred network
+    - cardamomOT/inter_simul.npy: inferred network (edges and signs)
+    - cardamomOT/importance_simul.npy: importance of each regulation of inter_simul (network shown)
 Optional:
     - perturbation_simulation sheet + cardamomOT/adata_sim_KO_*_stim*_prior*.h5ad: from check_KOV_to_sim.py
     - cardamomOT/adata_prot_{traj,simul}_stim*_prior*.h5ad

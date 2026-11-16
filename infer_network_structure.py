@@ -20,6 +20,8 @@ Required input files:
 
 Output files:
     - cardamom/inter.npy: gene interaction matrix (G×G)
+    - cardamom/importance.npy: signed importance of each regulation (share of the deviance of its target explained by
+      its regulators, split in proportion to |theta|), as inter
     - cardamom/basal.npy: basal expression parameters per sample (n_samples×G)
     - cardamom/alpha.npy: cellular scaling factors
     - cardamomOT/couplings.npz: final soft couplings of the trajectories between consecutive observed times
@@ -417,16 +419,20 @@ def main(argv):
     np.save(os.path.join(cardamom_dir, 'inter_t'), model.inter_t)
     np.save(os.path.join(cardamom_dir, 'basal_tmp'), model.basal_tmp)
     np.save(os.path.join(cardamom_dir, 'inter_tmp'), model.inter_tmp)
-    # EBIC selection of the regulators (network_bic_pruning): one row per target (and condition fitted apart)
+    # Signed importance of each regulation (comparable between targets): network shown in the reports
+    if model.importance is not None:
+        np.save(os.path.join(cardamom_dir, 'importance'), model.importance)
+    # EBIC selection of the regulators (last pruning pass): one row per target, condition fitted apart and sub-sample
     bic_path = os.path.join(cardamom_dir, 'network_bic_selection.csv')
     bic_tab = getattr(model, 'network_bic_table', None)
     if bic_tab:
-        pd.DataFrame([{'target': genes_list[r['target']], 'condition': r['condition'],
+        pd.DataFrame([{'target': genes_list[r['target']], 'condition': r['condition'], 'fit': r.get('fit', 0),
                        'n_candidates': r['n_candidates'], 'k': r['k'],
                        'kept': ';'.join(genes_list[j] for j in r['kept']),
+                       'deviance_0': r.get('dev0', np.nan), 'deviance_scale': r.get('scale', np.nan),
                        'path_k': ';'.join(str(k) for k, _, _ in r['scores']),
                        'path_deviance': ';'.join(f'{d:.4g}' for _, d, _ in r['scores']),
-                       'path_ebic': ';'.join(f'{e:.4g}' for _, _, e in r['scores'])} for r in bic_tab]
+                       'path_criterion': ';'.join(f'{e:.4g}' for _, _, e in r['scores'])} for r in bic_tab]
                      ).to_csv(bic_path, index=False)
     elif os.path.exists(bic_path):
         os.remove(bic_path)

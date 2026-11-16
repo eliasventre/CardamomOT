@@ -21,6 +21,7 @@ Required input files:
 Output files:
     - cardamom/basal_simul.npy, inter_simul.npy: simulation-ready parameters
     - cardamom/basal_t_simul.npy, inter_t_simul.npy: temporal parameters
+    - cardamom/importance_simul.npy: signed importance of each regulation of the simulation network (reports)
     - cardamom/ratios.npy: parameter ratios
     - cardamom/degradations_temporal.npy: temporal degradation rates
     - cardamom/data_state_rates.npz: birth and death rates of the trajectory states, consistent with the net growth
@@ -280,6 +281,9 @@ def main(argv):
         np.save(os.path.join(cardamom_dir, 'inter_simul'), model.inter)
         np.save(os.path.join(cardamom_dir, 'basal_t_simul'), model.basal_t)
         np.save(os.path.join(cardamom_dir, 'inter_t_simul'), model.inter_t)
+        # Signed importance of each regulation of the simulation network (network shown in the reports)
+        if model.importance_simul is not None:
+            np.save(os.path.join(cardamom_dir, 'importance_simul'), model.importance_simul)
         stim_names = ['Stimulus'] if ns == 1 else [f'Stimulus_{i}' for i in range(ns)]
         model.save_network_conditions(cardamom_dir, gene_names=stim_names + list(adata.var_names), suffix='_simul')
         np.save(os.path.join(cardamom_dir, 'ratios'), model.ratios)

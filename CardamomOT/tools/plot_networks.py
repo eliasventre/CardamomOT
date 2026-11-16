@@ -175,11 +175,12 @@ def reseau_top_regulateurs(matrix, gene_names=None,
     return G
 
 
-def plot_network(p, seuil=0.3, net_toplot='inter_simul', train="full", ns=1, sample_index=0):
+def plot_network(p, seuil=0.3, net_toplot='importance_simul', train="full", ns=1, sample_index=0):
     """Visualise the inferred GRN for a project directory.
 
-    Loads ``net_toplot.npy`` and plots the top regulators using
-    :func:`analyse_reseau` and :func:`reseau_top_regulateurs`.
+    Loads ``net_toplot.npy`` (default: the signed importance of each regulation of the simulation network, comparable
+    between targets) and plots
+    the top regulators using :func:`analyse_reseau` and :func:`reseau_top_regulateurs`.
 
     Parameters
     ----------

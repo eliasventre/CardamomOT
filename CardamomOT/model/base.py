@@ -55,7 +55,7 @@ EPS=1e-16
 RENAMED_PARAMETERS = {'max_iter_kinetics': 'max_iter_softEM', 'cell_depth_for_embeddings': 'cell_depth_for_representation',
                       'simulate_full_with_harissa': 'simulation_mrnas_direct',
                       'condition_kinetics': 'degradation_rates_per_condition',
-                      'grid_levels': 'max_grid_levels'}
+                      'grid_levels': 'max_grid_levels', 'network_bic_pruning': 'network_bic_pruning_end'}
 
 REMOVED_PARAMETERS = {
     'mixture_middle_nodes': 'replaced by mixture_transit_nodes: levels in each interval between adjacent modes (the transitions; the central mode stays a single NB)',
@@ -70,6 +70,8 @@ REMOVED_PARAMETERS = {
     'min_mode_weight': 'the number of modes is chosen by mixture_selection_criterion (min_mixture_components = 1 lets a gene keep one mode)',
     'min_mode_ratio': 'the number of modes is chosen by mixture_selection_criterion (min_mixture_components = 1 lets a gene keep one mode)',
     'min_mode_weight_integration': 'the number of modes is chosen by mixture_selection_criterion',
+    'n_network_fits': 'the network sub-sample fits cover every state at every update (no cap on their number)',
+    'network_bic_separate': 'the EBIC pruning is always per sub-sample fit',
     'min_mode_ratio_integration': 'the number of modes is chosen by mixture_selection_criterion',
     'soft_em_refinement': 'the soft EM with masses per time (max_iter_softEM) removes the truncation bias of the CEM',
     'late_protein_for_autoregulation': 'removed (the mRNA memory, targets_accounting_late_mrna, lags every regulator)',
@@ -289,6 +291,8 @@ class NetworkModel:
         self.inter_t = None
         self.basal_tmp = None
         self.inter_tmp = None
+        self.importance = None             # signed importance of each regulation of fit_network (_network_importance), as inter
+        self.importance_simul = None       # same for the simulation network (refine_network_degradations)
         self.ratios = None
         self.times_data = None
         self.times_simul = None
@@ -372,7 +376,7 @@ class NetworkModel:
         self.targets_accounting_late_mrna = False # True: the mRNA of a cell reflects its burst frequency over ~1 / d0 before the observation (d0 >= min_ratio x d1): every comparison of sigma with the mode of a cell (network fit, OT, basin updates, stopping error, score of the model learning, free-running fit, kon_theta, simulated counts) takes sigma along the memory of its mRNA (late_mrna_nodes); the forcing switches (alpha) when the network commits, delayed by the equivalent step of the mRNA when the forcing is the mRNA level (adaptive shrinkage, no mrna_bridge)
         self.late_mrna_nodes = 4 # with targets_accounting_late_mrna, for the network fit, the stopping error, the basin updates and the score of the model learning: 1 = single lagged node per class of targets (late_mrna_classes): sigma at the proteins (1 - exp(-d0 dt)) / d0 before the state, the mean of the memory kernel truncated at the start of the interval; Q >= 2 = sigma averaged on Q nodes over the last min(interval, 5 / d0) hours with the weights d0 exp(-d0 (t - s)) of each target (mass before the window on the earliest node), Q + 1 evaluations of sigma. The OT, the free-running fit, kon_theta and the simulated counts, which evaluate sigma many times, always use the single lagged nodes
         self.late_mrna_classes = 3 # with targets_accounting_late_mrna: classes of the targets by d0 (equal sizes), each with its single lagged node (the mean lag of its genes): sigma of each target at the lag of its class, cost x classes of the single node
-        self.weight_flow_matching = 0.4 # weight of the flow-matching term of the network fits (end-state term: 1 - weight), ramped from 0 at the first iteration to this value at min_n_loops
+        self.weight_flow_matching = 1/3 # weight of the flow-matching term of the network fits (end-state term: 1 - weight), ramped from 0 at the first iteration to this value at min_n_loops
         self.flow_matching_nodes = 1 # flow matching: nodes in each interval around the switch a of the state (mean of the alphas of the genes that change mode): just after it (a + 0.1, at a when a >= 1/2), then equally spaced on [0, a] and [a, 1] alternately; equally weighted, the regulators at their protein states there and the target at its kon in force (mode of the start state before its switch alpha, of the end state after it)
                    
         # Per-cell sequencing depth
@@ -405,7 +409,7 @@ class NetworkModel:
         self.intensity_prior = 100 # mRNA term of the OT cost while n_iter <= intensity_prior (decreasing weight); < 1: random couplings at the first iteration, then network term only
         self.quant_samples = .95 # Quantile of cells number per sample to use for inference
         # Protein trajectories: forcing by the modes or the observed mRNA, scales
-        self.inference_mrnas_direct = True # True: fit_network trajectories driven by the observed mRNA (shrunk modes, adaptive_shrinkage); False: by the modes only
+        self.inference_mrnas_direct = False # True: fit_network trajectories driven by the observed mRNA (shrunk modes, adaptive_shrinkage); False: by the modes only
         self.mrna_bridge = True # True: proteins from the linear mRNA bridges between observed mRNAs (prot_bridge_end, d0 >= min_ratio d1); False: shrunk modes (adaptive_shrinkage)
         self.scale_proteins = 1 # Eventually rescale protein values (recommended:1-2)
         self.scale_mrnas = 100 # Eventually rescale mRNA values (recommended:100)
@@ -417,18 +421,17 @@ class NetworkModel:
         self.qut_level = 0.05 # network fits: sparsity level = quantile universal threshold, level-quantile of the largest gradient at the null model under permuted targets (probability that no null edge enters a target without regulator); first fit, and refinement (garrote: its own threshold, theta of the first fit fixed)
         self.qut_n_perm = 20 # network fits: permutations of the target per fit for the quantile universal threshold
         self.network_ridge = 20 # network fits: Gaussian prior on the effect of each edge on the logit (w theta sd of the regulator), sd 2 logit(1 - 1/network_ridge); bounds the edges of nearly separable targets
-        self.network_relaxed = True # network fits: refinement without penalty (relaxed lasso): the first fit (QUT + ridge) sets the support and signs, the refinement re-estimates the effects on it without the L1 shrinkage, keeping the ridge (network_ridge) and the bounds; False: adaptive lasso at its own QUT
+        self.network_relaxed = False # network fits: refinement without penalty (relaxed lasso): the first fit (QUT + ridge) sets the support and signs, the refinement re-estimates the effects on it without the L1 shrinkage, keeping the ridge (network_ridge) and the bounds; False: adaptive lasso at its own QUT
         self.max_bound = 3 # network fits, adaptive-lasso refinement (network_relaxed False): corrections c_e (theta_e = c_e theta_tmp_e) in [0, max_bound] along the loops (_refine_max_bound)
-        self.refine_max_bound = 3 # network fits, relaxed refinement (network_relaxed True) and every fit out of the loops (final refit): corrections c_e (theta_e = c_e theta_tmp_e) in [0, refine_max_bound]
-        self.network_bic_pruning = True # end of fit_network: regulators of each target selected by an extended BIC along the path of their strengths (|theta| sd of the regulator), refits without L1 on the k strongest; the strongest always kept; refine_network_degradations keeps this support
-        self.network_bic_in_loop = True # network_bic_pruning: also after every network update of the EM loop from min_n_loops + 1 on (trajectories, basins and alphas then built on the pruned network); the final pass is kept
-        self.network_bic_gamma = 1.0 # network_bic_pruning: EBIC term 2 gamma log(candidates) per edge, on top of log(real cells)
-        self.network_bic_min_gain = 0.2 # network_bic_pruning: a group of regulators enters only if it brings at least min_gain / m of the deviance gain from the strongest group to the best point of the path, m = min(sqrt(genes), network_bic_max_regulators) the expected regulators per gene (effect size; the EBIC alone keeps small shortcuts at large n)
-        self.network_bic_max_regulators = 20 # network_bic_pruning: cap of the expected regulators per gene m in the effect-size threshold (the in-degree saturates in large networks)
-        self.network_bic_swap = 0.8 # network_bic_pruning: where the next regulator of the path is at least this fraction as strong as the last one kept (ambiguous order), it is also tried in its place (0: off)
-        self.network_bic_tie = 0.01 # network_bic_pruning: regulators whose strengths (effect on the logit) are less than this apart enter or leave together (chains split into pairs)
+        self.refine_max_bound = 3 # network fits, relaxed refinement (network_relaxed True), EBIC path (network_bic_in_loop / _end, times S / S_A) and every fit out of the loops (final refit): corrections c_e (theta_e = c_e theta_tmp_e) in [0, refine_max_bound]
+        self.network_bic_pruning_end = True # end of fit_network: regulators of each target selected by an extended BIC along the path of their strengths (|theta|, the proteins being normalised per gene), refits without L1 on the k strongest; the strongest always kept; always per sub-sample of the network fits (each fit pruned on its own states, then averaged: n of the same order everywhere, edges kept by some fits only shrink in the mean), the path from the first fit of each (core_inference, corrections up to refine_max_bound S / S_A) in place of its refinement (from the current network if it changed since the fits); skipped when network_bic_in_loop pruned the network in the loop; refine_network_degradations keeps this support (refinement by the free-running fit, and its network refit with sde_refit_network or refine_theta_with_sde = False: zeros kept, no pruning), except with sde_free_theta (network learned from scratch)
+        self.network_bic_in_loop = False # EBIC pruning of every network update of the EM loop from min_n_loops + 1 on, once the family selection of model_learning_grn is over (trajectories, basins and alphas then built on the pruned network): the path from the first fit (core_inference) replaces the refinement (corrections up to refine_max_bound S / S_A, its point with every candidate being the relaxed refinement); when it ran, no end pass (network_bic_pruning_end)
+        self.network_bic_gamma = 0.5 # EBIC pruning: EBIC term 2 gamma log(candidates) per edge, on top of log(real cells)
+        self.network_bic_max_regulators = 10 # EBIC pruning: hard cap of the regulators per target tested along the path (the weaker candidates removed; None: no cap)
+        self.network_bic_min_gain = .05 # EBIC pruning: effect size, each edge costs max(EBIC term, min_gain x E), E the deviance explained by the regulators of the target (from the refit without candidate regulator to the best point of the path); the point of the path with the least deviance + edges x cost is kept (an edge must bring on average at least min_gain of what the network explains for its target, so at most 1 / min_gain edges; the EBIC alone keeps small shortcuts at large n)
+        self.network_bic_swap = 0 # EBIC pruning: where the next regulator of the path is at least this fraction as strong as the last one kept (ambiguous order), it is also tried in its place (0: off)
+        self.network_bic_tie = 0.1 # EBIC pruning: regulators whose strengths |theta| are less than this apart enter or leave together (chains split into pairs)
         self.batch_size_network = 100 # Cells per network sub-sample (stratified by time and sample); raised to 10 x the parameters of a target-gene fit if lower; None = that floor
-        self.n_network_fits = 10 # Theta = mean of min(n_network_fits, 1 + n_states // batch_size) fits on disjoint subsamples, at every network update
         # Penalization/prior information
         self.stimulus = 1.0 # 1 if we simulate with a stimulus. If not we can penalize the stimulus with a value between 1 and 0: 0 = no sitmulus
         self.prior_network_pen = 1.0 # 1 if we don't use prior information. If not we can penalize the non-existing age in prior network with values between 1 and 0: 0 = impossible edge
@@ -1539,49 +1542,155 @@ class NetworkModel:
             return float(self.max_bound)
         return float(self.refine_max_bound)
 
+    def _bic_settings(self, sels, y_real, **mode):
+        """Settings of bic_prune_gene for each sub-sample sels (index arrays of the states): ratio = real cells behind
+        its states (n of its EBIC), mode: fit / core (main_loop_inference); bound of the path from a first fit:
+        refine_max_bound (its point with every candidate being the relaxed refinement)."""
+        y_real = np.asarray(y_real)
+
+        def ratio(sel):
+            rr = y_real[sel]
+            return len(np.unique(rr[rr >= 0])) / max(len(sel), 1)
+        bic = dict(gamma=self.network_bic_gamma, tie=self.network_bic_tie, swap=self.network_bic_swap,
+                   min_gain=self.network_bic_min_gain, max_regulators=self.network_bic_max_regulators,
+                   max_bound=float(self.refine_max_bound), **mode)
+        return [dict(bic, ratio=ratio(sel), n=ratio(sel) * len(sel)) for sel in sels]
+
+    def _bic_collect(self, fits, bic, inits=None, tmps=None, verb=True):
+        """Fits of inference_network_multi with bic_prune (settings bic per fit) -> (basal, inter, basal_tmp, inter_tmp,
+        edge thresholds, None), the selections in self.network_bic_table. inits: network given to the pruning of each
+        fit, tmps: its (basal_tmp, inter_tmp) (None: the first fit of the fit itself, 'fit' mode); the pruned edges are
+        removed from inter_tmp."""
+        self.network_bic_table = [dict(r, fit=k) for k, f in enumerate(fits) for r in (f[5] or [])]
+        out = []
+        for k, f in enumerate(fits):
+            init = f[3] if inits is None else inits[k]
+            b_tmp, i_tmp = (f[2], f[3]) if tmps is None else tmps[k]
+            inter_new = f[1]
+            if np.ndim(init) == 3 and np.ndim(inter_new) == 2:
+                inter_new = np.repeat(inter_new[None], np.shape(init)[0], axis=0)
+            removed = (np.asarray(init) != 0) & (inter_new == 0)
+            out.append((f[0], inter_new, b_tmp, np.where(np.broadcast_to(removed, np.shape(i_tmp)), 0.0, i_tmp),
+                        f[4], None))
+        if verb:
+            n_c = sum(r['n_candidates'] for r in self.network_bic_table)
+            n_k = sum(r['k'] for r in self.network_bic_table)
+            n = np.mean([b['n'] for b in bic])
+            print(f"[fit_network] EBIC pruning{f' of {len(fits)} sub-sample fits' if len(fits) > 1 else ''}: {n_k} "
+                  f"edges kept out of {n_c} (n = {n:.0f} real cells{' per fit' if len(fits) > 1 else ''}, "
+                  f"min gain {self.network_bic_min_gain:.3f})")
+        return out
+
+    def _bic_due(self, n_iter, min_n_loops, model_learning, ml_freeze, hard_forcing_ref, verb=True):
+        """True when the network fit of iteration n_iter is pruned (network_bic_in_loop): after min_n_loops, once the
+        family selection of model_learning_grn is over; never with hard_forcing_ref or the mixed model."""
+        due = self.network_bic_in_loop and n_iter > min_n_loops and (not model_learning or n_iter >= ml_freeze)
+        if due and (hard_forcing_ref or self._mixed_prior() is not None):
+            if verb:
+                print("[fit_network] EBIC pruning skipped (hard_forcing_ref or mixed model)")
+            return False
+        return due
+
+    def _bic_end_due(self, pruned_in_loop, verb=True):
+        """True when the end pass of the EBIC pruning runs (network_bic_pruning_end): not when the loop pruned the
+        network already (network_bic_in_loop), which would prune it twice."""
+        if not self.network_bic_pruning_end:
+            return False
+        if pruned_in_loop and verb:
+            print("[fit_network] EBIC pruning at the end skipped: the network was pruned in the loop")
+        return not pruned_in_loop
+
     def _bic_prune_network(self, rows, y_samples, targets, y_prot, ks, basal, inter, inter_tmp, samples_id, y_real,
-                           basal_ref, inter_ref, hard_forcing_ref, ref_constraint_pct, y_prot_mem=None, verb=True):
-        """network_bic_pruning: regulators of each target selected by an extended BIC (bic_prune_gene) on the states rows,
-        with the data term of the network fits (row weights of fit_network_balance), n = the real cells behind them; selections in self.network_bic_table. Returns (basal, inter, inter_tmp), the
-        pruned edges also removed from inter_tmp."""
+                           basal_ref, inter_ref, hard_forcing_ref, ref_constraint_pct, y_prot_mem=None, y_prot_mod=None,
+                           weight_fm=0.0, dist_targets=None, verb=True):
+        """EBIC pruning at the end of fit_network: regulators of each target selected by an extended BIC
+        (bic_prune_gene) with the data terms of the network fits (row weights of fit_network_balance, flow matching
+        y_prot_mod at weight_fm, distribution term dist_targets), n = the real cells behind the states. Always per
+        sub-sample (n of the same order everywhere): each sub-sample fit of the last update (_last_fits) pruned on its
+        own states from its first fit (core_inference, the path in place of its refinement: corrections up to
+        refine_max_bound S / S_A), then averaged (_mean_fit); when the network changed since these fits (model
+        learning, refine_in_loop), the current network pruned on each of these sub-samples (corrections up to S / S_A);
+        without sub-sample fits of these states, the network pruned on the states rows.
+        Selections in self.network_bic_table. Returns (basal, inter, inter_tmp), the pruned edges also removed from
+        inter_tmp."""
         self.network_bic_table = None
-        if not self.network_bic_pruning:
-            return basal, inter, inter_tmp
         if hard_forcing_ref or self._mixed_prior() is not None:
-            print("[fit_network] network_bic_pruning skipped (hard_forcing_ref or mixed model)")
+            print("[fit_network] EBIC pruning skipped (hard_forcing_ref or mixed model)")
             return basal, inter, inter_tmp
-        rows = np.asarray(rows)
-        rr = np.asarray(y_real)[rows]
-        ratio = len(np.unique(rr[rr >= 0])) / max(len(rows), 1)
-        # Expected regulators per gene: sqrt of the genes (largest gene set of a condition), capped
-        n_genes = np.shape(inter)[-1] - self.n_stimuli if self.gene_mask is None else \
-            int(np.asarray(self.gene_mask, dtype=bool)[:, self.n_stimuli:].sum(axis=1).max())
-        m_exp = float(np.clip(np.sqrt(max(n_genes, 1)), 1.0, self.network_bic_max_regulators))
-        mb, self._max_bound_now = getattr(self, '_max_bound_now', None), None  # refits within refine_max_bound
-        pkw = self._penalty_kw(ks, y_real, targets, y_samples)
-        self._max_bound_now = mb
-        fit = inference_network_multi(
-            [rows], y_samples, targets, y_prot, None, ks, n_stimuli=self.n_stimuli, samples_id=samples_id,
-            ref_network=self.ref_network, basal_init=basal, inter_init=inter, basal_ref=basal_ref, inter_ref=inter_ref,
-            weight_flow_matching=0.0, final=0, constrain_basal_uniform=self.constrain_basal_uniform,
+        last = getattr(self, '_last_fits', None)
+        separate = last is not None and last[0] == len(y_samples)
+        if not separate:
+            print("[fit_network] EBIC pruning: no sub-samples of these states, network pruned on all of them")
+        sels = last[1] if separate else [np.asarray(rows)]
+        core = separate and last[2] is not None  # first fits of the last update available
+        nets = last[2] if core else [(basal, inter, basal, inter_tmp)] * len(sels)
+        b_init = [f[2] if core else f[0] for f in nets]
+        i_init = [f[3] if core else f[1] for f in nets]
+        bic = self._bic_settings(sels, y_real, core=core)
+        fits = inference_network_multi(
+            list(sels), y_samples, targets, y_prot, y_prot_mod if weight_fm > 0 else None, ks,
+            n_stimuli=self.n_stimuli, samples_id=samples_id,
+            ref_network=self.ref_network, basal_init=b_init, inter_init=i_init,
+            basal_ref=basal_ref, inter_ref=inter_ref,
+            weight_flow_matching=weight_fm, final=0, constrain_basal_uniform=self.constrain_basal_uniform,
             hard_forcing_ref=hard_forcing_ref, ref_constraint_pct=ref_constraint_pct,
             seuil_min_network_intensity=self.seuil_min_network_intensity,
             sample_conditions=self.sample_conditions, condition_pen=self.network_condition_pen,
             gene_mask=self.gene_mask, sigma_spec_grn=self._spec_grn(), y_prot_mem=y_prot_mem,
-            bic_prune=dict(ratio=ratio, gamma=self.network_bic_gamma, tie=self.network_bic_tie, swap=self.network_bic_swap,
-                           min_gain=self.network_bic_min_gain / m_exp), **pkw)[0]
-        self.network_bic_table = fit[5]
+            dist_targets=dist_targets, bic_prune=bic, **self._penalty_kw(ks, y_real, targets, y_samples))
+        pruned = self._bic_collect(fits, bic, inits=i_init, tmps=[(f[2], f[3]) for f in nets], verb=verb)
+        if separate:
+            self._last_fits = (last[0], sels, pruned)
+        basal_new, inter_new, _, inter_tmp_new = self._mean_fit(pruned)  # edges below the threshold removed
+        return basal_new, inter_new, inter_tmp_new
+
+    def _network_importance(self, rows, y_samples, targets, y_prot, ks, basal, inter, samples_id, y_real, basal_ref,
+                            inter_ref, y_prot_mem=None, verb=True, tag='fit_network'):
+        """Signed importance of each regulation of the network (basal, inter) on the states rows (importance_gene: share
+        of the deviance left by the basals and self-regulation of its target that the regulators explain, split among
+        them in proportion to |theta|: comparable between targets and families of sigma), with the sign of the
+        regulation; laid out as inter. Every edge of the network is scored, in ref_network or not (hard_forcing_ref)."""
+        present = np.asarray(inter, dtype=float) != 0
+        present = present.any(axis=0) if present.ndim == 3 else present
+        ref = np.where(present & (self.ref_network == 0), 1.0, self.ref_network)
+        imp = inference_network_multi(
+            [np.asarray(rows)], y_samples, targets, y_prot, None, ks, n_stimuli=self.n_stimuli, samples_id=samples_id,
+            ref_network=ref, basal_init=basal, inter_init=inter, basal_ref=basal_ref, inter_ref=inter_ref,
+            weight_flow_matching=0.0, final=0, constrain_basal_uniform=self.constrain_basal_uniform,
+            seuil_min_network_intensity=self.seuil_min_network_intensity,
+            sample_conditions=self.sample_conditions, condition_pen=self.network_condition_pen,
+            gene_mask=self.gene_mask, sigma_spec_grn=self._spec_grn(), y_prot_mem=y_prot_mem,
+            importance=True, **self._penalty_kw(ks, y_real, targets, y_samples))[0][5]
+        imp = np.sign(np.asarray(inter, dtype=float)) * np.nan_to_num(np.broadcast_to(imp, np.shape(inter)))
         if verb:
-            n_c = sum(r['n_candidates'] for r in fit[5])
-            n_k = sum(r['k'] for r in fit[5])
-            print(f"[fit_network] network_bic_pruning: {n_k} edges kept out of {n_c} "
-                  f"(n = {ratio * len(rows):.0f} real cells, min gain {self.network_bic_min_gain / m_exp:.3f})")
-        basal_new, inter_new = fit[0], fit[1]
-        if np.ndim(inter) == 3 and np.ndim(inter_new) == 2:
-            inter_new = np.repeat(inter_new[None], np.shape(inter)[0], axis=0)
-        removed = (np.asarray(inter) != 0) & (inter_new == 0)
-        inter_tmp = np.where(np.broadcast_to(removed, np.shape(inter_tmp)), 0.0, inter_tmp)
-        return basal_new, inter_new, inter_tmp
+            a = np.abs(imp).copy()
+            idx = np.arange(a.shape[-1])
+            a[..., idx, idx] = 0.0  # self-regulations left out of the summary
+            nz = a[a > 0]
+            print(f"[{tag}] Importance of the regulations (self-regulations aside): {nz.size} edges, median "
+                  f"{np.median(nz) if nz.size else 0:.3f}, max {nz.max() if nz.size else 0:.3f}")
+        return imp
+
+    def _simulation_importance(self, ks, samples_id, verb=True):
+        """Signed importance of the regulations of the simulation network (_network_importance): the network of the
+        intervals inter_t, basal_t (scale of theta included) averaged over them, on the trajectories of the free-running
+        fit at each observed time (self._sde_states: simulated proteins, targets = the observed kon transported on them
+        by the plan of the fit, initial states against their own cells), drawn by their branching weights. Laid out as
+        inter; None without these trajectories."""
+        states = getattr(self, '_sde_states', None)
+        if not states or self.inter_t is None:
+            return None
+        rng = np.random.default_rng(task_seed(self.seed, 11))
+        Y, K, S = [], [], []
+        for e in states:
+            n = len(e['P'])
+            w = np.asarray(e['w'], dtype=float)
+            idx = rng.choice(n, n, p=w / w.sum()) if w.sum() > 0 else np.arange(n)
+            Y.append(e['P'][idx]), K.append(e['kon'][idx]), S.append(np.full(n, int(e['sample'])))
+        Y, K, S = np.concatenate(Y), np.concatenate(K), np.concatenate(S)
+        basal_eff, inter_eff = np.mean(self.basal_t, axis=0), np.mean(self.inter_t, axis=0)
+        return self._network_importance(np.arange(len(Y)), S, K, Y, ks, basal_eff, inter_eff, samples_id,
+                                        np.full(len(Y), -1), None, None, verb=verb, tag='refine_network_degradations')
 
     def _penalty_kw(self, ks, y_real=None, y_kon=None, y_samples=None):
         """Penalties and data term of the network fits (inference_network_multi; ks: mixtures of the fit, for the
@@ -3228,10 +3337,22 @@ class NetworkModel:
                 strata[idx] = km.fit_predict(np.log1p(data_rna[np.ix_(idx, cols)]))
         return strata
 
-    def _n_params_per_target(self, active_cols, n_samples, apart=False):
-        """Largest parameter count of one target-gene fit: active regulators x network conditions + per-sample basals;
-        apart (network conditions fitted apart): {condition: count} of the fits of each condition alone (its genes and
-        samples)."""
+    def _effective_regulators(self, k, pruned=False):
+        """Regulators a target fit must resolve among k candidates: when this fit is pruned (EBIC path in place of the
+        refinement), which keeps at most s of them (s = 2 + 1 / network_bic_min_gain, the first group of the path being
+        at most a pair, and at most max(network_bic_max_regulators, 2)), min(k, s log k) (sparse recovery needs
+        ~ s log k states, not k); k otherwise (the refinement re-estimates every edge)."""
+        if k <= 1 or not pruned:
+            return k
+        s_max = 2 + 1 / self.network_bic_min_gain if self.network_bic_min_gain > 0 else np.inf
+        if self.network_bic_max_regulators is not None:
+            s_max = min(s_max, max(self.network_bic_max_regulators, 2))
+        return int(min(k, np.ceil(s_max * np.log(k))))
+
+    def _n_params_per_target(self, active_cols, n_samples, apart=False, pruned=False):
+        """Largest parameter count of one target-gene fit: effective regulators (_effective_regulators of the active
+        ones; pruned: the fit of this update is pruned) x network conditions + per-sample basals; apart (network
+        conditions fitted apart): {condition: count} of the fits of each condition alone (its genes and samples)."""
         ns = self.n_stimuli
         if apart and self.sample_conditions is not None:
             cond = np.asarray(self.sample_conditions)
@@ -3240,28 +3361,30 @@ class NetworkModel:
                 act = None if self.gene_mask is None else self.gene_mask[int(np.flatnonzero(cond == c)[0])]
                 k_c = max((len(cols) if act is None else int(act[cols].sum())
                            for g, cols in enumerate(active_cols) if g >= ns and (act is None or act[g])), default=0)
-                out[int(c)] = k_c + int(np.sum(cond == c))
+                out[int(c)] = self._effective_regulators(k_c, pruned) + int(np.sum(cond == c))
             return out
         k_max = max((len(c) for c in active_cols[ns:]), default=0)
         n_cond = 1 if self.sample_conditions is None else int(np.max(self.sample_conditions)) + 1
-        return k_max * n_cond + n_samples
+        return self._effective_regulators(k_max, pruned) * n_cond + n_samples
 
     def _network_batch_size(self, n_params):
         """Network sub-sample size: at least 10 states per parameter; batch_size_network (if not None) can only raise it."""
         floor = 10 * n_params
         return floor if self.batch_size_network is None else max(self.batch_size_network, floor)
 
-    def _fit_theta_averaged(self, fit_fn, times_vec, samples_vec, labels, n_fits, n_params, valid=None):
+    def _fit_theta_averaged(self, fit_fn, times_vec, samples_vec, labels, n_params, valid=None):
         """
         Theta from fit_fn(sels) (one fit per sub-sample, run jointly) on sub-samples of
         _network_batch_size(n_params) trajectory states,
         stratified by (time, sample) and cell type (labels, if not None). Mean over
-        min(n_fits, 1 + n_states // batch_size) disjoint sub-samples (covering every state
-        about once, at most n_fits); a single fit when one sub-sample holds every state.
+        disjoint sub-samples covering every state (at least 5, overlapping then); a single fit when one sub-sample
+        holds every state.
         Returns (basal, inter, basal_tmp, inter_tmp).
         """
-        sels = self._network_subsamples(times_vec, samples_vec, labels, n_fits, n_params, valid=valid)
-        return self._mean_fit(fit_fn(sels))
+        sels = self._network_subsamples(times_vec, samples_vec, labels, n_params, valid=valid)
+        fits = fit_fn(sels)
+        self._last_fits = (len(samples_vec), sels, fits)  # sub-sample fits of this update (EBIC pruning)
+        return self._mean_fit(fits)
 
     def _mean_fit(self, fits):
         """(basal, inter, basal_tmp, inter_tmp): mean of the fits on the sub-samples (NaN: condition absent from a
@@ -3274,7 +3397,7 @@ class NetworkModel:
             self.mixed_z = np.mean([f[5][1] for f in fits], axis=0)
         return tuple(out)
 
-    def _network_subsamples(self, times_vec, samples_vec, labels, n_fits, n_params, valid=None):
+    def _network_subsamples(self, times_vec, samples_vec, labels, n_params, valid=None):
         """Disjoint sub-samples (index arrays) of the network fits, see _fit_theta_averaged. n_params {condition:
         count} (conditions fitted apart): the sub-samples of each condition are drawn alone, as if it were inferred
         alone, and the k-th sub-sample holds the k-th one of every condition that has one."""
@@ -3284,7 +3407,7 @@ class NetworkModel:
             per_c, info = [], []
             for c, n_c in sorted(n_params.items()):
                 if np.any(keep & (cond_rows == c)):
-                    per_c.append(self._network_subsamples(times_vec, samples_vec, labels, n_fits, n_c,
+                    per_c.append(self._network_subsamples(times_vec, samples_vec, labels, n_c,
                                                           valid=keep & (cond_rows == c)))
                     info.append(self._net_batch_info)
             sels = [np.concatenate([s[k] for s in per_c if k < len(s)]) for k in range(max(len(s) for s in per_c))]
@@ -3295,9 +3418,8 @@ class NetworkModel:
         rows = np.arange(len(times_vec)) if valid is None else np.flatnonzero(valid)
         times_vec, samples_vec = np.asarray(times_vec)[rows], np.asarray(samples_vec)[rows]
         labels = None if labels is None else np.asarray(labels)[rows]
-        # Disjoint sub-samples covering as many states as possible (a single one if it holds them all)
-        n_fits = max(5, min(n_fits, 1 + len(times_vec) // batch_size))
-        sels, _ = grouped_partition([times_vec, samples_vec], batch_size, n_fits, labels)
+        # Disjoint sub-samples covering every state (at least 5, overlapping then; a single one if it holds them all)
+        sels, _ = grouped_partition([times_vec, samples_vec], batch_size, None, labels, min_parts=5)
         sels = [rows[sel] for sel in sels]
         self._net_batch_info = (int(np.mean([len(sel) for sel in sels])), len(sels), len(times_vec))  # for the iteration log
         return sels
@@ -3515,6 +3637,7 @@ class NetworkModel:
         target from the fit of its family; updates sigma_spec_grn.
         """
         from ..inference.sigma import set_family, family_index, family_name
+        self._last_fits = (len(y_samples), sels, None)  # network assembled per target: pruned on each sub-sample
         ns = self.n_stimuli
         cands = self._model_learning_candidates()
         spec = self.sigma_spec_grn
@@ -4022,13 +4145,15 @@ class NetworkModel:
         ramp_targets, model_learning, ml_start, ml_freeze = self._init_em_targets(
             G_tot, vect_t, vect_samples_id, samples_id, times, ks, min_n_loops, True, None, verb=verb)
         last_ml = None
+        pruned_in_loop = False  # EBIC pruning done in the loop: no end pass
 
-        def fit_theta(basal_start, inter_start, select=None, frozen=False):
+        def fit_theta(basal_start, inter_start, select=None, frozen=False, prune=False):
             # M-step: network fit(s) on (time, sample, cell type)-stratified subsamples of the real cells; frozen: one fit
-            # on all of them (variances of the mixed model)
-            def fit_on_spec(spec, b0, i0):
+            # on all of them (variances of the mixed model); prune: EBIC path in place of the refinement
+            def fit_on_spec(spec, b0, i0, prune=False):
                 def fit_on(sels):
-                    return inference_network_multi(
+                    bic = self._bic_settings(sels, y_real, fit=True) if prune else None
+                    fits = inference_network_multi(
                         sels, y_samples, self._network_targets(y_kon, y_real), P, None,
                         ks, n_stimuli=ns, samples_id=samples_id,
                         ref_network=self.ref_network, basal_init=b0, inter_init=i0,
@@ -4039,18 +4164,20 @@ class NetworkModel:
                         sample_conditions=self.sample_conditions, condition_pen=self.network_condition_pen,
                         gene_mask=self.gene_mask, sigma_spec_grn=spec,
                         dist_targets=self._distribution_targets(y_kon, y_real, y_samples, vect_t, ks, valid_cells),
-                        mixed=self._mixed_prior(),
+                        mixed=self._mixed_prior(), bic_prune=bic,
                         **self._penalty_kw(ks, y_real, self._network_targets(y_kon, y_real), y_samples))
+                    return fits if bic is None else self._bic_collect(fits, bic, verb=verb)
                 return fit_on
             if frozen:
                 return fit_on_spec(self._spec_grn(), basal_start, inter_start)([np.flatnonzero(valid_cells)])[0]
+            # Sub-samples sized for the pruned fit only when this update is pruned (else every candidate is refined)
             n_params = self._n_params_per_target(prev_cols, len(samples_id), apart=self.network_condition_pen == 0
-                                                 and self._mixed_prior() is None)
+                                                 and self._mixed_prior() is None, pruned=prune and not select)
             if not select:
-                return self._fit_theta_averaged(fit_on_spec(self._spec_grn(), basal_start, inter_start), vect_t,
-                                                y_samples, cell_types, self.n_network_fits, n_params,
+                return self._fit_theta_averaged(fit_on_spec(self._spec_grn(), basal_start, inter_start, prune), vect_t,
+                                                y_samples, cell_types, n_params,
                                                 valid=valid_cells)
-            sels = self._network_subsamples(vect_t, y_samples, cell_types, self.n_network_fits, n_params,
+            sels = self._network_subsamples(vect_t, y_samples, cell_types, n_params,
                                             valid=valid_cells)
             return self._select_sigma_families(fit_on_spec, sels, basal_start, inter_start, P, y_samples, y_real,
                                                ks, sample_idx, n_iter, verb=verb)
@@ -4077,16 +4204,15 @@ class NetworkModel:
             kon_err = self._network_targets(y_kon, y_real)
             error = self._count_errors_per_sample(P, kon_err, ks, inter, basal, **err_kw)
             select = model_learning and self._model_learning_due(n_iter, ml_start, ml_freeze)
-            basal, inter, basal_tmp, inter_tmp = fit_theta(basal, inter, select=select)
+            # EBIC sparsity of the network of this update (path from the first fit in place of the refinement)
+            prune = self._bic_due(n_iter, min_n_loops, model_learning, ml_freeze, hard_forcing_ref, verb)
+            pruned_in_loop = pruned_in_loop or prune
+            basal, inter, basal_tmp, inter_tmp = fit_theta(basal, inter, select=select, prune=prune)
             if self._mixed_due(n_iter, min_n_loops):
                 self._learn_mixed_variances(lambda: fit_theta(basal, inter, frozen=True), verb)
                 count_end = 0
             if select:
                 last_ml = n_iter
-            if self.network_bic_in_loop and n_iter > min_n_loops:  # EBIC sparsity of the network of this update
-                basal, inter, inter_tmp = self._bic_prune_network(
-                    np.arange(N), y_samples, kon_err, P, ks, basal, inter, inter_tmp, samples_id, y_real, basal_ref,
-                    inter_ref, hard_forcing_ref, ref_constraint_pct, verb=verb)
             error_2 = self._count_errors_per_sample(P, kon_err, ks, inter, basal, **err_kw)
             errors.append(error_2)
             self.loss_trajectory.append(error_2)
@@ -4111,9 +4237,14 @@ class NetworkModel:
                                 kov_cell_mask, weight_prob=0.0)
             y_kon[:, ns:] = self.modes[:, ns:]
         self._target_mix = 0.0
-        basal, inter, inter_tmp = self._bic_prune_network(
-            np.arange(N), y_samples, self._network_targets(y_kon, y_real), P, ks, basal, inter, inter_tmp, samples_id,
-            y_real, basal_ref, inter_ref, hard_forcing_ref, ref_constraint_pct, verb=verb)
+        if self._bic_end_due(pruned_in_loop, verb):
+            basal, inter, inter_tmp = self._bic_prune_network(
+                np.arange(N), y_samples, self._network_targets(y_kon, y_real), P, ks, basal, inter, inter_tmp,
+                samples_id, y_real, basal_ref, inter_ref, hard_forcing_ref, ref_constraint_pct,
+                dist_targets=self._distribution_targets(y_kon, y_real, y_samples, vect_t, ks, valid_cells), verb=verb)
+        # Importance of the regulations of the final network (scores of the benchmarks and the reports)
+        self.importance = self._network_importance(np.arange(N), y_samples, self._network_targets(y_kon, y_real), P,
+                                                   ks, basal, inter, samples_id, y_real, basal_ref, inter_ref, verb=verb)
 
         # --- States of the later steps: cells drawn with the weights without branching ---
         T, N_tot = len(times), int(np.sum(N_full))
@@ -4358,12 +4489,13 @@ class NetworkModel:
             # Network targets (_network_targets); the trajectories keep the forcing modes (EMD basins)
             return self._network_targets(y_kon, y_real)
 
-        def fit_theta(weight_fm, basal_start, inter_start, n_fits, select=None, frozen=False):
+        def fit_theta(weight_fm, basal_start, inter_start, select=None, frozen=False, prune=False):
             # Network fit(s) on (time, sample, cell type)-stratified subsamples of the trajectories; frozen: one fit on all
-            # the states (variances of the mixed model)
-            def fit_on_spec(spec, b0, i0):
+            # the states (variances of the mixed model); prune: EBIC path in place of the refinement
+            def fit_on_spec(spec, b0, i0, prune=False):
                 def fit_on(sels):
-                    return inference_network_multi(
+                    bic = self._bic_settings(sels, y_real, fit=True) if prune else None
+                    fits = inference_network_multi(
                         sels, y_samples, fit_targets(), y_prot, y_prot_prev,
                         ks, n_stimuli=ns, samples_id=samples_id,
                         ref_network=self.ref_network, basal_init=b0, inter_init=i0,
@@ -4375,18 +4507,20 @@ class NetworkModel:
                         sample_conditions=self.sample_conditions, condition_pen=self.network_condition_pen,
                         gene_mask=self.gene_mask, sigma_spec_grn=spec, y_prot_mem=y_prot_mem,
                         dist_targets=self._distribution_targets(y_kon, y_real, y_samples, vect_t_sim, ks, valid),
-                        mixed=self._mixed_prior(), **self._penalty_kw(ks, y_real, fit_targets(), y_samples))
+                        mixed=self._mixed_prior(), bic_prune=bic, **self._penalty_kw(ks, y_real, fit_targets(), y_samples))
+                    return fits if bic is None else self._bic_collect(fits, bic, verb=verb)
                 return fit_on
             if frozen:
                 return fit_on_spec(self._spec_grn(), basal_start, inter_start)([np.flatnonzero(valid)])[0]
             # Conditions fitted apart (network_condition_pen = 0): sub-samples of each condition drawn alone
+            # Sub-samples sized for the pruned fit only when this update is pruned (else every candidate is refined)
             n_params = self._n_params_per_target(prev_cols, n_samples_local, apart=self.network_condition_pen == 0
-                                                 and self._mixed_prior() is None)
+                                                 and self._mixed_prior() is None, pruned=prune and not select)
             if not select:
-                return self._fit_theta_averaged(fit_on_spec(self._spec_grn(), basal_start, inter_start), vect_t_sim,
-                                                y_samples, traj_cell_types(), n_fits, n_params, valid=valid)
+                return self._fit_theta_averaged(fit_on_spec(self._spec_grn(), basal_start, inter_start, prune),
+                                                vect_t_sim, y_samples, traj_cell_types(), n_params, valid=valid)
             # Model learning: every candidate family on the same sub-samples, scored against the mixture alone
-            sels = self._network_subsamples(vect_t_sim, y_samples, traj_cell_types(), n_fits, n_params, valid=valid)
+            sels = self._network_subsamples(vect_t_sim, y_samples, traj_cell_types(), n_params, valid=valid)
             return self._select_sigma_families(fit_on_spec, sels, basal_start, inter_start, y_prot, y_samples, y_real,
                                                ks, sample_idx, n_iter, verb=verb, mem=y_prot_mem)
 
@@ -4404,6 +4538,7 @@ class NetworkModel:
         ramp_targets, model_learning, ml_start, ml_freeze = self._init_em_targets(
             G_tot, vect_t, vect_samples_id, samples_id, times, ks, min_n_loops, compute_theta, context, verb=verb)
         last_ml = None  # iteration of the last family selection
+        pruned_in_loop = False  # EBIC pruning done in the loop: no end pass
 
         # === Main loop ===
         while True:
@@ -4545,19 +4680,16 @@ class NetworkModel:
             if fit_net:
                 # Mean of fits on independent stratified subsamples covering the trajectory states
                 select = model_learning and self._model_learning_due(n_iter, ml_start, ml_freeze)
-                basal, inter, basal_tmp, inter_tmp = fit_theta(weight_fm, basal, inter, self.n_network_fits,
-                                                               select=select)
+                # EBIC sparsity of the network of this update (path from the first fit in place of the refinement)
+                prune = context is None and alpha_pool is None and \
+                    self._bic_due(n_iter, min_n_loops, model_learning, ml_freeze, hard_forcing_ref, verb)
+                pruned_in_loop = pruned_in_loop or prune
+                basal, inter, basal_tmp, inter_tmp = fit_theta(weight_fm, basal, inter, select=select, prune=prune)
                 if self._mixed_due(n_iter, min_n_loops):
-                    self._learn_mixed_variances(lambda: fit_theta(weight_fm, basal, inter, 1, frozen=True), verb)
+                    self._learn_mixed_variances(lambda: fit_theta(weight_fm, basal, inter, frozen=True), verb)
                     count_end = 0
                 if select:
                     last_ml = n_iter
-                if self.network_bic_in_loop and n_iter > min_n_loops and context is None and alpha_pool is None:
-                    # EBIC sparsity of the network of this update (memory nodes refreshed above)
-                    basal, inter, inter_tmp = self._bic_prune_network(
-                        np.flatnonzero(valid), y_samples, fit_targets(), y_prot, ks, basal, inter, inter_tmp,
-                        samples_id, y_real, basal_ref, inter_ref, hard_forcing_ref, ref_constraint_pct,
-                        y_prot_mem=y_prot_mem, verb=verb)
 
             error_2 = self._count_errors_per_sample(y_prot[valid], kon_err, ks, inter, basal, **err_kw)
             errors.append(error_2)
@@ -4579,6 +4711,8 @@ class NetworkModel:
                 # Rates (and network) adjusted to the dynamics they generate, before alpha and the modes
                 basal, inter = self._refine_in_loop(y_prot, y_rna, y_kon, y_samples, y_real, valid, times, N_tot,
                                                     basal, inter, ks, sample_idx, verb=verb)
+                if getattr(self, '_last_fits', None) is not None:  # network changed after the sub-sample fits
+                    self._last_fits = self._last_fits[:2] + (None,)
                 last_deg = n_iter
 
             # --- Update counts for stopping condition if n_iter is high enough ---
@@ -4670,16 +4804,28 @@ class NetworkModel:
                                 ks, n_iter, kov_cell_mask, it_shift=it_shift)
 
 
-        # --- Sparsity by EBIC along the path of the regulators (network_bic_pruning), once on all the states ---
-        if compute_theta and context is None and alpha_pool is None and len(times) > 1 and self.network_bic_pruning:
+        # --- Sparsity by EBIC along the path of the regulators (network_bic_pruning_end) ---
+        if compute_theta and context is None and alpha_pool is None and len(times) > 1 and \
+                self._bic_end_due(pruned_in_loop, verb):
             if y_prot_mem is not None:
                 refresh_prev_prot(y_prot_mem, memory=True)
+            if weight_fm > 0:  # flow-matching nodes of the current trajectories, as in the network fits
+                refresh_prev_prot()
             basal, inter, inter_tmp = self._bic_prune_network(
                 np.flatnonzero(valid), y_samples, fit_targets(), y_prot, ks, basal, inter, inter_tmp, samples_id,
-                y_real, basal_ref, inter_ref, hard_forcing_ref, ref_constraint_pct, y_prot_mem=y_prot_mem, verb=verb)
+                y_real, basal_ref, inter_ref, hard_forcing_ref, ref_constraint_pct, y_prot_mem=y_prot_mem,
+                y_prot_mod=y_prot_prev, weight_fm=weight_fm,
+                dist_targets=self._distribution_targets(y_kon, y_real, y_samples, vect_t_sim, ks, valid), verb=verb)
             kon_vector = y_kon.copy()
             kon_vector[:, ns:] = self._kon_ref_per_sample(y_prot, ks, inter, basal, samples_id=sample_idx,
                                                           samples_data=y_samples)[:, ns:]
+        # Importance of the regulations of the final network (scores of the benchmarks and the reports)
+        if compute_theta and context is None and alpha_pool is None and len(times) > 1:
+            if y_prot_mem is not None:
+                refresh_prev_prot(y_prot_mem, memory=True)
+            self.importance = self._network_importance(
+                np.flatnonzero(valid), y_samples, fit_targets(), y_prot, ks, basal, inter, samples_id, y_real,
+                basal_ref, inter_ref, y_prot_mem=y_prot_mem, verb=verb)
 
         # --- Growth pass: net growth of the final trajectories given the final network ---
         # Done once, out of the loop: the growth correction is not fed back into the inference
@@ -5563,7 +5709,8 @@ class NetworkModel:
         proteins of fit_network (or the rescaled observed proteins, proteins_observed), whose network is then that of
         fit_network.
         Starting network: that of fit_network (rows of the regulators rescaled with the proteins), refitted (final = 1)
-        on the reference proteins with sde_refit_network or refine_theta_with_sde = False.
+        on the reference proteins with sde_refit_network or refine_theta_with_sde = False, on its support only (the zeros
+        of fit_network kept, no pruning).
         - refine_theta_with_sde = True: that network refined in the free-running fit (support and signs kept, relative
           L2 anchor sde_lambda_theta).
         - refine_theta_with_sde = False: that network fixed.
@@ -5696,7 +5843,7 @@ class NetworkModel:
         self._train_proliferation_mlp(verb=verb)
         basal, inter, d1_c, eps_c, scale_c, cond = self._fit_free_running(
             y_prot, basal, inter, mode, d1_start, eps_start, valid, times, N_tot, ks, k1, samples_id, b_states,
-            verb=verb, r_states=self.R_states, b_states_end=self._birth_at_own_time(b_states))
+            verb=verb, r_states=self.R_states, b_states_end=self._birth_at_own_time(b_states), export_states=True)
         T1 = len(times) - 1
         if d1_c.shape[0] > 1:
             # Kinetics per network condition, stored per sample (as inter): d_t (T-1, 2, S, G), ratios (T-1, S, G)
@@ -5721,6 +5868,8 @@ class NetworkModel:
 
         self.basal, self.inter = basal, inter
         self.basal_t, self.inter_t = basal_t, inter_t
+        # Importance of the regulations of the simulation network, on the trajectories of the free-running fit
+        self.importance_simul = self._simulation_importance(ks, samples_id, verb=verb)
 
         if verb:
             basal_mean = basal.mean(axis=0) if basal.ndim == 2 else basal
@@ -5876,7 +6025,7 @@ class NetworkModel:
                           rna=None, r_states=None, b_states_end=None,
                           prolif='model', temporal=None, learn_scale=None, learn_theta=None, epochs=None,
                           per_condition=True, d1_ref=None, eps_ref=None, only_max_horizon=False, lam_rates=None,
-                          tag='refine_network_degradations'):
+                          tag='refine_network_degradations', export_states=False):
         """
         d1, eps = d1 / d0 and the scale of theta per target gene (per interval with use_temporal_degradations) by
         the free-running fit of the simulation model (fit_free_running: 'ode', 'sde1' protein-only PDMP, 'sde2'
@@ -5893,6 +6042,8 @@ class NetworkModel:
         (refine_in_loop): trajectory arrays (samples_rows, kon_targets, real_idx, rna), prolif (None: no MLP), temporal / learn_scale / learn_theta /
         epochs, per_condition, rappel targets d1_ref / eps_ref (default the starting values) and strength lam_rates
         (default sde_lambda_rates), only_max_horizon.
+        export_states: trajectories of the fitted model at each observed time with their transported targets
+        (fit_free_running), in self._sde_states (one dict per comparison, with the sample position 'sample').
         Returns (basal, inter, d1, eps, scale (C, T-1, G), condition of each sample position (S,)); the edges of inter
         below seuil_min_network_intensity set to 0.
         """
@@ -5978,7 +6129,8 @@ class NetworkModel:
             # Initial states paired with their own cells: row of the real cell of each valid initial slot
             init_idx = np.searchsorted(obs_cells[t_first], np.maximum(ri_all[t_first, slots[valid0]], 0))
             init_idx = np.minimum(init_idx, len(obs_cells[t_first]) - 1)
-            g = dict(X=X[:, slots].astype(float), k_lo=kb_s[:, 0], k_hi=kb_s[:, 1], k1=k1_s, stim=stim, stim0=stim0,
+            g = dict(sample=s_idx, X=X[:, slots].astype(float), k_lo=kb_s[:, 0], k_hi=kb_s[:, 1], k1=k1_s, stim=stim,
+                     stim0=stim0,
                      stim_own=stim_own, w0=w0, init_idx=init_idx,
                      mid=self._central_modes_of(ks_of(ks, s_idx), s_idx),  # central modes (ordinal cost)
                      valid0=valid0,
@@ -6113,12 +6265,15 @@ class NetworkModel:
                 mrna_dilution=self.mrna_dilution_on(),
                 qut_level=self.qut_level if free else None, mode_cost=self.sde_mode_cost or self.fit_ot_cost,
                 kon_weight=float(self.sde_kon_weight), mrna_weight=float(self.sde_mrna_weight), bptt=self.sde_bptt if free else None,
-                **prolif_kw(gs))
+                export_states=export_states, **prolif_kw(gs))
 
+        self._sde_states = [] if export_states else None
         try:
             if not separate:
                 theta, basal_new, d1_t, eps_t, scale_t, hist = run(groups, inter, basal_rows, 1, (3,))
                 hists = [hist]
+                if export_states:
+                    self._sde_states += [dict(e, sample=groups[e['gi']]['sample']) for e in hist.get('states', [])]
             else:
                 # One fit per condition on its samples (rows of inter / basal remapped), stacked per condition
                 theta, basal_new = np.array(inter, dtype=float), basal_rows.copy()
@@ -6132,6 +6287,8 @@ class NetworkModel:
                         continue
                     th_c, ba_c, d1_c, eps_c, sc_c, hist = run(gs, theta[rows], basal_rows[rows], 1, (3, c))
                     theta[rows], basal_new[rows] = th_c, ba_c
+                    if export_states:
+                        self._sde_states += [dict(e, sample=gs[e['gi']]['sample']) for e in hist.get('states', [])]
                     rates.append((d1_c[0], eps_c[0], sc_c[0]))
                     hists.append(hist)
                 # Conditions without trajectories: the starting rates
@@ -6164,7 +6321,8 @@ class NetworkModel:
         """Proteins along the couplings of fit_network towards kon_targets (relaxation d1) and network refitted on
         them (final fit, without flow-matching term; inter_simul_ref as reference if given; y_prot_given: these
         proteins instead; inter_given: network of reference and start instead of that of fit_network, e.g. in the
-        units of y_prot_given). Returns (y_prot, basal, inter)."""
+        units of y_prot_given). Only on the support of the network of fit_network (its zeros stay zeros; per condition
+        with separate fits), without pruning. Returns (y_prot, basal, inter)."""
         ns = self.n_stimuli
         basal_ref = self.basal.copy()
         inter_ref = self.inter.copy() if inter_given is None else np.array(inter_given, dtype=float)
@@ -6175,8 +6333,14 @@ class NetworkModel:
         n_rows = np.shape(self.inter)[0] if np.ndim(self.inter) == 3 else None
         if common and np.ndim(inter_ref) == 3:
             inter_ref = np.stack(list(self.condition_networks(inter_ref).values())).mean(axis=0)
+        # Support of the network of fit_network: its zeros stay zeros in the refit (per sample with network conditions)
+        support = np.asarray(self.inter, dtype=float) != 0
+        sup_all = support.any(axis=0) if support.ndim == 3 else support
+        if common and support.ndim == 3:
+            support = sup_all
         # Same active regulators as in the inference_network call below
         _, prev_cols = active_regulators(self.ref_network, inter_ref, self.hard_forcing_ref)
+        prev_cols = [c[sup_all[c, g]] for g, c in enumerate(prev_cols)]
         self._max_bound_now = None  # refit: refinement corrections within refine_max_bound
         y_prot = self.estimate_trajectories(self.prot, times, d1, N=N_tot, kon_beta=kon_targets,
                                             s=self.scale_proteins, birth=self._state_birth()) \
@@ -6208,11 +6372,12 @@ class NetworkModel:
                 sigma_spec_grn=self._spec_grn(), **self._penalty_kw(ks, real_idx, targets, self.samples_data),
                 dist_targets=None if targets is self.kon_beta else self._distribution_targets(
                     self.kon_beta, real_idx, self.samples_data, self.times_data, ks, valid),
+                edge_support=support,
             )
 
         # Mean theta over fits on (time, sample, cell type)-stratified subsamples (single fit if one holds all)
         basal, inter, _, _ = self._fit_theta_averaged(
-            fit_on, self.times_data, self.samples_data, self.traj_cell_types, self.n_network_fits,
+            fit_on, self.times_data, self.samples_data, self.traj_cell_types,
             self._n_params_per_target(prev_cols, len(samples_id), apart=self.per_condition_fits()[0]), valid=valid)
         if common and n_rows is not None and np.ndim(inter) == 2:  # kept per sample (one network for every condition)
             inter = np.repeat(np.asarray(inter)[None], n_rows, axis=0)

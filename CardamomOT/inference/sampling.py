@@ -30,12 +30,14 @@ def stratified_choice(idx, n, labels=None, rng=None):
     return stratified_order(idx, np.asarray(labels), rng)[:n]
 
 
-def grouped_partition(groups, budget, n_parts, labels=None):
+def grouped_partition(groups, budget, n_parts=None, labels=None, min_parts=1):
     """
     n_parts sub-samples of ~budget rows: equal quota per group (e.g. time x sample),
     cell-type proportional within each group, and jointly covering as many rows as
     possible (disjoint when a group holds >= n_parts x quota rows, otherwise the
     repetitions are spread evenly). groups is a list of per-row key arrays.
+    n_parts None: enough sub-samples to cover every row, max(min_parts, largest
+    ceil(group size / quota)).
     Returns (list of row arrays, full) with full = True when one sub-sample holds
     every row (then a single sub-sample is returned).
     """
@@ -46,6 +48,8 @@ def grouped_partition(groups, budget, n_parts, labels=None):
     members = [np.flatnonzero(inv == k) for k in range(len(uniq))]
     if all(len(idx) <= per_group for idx in members):
         return [np.concatenate(members)], True
+    if n_parts is None:
+        n_parts = max(int(min_parts), max(int(np.ceil(len(idx) / per_group)) for idx in members))
     parts = [[] for _ in range(n_parts)]
     for idx in members:
         q = min(per_group, len(idx))

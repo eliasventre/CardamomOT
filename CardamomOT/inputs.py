@@ -41,7 +41,7 @@ PARAMETER_GROUPS = [
         'mean_forcing_em', 'batch_size_mixture', 'max_iter_softEM', 'min_mixture_components', 'mixture_min_percentage', 'max_grid_levels',
         'mixture_transit_nodes', 'mixture_central_position', 'mixture_transit_selection', 'dispersion_max', 'mixture_selection_criterion', 'integrate_samples', 'ref_sample_integration']),
     ('Network inference', [
-        'force_basins', 'temporal_basins', 'min_n_loops', 'ot_gene_weight_schedule', 'fit_ot_cost', 'fit_network_cost', 'fit_likelihood', 'kappa_estimation', 'fit_network_balance', 'transition_constraint_weight', 'max_iter', 'batch_size_traj', 'n_network_fits',
+        'force_basins', 'temporal_basins', 'min_n_loops', 'ot_gene_weight_schedule', 'fit_ot_cost', 'fit_network_cost', 'fit_likelihood', 'kappa_estimation', 'fit_network_balance', 'transition_constraint_weight', 'max_iter', 'batch_size_traj', 
         'constrain_basal_uniform', 'network_condition_pen', 'mixed_effect_model_conditions',
         'weight_flow_matching',
         'flow_matching_nodes',

@@ -677,7 +677,9 @@ def _cover_page(pdf, R, info, perturbations_status):
             ('Observed cells', f'{R.adata_data.n_obs}'),
             ('Timepoints', ', '.join(f'{t:g}' for t in np.sort(np.unique(R.times(R.adata_data))))),
             ('Cell types', ', '.join(R.categories) if R.has_ct else "— (no obs['cell_type'])"),
-            ('Network shown', "inter_simul.npy"),
+            ('Network shown', "importance_simul.npy: importance of the regulations of inter_simul.npy (share of the "
+                              "deviance of each target explained by its regulators on the trajectories of the "
+                              "free-running fit, split in proportion to |theta|)"),
             ('Embeddings', f"{R.emb_name}; mRNA: log1p={R.log}, normalise={R.norm}, cell_depth_for_representation={R.depth_emb} "
                            + ("(counts / depth factor, model draws taken at the depth of the cells they mimic)" if R.depth_emb
                               else "(raw counts, model draws at the depth of the cells)")
@@ -1804,8 +1806,8 @@ def _grn_pages(pdf, R, matrix, ns, show_stim, top_n=20, top_targets=10, label=''
     M = matrix - np.diag(np.diag(matrix))
     genes_idx = np.arange(ns, G_tot)
 
-    out_power = np.log1p(np.abs(M).sum(axis=1))
-    in_power = np.log1p(np.abs(M[ns:, :]).sum(axis=0))  # incoming from genes only
+    out_power = np.abs(M).sum(axis=1)
+    in_power = np.abs(M[ns:, :]).sum(axis=0)  # incoming from genes only
     g_out, g_in = out_power[genes_idx], in_power[genes_idx]
     g_names = [names[i] for i in genes_idx]
     top_out = np.argsort(g_out)[::-1][:top_n]
@@ -1814,6 +1816,8 @@ def _grn_pages(pdf, R, matrix, ns, show_stim, top_n=20, top_targets=10, label=''
     # Page: violin plots
     fig = plt.figure(figsize=A4_LANDSCAPE)
     _page_title(fig, f'2. Gene regulatory network{label} — regulatory power',
+                f"Importance of the regulations of a target: share of the deviance left by its basal and self-regulation "
+                f"that its regulators explain, split among them in proportion to |theta| (comparable between targets). "
                 f"Self-interactions excluded. Top {top_n} genes labelled"
                 + (f"; stimulus shown as a star (stimulus = {R.stim} ≥ 0.5)." if show_stim else
                    f"; stimulus not shown (stimulus = {R.stim} < 0.5)."))
@@ -1822,15 +1826,16 @@ def _grn_pages(pdf, R, matrix, ns, show_stim, top_n=20, top_targets=10, label=''
     extra = [(stim_names[s], out_power[s]) for s in range(ns)] if show_stim else None
     ax = fig.add_subplot(gs[0, 0])
     _labelled_violin(ax, g_out, g_names, top_out, 'Outgoing regulation (regulators)',
-                     'log(1 + Σ|outgoing weights|)', extra=extra)
+                     'Σ importance of the outgoing regulations', extra=extra)
     _panel_label(ax, 'A', -0.25)
     ax = fig.add_subplot(gs[0, 1])
-    _labelled_violin(ax, g_in, g_names, top_in, 'Incoming regulation (targets)', 'log(1 + Σ|incoming weights|)')
+    _labelled_violin(ax, g_in, g_names, top_in, 'Incoming regulation (targets)',
+                     'Σ importance of the incoming regulations')
     _panel_label(ax, 'B', -0.25)
 
     # Tables: activation / inhibition balance of the top regulators (outgoing) and regulated genes (incoming, from genes)
     def power_table(ax, rows, head, title):
-        tab = ax.table(cellText=rows, colLabels=['#', head, 'Σ|w|', 'act.', 'inh.'],
+        tab = ax.table(cellText=rows, colLabels=['#', head, 'Σ imp.', 'act.', 'inh.'],
                        loc='upper center', cellLoc='center', colWidths=[0.1, 0.34, 0.2, 0.16, 0.16])
         tab.auto_set_font_size(False); tab.set_fontsize(6.5); tab.scale(1, 1.05)
         for (r, c), cell in tab.get_celld().items():
@@ -1857,9 +1862,10 @@ def _grn_pages(pdf, R, matrix, ns, show_stim, top_n=20, top_targets=10, label=''
         keep[:ns] = False
     max_intensity = float(np.abs(M).max() or 1.0)
     perturbed = R.perturbed_genes
-    rule = (f'Edges shown only if among the {top_targets} strongest (|w|) targets of the regulator AND the '
-            f'{top_targets} strongest regulators of the target; edge width ∝ |weight| (global scale). '
-            'Perturbed genes (KO/OV) are highlighted in beige.')
+    rule = (f'Edges shown only if among the {top_targets} most important targets of the regulator AND the '
+            f'{top_targets} most important regulators of the target; edge width ∝ importance (share of the deviance of '
+            'the target explained by its regulators, split in proportion to |theta|; global scale). Perturbed genes '
+            '(KO/OV) are highlighted in beige.')
 
     def star_pages(panels, title, incoming, center_label, center_color):
         # Small subgraphs, 4 x 6 per page (top 20 + stimuli on one page)
@@ -1942,8 +1948,8 @@ def _network_similarity_page(pdf, R, nets, ns, show_stim):
     fig = plt.figure(figsize=A4_LANDSCAPE)
     _page_title(fig, '2. Gene regulatory network — similarity between network conditions',
                 'Self-regulations (gene X → gene X) excluded' + ('' if show_stim else '; stimulus edges not included')
-                + '. Cosine of the signed weights; Jaccard of the signed edge sets (shared = non-zero with the same sign). '
-                'Curves: k strongest edges of each network (|w|).')
+                + '. Cosine of the signed importances; Jaccard of the signed edge sets (shared = non-zero with the same '
+                'sign). Curves: k most important edges of each network.')
     gs = gridspec.GridSpec(1, 4, figure=fig, left=0.05, right=0.98, top=0.82, bottom=0.14, wspace=0.45,
                            width_ratios=[1, 1, 1.25, 1.25])
     for j, (metric, title) in enumerate([('cosine', 'Cosine similarity'), ('jaccard', 'Jaccard index (signed edges)')]):
@@ -3152,7 +3158,12 @@ def generate_report(p, split, stim, prior, perturbations=(), out_path=None,
     R.mrna_shrinkage = mrna_shrinkage
     R.depth_growth_share = float(depth_growth_share)
 
-    inter = load_network_array(os.path.join(p, 'cardamomOT', 'inter_simul.npy'))
+    # Network shown: signed importance of each regulation of the simulation network (share of the deviance of its target
+    # explained by its regulators on the trajectories of the free-running fit, split in proportion to |theta|)
+    imp_path = os.path.join(p, 'cardamomOT', 'importance_simul.npy')
+    if not os.path.exists(imp_path):
+        raise FileNotFoundError(f"{imp_path} missing: rerun infer_network_simul.py")
+    inter = load_network_array(imp_path)
     # Network conditions: one network per condition (inter per sample, condition of each sample in network_conditions.json)
     cond_networks, cond_pen, cond_tau = {'': inter}, None, None
     cond_json = os.path.join(p, 'cardamomOT', 'network_conditions.json')
