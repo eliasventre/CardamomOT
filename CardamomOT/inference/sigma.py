@@ -29,7 +29,8 @@ spec (G, N_SPEC + G) (model_learning_grn; None = every gene logistic of a linear
     spec[g, SPEC_KAPPA], spec[g, SPEC_PBAR]: scale kappa_g and protein level Pbar_g of the high mode of gene g as a
         regulator (PHI_LOG, PHI_HERBACH targets);
     spec[g, SPEC_THRESH]: threshold s_g of gene g as a regulator (PHI_HERBACH_APPROX, and prior centre of the
-        thresholds of its edges in the exact form), halfway between its low and high protein levels;
+        thresholds of its edges in the exact form), at the protein level of its central mode (halfway between its low and high
+        protein levels with two modes; herbach_threshold);
     spec[j, SPEC_M]: Hill coefficient m_j of target j (Herbach types);
     spec[j, N_SPEC + g]: threshold s_gj of the edge g -> j of an exact Herbach target j (default s_g, learned in the
         network fit, see edge_thresholds).

@@ -429,7 +429,7 @@ def main(argv):
         pd.DataFrame([{'target': genes_list[r['target']], 'condition': r['condition'], 'fit': r.get('fit', 0),
                        'n_candidates': r['n_candidates'], 'k': r['k'],
                        'kept': ';'.join(genes_list[j] for j in r['kept']),
-                       'deviance_0': r.get('dev0', np.nan), 'deviance_scale': r.get('scale', np.nan),
+                       'deviance_scale': r.get('scale', np.nan),
                        'path_k': ';'.join(str(k) for k, _, _ in r['scores']),
                        'path_deviance': ';'.join(f'{d:.4g}' for _, d, _ in r['scores']),
                        'path_criterion': ';'.join(f'{e:.4g}' for _, _, e in r['scores'])} for r in bic_tab]

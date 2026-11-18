@@ -12,7 +12,8 @@ from typing import Any
 import multiprocessing as mp
 import numpy as np
 from scipy.optimize import minimize
-from scipy.special import expit, ndtri
+from scipy.special import expit, ndtri, gammaln
+from scipy.stats import wasserstein_distance
 from scipy.optimize import check_grad
 from numba import njit
 from functools import partial
@@ -34,7 +35,7 @@ logger = get_logger(__name__)
 seuil = 1e-5
 check_gradient = 0
 alpha = 1 # How to balance differents sources when they are unbalanced (ex: RMS2V3 and RD136 with different number of cells, 0 if not rescaled (each cell equal), 1 if rescaled (each model equal)))
-eps_CE = 1e-6
+eps_CE = 1e-16
 EPS = 1e-16
 sc = 1e-3
 r_elasticnet = 0.5
@@ -175,28 +176,33 @@ def with_targets(y_target, **rows):
     return out
 
 
-def balance_weights(y_target, ys, ks, transit=None, gamma=1.0):
-    """TargetArray of y_target (N,) with the weights of fit_network_balance: per sample, 1 / frequency^gamma of the
-    main mode of each row (nearest main mode of the mixture ks, (n_modes,) or (n_samples, n_modes); transit
-    (n_samples,): transition levels per interval between its main modes, a transitional row counting for its nearest
-    main mode), frequency floored at BALANCE_MIN_FREQ, mean 1 over the rows of the sample: each main mode of a sample
-    (with the transitions nearest to it, in their proportions) weighs frequency^(1 - gamma) in the fit, the same for
-    all at gamma = 1."""
-    ks = np.asarray(ks, dtype=float)
+def balance_weights(y_target, ys, gamma=1.0):
+    """TargetArray of y_target (N,) with the weights of fit_network_balance: per sample, its two extreme modes
+    balanced, each row belonging to the highest one in proportion to its sigmoid target u (position between the lowest
+    (0) and highest (1) modes, any intermediate mode included, even a central one) and to the lowest one for the rest;
+    frequencies f_low, f_high = mean memberships floored at BALANCE_MIN_FREQ, weight (1 - u) / f_low^gamma + u /
+    f_high^gamma, mean 1 over the rows of the sample: each extreme mode (with its share of the intermediate rows)
+    weighs frequency^(1 - gamma) in the fit, the same for both at gamma = 1."""
     ys = np.asarray(ys).astype(int)
-    w = np.ones(len(y_target))
+    u = np.clip(np.asarray(y_target, dtype=float), 0.0, 1.0)
+    w = np.ones(len(u))
     for s in np.unique(ys):
-        m = np.flatnonzero(ys == s)
-        k = ks[min(s, len(ks) - 1)] if ks.ndim == 2 else ks
-        kb = sigmoid_amplitudes(k)
-        n_tr = 0 if transit is None else int(np.asarray(transit).ravel()[min(s, np.size(transit) - 1)])
-        main = k[:1 + int(np.argmax(k))][::n_tr + 1]  # main modes: every (n_tr + 1)-th level (transit_groups)
-        lv = np.unique(np.round(sigmoid_target(main, kb[0], kb[1]), 6))
-        near = np.argmin(np.abs(np.asarray(y_target)[m, None] - lv[None]), axis=1)
-        freq = np.bincount(near, minlength=len(lv)) / len(m)
-        ws = np.maximum(freq[near], BALANCE_MIN_FREQ) ** -gamma
+        m = ys == s
+        f_high = float(np.mean(u[m]))
+        f = np.maximum([1.0 - f_high, f_high], BALANCE_MIN_FREQ) ** -gamma
+        ws = (1.0 - u[m]) * f[0] + u[m] * f[1]
         w[m] = ws / ws.mean()
     return with_targets(y_target, w=w)
+
+
+def _batch_weights(w, ys):
+    """Balance weights w of the rows of a subset (fit_network_balance, computed on every state of the update),
+    renormalised to mean 1 per sample: the relative weights kept, the scale of the fit (QUT, EBIC, ridge) unchanged."""
+    w, ys = np.array(w, dtype=float), np.asarray(ys).astype(int)
+    for s in np.unique(ys):
+        m = ys == s
+        w[m] /= max(float(w[m].mean()), EPS)
+    return w
 
 
 def _null_start(G, n_samples, ys, yt):
@@ -1024,12 +1030,13 @@ def _path_terms(yp, path):
         for q in range(path.nodes.shape[1])]
 
 
-def _path_fit(theta_of, basal, ys, us, terms, yt, weights_samples, grad=True):
+def _path_fit(theta_of, basal, ys, us, terms, yt, weights_samples, grad=True, factors=None):
     """
     Flow matching: cross-entropy along the interval, sum_q w_q CE(sigmoid(basal + Y_q theta), yt_q), yt_q the
     target in force at node q (mode of the start state before the switch alpha of the target, of the end state
     after it; yt for the end state), nodes drawn uniformly over the interval with equal weights: the network
     reproduces the switching path of the trajectories. theta_of(s): effective interactions (K,) of sample s.
+    factors: weight of each sample of us (None: sum(weights) / weight / len(us)).
     Returns (loss, [(s, weight of the sample, d / d theta (K,), d / d basal)]).
     """
     Q = 0.0
@@ -1040,7 +1047,7 @@ def _path_fit(theta_of, basal, ys, us, terms, yt, weights_samples, grad=True):
         mask = (ys == s)
         if not np.any(mask):
             continue
-        ws = w_tot / weights_samples[cnt] / len(us)
+        ws = w_tot / weights_samples[cnt] / len(us) if factors is None else factors[cnt]
         th = theta_of(s_idx)
         yt_s = yt[mask]
         g_th, g_b = 0.0, 0.0  # (K,) after the first term, (2K,) with the log-thresholds (learn)
@@ -1166,7 +1173,7 @@ def _sigma_refinement(theta_basal, inter_with_diag, cond, Y, ys, us):
 
 def objective_refinement_grad(X, inter, weights_samples, ys, yp, ypm, yt,
                               diag, G, g, n_samples, l_pen, weight_flow_matching, cond=None, dist=None, ridge=None,
-                              thresh=None, grad=True):
+                              thresh=None, grad=True, factors=None):
     """
     Loss for the refinement step with per-sample basal, and with grad its gradient w.r.t. X (interaction
     corrections, basals, log-threshold shifts), in one pass: (Q, dQ / dX or None).
@@ -1178,6 +1185,8 @@ def objective_refinement_grad(X, inter, weights_samples, ys, yp, ypm, yt,
                   log s_0 (G,) of the regulators, prior sd tau): Gaussian prior on log s + d around log s_0)
     inter, diag : (G,), or (C, G) with cond[s] = condition of sample s
     (one correction per edge, shared by the conditions)
+    factors: weight of each sample of np.unique(ys) (None: sum(weights) / weight / number of samples; given for
+    sub-groups of samples that keep the weights of their samples, e.g. the (sample, time) basals of bic_prune_gene)
     """
     theta_inter = inter.copy() * X[:G]          # (G,) or (C, G)
     theta_basal = X[G:G + n_samples]             # (n_samples,)
@@ -1195,7 +1204,7 @@ def objective_refinement_grad(X, inter, weights_samples, ys, yp, ypm, yt,
     w_fm = _fm_weight(weight_flow_matching, ypm)
     if w_fm:
         q, out = _path_fit(lambda s: _of_cond(inter_with_diag, cond, s), theta_basal, ys, us,
-                           _path_terms(yp, ypm), yt, weights_samples, grad=grad)
+                           _path_terms(yp, ypm), yt, weights_samples, grad=grad, factors=factors)
         Q += w_fm * q
         for s_idx, ws, gt, gb in out:
             gt, gd = _split_grad(gt, G)
@@ -1206,7 +1215,8 @@ def objective_refinement_grad(X, inter, weights_samples, ys, yp, ypm, yt,
     sigma = None if mem else _sigma_refinement(theta_basal, inter_with_diag, cond, yp, ys, us)
     for cnt, s in enumerate(us):
         s_idx = int(s)
-        weight_s = (1 - w_fm) * np.sum(weights_samples) / weights_samples[cnt] / ns_unique
+        weight_s = (1 - w_fm) * (np.sum(weights_samples) / weights_samples[cnt] / ns_unique if factors is None
+                                 else factors[cnt])
         mask = (ys == s)
         th = _of_cond(inter_with_diag, cond, s_idx)
         if mem:
@@ -1869,7 +1879,7 @@ def refine_inference(y_samples, y_prot, y_prot_mod, y_target, inter, basal, thet
                      l_pen, weight_flow_matching=.5, final=0,
                      hard_forcing_ref=False, ref_constraint_pct=0.1, ref_network=None, seuil_min_network_intensity=1e-2,
                      cond=None, dist=None, ridge=None, thresh_prior=None, sample_weights=None, max_bound=2.0,
-                     fix_edges=False):
+                     fix_edges=False, sample_factors=None):
     """
     Refinement step: optimise multiplicative correction factors over inter (in [0, max_bound]; fix_edges: held at 1,
     only the basals refitted), per-sample basals refitted freely
@@ -1887,6 +1897,8 @@ def refine_inference(y_samples, y_prot, y_prot_mod, y_target, inter, basal, thet
     reference (signed priors only), as in core_inference. ridge (G,) or None: Gaussian prior on the effects
     c_e theta_tmp_e (ridge_coefficients, coefficients on theta = e / w as in core_inference, divided here by w^2 since
     inter holds the effective values e), with l_pen = 0 in the relaxed refinement (network_relaxed).
+    sample_factors: weight of each sample of np.unique(y_samples) in place of those of sample_weights
+    (objective_refinement_grad factors).
 
     basal : (n_samples,)
     inter : (G,), or (C, G) per condition (cond[s] = condition of sample s):
@@ -1956,7 +1968,7 @@ def refine_inference(y_samples, y_prot, y_prot_mod, y_target, inter, basal, thet
               weights_samples=weights_samples, ys=y_samples, yp=y_prot, ypm=y_prot_mod, yt=y_target,
               diag=diag, G=G, g=g, n_samples=n_samples,
               l_pen=l_pen, weight_flow_matching=weight_flow_matching, cond=cond, dist=dist, ridge=ridge,
-              thresh=thresh)
+              thresh=thresh, factors=sample_factors)
     loss_fn = partial(objective_refinement, **kw)
     grad_fn = partial(grad_correc, **kw)
 
@@ -2164,12 +2176,114 @@ def _row_sigma(basal, inter, cond, y_prot, ys):
     return out
 
 
-def _bic_groups(order, score, tie):
-    """Groups of the regulators sorted by decreasing score: consecutive ones less than tie apart enter together,
-    a chain of ties split into pairs."""
+def _displacements(t, y, traj=None):
+    """Times (K,) and displacements D (K, K) of a target between the times of one sample, y its sigmoid target (0:
+    lowest mode, 1: highest). traj (trajectory of each row): D[i, j] = mean over the trajectories of |y(t_j) - y(t_i)|
+    (those with a state at both times); None (states drawn apart per time): W1 between the marginals of y at t_i and
+    t_j, the least displacement they allow. Both >= |change of the mean|, equal when every trajectory moves the same
+    way (not for a bifurcation). Not weighted by fit_network_balance: the changes are those of the data."""
+    t, y = np.asarray(t, dtype=float), np.asarray(y, dtype=float)
+    times, ti = np.unique(t, return_inverse=True)
+    K = len(times)
+    D = np.zeros((K, K))
+    if traj is None:
+        for i in range(K):
+            for j in range(i + 1, K):
+                D[i, j] = D[j, i] = wasserstein_distance(y[ti == i], y[ti == j])
+        return times, D
+    _, ni = np.unique(np.asarray(traj), return_inverse=True)
+    Y = np.full((ni.max() + 1, K), np.nan)
+    Y[ni, ti] = y
+    for i in range(K):
+        d = np.abs(Y - Y[:, i:i + 1])
+        ok = np.isfinite(d)
+        D[i] = np.nan_to_num(d).sum(axis=0) / np.maximum(ok.sum(axis=0), 1)
+    return times, D
+
+
+def _turning_points(D, h):
+    """Moves of at least h of a time course with displacements D (K, K) between its times: (extremes [0, e_1, ...,
+    e_M], pivots [p_1, ..., p_M]), move k from p_k to its extreme e_k (p_k = e_(k-1) but for the first one). A move ends
+    when the trajectories come back by h, (D[p, e] + D[e, i] - D[p, i]) / 2 (|m_e - m_i| on a single profile): smaller
+    reversals ignored, a change in several steps, even across a plateau, is one move."""
+    piv, pv, p, e = [0], [], 0, None
+    for i in range(1, len(D)):
+        if e is None:  # first move: from the farthest earlier time
+            j = int(np.argmax(D[:i, i]))
+            if D[j, i] >= h:
+                p, e = j, i
+                pv.append(p)
+        elif (D[p, e] + D[e, i] - D[p, i]) / 2 >= h:
+            piv.append(e)
+            p, e = e, i
+            pv.append(p)
+        elif D[p, i] > D[p, e]:
+            e = i
+    return (piv + [e] if e is not None else piv), pv
+
+
+def _change_bounds(ys, t, y, rate, traj=None):
+    """Segments of the changes of a target in time (network_bic_time): per sample, the displacements of its sigmoid
+    target y between times (_displacements: mean change of its trajectories traj, else W1 between the marginals); its
+    moves of at least rate (_turning_points), each from its departure to its arrival: along the move p -> e, the part
+    done at time i, (D[p, e] + D[p, i] - D[i, e]) / 2 (|m_i - m_p| on a single profile; a trajectory arrived then gone
+    back counts for neither), arrival = first time where the part left to do is at most rate / 2, departure = last time
+    before it where the part done is at most rate / 2. Segment k = times from the departure to the arrival of move k
+    (the regulators of the target act through their proteins, which vary while its kon switches), the other times left
+    out. Returns {sample: [(first time, last time) of each segment]}, the samples without change left out."""
+    ys = np.asarray(ys).astype(int)
+    t, y = np.asarray(t, dtype=float), np.asarray(y, dtype=float)
+    out = {}
+    for s in np.unique(ys):
+        ms = ys == s
+        times, D = _displacements(t[ms], y[ms], None if traj is None else np.asarray(traj)[ms])
+        if len(times) < 2 or D.max() < rate:
+            continue
+        piv, pv = _turning_points(D, rate)
+        segs = []
+        for p, e in zip(pv, piv[1:]):
+            done = (D[p, e] + D[p] - D[:, e]) / 2  # part of the move p -> e done at each time
+            a = next(i for i in range(p + 1, e + 1) if D[p, e] - done[i] <= rate / 2)
+            d = max(i for i in range(p, a) if done[i] <= rate / 2)
+            segs.append((float(times[d]), float(times[a])))
+        if segs:
+            out[int(s)] = segs
+    return out
+
+
+def _segment_rows(ys, t, bounds):
+    """Rows (ys, t) of the segments bounds ({sample: [(first time, last time)]}, _change_bounds): (rows (M,), segment
+    of each (M,), sample of each segment, row weights (M,): 1/2 for the rows of a time shared by two segments) or None
+    without row."""
+    ys, t = np.asarray(ys).astype(int), np.asarray(t, dtype=float)
+    rows, grp, s_of, rw = [], [], [], []
+    for s, segs in bounds.items():
+        ms = ys == s
+        for k, (lo, hi) in enumerate(segs):
+            r = np.flatnonzero(ms & (t >= lo) & (t <= hi))
+            if not len(r):
+                continue
+            sh_lo = k > 0 and segs[k - 1][1] == lo  # time shared with the previous segment
+            sh_hi = k < len(segs) - 1 and segs[k + 1][0] == hi
+            shared = ((t[r] == lo) & sh_lo) | ((t[r] == hi) & sh_hi)
+            rows.append(r)
+            grp.append(np.full(len(r), len(s_of)))
+            rw.append(np.where(shared, 0.5, 1.0))
+            s_of.append(s)
+    if not s_of:
+        return None
+    return np.concatenate(rows), np.concatenate(grp), np.array(s_of, dtype=int), np.concatenate(rw)
+
+
+def _bic_groups(order, score, tie, link=None):
+    """Groups of the regulators sorted by decreasing score: one at least tie times as strong as the previous one
+    enters with it (tie in (0, 1], None: no group), a chain of ties split into pairs; link (G,) bool or None: only
+    regulators both in link are grouped."""
     groups = []
     for j in order:
-        if groups and len(groups[-1]) == 1 and score[groups[-1][0]] - score[j] < tie:
+        prev = groups[-1][0] if groups and len(groups[-1]) == 1 else None
+        if prev is not None and tie is not None and score[prev] > 0 and score[j] >= tie * score[prev] and \
+                (link is None or (link[prev] and link[j])):
             groups[-1].append(j)
         else:
             groups.append([j])
@@ -2213,33 +2327,41 @@ def bic_prune_gene(y_samples, y_prot, y_target, inter, basal, theta_ref, G, g, n
     Sparsity of the regulators of target g by an extended BIC along the path of their strengths: regulators kept
     (|theta| >= seuil_min_network_intensity, out of self-regulation and signed priors, always kept) sorted by |theta_j|
     (largest over the conditions; effect of a full switch of the regulator, the proteins being normalised per gene: the
-    order of the first fit, its L1 already stricter on the regulators that vary little), grouped when less than
-    bic['tie'] apart in |theta| (_bic_groups); the network refitted
-    without L1 (refine_inference, ridge kept) on the first groups, from one group to all of them, with corrections in
-    [0, b S / S_A] (S, S_A: sums of the strengths of the candidates and of the kept ones: the kept regulators may take
-    over the regulation of the removed ones in proportion to their strengths). max_bound None: inter already refined,
-    b = 1, returned unchanged if every candidate is kept; else inter is the first fit (core_inference) and the path
-    replaces the refinement: b = max_bound (the point with every candidate is the relaxed refinement), the refit of
-    the best point always returned, with the edge thresholds (thresh_prior) of the refinement. Refits and deviances
-    with the flow-matching (y_prot_mod, weight_flow_matching) and distribution (dist) terms of the fit. Where the order
-    is ambiguous (next group at least bic['swap'] times as strong as the last one), the point with the next group in
-    place of the last one is refitted too, the better of the two kept by the criterion below.
-    EBIC term per edge phi (log n + 2 gamma log K) (K candidates, n = bic['ratio'] x rows: real cells behind the
-    states; phi = _deviance_scale at the given network: the scale of the deviance relative to a log-likelihood, 1 but
+    order of the first fit, its L1 already stricter on the regulators that vary little), one at least bic['tie'] times
+    as strong as the previous one entering with it (_bic_groups); the network refitted without L1 nor ridge
+    (refine_inference, bounds only) on the first groups, from one group to all of them, with corrections in [0, b S /
+    S_A] (S, S_A: sums of the strengths of the candidates and of the kept ones: the kept regulators may take over the
+    regulation of the removed ones in proportion to their strengths). max_bound None: inter already refined, b = 1,
+    returned unchanged if every candidate is kept; else inter is the first fit (core_inference) and the path replaces
+    the refinement: b = max_bound (the point with every candidate is the relaxed refinement), the refit of the best
+    point always returned, with the edge thresholds (thresh_prior) of the refinement. Refits and deviances with the
+    flow-matching (y_prot_mod, weight_flow_matching) and distribution (dist) terms of the fit.
+    Order given the changes of the target in time (bic['time']: time of each row, None: off): its time course cut into
+    segments each covering one of its changes, from its start to its end (bic['bounds'], _change_bounds: moves of at
+    least bic['change'] of the mean change of its trajectories bic['traj'] between its lowest and highest modes, else
+    of W1 between the marginals; detected on every state of the network update by inference_network_multi, on these
+    rows if not given), one refit of all the candidates on the rows of the segments with a basal per (sample, segment)
+    (weighted as their sample), used for the order only: the candidates (stimuli included) with |theta| >= seuil_min_network_intensity in it sorted by their effects there (sd of
+    their terms of the logit around the mean of each segment: |theta| alone is not identified for a regulator nearly
+    constant over the segments), then the others in the order of the first fit. A regulator moving with the target where
+    it changes comes first; one constant over its changes (an early switcher before a late target, a descendant
+    switching after it) gets little or no credit, and is only tested on top of them (otherwise an early clean switcher
+    may enter first as a proxy of time). Ties on these effects, only between candidates with credit; targets without
+    change keep the order of the first fit. The path points and the criterion are unchanged (all the rows, per-sample
+    basals).
+    EBIC (Chen & Chen 2008) of a point with k regulators: phi (k log n + 2 gamma log C(K, k)) (K candidates of the
+    first fit, n = bic['ratio'] x rows: real cells behind the states; phi = _deviance_scale at the given network: the scale of the deviance relative to a log-likelihood, 1 but
     for the ordinal cost); deviance 2 n x the data terms of the refit per row: its objective without the priors, i.e.
     the end-state term (row weights of fit_network_balance), the flow-matching and distribution terms at their weights
     and the sample weights of the fit; n log(that mean cost) for the euclidean cost.
     Hard cap (bic['max_regulators'], None: none): the path stops at that many regulators (the first group always
     offered), the weaker candidates removed.
-    Effect size (bic['min_gain']): the point kept minimises deviance + k max(EBIC term, min_gain x E) over the whole
-    path (k edges), E the deviance explained by the regulators of the target (from the refit without candidate
-    regulator, a reference only, to the best point refitted): every edge must bring on average at least min_gain of
-    what the network explains for its target (significance alone keeps the small shortcuts at large n; the points are
-    not nested, their bounds differing).
+    The point kept minimises deviance + EBIC over the whole path (k edges; the points are not nested, their bounds
+    differing).
     The first group is always offered. Returns (inter, basal, info, log-thresholds (G,) of the edges or None): the
     refit of the best path point (inter and basal unchanged if it keeps every candidate of a refined network),
     info = dict(n_candidates, k, kept (indices): the regulators left by that refit (one offered may get a correction
-    of 0), scores [(k offered, deviance, criterion)], dev0 (deviance without candidate regulator), scale (phi)).
+    of 0), scores [(k offered, deviance, criterion)], scale (phi)).
     """
     ys = np.asarray(y_samples).astype(int)
     inter = np.asarray(inter, dtype=float)
@@ -2250,51 +2372,103 @@ def bic_prune_gene(y_samples, y_prot, y_target, inter, basal, theta_ref, G, g, n
     if g < G:
         keep[g] = True
     Y = _end(y_prot)
-    score = a  # strength of each regulator: |theta| (not |theta| sd(Y): no second penalty on the regulators varying little)
+    refit = max_bound is not None  # first fit: the path replaces the refinement
+    s_tot = float(np.sum(a[cand]))
+    b_max = float(max_bound) if refit else 1.0
+    learn = thresh_prior is not None and isinstance(Y, HerbachArray)
+    log_s = np.log(Y.pbar) - Y.lbar / Y.m if learn else None
+    us = np.unique(ys)
+    ws = [np.sum(ys == s) ** alpha for s in us]  # sample weights of the refits
+
+    w_rows = np.broadcast_to(np.asarray(_row_w(y_target), dtype=float), (len(ys),))  # fit_network_balance
+    seg_factors = lambda s_of: np.array([np.sum(ws) / ws[int(np.flatnonzero(us == s)[0])] / len(us) for s in s_of])
+
+    def point(sel, seg=None):
+        # Refit on the regulators sel (self-regulation and signed priors kept); seg (_segment_rows): on the rows of
+        # the segments, a basal per segment (each weighted as its sample, order only): (deviance, k, inter, basal, sel,
+        # thresholds)
+        on = keep.copy()
+        on[sel] = True
+        s_on = float(np.sum(a[sel]))
+        yp_r, ypm_r, yt_r, d_r = y_prot, y_prot_mod, y_target, dist
+        if seg is not None:
+            rows, ys_r, s_of, rw = seg
+            n_r, b_r = len(s_of), np.asarray(basal, dtype=float)[s_of]
+            c_r = None if cond is None else np.asarray(cond)[s_of]
+            f_r = seg_factors(s_of)
+            yp_r, ypm_r, d_r = y_prot[rows], None if y_prot_mod is None else y_prot_mod[rows], _sl(dist, rows)
+            yt_r = with_targets(y_target[rows], w=w_rows[rows] * rw)  # rows of a time shared by two segments: 1/2 each
+        else:
+            ys_r, n_r, b_r, c_r, w_r, f_r = ys, n_samples, np.array(basal, dtype=float), cond, ws, None
+        it, b, thr = refine_inference(ys_r, yp_r, ypm_r, yt_r, inter * on, b_r,
+                                      theta_ref, G, g, n_r, 0.0, weight_flow_matching=weight_flow_matching,
+                                      final=0, ref_network=ref_network,
+                                      seuil_min_network_intensity=seuil_min_network_intensity, cond=c_r, dist=d_r,
+                                      ridge=None, thresh_prior=thresh_prior,  # no ridge: deviance at the unpenalised fit
+                                      max_bound=b_max * (s_tot / s_on if s_on > 0 else 1.0), sample_factors=f_r)
+        if seg is not None:
+            return None, len(sel), it, b, np.asarray(sel, dtype=int), thr
+        yp, ypm = y_prot, y_prot_mod
+        if thr is not None and learn:  # at the learned edge thresholds
+            yp, ypm = _shift_thresholds(y_prot, thr - log_s), _shift_thresholds(y_prot_mod, thr - log_s)
+        # Data terms of the refit (end state, flow matching, distribution; no prior), per row
+        q = objective_refinement_grad(np.r_[np.ones(G), b], it, w_r, ys_r, yp, ypm, y_target, np.zeros_like(it), G, g,
+                                      n_r, np.zeros(G), weight_flow_matching, cond=c_r, dist=dist,
+                                      grad=False, factors=f_r)[0] / len(ys)
+        dev = n * np.log(max(q, EPS)) if (_MODE == 1 and not _LIK) else 2 * n * q
+        return dev, len(sel), it, b, np.asarray(sel, dtype=int), thr
+
+    # Strength of each regulator: |theta| of the first fit (not |theta| sd(Y): no second penalty on the regulators
+    # varying little)
+    score = a.copy()
     order = cand[np.argsort(-score[cand], kind='stable')]
+    link = None
+    timed = False
+    if bic.get('time') is not None:
+        # Given the changes of the target in time: the candidates (stimuli included) reordered by their effects in the
+        # refit of all of them on the segments of its changes, those without credit after them in the first order;
+        # ties only between candidates with credit
+        bounds = bic.get('bounds')
+        if bounds is None:  # not given (inference_network_multi): detected on these rows
+            bounds = _change_bounds(ys, bic['time'], y_target, float(bic.get('change', 0.2)), bic.get('traj'))
+        seg = _segment_rows(ys, bic['time'], bounds) if len(order) > 1 else None
+        if seg is not None:
+            # Effect of each regulator in the refit: sd of its term of the logit around the mean of each segment
+            # (|theta| alone is not identified for a regulator nearly constant over the segments)
+            rows, grp, s_of, rw = seg
+            it_s = point(order, seg)[2]
+            c_s = None if cond is None else np.asarray(cond)[s_of]
+            Ys, wr, f_s = _end(y_prot)[rows], w_rows[rows] * rw, seg_factors(s_of)
+            st, w_tot = np.zeros(G), 0.0
+            for k in range(len(s_of)):
+                m = grp == k
+                th, wk = _of_cond(it_s, c_s, k), wr[m] * f_s[k]
+                for j in order:
+                    e = _logit(Ys[m], th * (np.arange(G) == j))
+                    st[j] += np.sum(wk * (e - np.average(e, weights=wk)) ** 2)
+                w_tot += np.sum(wk)
+            st = np.sqrt(st / max(w_tot, EPS))
+            credit = np.abs(it_s).reshape(-1, G).max(axis=0) >= seuil_min_network_intensity
+            score[order] = st[order]
+            order = np.r_[order[credit[order]][np.argsort(-st[order[credit[order]]], kind='stable')],
+                          order[~credit[order]]]
+            link, timed = credit, True
     K = len(order)
-    info = dict(n_candidates=K, k=K, kept=order.copy(), scores=[])
-    groups = _bic_groups(order, score, float(bic.get('tie', 0.0)))
+    info = dict(n_candidates=K, k=K, kept=order.copy(), scores=[], time=timed)
+    tie = bic.get('tie')
+    groups = _bic_groups(order, score, None if tie is None else float(tie), link)
     # Hard cap: the path stops at max_regulators regulators (the first group always offered), the others removed
     cap = bic.get('max_regulators')
     if cap is not None:
         n_in = np.cumsum([len(grp) for grp in groups])
         groups = groups[:max(1, int(np.sum(n_in <= int(cap))))]
     capped = sum(len(grp) for grp in groups) < K
-    refit = max_bound is not None  # first fit: the path replaces the refinement
     n = max(float(bic.get('ratio', 1.0)) * len(ys), 2.0)
-    # EBIC term per edge, in the units of the deviance (phi: its scale relative to a log-likelihood)
+    # EBIC of k regulators among K, in the units of the deviance (phi: its scale relative to a log-likelihood)
     phi = _deviance_scale(basal, inter, cond, y_prot, ys, y_target)
     info['scale'] = phi
-    pen = phi * (np.log(n) + 2 * float(bic.get('gamma', 0.5)) * np.log(max(K, 1)))
-    s_tot = float(np.sum(score[order]))
-    swap = float(bic.get('swap', 0.0))
-    b_max = float(max_bound) if refit else 1.0
-    learn = thresh_prior is not None and isinstance(Y, HerbachArray)
-    log_s = np.log(Y.pbar) - Y.lbar / Y.m if learn else None
-    ws = [np.sum(ys == s) ** alpha for s in np.unique(ys)]  # sample weights of the refits
-
-    def point(sel):
-        # Refit on the regulators sel (self-regulation and signed priors kept):
-        # (deviance, k, inter, basal, sel, log-thresholds)
-        on = keep.copy()
-        on[sel] = True
-        s_on = float(np.sum(score[sel]))
-        it, b, thr = refine_inference(ys, y_prot, y_prot_mod, y_target, inter * on, np.array(basal, dtype=float),
-                                      theta_ref, G, g, n_samples, 0.0, weight_flow_matching=weight_flow_matching,
-                                      final=0, ref_network=ref_network,
-                                      seuil_min_network_intensity=seuil_min_network_intensity, cond=cond, dist=dist,
-                                      ridge=ridge, thresh_prior=thresh_prior,
-                                      max_bound=b_max * (s_tot / s_on if s_on > 0 else 1.0))
-        yp, ypm = y_prot, y_prot_mod
-        if thr is not None and learn:  # at the learned edge thresholds
-            yp, ypm = _shift_thresholds(y_prot, thr - log_s), _shift_thresholds(y_prot_mod, thr - log_s)
-        # Data terms of the refit (end state, flow matching, distribution; no prior), per row
-        q = objective_refinement_grad(np.r_[np.ones(G), b], it, ws, ys, yp, ypm, y_target, np.zeros_like(it), G, g,
-                                      n_samples, np.zeros(G), weight_flow_matching, cond=cond, dist=dist,
-                                      grad=False)[0] / len(ys)
-        dev = n * np.log(max(q, EPS)) if (_MODE == 1 and not _LIK) else 2 * n * q
-        return dev, len(sel), it, b, np.asarray(sel, dtype=int), thr
+    gam = float(bic.get('gamma', 0.5))
+    pen = lambda k: phi * (k * np.log(n) + 2 * gam * (gammaln(K + 1) - gammaln(k + 1) - gammaln(K - k + 1)))
 
     if len(groups) <= 1 and not capped:
         if not refit:
@@ -2304,23 +2478,9 @@ def bic_prune_gene(y_samples, y_prot, y_target, inter, basal, theta_ref, G, g, n
         info['k'] = len(info['kept'])
         return it, b, info, thr
 
-    steps = []
-    for i in range(len(groups)):
-        pts = [point([j for grp in groups[:i + 1] for j in grp])]
-        # Ambiguous order (next group at least swap x as strong): the next group in place of the last one too
-        if swap > 0 and i + 1 < len(groups) and \
-                score[groups[i + 1]].max() >= swap * score[groups[i]].max():
-            pts.append(point([j for grp in groups[:i] + [groups[i + 1]] for j in grp]))
-        steps.append(pts)
-    # Cost per edge: the EBIC term or the effect size min_gain x explained deviance (from the point without candidate
-    # regulator to the best point refitted), whichever is larger; each swap and the best point over the whole path
-    # decided by deviance + k x cost (a weak group may enter when the next ones make up for it)
-    dev0 = point([])[0]
-    explained = max(dev0 - min(pt[0] for pts in steps for pt in pts), 0.0)
-    cost = max(pen, float(bic.get('min_gain', 0.0)) * explained)
-    crit = lambda pt: pt[0] + pt[1] * cost
-    path = [min(pts, key=crit) for pts in steps]
-    info['dev0'] = dev0
+    # Best point over the whole path: deviance + EBIC (a weak group may enter if the next ones make up for it)
+    path = [point([j for grp in groups[:i + 1] for j in grp]) for i in range(len(groups))]
+    crit = lambda pt: pt[0] + pen(pt[1])
     info['scores'] = [(pt[1], pt[0], crit(pt)) for pt in path]
     _, k, it, b, sel, thr = min(path, key=crit)
     if k == K and not capped and not refit:
@@ -2390,9 +2550,9 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
                         hard_forcing_ref=False, ref_constraint_pct=0.1, seuil_min_network_intensity=1e-2,
                         cond=None, condition_pen=1.0, act=None, act_tgt=None,
                         qut_level=0.5, qut_n_perm=20, network_ridge=20.0, network_relaxed=False, dist=None,
-                        thresh_prior=None, mixed=None, network_cost='ce', network_balance=False, balance_transit=None,
+                        thresh_prior=None, mixed=None, network_cost='ce', network_balance=False,
                         ordinal_mid=None, ordinal_u=None, level_data=None, network_likelihood=False, max_bound=2.0,
-                        bic_prune=None, importance=False):
+                        bic_prune=None, importance=False, balance_w=None):
     """
     Joint inference (inter + per-sample basal) for a single gene g. max_bound: bound of the corrections of the
     refinement (refine_inference).
@@ -2413,9 +2573,9 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
     the sample of the other rows (-inf beyond), whose level is that of their target (onehot_levels), as on the nodes.
     ordinal_u: (u1, u2) (N,) warped targets of the ordinal cost of the rows (soft targets: their expectations under
     the posteriors of the levels, E_q[T_k(tau_l)], the M-step of the EM), None: the warps of the targets.
-    network_balance: exponent gamma in [0, 1] (False: none, True: 1): rows weighted by 1 / frequency^gamma of their main
-    mode in their sample (balance_weights; transition levels per interval of each sample in balance_transit
-    (n_samples,) or None), QUT included.
+    network_balance: exponent gamma in [0, 1] (False: none, True: 1): the two extreme modes of each sample balanced,
+    rows weighted in proportion to their position between them (balance_weights), QUT included; balance_w: these
+    weights computed on every state of the update (inference_network_multi), else on these rows.
     mixed: (tau2, tau2_basal) of the mixed model (core_inference_mixed), with cond = patient of each sample; replaces
     condition_pen, constrain_basal_uniform and alpha, and adds the statistics of its variances as a sixth element.
     dist: DistTerm of the end-state term (weight_network_distribution) or None; the sparsity levels (QUT) are those of
@@ -2467,7 +2627,8 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
     if network_balance:
         if mixed is not None:
             raise ValueError("fit_network_balance is not supported with mixed_effect_model_conditions")
-        y_target = balance_weights(y_target, y_samples, ks, balance_transit, float(network_balance))
+        y_target = with_targets(y_target, w=balance_w) if balance_w is not None else \
+            balance_weights(y_target, y_samples, float(network_balance))
     if y_prot_mod is not None:  # targets in force at the flow-matching nodes
         lo, hi = np.asarray(kb[..., 0]), np.asarray(kb[..., 1])  # scalars, or one per row (per-sample mixtures)
         lo, hi = (lo[:, None], hi[:, None]) if lo.ndim else (lo, hi)
@@ -2496,6 +2657,8 @@ def main_loop_inference(g, y_samples, y_prot, y_prot_mod, y_kon, theta_init, the
         y_prot_mod = None if y_prot_mod is None else y_prot_mod[keep]
         dist = _sl(dist, keep)
         basal_free_mask = (np.ones(n_samples, bool) if basal_free_mask is None else basal_free_mask) & ~flat
+        if bic_prune is not None and bic_prune.get('time') is not None:  # time of the rows kept
+            bic_prune = dict(bic_prune, time=np.asarray(bic_prune['time'])[keep])
     if len(y_target) == 0:
         # g has a single mode in every sample: network kept at its initial value, basals fitted alone
         inter = np.asarray(theta_init[:n_rows], dtype=float).reshape((G,) if cond is None else (C, G))
@@ -2705,8 +2868,6 @@ def _infer_gene(g_tgt, G, active_src, y_samples, yp, ypm, y_kon_g, ti_g, tr_g,
     """
     if gene_kw.get('ordinal_mid') is not None:  # central mode of this target per sample (ordinal cost)
         gene_kw = dict(gene_kw, ordinal_mid=np.asarray(gene_kw['ordinal_mid'], dtype=float)[:, g_tgt])
-    if gene_kw.get('balance_transit') is not None:  # transition levels of this target per sample (balance)
-        gene_kw = dict(gene_kw, balance_transit=np.asarray(gene_kw['balance_transit'])[:, g_tgt])
     if gene_kw.get('mixed') is not None:  # tau2 of this target
         tau2, tau2_b = gene_kw['mixed']
         gene_kw = dict(gene_kw, mixed=(float(np.broadcast_to(tau2, (G,))[g_tgt]), tau2_b))
@@ -2779,7 +2940,7 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
                       sample_conditions=None, condition_pen=1.0, gene_mask=None,
                       sigma_spec_grn=None, qut_level=0.5, qut_n_perm=20, network_relaxed=False, y_prot_mem=None,
                       dist_targets=None, herbach_threshold_sd=None, mixed=None, network_cost='ce',
-                      network_balance=False, balance_transit=None, ordinal_mid=None, ordinal_u=None, level_data=None,
+                      network_balance=False, ordinal_mid=None, ordinal_u=None, level_data=None,
                       network_likelihood=False, max_bound=2.0, bic_prune=None, importance=False,
                       edge_support=None) -> list:
     """
@@ -2825,13 +2986,16 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
         a value or one per target (G,); condition_pen and constrain_basal_uniform are then ignored, and each fit has a
         sixth element: statistics of the variances (G, 4) (s_theta, n_theta, s_basal, n_basal per target) and posterior
         z (C, G, G).
-    network_cost, network_likelihood, network_balance, balance_transit, ordinal_mid: main_loop_inference.
+    network_cost, network_likelihood, network_balance, ordinal_mid: main_loop_inference.
     max_bound : bound of the corrections c_e of the refinement (theta_e = c_e theta_tmp_e, c_e in [0, max_bound]).
     bic_prune : dict(ratio, gamma, tie, ...) or None: regulators of each target selected by an extended BIC along the
         path of its regulators (bic_prune_gene; main_loop_inference for 'fit' and 'core'): after the first fit, in
         place of the refinement ('fit'), or inter_init / basal_init pruned without fit; the sixth element of each fit
         is then the list of the selections (dict per target: target, condition, n_candidates, k, kept, scores). A list
-        (one dict per subset), with lists inter_init / basal_init without fit: each subset on its rows.
+        (one dict per subset), with lists inter_init / basal_init without fit: each subset on its rows. Its 'time'
+        (N,) (time of every row, or None), 'traj' (N,) (trajectory of every row, or None: states drawn apart per time)
+        and 'change': order of the path given the changes of each target in time (bic_prune_gene), detected once on
+        every state of the subsets (_change_bounds), the same segments for all.
     importance : no fit: the regulations of inter_init scored by importance_gene; the sixth element of each fit is then
         their importances, laid out as inter.
     edge_support : bool (G, G) [regulator, target] or per sample (n_samples, G, G), or None: the only edges fitted (the
@@ -2938,7 +3102,7 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
                    seuil_min_network_intensity=seuil_min_network_intensity, condition_pen=condition_pen,
                    qut_level=qut_level, qut_n_perm=qut_n_perm, network_ridge=network_ridge,
                    network_relaxed=network_relaxed, mixed=mixed, network_cost=network_cost,
-                   network_balance=network_balance, balance_transit=balance_transit, ordinal_mid=ordinal_mid,
+                   network_balance=network_balance, ordinal_mid=ordinal_mid,
                    network_likelihood=network_likelihood, max_bound=max_bound, bic_prune=bic_prune,
                    importance=importance)
     if (bic_prune is not None or importance) and mixed is not None:
@@ -3034,11 +3198,17 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
             yp = MemStates(yp, mem[0], mem[1])
         theta_rows = slice(None) if c is None else np.r_[c * G:(c + 1) * G, C * G:C * G + n_samples]
         cond_g = None if c is not None else cond
+        kw_g = gene_kw if g_tgt not in w_bal else \
+            dict(gene_kw, balance_w=_batch_weights(w_bal[g_tgt][rows], np.asarray(y_samples)[rows]))
+        bic_g = None if bic_prune is None else bic_k[k]
+        if bic_g is not None and bic_g.get('time') is not None:  # time of these rows, segments of the target
+            bic_g = dict(bic_g, time=np.asarray(bic_g['time'])[rows], bounds=bounds.get(g_tgt, {}),
+                         traj=None if bic_g.get('traj') is None else np.asarray(bic_g['traj'])[rows])
         return (g_tgt, G, active_src, y_samples[rows], yp, ypm,
                 y_kon[rows, g_tgt], theta_init_mats[k][theta_rows, g_tgt], theta_ref_mat[theta_rows, g_tgt],
                 ks[:, g_tgt] if ks.ndim == 3 else ks[g_tgt], n_samples,
                 ref_network[:, g_tgt] if dense else ref_network[active_src, g_tgt],
-                free_mask_2d[:, g_tgt], gene_kw if bic_prune is None else dict(gene_kw, bic_prune=bic_k[k]), cond_g,
+                free_mask_2d[:, g_tgt], kw_g if bic_g is None else dict(kw_g, bic_prune=bic_g), cond_g,
                 None if act_c is None or cond_g is None else act_c[:, active_src].astype(float),
                 None if act_c is None or cond_g is None else act_c[:, g_tgt],
                 None if dist_targets is None else dist_term(dist_targets[2][rows], dist_targets[0][rows, g_tgt],
@@ -3052,6 +3222,30 @@ def inference_network_multi(subsets, y_samples, y_kon, y_prot, y_prot_mod, ks, n
     present = [[apart and (rows_of[c] if sub is None else rows_of[c][sub]).any() for c in range(C)] for sub in subsets]
     tasks = [(k, g, c) for k in range(len(subsets)) for g in genes
              for c in ([None] if not apart else [c for c in range(C) if present[k][c] and (act_c is None or act_c[c, g])])]
+    # Every state of the update (rows of the subsets) and the sigmoid targets of a target gene on them
+    r_all = np.arange(len(y_samples)) if any(sub is None for sub in subsets) else \
+        np.unique(np.concatenate([np.asarray(sub) for sub in subsets]))
+    ys_all = np.asarray(y_samples).astype(int)[r_all]
+
+    def targets_all(g):
+        kb = sigmoid_amplitudes(ks[:, g] if ks.ndim == 3 else ks[g])
+        kb = kb[ys_all] if kb.ndim == 2 else kb
+        return sigmoid_target(y_kon[r_all, g], kb[..., 0], kb[..., 1])
+    # 1) Changes of each target in time (network_bic_time): detected once on every state of the update (all the
+    # trajectories, before the subsets, not weighted), the same segments for all the subsets
+    bounds = {}
+    if bic_k[0] is not None and bic_k[0].get('time') is not None:
+        t_all = np.asarray(bic_k[0]['time'], dtype=float)[r_all]
+        traj_all = None if bic_k[0].get('traj') is None else np.asarray(bic_k[0]['traj'])[r_all]
+        for g in genes:
+            bounds[g] = _change_bounds(ys_all, t_all, targets_all(g), float(bic_k[0].get('change', 0.2)), traj_all)
+    # 2) Balance of the extreme modes (fit_network_balance): once per target on every state of the update, before the
+    # subsets, each subset keeping these relative weights (_batch_weights)
+    w_bal = {}
+    if network_balance:
+        for g in genes:
+            w_bal[g] = np.ones(len(y_samples))
+            w_bal[g][r_all] = _row_w(balance_weights(targets_all(g), ys_all, float(network_balance)))
     if Parallel is not None:
         results = Parallel(n_jobs=-1)(
             delayed(_infer_gene)(*gene_args(subsets[k], g, c, k)) for k, g, c in tasks

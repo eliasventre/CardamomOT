@@ -55,7 +55,7 @@ PARAMETER_GROUPS = [
         'sde_kon_weight', 'sde_mrna_weight', 'sde_bptt', 'sde_protein_weight', 'sde_max_horizon',
         'sde_horizon_growth', 'sde_windows', 'refine_in_loop']),
     ('Model learning of the regulation function', [
-        'model_learning_grn', 'model_learning_phi', 'model_learning_herbach_form', 'herbach_threshold_sd', 'model_learning_threshold_bic', 'model_learning_form_neighbours', 'model_learning_herbach_m', 'model_learning_link', 'model_learning_kappa',
+        'model_learning_grn', 'model_learning_phi', 'model_learning_herbach_form', 'herbach_threshold', 'herbach_threshold_sd', 'model_learning_threshold_bic', 'model_learning_form_neighbours', 'model_learning_herbach_m', 'model_learning_link', 'model_learning_kappa',
         'model_learning_start', 'model_learning_freeze', 'model_learning_period', 'model_learning_margin',
         'model_learning_score', 'network_relaxed']),
     ('Proliferation and simulation', [
